@@ -605,6 +605,10 @@ export type InitPhase =
   | 'native-start'
   | 'tickets'
   | 'restore-pool'
+  /**
+   * No longer entered: its steps run after `ready` since 2026-10-13 (`startPostReadyWork`). Kept so
+   * a watermark written by an older build still reads as what it was.
+   */
   | 'pairing';
 
 /** An in-progress `init()`, as recorded on disk before each step that can block. */

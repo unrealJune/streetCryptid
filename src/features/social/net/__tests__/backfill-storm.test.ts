@@ -291,8 +291,10 @@ describe('backfill storm', () => {
 
     it('writes nothing for an unchanged poll', async () => {
       const svc = makeService();
-      // `init` polls once itself, and that first poll is the one real change (from null).
+      // `init` starts the first poll once ready, and that poll is the one real change (from null).
+      // Awaited explicitly: the first poll is post-ready work, which `init` no longer waits for.
       await svc.init('@me', 'mothman');
+      await svc.awaitPostReadyWork();
       const afterInit = transportRows().length;
 
       await svc.refreshTransportDiagnostics();

@@ -51,7 +51,6 @@ import uniffi.iroh_location.TransportConfig
 import uniffi.iroh_location.PeerTransportDiagnostic
 import uniffi.iroh_location.TransportAddressDiagnostic
 import uniffi.iroh_location.TransportDiagnostics
-import uniffi.iroh_location.configureTelemetry
 import uniffi.iroh_location.decodeMvtBundle
 import uniffi.iroh_location.decodeMvtTile
 import uniffi.iroh_location.decodePairInvite
@@ -1198,7 +1197,14 @@ class IrohLocationModule : Module() {
     // and "unavailable" alike.
     AsyncFunction("configureTelemetry") Coroutine
       { endpoint: String, instanceId: String ->
-        configureTelemetry(endpoint, instanceId)
+        // Through the configurator, which remembers it for the foreground service: a process the
+        // OS restarts without JS has nobody else to configure the exporter.
+        TelemetryConfigurator.apply(
+          appContext.reactContext?.applicationContext,
+          endpoint,
+          instanceId,
+          remember = true,
+        )
       }
 
     AsyncFunction("flushTelemetry") Coroutine

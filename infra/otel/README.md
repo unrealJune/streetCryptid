@@ -150,19 +150,23 @@ between a push and the friend seeing it is normal rather than a fault.
 These exist because their absence was indistinguishable from a phone that was never woken. None of
 them describe a ping; all of them describe why there wasn't one.
 
-| Span                                                   | Says                                                                                                                                                  |
-| ------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `device.health`                                        | the periodic liveness record — OS permissions, task registration, `last_*_age_ms`                                                                     |
-| `storage.degraded`                                     | persistence fell back to memory; nothing this device saves survives a restart                                                                         |
-| `outbox.load` (`sc.drop_reason=outbox-*`)              | the durable queue was unreadable, so every fix waiting in it is gone                                                                                  |
-| `cadence.rearm`                                        | the OS refused a cadence change, so sampling is pinned at an interval nobody chose                                                                    |
-| `engine.failed`                                        | `doFlush` / `heartbeat` threw; the engine is in `error` and only the UI knew                                                                          |
-| `bg.selfheal` (`sharing-disabled` / `already-running`) | the self-heal ran and had nothing to do — distinct from never running                                                                                 |
-| `bg.session` (`precheck-empty`)                        | a headless wake found an empty outbox — distinct from no wake at all                                                                                  |
-| `revive.arm` (`outcome`)                               | whether the iOS tripwire is actually armed, rather than only believed to be — `armed` \| `throttled` \| `task-undefined` \| `unavailable` \| `failed` |
-| `device.health` (`sharing.muted`)                      | this phone believes it is sharing and cannot — `foreground-permission` \| `background-permission` \| `location-task-stopped` \| `no-recipients`       |
-| `location.runtime` (`location.event`)                  | the iOS native location runtime describing itself, JS or no JS — see [below](#is-core-location-delivering-locationruntime)                            |
-| `friend.pull` (`pull.outcome`)                         | a native receive-side pull and what it cost against the OS's background allowance — see [below](#is-the-background-pull-safe-friendpull)              |
+| Span                                                   | Says                                                                                                                                                                                        |
+| ------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `device.health`                                        | the periodic liveness record — OS permissions, task registration, `last_*_age_ms`                                                                                                           |
+| `storage.degraded`                                     | persistence fell back to memory; nothing this device saves survives a restart                                                                                                               |
+| `outbox.load` (`sc.drop_reason=outbox-*`)              | the durable queue was unreadable, so every fix waiting in it is gone                                                                                                                        |
+| `cadence.rearm`                                        | the OS refused a cadence change, so sampling is pinned at an interval nobody chose                                                                                                          |
+| `engine.failed`                                        | `doFlush` / `heartbeat` threw; the engine is in `error` and only the UI knew                                                                                                                |
+| `bg.selfheal` (`sharing-disabled` / `already-running`) | the self-heal ran and had nothing to do — distinct from never running                                                                                                                       |
+| `bg.session` (`precheck-empty`)                        | a headless wake found an empty outbox — distinct from no wake at all                                                                                                                        |
+| `revive.arm` (`outcome`)                               | whether the iOS tripwire is actually armed, rather than only believed to be — `armed` \| `throttled` \| `task-undefined` \| `unavailable` \| `failed`                                       |
+| `device.health` (`sharing.muted`)                      | this phone believes it is sharing and cannot — `foreground-permission` \| `background-permission` \| `location-task-stopped` \| `no-recipients`                                             |
+| `location.runtime` (`location.event`)                  | the native location runtime describing itself, JS or no JS (iOS, and Android's foreground service) — see [below](#is-core-location-delivering-locationruntime)                              |
+| `friend.pull` (`pull.outcome`)                         | a native receive-side pull and what it cost against the OS's background allowance — see [below](#is-the-background-pull-safe-friendpull)                                                    |
+| `app.init.timeout` (`trigger`)                         | an init attempt outlived the 30 s watchdog — `watchdog` (its timer) or `foreground` (judged by the clock on resume, since a backgrounded Android app's timers do not run). Once per attempt |
+| `app.init.step` (`init.step`, `outcome`)               | a post-ready step (`profiles` / `stash-grant` / `pairing-poll`): `ok` \| `error` \| `overrun` (still running at 20 s, sent while it runs) \| `late` \| `abandoned` (shutdown)               |
+| `pairing.poll.stalled` (`gen`)                         | one pairing poll ran past 20 s and was released so it no longer blocks pairing; the native call it was waiting on never answered                                                            |
+| `pairing.poll.late` (`gen`)                            | a stalled poll came back after a newer one; its drained events were handled, its session list was not                                                                                       |
 
 ### Spans that say what the phone and its human were doing
 
@@ -518,12 +522,32 @@ Read a pulse like this:
   it already gave us. Those are no longer ingested (they went out `live` with a stale position on
   2026-10-02); a non-zero `fix_age_at_delivery_ms` on a fresh delivery says the same thing.
 
+**Android emits it too, since 2026-10-13** (`LocationRuntimeReporter.kt`, `os.type = android`),
+from the foreground service: `started` (`location.reason = service`) when the service is created,
+`pulse` / `main_stalled` on the same five-minute timer with a main-looper probe (the platform
+provider delivers there), and `authorization` (`denied`) when a provider refuses. Android has no
+moving/stopped machine, so `location.state` is what the stationary ticker would conclude (`moving`
+= a delivery inside the current slot), `desired_accuracy_m` is 0 and the fence fields are always
+false. `location.node_owner = native` means no JS is wired: the app process is gone and the service
+is carrying the phone alone.
+
+It ships because the service now configures the exporter itself. Until then only JS did, so an
+Android process the OS had restarted without React published and pulled in total silence: on
+2026-10-12 a Pixel 10 was dark from 21:11 to 01:26 with its service working, and only the next
+launch's `app.previous_run` showed the hole. `TelemetryConfigurator.kt` persists what JS last
+configured (with the build that wrote it; another build's values are never applied) and the
+service re-applies it on `onCreate`. So for an Android phone, pulses continuing with
+`node_owner = native` while `device.health` stops is the app process dying, not the phone.
+
 ```traceql
 # A phone's runtime over a gap (swap in its short id).
 { name = "location.runtime" && resource.service.instance.id = "84f86b144a" }
 
 # Moving and deaf: pulses that saw no delivery at all.
 { name = "location.runtime" && span.location.event = "pulse" && span.location.state = "moving" && span.location.deliveries = 0 }
+
+# Android phones carried by the service alone (no JS wired).
+{ name = "location.runtime" && resource.os.type = "android" && span.location.node_owner = "native" }
 ```
 
 ## Is the background pull safe? (`friend.pull`)

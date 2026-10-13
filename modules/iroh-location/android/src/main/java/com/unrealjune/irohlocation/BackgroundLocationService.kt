@@ -26,6 +26,7 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import uniffi.iroh_location.BatteryState
 import uniffi.iroh_location.LocationFix
+import uniffi.iroh_location.LocationRuntimeKind
 
 /**
  * A foreground service that takes each location straight to the wire, with no JS in the loop.
@@ -72,6 +73,7 @@ class BackgroundLocationService : Service() {
       // Stamped before the launch, not inside it: the ticker asks "did the provider deliver in this
       // slot", and a coroutine that has been dispatched but not yet run still answers yes.
       lastDeliveryAtMs = System.currentTimeMillis()
+      reporter.noteDelivery(location)
       // Straight into the native path. No JS, no headless bridge, no spool.
       scope.launch { publish(location) }
     }
@@ -87,6 +89,14 @@ class BackgroundLocationService : Service() {
 
   private var stationaryTicker: Job? = null
 
+  /** `location.runtime`, so this service is visible when no JS is alive to say it is running. */
+  private val reporter =
+    LocationRuntimeReporter(
+      scope,
+      slotIntervalMs = { slotIntervalMs.toLong().coerceAtLeast(MIN_TICK_INTERVAL_MS) },
+      distanceFilterM = { cadenceDistanceM },
+    )
+
   override fun onBind(intent: Intent?): IBinder? = null
 
   override fun onCreate() {
@@ -95,6 +105,14 @@ class BackgroundLocationService : Service() {
     running = true
     startLocationUpdates()
     startStationaryTicker()
+    // Off the main thread: configuring telemetry loads the native library. A process restarted
+    // with no JS (the app was killed and `START_REDELIVER_INTENT` brought this back) is exactly
+    // the one with nobody else to configure it, so the `started` span goes out after it.
+    scope.launch(Dispatchers.IO) {
+      TelemetryConfigurator.applyPersisted(applicationContext)
+      reporter.event(LocationRuntimeKind.STARTED, reason = "service")
+      reporter.startPulse()
+    }
   }
 
   /**
@@ -106,6 +124,7 @@ class BackgroundLocationService : Service() {
 
   override fun onDestroy() {
     running = false
+    reporter.stopPulse()
     stationaryTicker?.cancel()
     stationaryTicker = null
     locationManager?.removeUpdates(listener)
@@ -143,6 +162,11 @@ class BackgroundLocationService : Service() {
         // Permission revoked while running. Not fatal — the other provider may still be permitted,
         // and the app surfaces the permission state itself.
         Log.w(TAG, "location permission refused for $provider", e)
+        reporter.event(
+          LocationRuntimeKind.AUTHORIZATION,
+          reason = "denied",
+          detail = "$provider: ${e.message ?: "SecurityException"}",
+        )
       } catch (e: IllegalArgumentException) {
         Log.i(TAG, "provider $provider is unavailable on this device")
       }
@@ -201,12 +225,20 @@ class BackgroundLocationService : Service() {
 
   private suspend fun heartbeat() {
     val battery = readBattery()
-    when (NativeBackgroundRuntime.heartbeat(applicationContext, battery, slotIntervalMs)) {
+    reporter.noteWorkStarted()
+    val capture =
+      try {
+        NativeBackgroundRuntime.heartbeat(applicationContext, battery, slotIntervalMs)
+      } finally {
+        reporter.noteWorkFinished()
+      }
+    when (capture) {
       is NativeBackgroundRuntime.Capture.Ingested -> Unit
       // Same hand-off as a capture: while the app is mounted it runs the pipeline's front half
       // (policy, own marker). `null` fix: a parked tick has no position, and `routeNativeCapture`
       // reads `kind` to know that.
       NativeBackgroundRuntime.Capture.HandToApp -> {
+        reporter.noteHandOff()
         IrohLocationModule.handOffCapture(
           fix = null,
           battery = battery,
@@ -225,9 +257,14 @@ class BackgroundLocationService : Service() {
   private suspend fun publish(location: Location) {
     val fix = location.toFix()
     val battery = readBattery()
-    when (val capture =
-      NativeBackgroundRuntime.ingest(applicationContext, fix, battery, slotIntervalMs)
-    ) {
+    reporter.noteWorkStarted()
+    val capture =
+      try {
+        NativeBackgroundRuntime.ingest(applicationContext, fix, battery, slotIntervalMs)
+      } finally {
+        reporter.noteWorkFinished()
+      }
+    when (capture) {
       is NativeBackgroundRuntime.Capture.Ingested -> {
         val outcome = capture.outcome
         // One line per wake that did something, so a quiet phone and a broken one look different
@@ -245,12 +282,13 @@ class BackgroundLocationService : Service() {
       // dropping here is what left a Pixel silent for fifteen hours with a perfectly healthy
       // service running.
       NativeBackgroundRuntime.Capture.HandToApp ->
-        if (!IrohLocationModule.handOffCapture(fix, battery, reason = "movement")) {
+        if (IrohLocationModule.handOffCapture(fix, battery, reason = "movement")) {
+          reporter.noteHandOff()
+          NativeBackgroundRuntime.pullAfterHandOff(applicationContext, trigger = "movement")
+        } else {
           // The module was torn down between the routing decision and the hand-off. Unlike the
           // queued cases this fix is simply gone, so say so rather than letting it look routine.
           Log.w(TAG, "capture dropped: the app was wired a moment ago and is not any more")
-        } else {
-          NativeBackgroundRuntime.pullAfterHandOff(applicationContext, trigger = "movement")
         }
       // No identity, or the ingest threw. The fix stays in the native outbox for the next wake.
       NativeBackgroundRuntime.Capture.Unavailable -> Unit

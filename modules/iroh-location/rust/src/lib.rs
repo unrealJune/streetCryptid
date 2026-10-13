@@ -61,7 +61,7 @@ pub mod transport;
 pub const DOCS_MESH_EPOCH: u32 = 0;
 pub mod host;
 mod relay;
-/// iroh's DNS through the OS resolver on Apple, not hardcoded nameservers (see the module docs).
+/// iroh's DNS through the OS resolver on Apple and Android, never a nameserver list.
 mod system_dns;
 mod telemetry;
 
@@ -2565,12 +2565,14 @@ impl LocationNode {
             .secret_key(secret)
             .relay_mode(relay_mode)
             .address_lookup(memory.clone());
-        // On Apple, iroh's default resolver cannot read the system DNS config and falls back to
-        // querying Google's nameservers directly, which some phones can never reach. Every relay
-        // dial, probe and address lookup goes through this one resolver; `system_dns` explains.
-        #[cfg(target_vendor = "apple")]
-        {
-            builder = builder.dns_resolver(system_dns::resolver());
+        // iroh's default resolver sends its own queries to a nameserver list: Google's on Apple,
+        // where it cannot read the system config, and on Android whatever list it read at build or
+        // at the last network change, which can be the wrong network's. Some phones can never
+        // reach either. Every relay dial, probe and address lookup goes through this one resolver,
+        // so it goes through the OS instead; `system_dns` explains.
+        #[cfg(any(target_vendor = "apple", target_os = "android"))]
+        if let Some(resolver) = system_dns::resolver() {
+            builder = builder.dns_resolver(resolver);
         }
         if !ip_enabled {
             builder = builder.clear_ip_transports();
