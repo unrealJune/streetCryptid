@@ -173,6 +173,16 @@ Conventions when changing that code:
   from the delivery path, which falls silent exactly when it matters — probing the main thread
   first (`main_stalled` when it cannot answer), plus a span per transition, visit, fence exit and
   Core Location error. Anything new the runtime decides goes on it; see `infra/otel/README.md`.
+- **Android's foreground service reports itself and ships its own telemetry.** Until 2026-10-13
+  the Rust exporter was configured only by JS, so a process Android restarted without React (the
+  app killed, `START_REDELIVER_INTENT` bringing the service back) published and pulled with nothing
+  leaving the phone: a Pixel 10 was dark 21:11-01:26 on 2026-10-12 while its service worked.
+  `TelemetryConfigurator.kt` (the twin of the Swift one) persists what JS configures, stamped with
+  the build's version code, and `BackgroundLocationService.onCreate` re-applies it; values from
+  another build are never applied, so turning telemetry off in a build stays a JS decision. One
+  configure per (endpoint, instance) per process, for the same reason as on iOS. The service emits
+  `location.runtime` through `LocationRuntimeReporter.kt` (`started`, a 5-min `pulse` with a
+  main-looper probe, `authorization`); `location.node_owner = native` there is the app process gone.
 - **A heartbeat states what it knows about motion, and only a proven stop says `parked`.**
   `heartbeat_fix` takes `parked: Option<bool>` (`publish::Motion`): `Some(true)` from a confirmed
   dwell, a visit arrival, a parked coarse tick or Android's no-delivery ticker; `Some(false)` from a
