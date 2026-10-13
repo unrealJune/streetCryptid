@@ -1,4 +1,4 @@
-//! iroh's DNS, answered by the operating system's resolver on Apple platforms.
+//! iroh's DNS, answered by the operating system's resolver on Apple platforms and Android.
 //!
 //! iroh resolves everything that makes a phone reachable through one [`DnsResolver`]: relay
 //! hostnames (the relay connection and every `net_report` probe), the `_iroh.<z32>` TXT records
@@ -22,21 +22,46 @@
 //! with tokio's `AsyncFd`, so no thread blocks, and dropping a query (iroh's per-call timeout
 //! does) deallocates it, which cancels it in the daemon.
 //!
+//! ## Android
+//!
+//! Android has the same hole with a different shape. hickory CAN read the system's nameservers
+//! there (over JNI, from the active network's `LinkProperties`), but only when the endpoint is
+//! built and again when iroh sees a major network change, and then it sends its own UDP/TCP
+//! queries to those IPs for as long as the list stands. A list read mid-handover is wrong for the
+//! network the phone ends up on, and nothing replaces it. On 2026-10-13 a Pixel 10 adopted a
+//! node the background service had built and, from 01:26 on, failed EVERY iroh lookup — every
+//! relay connect, every pkarr publish to `dns.iroh.link` — while its telemetry and map tiles,
+//! resolving through the OS in the same process, were fine. It had no relay at all and could
+//! only be reached on its LAN. A list is also wrong by construction behind Private DNS and VPNs,
+//! exactly as on iOS.
+//!
+//! So on API 29+ every query goes to netd through `android_res_nquery` (libandroid,
+//! `<android/multinetwork.h>`) on `NETWORK_UNSPECIFIED`, which is the process's default network
+//! as the OS sees it at the moment of the query: Private DNS, VPNs and network switches are the
+//! OS's problem, not ours. The call hands back a socket that becomes readable when netd has the
+//! answer; it is driven with `AsyncFd` like the Apple daemon socket, and a query dropped before
+//! it answers is cancelled with `android_res_cancel`. The answer is a whole DNS message, which
+//! [`wire`] reads. The symbols are looked up at run time because `minSdkVersion` is below 29; a
+//! phone without them keeps iroh's resolver and says so once in the log.
+//!
 //! A failure names its cause in the log MESSAGE (`iroh_location::system_dns`), because Loki keeps
 //! the message and drops the fields, and iroh's own `Failed to resolve` hides the source chain.
-//! That opacity is why the phone above took weeks to explain.
+//! That opacity is why the phones above took weeks, and then a day, to explain.
 //!
 //! [`DnsResolver`]: iroh::dns::DnsResolver
 
-// Off Apple only the tests reach the pure half; Android reads the real system DNS over JNI.
-#![cfg_attr(not(target_vendor = "apple"), allow(dead_code))]
+// Elsewhere only the tests reach the pure half.
+#![cfg_attr(
+    not(any(target_vendor = "apple", target_os = "android")),
+    allow(dead_code)
+)]
 
 /// RR types this module asks for.
 pub(crate) const RR_A: u16 = 1;
 pub(crate) const RR_AAAA: u16 = 28;
 pub(crate) const RR_TXT: u16 = 16;
 
-/// Decoders for the raw RDATA mDNSResponder hands back. Pure, so they are tested on every host.
+/// Decoders for the raw RDATA the OS hands back. Pure, so they are tested on every host.
 pub(crate) mod rdata {
     use std::net::{Ipv4Addr, Ipv6Addr};
 
@@ -62,6 +87,80 @@ pub(crate) mod rdata {
             rest = &tail[len..];
         }
         Some(strings)
+    }
+}
+
+/// Reads the answer section out of a whole DNS response (RFC 1035 §4), which is what netd hands
+/// back on Android. Pure, so it is tested on every host.
+pub(crate) mod wire {
+    /// RCODE NXDOMAIN.
+    pub(crate) const RCODE_NXDOMAIN: u8 = 3;
+    const CLASS_IN: u16 = 1;
+
+    /// What a response said: its RCODE, and the RDATA of every IN answer of the type asked for.
+    /// The CNAMEs on the way to the answer are skipped, as the Apple path skips intermediates.
+    #[derive(Debug, PartialEq, Eq)]
+    pub(crate) struct Response {
+        pub(crate) rcode: u8,
+        pub(crate) records: Vec<Vec<u8>>,
+    }
+
+    /// `None` if the message is truncated or malformed.
+    pub(crate) fn parse(msg: &[u8], rrtype: u16) -> Option<Response> {
+        let header = msg.get(..12)?;
+        let rcode = header[3] & 0x0f;
+        let qdcount = u16::from_be_bytes([header[4], header[5]]);
+        let ancount = u16::from_be_bytes([header[6], header[7]]);
+        let mut pos = 12;
+        for _ in 0..qdcount {
+            pos = skip_name(msg, pos)?;
+            // QTYPE, QCLASS
+            msg.get(pos..pos + 4)?;
+            pos += 4;
+        }
+        let mut records = Vec::new();
+        for _ in 0..ancount {
+            pos = skip_name(msg, pos)?;
+            let fixed = msg.get(pos..pos + 10)?;
+            let rtype = u16::from_be_bytes([fixed[0], fixed[1]]);
+            let class = u16::from_be_bytes([fixed[2], fixed[3]]);
+            let rdlen = usize::from(u16::from_be_bytes([fixed[8], fixed[9]]));
+            pos += 10;
+            let rdata = msg.get(pos..pos + rdlen)?;
+            pos += rdlen;
+            if rtype == rrtype && class == CLASS_IN {
+                records.push(rdata.to_vec());
+            }
+        }
+        Some(Response { rcode, records })
+    }
+
+    /// Past one domain name. A compression pointer ends a name, so skipping one never needs to
+    /// follow it.
+    fn skip_name(msg: &[u8], mut pos: usize) -> Option<usize> {
+        loop {
+            let len = *msg.get(pos)?;
+            match len & 0xc0 {
+                0x00 if len == 0 => return Some(pos + 1),
+                0x00 => pos += 1 + usize::from(len),
+                0xc0 => return msg.get(pos + 1).map(|_| pos + 2),
+                // 0x40 / 0x80: label types nothing uses.
+                _ => return None,
+            }
+        }
+    }
+
+    /// The name RFC 1035 gives an RCODE, for log messages a human reads.
+    pub(crate) fn rcode_name(rcode: u8) -> &'static str {
+        match rcode {
+            0 => "NoError",
+            1 => "FormErr",
+            2 => "ServFail",
+            3 => "NXDomain",
+            4 => "NotImp",
+            5 => "Refused",
+            _ => "unrecognised",
+        }
     }
 }
 
@@ -94,24 +193,341 @@ pub(crate) fn dnssd_error_name(code: i32) -> &'static str {
     }
 }
 
-#[cfg(target_vendor = "apple")]
-pub(crate) use apple::resolver;
+fn rr_name(rrtype: u16) -> &'static str {
+    match rrtype {
+        RR_A => "A",
+        RR_AAAA => "AAAA",
+        RR_TXT => "TXT",
+        _ => "?",
+    }
+}
+
+/// Logs a failed lookup. Fields don't survive Loki, so the message carries everything; a
+/// negative answer (NXDOMAIN, no records of that type) is an answer, not a fault, and logs quieter.
+#[cfg(any(target_vendor = "apple", target_os = "android"))]
+fn log_failure(host: &str, rrtype: u16, err: &dyn std::fmt::Display, negative: bool) {
+    let msg = format!("system dns: {} {host} failed: {err}", rr_name(rrtype));
+    if negative {
+        tracing::trace!("{msg}");
+    } else {
+        tracing::debug!("{msg}");
+    }
+}
+
+#[cfg(any(target_vendor = "apple", target_os = "android"))]
+pub(crate) use system::resolver;
+
+/// iroh's [`Resolver`](iroh::dns::Resolver) over this platform's OS resolver. The platform
+/// modules only answer "the RDATA for this name and type".
+#[cfg(any(target_vendor = "apple", target_os = "android"))]
+mod system {
+    use std::future::Future;
+    use std::net::{Ipv4Addr, Ipv6Addr};
+    use std::pin::Pin;
+
+    use iroh::dns::{BoxIter, DnsError, DnsResolver, Resolver, TxtRecordData};
+
+    #[cfg(target_os = "android")]
+    use super::android as platform;
+    #[cfg(target_vendor = "apple")]
+    use super::apple as platform;
+    use super::{rdata, RR_A, RR_AAAA, RR_TXT};
+
+    type BoxFuture<T> = Pin<Box<dyn Future<Output = T> + Send + 'static>>;
+
+    #[derive(Debug)]
+    struct Malformed;
+
+    impl std::fmt::Display for Malformed {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "malformed record data")
+        }
+    }
+
+    impl std::error::Error for Malformed {}
+
+    fn decode<T>(records: Vec<Vec<u8>>, f: fn(&[u8]) -> Option<T>) -> Result<Vec<T>, DnsError> {
+        records
+            .iter()
+            .map(|r| f(r.as_slice()))
+            .collect::<Option<Vec<T>>>()
+            .ok_or_else(|| DnsError::from(n0_error::AnyError::from_std(Malformed)))
+    }
+
+    #[derive(Debug, Default)]
+    struct SystemResolver;
+
+    impl Resolver for SystemResolver {
+        fn lookup_ipv4(&self, host: String) -> BoxFuture<Result<BoxIter<Ipv4Addr>, DnsError>> {
+            Box::pin(async move {
+                let addrs = decode(platform::query(host, RR_A).await?, rdata::a)?;
+                Ok(Box::new(addrs.into_iter()) as BoxIter<Ipv4Addr>)
+            })
+        }
+
+        fn lookup_ipv6(&self, host: String) -> BoxFuture<Result<BoxIter<Ipv6Addr>, DnsError>> {
+            Box::pin(async move {
+                let addrs = decode(platform::query(host, RR_AAAA).await?, rdata::aaaa)?;
+                Ok(Box::new(addrs.into_iter()) as BoxIter<Ipv6Addr>)
+            })
+        }
+
+        fn lookup_txt(&self, host: String) -> BoxFuture<Result<BoxIter<TxtRecordData>, DnsError>> {
+            Box::pin(async move {
+                let records = decode(platform::query(host, RR_TXT).await?, rdata::txt)?;
+                Ok(Box::new(records.into_iter().map(TxtRecordData::from))
+                    as BoxIter<TxtRecordData>)
+            })
+        }
+
+        /// The OS owns the cache, and shares it with every other process.
+        fn clear_cache(&self) {}
+
+        /// Nothing to rebind: every query is its own call into the OS, which tracks network
+        /// changes itself. A reset that re-reads a nameserver list is what stranded the Pixel in
+        /// the module docs.
+        fn reset(&self) -> Box<dyn Resolver> {
+            Box::new(SystemResolver)
+        }
+    }
+
+    /// The resolver `LocationNode::start` hands the endpoint, or `None` where the OS offers no
+    /// resolver API (Android below 29), which keeps iroh's own.
+    pub(crate) fn resolver() -> Option<DnsResolver> {
+        match platform::backend() {
+            Ok(backend) => {
+                tracing::info!("system dns: iroh lookups go through {backend}");
+                Some(DnsResolver::custom(SystemResolver))
+            }
+            Err(why) => {
+                tracing::warn!("system dns: unavailable ({why}); iroh keeps its own resolver");
+                None
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "android")]
+mod android {
+    use std::ffi::{c_char, c_int, c_void, CString};
+    use std::fmt;
+    use std::os::fd::{AsRawFd, RawFd};
+    use std::sync::OnceLock;
+
+    use iroh::dns::DnsError;
+    use tokio::io::unix::AsyncFd;
+
+    use super::{log_failure, wire};
+
+    /// `net_handle_t` 0, `NETWORK_UNSPECIFIED`: whatever the OS considers this process's default
+    /// network when the query is made.
+    const NETWORK_UNSPECIFIED: u64 = 0;
+    const CLASS_IN: c_int = 1;
+    /// The largest DNS message there is; netd retries a truncated UDP answer over TCP itself.
+    const ANSWER_MAX: usize = 65_535;
+
+    // <android/multinetwork.h>, API 29.
+    type NQuery = unsafe extern "C" fn(
+        network: u64,
+        dname: *const c_char,
+        ns_class: c_int,
+        ns_type: c_int,
+        flags: u32,
+    ) -> c_int;
+    type NResult =
+        unsafe extern "C" fn(fd: c_int, rcode: *mut c_int, answer: *mut u8, anslen: usize) -> c_int;
+    type Cancel = unsafe extern "C" fn(fd: c_int);
+
+    struct Api {
+        nquery: NQuery,
+        nresult: NResult,
+        cancel: Cancel,
+    }
+
+    fn api() -> Result<&'static Api, &'static str> {
+        static API: OnceLock<Result<Api, &'static str>> = OnceLock::new();
+        API.get_or_init(load).as_ref().map_err(|why| *why)
+    }
+
+    fn load() -> Result<Api, &'static str> {
+        // SAFETY: dlopen/dlsym with NUL-terminated names. The handle is never closed, so the
+        // symbols stay valid for the life of the process, and each one is transmuted to the
+        // signature multinetwork.h declares for it.
+        unsafe {
+            let lib = libc::dlopen(c"libandroid.so".as_ptr(), libc::RTLD_NOW);
+            if lib.is_null() {
+                return Err("libandroid.so did not load");
+            }
+            let nquery = libc::dlsym(lib, c"android_res_nquery".as_ptr());
+            let nresult = libc::dlsym(lib, c"android_res_nresult".as_ptr());
+            let cancel = libc::dlsym(lib, c"android_res_cancel".as_ptr());
+            if nquery.is_null() || nresult.is_null() || cancel.is_null() {
+                return Err("android_res_nquery needs API 29");
+            }
+            Ok(Api {
+                nquery: std::mem::transmute::<*mut c_void, NQuery>(nquery),
+                nresult: std::mem::transmute::<*mut c_void, NResult>(nresult),
+                cancel: std::mem::transmute::<*mut c_void, Cancel>(cancel),
+            })
+        }
+    }
+
+    /// A lookup that did not produce records, with the reason netd gave.
+    #[derive(Debug)]
+    enum QueryError {
+        BadName,
+        Unavailable(&'static str),
+        /// `android_res_nquery` refused, with the errno.
+        Start(i32),
+        /// `android_res_nresult` failed, with the errno (`ETIMEDOUT` is netd giving up).
+        Result(i32),
+        /// An answer with a failing RCODE.
+        Rcode(u8),
+        /// NOERROR with no record of the type asked for.
+        NoData,
+        Socket(std::io::Error),
+        Malformed,
+    }
+
+    impl QueryError {
+        fn is_negative(&self) -> bool {
+            matches!(
+                self,
+                QueryError::Rcode(wire::RCODE_NXDOMAIN) | QueryError::NoData
+            )
+        }
+    }
+
+    impl fmt::Display for QueryError {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            match self {
+                QueryError::BadName => write!(f, "name contains a NUL byte"),
+                QueryError::Unavailable(why) => write!(f, "{why}"),
+                QueryError::Start(errno) => write!(
+                    f,
+                    "android_res_nquery refused: {}",
+                    std::io::Error::from_raw_os_error(*errno)
+                ),
+                QueryError::Result(errno) => write!(
+                    f,
+                    "android_res_nresult: {}",
+                    std::io::Error::from_raw_os_error(*errno)
+                ),
+                QueryError::Rcode(rcode) => write!(f, "{} ({rcode})", wire::rcode_name(*rcode)),
+                QueryError::NoData => write!(f, "no records of that type"),
+                QueryError::Socket(e) => write!(f, "netd socket: {e}"),
+                QueryError::Malformed => write!(f, "malformed answer"),
+            }
+        }
+    }
+
+    impl std::error::Error for QueryError {}
+
+    struct NetdFd(RawFd);
+
+    impl AsRawFd for NetdFd {
+        fn as_raw_fd(&self) -> RawFd {
+            self.0
+        }
+    }
+
+    /// One in-flight `android_res_nquery`. Dropping it before the answer is read cancels it.
+    struct Query {
+        api: &'static Api,
+        /// The socket netd answers on; -1 once `android_res_nresult` has consumed (closed) it.
+        raw: RawFd,
+        fd: Option<AsyncFd<NetdFd>>,
+    }
+
+    impl Query {
+        fn start(name: &str, rrtype: u16) -> Result<Self, QueryError> {
+            let api = api().map_err(QueryError::Unavailable)?;
+            let name = CString::new(name).map_err(|_| QueryError::BadName)?;
+            // SAFETY: a valid C string for the duration of the call; flags 0 = netd's defaults
+            // (its cache, its retries).
+            let raw = unsafe {
+                (api.nquery)(
+                    NETWORK_UNSPECIFIED,
+                    name.as_ptr(),
+                    CLASS_IN,
+                    c_int::from(rrtype),
+                    0,
+                )
+            };
+            if raw < 0 {
+                return Err(QueryError::Start(-raw));
+            }
+            let mut query = Query { api, raw, fd: None };
+            // On failure Drop cancels the query, which closes the socket.
+            query.fd = Some(AsyncFd::new(NetdFd(raw)).map_err(QueryError::Socket)?);
+            Ok(query)
+        }
+
+        async fn run(mut self, rrtype: u16) -> Result<Vec<Vec<u8>>, QueryError> {
+            {
+                let fd = self.fd.as_ref().expect("set by start");
+                let _ready = fd.readable().await.map_err(QueryError::Socket)?;
+            }
+            // Deregister before `nresult` closes the socket under the reactor.
+            self.fd.take();
+            let raw = std::mem::replace(&mut self.raw, -1);
+            let mut rcode: c_int = 0;
+            let mut answer = vec![0u8; ANSWER_MAX];
+            // SAFETY: `raw` is the live query socket, consumed (closed) exactly once, here;
+            // `answer` is writable for its whole length.
+            let len =
+                unsafe { (self.api.nresult)(raw, &mut rcode, answer.as_mut_ptr(), answer.len()) };
+            if len < 0 {
+                return Err(QueryError::Result(-len));
+            }
+            answer.truncate(len as usize);
+            let response = wire::parse(&answer, rrtype).ok_or(QueryError::Malformed)?;
+            if !response.records.is_empty() {
+                return Ok(response.records);
+            }
+            Err(match response.rcode {
+                0 => QueryError::NoData,
+                rcode => QueryError::Rcode(rcode),
+            })
+        }
+    }
+
+    impl Drop for Query {
+        fn drop(&mut self) {
+            self.fd.take();
+            if self.raw >= 0 {
+                // SAFETY: the query socket has not been consumed; cancel closes it, exactly once.
+                unsafe { (self.api.cancel)(self.raw) };
+            }
+        }
+    }
+
+    pub(super) async fn query(host: String, rrtype: u16) -> Result<Vec<Vec<u8>>, DnsError> {
+        let result = match Query::start(&host, rrtype) {
+            Ok(q) => q.run(rrtype).await,
+            Err(e) => Err(e),
+        };
+        result.map_err(|e| {
+            log_failure(&host, rrtype, &e, e.is_negative());
+            DnsError::from(n0_error::AnyError::from_std(e))
+        })
+    }
+
+    pub(super) fn backend() -> Result<&'static str, &'static str> {
+        api().map(|_| "netd (android_res_nquery)")
+    }
+}
 
 #[cfg(target_vendor = "apple")]
 mod apple {
     use std::ffi::{c_char, c_int, c_void, CString};
     use std::fmt;
-    use std::future::Future;
-    use std::net::{Ipv4Addr, Ipv6Addr};
     use std::os::fd::{AsRawFd, RawFd};
-    use std::pin::Pin;
 
-    use iroh::dns::{BoxIter, DnsError, DnsResolver, Resolver, TxtRecordData};
+    use iroh::dns::DnsError;
     use tokio::io::unix::AsyncFd;
 
-    use super::{dnssd_error_name, rdata, RR_A, RR_AAAA, RR_TXT};
-
-    type BoxFuture<T> = Pin<Box<dyn Future<Output = T> + Send + 'static>>;
+    use super::{dnssd_error_name, log_failure, RR_TXT};
 
     #[repr(C)]
     struct DnsServiceOpaque {
@@ -171,7 +587,6 @@ mod apple {
         Process(i32),
         Answer(i32),
         Socket(std::io::Error),
-        Malformed,
     }
 
     impl QueryError {
@@ -204,7 +619,6 @@ mod apple {
                 }
                 QueryError::Answer(c) => write!(f, "{} ({c})", dnssd_error_name(*c)),
                 QueryError::Socket(e) => write!(f, "daemon socket: {e}"),
-                QueryError::Malformed => write!(f, "malformed record data"),
             }
         }
     }
@@ -381,81 +795,20 @@ mod apple {
         unsafe { libc::poll(&mut poll, 1, 0) > 0 }
     }
 
-    fn rr_name(rrtype: u16) -> &'static str {
-        match rrtype {
-            RR_A => "A",
-            RR_AAAA => "AAAA",
-            RR_TXT => "TXT",
-            _ => "?",
-        }
-    }
-
-    async fn query(host: String, rrtype: u16) -> Result<Vec<Vec<u8>>, DnsError> {
+    pub(super) async fn query(host: String, rrtype: u16) -> Result<Vec<Vec<u8>>, DnsError> {
         let result = match Query::start(&host, rrtype) {
             Ok(q) => q.run().await,
             Err(e) => Err(e),
         };
         result.map_err(|e| {
-            // Fields don't survive Loki, so the message carries everything.
-            let msg = format!("system dns: {} {host} failed: {e}", rr_name(rrtype));
-            if e.is_negative() {
-                tracing::trace!("{msg}");
-            } else {
-                tracing::debug!("{msg}");
-            }
+            log_failure(&host, rrtype, &e, e.is_negative());
             DnsError::from(n0_error::AnyError::from_std(e))
         })
     }
 
-    fn decode<T>(records: Vec<Vec<u8>>, f: fn(&[u8]) -> Option<T>) -> Result<Vec<T>, DnsError> {
-        records
-            .iter()
-            .map(|r| f(r.as_slice()))
-            .collect::<Option<Vec<T>>>()
-            .ok_or_else(|| DnsError::from(n0_error::AnyError::from_std(QueryError::Malformed)))
-    }
-
-    /// iroh's [`Resolver`], answered by mDNSResponder.
-    #[derive(Debug, Default)]
-    struct SystemResolver;
-
-    impl Resolver for SystemResolver {
-        fn lookup_ipv4(&self, host: String) -> BoxFuture<Result<BoxIter<Ipv4Addr>, DnsError>> {
-            Box::pin(async move {
-                let addrs = decode(query(host, RR_A).await?, rdata::a)?;
-                Ok(Box::new(addrs.into_iter()) as BoxIter<Ipv4Addr>)
-            })
-        }
-
-        fn lookup_ipv6(&self, host: String) -> BoxFuture<Result<BoxIter<Ipv6Addr>, DnsError>> {
-            Box::pin(async move {
-                let addrs = decode(query(host, RR_AAAA).await?, rdata::aaaa)?;
-                Ok(Box::new(addrs.into_iter()) as BoxIter<Ipv6Addr>)
-            })
-        }
-
-        fn lookup_txt(&self, host: String) -> BoxFuture<Result<BoxIter<TxtRecordData>, DnsError>> {
-            Box::pin(async move {
-                let records = decode(query(host, RR_TXT).await?, rdata::txt)?;
-                Ok(Box::new(records.into_iter().map(TxtRecordData::from))
-                    as BoxIter<TxtRecordData>)
-            })
-        }
-
-        /// mDNSResponder owns the cache, and it is shared with every other process.
-        fn clear_cache(&self) {}
-
-        /// Nothing to rebind: each query opens its own daemon connection, and mDNSResponder
-        /// tracks network changes itself.
-        fn reset(&self) -> Box<dyn Resolver> {
-            Box::new(SystemResolver)
-        }
-    }
-
-    /// The resolver `LocationNode::start` hands the endpoint on Apple platforms.
-    pub(crate) fn resolver() -> DnsResolver {
-        tracing::info!("system dns: iroh lookups go through mDNSResponder");
-        DnsResolver::custom(SystemResolver)
+    /// mDNSResponder is always there.
+    pub(super) fn backend() -> Result<&'static str, &'static str> {
+        Ok("mDNSResponder")
     }
 }
 
@@ -499,5 +852,73 @@ mod tests {
         assert_eq!(dnssd_error_name(-65538), "NoSuchName");
         assert_eq!(dnssd_error_name(-65570), "PolicyDenied");
         assert_eq!(dnssd_error_name(1), "unrecognised");
+        assert_eq!(wire::rcode_name(wire::RCODE_NXDOMAIN), "NXDomain");
+        assert_eq!(wire::rcode_name(2), "ServFail");
+    }
+
+    /// `iroh-wus.streetcrypt.id. A`, answered through a CNAME, with name compression throughout
+    /// — the shape a resolver behind a CDN or a captive network returns.
+    fn cname_then_a() -> Vec<u8> {
+        let mut m = vec![
+            0x12, 0x34, // id
+            0x81, 0x80, // QR RD RA, NOERROR
+            0x00, 0x01, // QDCOUNT
+            0x00, 0x02, // ANCOUNT
+            0x00, 0x00, 0x00, 0x00, // NSCOUNT, ARCOUNT
+        ];
+        // Question at offset 12.
+        m.extend_from_slice(b"\x08iroh-wus\x0bstreetcrypt\x02id\x00");
+        m.extend_from_slice(&[0x00, 0x01, 0x00, 0x01]);
+        // CNAME: name = pointer to 12, rdata = "edge" + pointer to "streetcrypt.id" (offset 21).
+        m.extend_from_slice(&[
+            0xc0, 0x0c, 0x00, 0x05, 0x00, 0x01, 0, 0, 0x01, 0x2c, 0x00, 0x07,
+        ]);
+        m.extend_from_slice(b"\x04edge\xc0\x15");
+        // A: name = pointer to the CNAME target.
+        let target = (m.len() - 7) as u8;
+        m.extend_from_slice(&[
+            0xc0, target, 0x00, 0x01, 0x00, 0x01, 0, 0, 0x01, 0x2c, 0x00, 0x04,
+        ]);
+        m.extend_from_slice(&[20, 237, 162, 186]);
+        m
+    }
+
+    #[test]
+    fn reads_the_answer_through_a_cname() {
+        let msg = cname_then_a();
+        let response = wire::parse(&msg, RR_A).unwrap();
+        assert_eq!(response.rcode, 0);
+        assert_eq!(response.records, vec![vec![20, 237, 162, 186]]);
+        // Asking for a type the answer does not carry is NOERROR with nothing in it.
+        assert_eq!(
+            wire::parse(&msg, RR_AAAA).unwrap().records,
+            Vec::<Vec<u8>>::new()
+        );
+    }
+
+    #[test]
+    fn reads_the_rcode_of_a_negative_answer() {
+        let mut msg = vec![0x12, 0x34, 0x81, 0x83, 0, 1, 0, 0, 0, 0, 0, 0];
+        msg.extend_from_slice(b"\x07missing\x02id\x00\x00\x10\x00\x01");
+        let response = wire::parse(&msg, RR_TXT).unwrap();
+        assert_eq!(response.rcode, wire::RCODE_NXDOMAIN);
+        assert!(response.records.is_empty());
+    }
+
+    #[test]
+    fn refuses_a_truncated_message() {
+        let msg = cname_then_a();
+        // Every strict prefix is either missing the header or cuts a record short.
+        for len in 0..msg.len() {
+            assert_eq!(
+                wire::parse(&msg[..len], RR_A),
+                None,
+                "prefix of {len} bytes"
+            );
+        }
+        // A reserved label type is not a name.
+        let mut bad = vec![0x12, 0x34, 0x81, 0x80, 0, 1, 0, 0, 0, 0, 0, 0];
+        bad.extend_from_slice(&[0x40, 0x00, 0x00, 0x01, 0x00, 0x01]);
+        assert_eq!(wire::parse(&bad, RR_A), None);
     }
 }

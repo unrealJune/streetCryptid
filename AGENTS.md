@@ -468,16 +468,23 @@ Conventions when changing that code:
   button. Before changing it, check whether `node.rebind{trigger="ble-arm"}` is actually firing on
   phones whose Bluetooth is fine: attach is asynchronous, so "not yet" and "no" are the same answer
   at that call site. It was NOT the cause of the 2026-09-13 pairing failures.
-- **On Apple, iroh's DNS is mDNSResponder, never a nameserver list** (`rust/src/system_dns.rs`).
+- **iroh's DNS is the OS resolver, never a nameserver list** (`rust/src/system_dns.rs`). On Apple
   iroh's default resolver cannot read iOS's DNS config, so it fell back to querying Google's
   8.8.8.8 directly from every iPhone. An iPhone 16 that could not reach it failed every relay
   lookup for weeks (2026-09-17 to 2026-10-11, never once completing a relay probe) while its
   telemetry, resolving through the OS, shipped fine. Every query now goes through
   `DNSServiceQueryRecord`, which honours VPNs, encrypted-DNS profiles, split DNS and Private Relay.
-  Do not "fix" a DNS problem by feeding iroh nameserver IPs (`res_9_getservers` included): any
-  list is wrong behind one of those. Failures log under `iroh_location::system_dns` as
-  `system dns: <type> <host> failed: <reason>`. Android reads the real system DNS over JNI and
-  keeps iroh's default.
+  Android had the same failure by another route: hickory reads the active network's nameservers
+  over JNI, but only at endpoint build and on a major network change, and keeps querying them
+  itself. On 2026-10-13 a Pixel 10 holding a list read mid-handover failed every iroh lookup (no
+  relay, no pkarr publish) while its own OS lookups worked. On API 29+ every query now goes to netd
+  through `android_res_nquery` on the default network (symbols looked up at run time, since
+  `minSdkVersion` is 26; below 29 iroh keeps its resolver and logs `system dns: unavailable`).
+  Do not "fix" a DNS problem by feeding iroh nameserver IPs (`res_9_getservers` or
+  `LinkProperties` included): any list is wrong behind one of those, or after the next network
+  change. Failures log under `iroh_location::system_dns` as
+  `system dns: <type> <host> failed: <reason>`, and which backend a node got is logged once at
+  start (`system dns: iroh lookups go through …`).
 - Guard newly added native exports anyway (`typeof mod.configureTelemetry === 'function'`). Not
   because of bindgen now, but because a phone can be running an older binary than the JS bundle.
 

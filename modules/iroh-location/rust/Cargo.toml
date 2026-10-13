@@ -153,10 +153,11 @@ tokio-stream = "0.1"
 # bootstrap). Resolves to the same uuid 1.x the vendored transport / blew already use.
 uuid = "1"
 
-# Apple only: iroh's DNS through mDNSResponder (`src/system_dns.rs`), driven from the daemon
-# socket with `AsyncFd` (tokio `net`) and drained with `poll` (libc). `n0-error` is how a
-# `Resolver` builds iroh's `DnsError`. All three are already in the tree via iroh.
-[target.'cfg(target_vendor = "apple")'.dependencies]
+# iroh's DNS through the OS resolver (`src/system_dns.rs`): mDNSResponder on Apple, netd's
+# `android_res_nquery` on Android. Both are driven from a socket with `AsyncFd` (tokio `net`);
+# libc is `poll` on Apple and `dlopen`/`dlsym` on Android. `n0-error` is how a `Resolver` builds
+# iroh's `DnsError`. All three are already in the tree via iroh.
+[target.'cfg(any(target_os = "android", target_vendor = "apple"))'.dependencies]
 tokio = { version = "1", features = ["net"] }
 libc = "0.2"
 n0-error = "1"
