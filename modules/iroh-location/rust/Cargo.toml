@@ -152,12 +152,11 @@ tokio-stream = "0.1"
 # streetCryptid identity GATT service/characteristic UUIDs (the invite-less stranger
 # bootstrap). Resolves to the same uuid 1.x the vendored transport / blew already use.
 uuid = "1"
-
 # iroh's DNS through the OS resolver (`src/system_dns.rs`): mDNSResponder on Apple, netd's
 # `android_res_nquery` on Android. Both are driven from a socket with `AsyncFd` (tokio `net`);
 # libc is `poll` on Apple and `dlopen`/`dlsym` on Android. `n0-error` is how a `Resolver` builds
-# iroh's `DnsError`. All three are already in the tree via iroh.
-[target.'cfg(any(target_os = "android", target_vendor = "apple"))'.dependencies]
+# iroh's `DnsError`. All three are already in the tree via iroh. (Same table as the BLE deps
+# above: TOML refuses the same target table twice.)
 tokio = { version = "1", features = ["net"] }
 libc = "0.2"
 n0-error = "1"
