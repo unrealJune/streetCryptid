@@ -174,7 +174,6 @@ describe('backfill storm', () => {
   it('coalesces trail-change notifications across a backfill burst', async () => {
     const svc = makeService();
     await svc.init('@me', 'mothman');
-    await svc.awaitPostReadyWork();
     await svc.addFriend(friend);
 
     let notifications = 0;
@@ -211,7 +210,6 @@ describe('backfill storm', () => {
     const snapshots: { lastSyncRecovered: number | null }[] = [];
     svc.onChange((snapshot) => snapshots.push(snapshot));
     await svc.init('@me', 'mothman');
-    await svc.awaitPostReadyWork();
     await svc.addFriend(friend);
 
     mockHolder.mod.trailFixes = Array.from({ length: 300 }, (_, i) => ({
@@ -237,7 +235,6 @@ describe('backfill storm', () => {
   it('re-reads a friend from scratch after their cached trail is dropped', async () => {
     const svc = makeService();
     await svc.init('@me', 'mothman');
-    await svc.awaitPostReadyWork();
     await svc.addFriend(friend);
     mockHolder.mod.trailFixes = [
       { author: 'bb22', seq: 1, fix: { lat: 1, lon: 2, accuracyM: 3, headingDeg: 0, ts: 500 } },
@@ -262,7 +259,6 @@ describe('backfill storm', () => {
   it('treats a key-reordered transport snapshot as unchanged', async () => {
     const svc = makeService();
     await svc.init('@me', 'mothman');
-    await svc.awaitPostReadyWork();
 
     await svc.refreshTransportDiagnostics();
     await svc.refreshTransportDiagnostics();
@@ -295,7 +291,8 @@ describe('backfill storm', () => {
 
     it('writes nothing for an unchanged poll', async () => {
       const svc = makeService();
-      // `init` polls once itself, and that first poll is the one real change (from null).
+      // `init` starts the first poll once ready, and that poll is the one real change (from null).
+      // Awaited explicitly: the first poll is post-ready work, which `init` no longer waits for.
       await svc.init('@me', 'mothman');
       await svc.awaitPostReadyWork();
       const afterInit = transportRows().length;
@@ -315,7 +312,6 @@ describe('backfill storm', () => {
     it('writes one rollup carrying how many polls it stands for', async () => {
       const svc = makeService();
       await svc.init('@me', 'mothman');
-      await svc.awaitPostReadyWork();
 
       // One changed poll, then enough unchanged ones to cross the rollup threshold.
       for (let i = 0; i < 61; i += 1) await svc.refreshTransportDiagnostics();
@@ -333,7 +329,6 @@ describe('backfill storm', () => {
     it('carries short peer ids and no previous snapshot on a changed poll', async () => {
       const svc = makeService();
       await svc.init('@me', 'mothman');
-      await svc.awaitPostReadyWork();
       await svc.addFriend(friend);
 
       await svc.refreshTransportDiagnostics();

@@ -137,6 +137,15 @@ import { recordDeviceHealth } from './background/device-health';
 import { reportStrandedTeardown } from './background/teardown-watermark';
 import { reportStrandedInit } from './background/init-watermark';
 import { stampWatermark } from './background/watermarks';
+import { PairingPollRunner, type FetchResult } from './pairing-poll-runner';
+import type { ApplyMode } from '../core/pairing-poll-driver';
+import {
+  INITIAL_POST_READY,
+  isStepLive,
+  stepPostReady,
+  type PostReadyEvent,
+  type PostReadySteps,
+} from '../core/post-ready-steps';
 import { createDefaultStashClient, type StashClient } from './stash-client';
 import { loadKeys, saveKeys } from './secure-keys';
 import { loadSeq, saveSeq, SEQ_RESERVATION_BLOCK, SEQ_RESERVATION_LOW_WATER } from './state-store';
@@ -400,6 +409,15 @@ const PAIRING_POLL_INTERVAL_MS = 4000;
  * Idle cost is unchanged: this only applies when a session exists.
  */
 const PAIRING_ACTIVE_POLL_INTERVAL_MS = 300;
+
+/**
+ * How long one pairing poll may run before it is reported (`pairing.poll.stalled`) and released,
+ * so it no longer blocks the next one. See `core/pairing-poll-driver.ts`.
+ */
+const PAIRING_POLL_STALL_MS = 20_000;
+
+/** Stalled polls that may be outstanding before no new one starts. */
+const PAIRING_POLL_MAX_STALLED = 2;
 
 export const BUMP_WINDOW_MS = 120_000;
 
@@ -764,23 +782,41 @@ export class LocationSharingService {
    * a row had the same problem for the same reason.
    */
   private readonly profileBackfill = new Map<string, { attempts: number; nextAt: number }>();
-  private pollTimer: ReturnType<typeof setTimeout> | null = null;
   /**
-   * Set while the app is backgrounded, and the reason {@link startPairingPolling} has a second
-   * guard rather than just being stopped.
+   * The pairing poll's driver. Every rule about when a poll may run — only once ready, only on
+   * screen, never mid-rebind, never after shutdown, a hung poll released after
+   * {@link PAIRING_POLL_STALL_MS}, a caller never answered by a poll older than its question — is in
+   * `core/pairing-poll-driver.ts` and tested there; this only plugs the native reads in.
    *
-   * Stopping the loop is not enough on its own: `onPairReady`, `rebindNodeInner` and `armBump` all
-   * re-arm it, and none of them knows the app is in a pocket. On 2026-09-18 this loop was 414 of
-   * the 1059 journal entries an iPhone wrote while backgrounded, every one of them returning
+   * The background rule has a history worth keeping: on 2026-09-18 this loop was 414 of the 1059
+   * journal entries an iPhone wrote while backgrounded, every one of them returning
    * `sessions: 0, ble_peers: 0, pairing_ready: false` — a phone polling hard for a handshake that
-   * needs two present humans. Each tick is three native pairing calls, three BLE calls (one of
-   * which can spin 1.5s of 50ms polls), and a ~1.5KB SQLite row.
-   *
-   * Deliberately NOT applied to {@link startBumpPolling}: that loop bounds itself against
-   * `isBumpActive()` inside a two-minute window a human opened, so it expires on its own.
+   * needs two present humans. Stopping the timer was not enough, because `onPairReady`,
+   * `rebindNodeInner` and `armBump` all re-armed it and none of them knew the app was in a pocket.
+   * Now none of them can: they ask the driver, and the driver knows.
    */
-  private pollingSuspended = false;
-  private pollInFlight: Promise<void> | null = null;
+  private readonly pairingPoll = new PairingPollRunner<PairingPollReads>({
+    config: {
+      idleMs: PAIRING_POLL_INTERVAL_MS,
+      busyMs: PAIRING_ACTIVE_POLL_INTERVAL_MS,
+      maxStalled: PAIRING_POLL_MAX_STALLED,
+    },
+    stallMs: PAIRING_POLL_STALL_MS,
+    fetch: () => this.fetchPairingPoll(),
+    apply: (result, mode) => this.applyPairingPoll(result, mode),
+    isBusy: () => this.pairSessions.length > 0 || this.isBumpActive(),
+    onStalled: (gen) => {
+      getTelemetry()
+        .startSpan('pairing.poll.stalled', { attributes: { gen, stall_ms: PAIRING_POLL_STALL_MS } })
+        .end();
+      void this.flushDevTelemetry().catch(() => undefined);
+    },
+    onLate: (gen) => {
+      getTelemetry().startSpan('pairing.poll.late', { attributes: { gen } }).end();
+    },
+  });
+  /** The profile backfill sweep in flight, so the poll can start one without stacking them. */
+  private profileBackfillInFlight: Promise<void> | null = null;
   /**
    * The in-flight native reconciliation, so a second caller JOINS it instead of starting a rival.
    *
@@ -861,6 +897,8 @@ export class LocationSharingService {
   private readonly friendWiring = new Set<Promise<void>>();
   /** Post-ready steps still in flight. See {@link startPostReadyWork}. */
   private readonly postReadyWork = new Set<Promise<void>>();
+  /** Where the post-ready steps are; every rule is in `core/post-ready-steps.ts`. */
+  private postReady: PostReadySteps = INITIAL_POST_READY;
   private latestLocalFix: LocationFix | null = null;
   private shutdownPromise: Promise<void> | null = null;
 
@@ -1231,7 +1269,10 @@ export class LocationSharingService {
     this.initPhase = null;
     await clearInitWatermark(this.kv).catch(() => undefined);
     this.setStatus('ready');
-    if (interactive) this.startPostReadyWork();
+    if (interactive) {
+      this.pairingPoll.ready();
+      this.startPostReadyWork();
+    }
   }
 
   /**
@@ -1244,44 +1285,59 @@ export class LocationSharingService {
    * for 11+ minutes on a launch whose iroh DNS was failing outright, and because `ready` was behind
    * it, the map stayed on the positions it had loaded from disk: a friend who had pushed to that
    * very phone an hour earlier read "out of contact 4 hr". Nothing said which of the four calls
-   * it was, so each one is now a {@link boundedStep} that names itself if it overruns.
+   * it was, so each one is now a {@link runStep} that names itself if it overruns.
    */
   private startPostReadyWork(): void {
-    // Synchronously, so the loop is live when `init` returns, exactly as before.
-    this.startPairingPolling();
-    this.boundedStep('profiles', () => this.importFriendProfiles());
-    this.boundedStep('stash-grant', () => this.syncStashGrants());
-    this.boundedStep('pairing-poll', () => this.pollPairingOnce());
+    const attempt = this.postReady.attempt + 1;
+    this.dispatchPostReady({
+      type: 'start',
+      attempt,
+      steps: ['profiles', 'stash-grant', 'pairing-poll'],
+    });
+    if (!isStepLive(this.postReady, attempt)) return;
+    this.runStep(attempt, 'profiles', () => this.importFriendProfiles(attempt));
+    this.runStep(attempt, 'stash-grant', () => this.syncStashGrants());
+    this.runStep(attempt, 'pairing-poll', () => this.pollPairingOnce());
   }
 
+  private dispatchPostReady(event: PostReadyEvent): void {
+    const step = stepPostReady(this.postReady, event);
+    this.postReady = step.state;
+    for (const effect of step.effects) {
+      getTelemetry()
+        .startSpan('app.init.step', {
+          attributes: {
+            'init.step': effect.step,
+            outcome: effect.outcome,
+            elapsed_ms: Date.now() - this.postReadyStartedAt,
+          },
+        })
+        .end();
+      if (effect.outcome === 'overrun') void this.flushDevTelemetry().catch(() => undefined);
+    }
+  }
+
+  private postReadyStartedAt = 0;
+
   /**
-   * Run one post-ready step and report it as an `app.init.step` span: `ok`, `error`, or — if it
-   * is still running after {@link POST_READY_STEP_REPORT_MS} — `overrun`, emitted at that moment,
-   * because a step that never returns would otherwise never report at all. One that lands after
-   * that reports again as `late`, with how long it really took.
+   * Run one post-ready step, reporting through the machine: `ok` / `error` when it settles,
+   * `overrun` at {@link POST_READY_STEP_REPORT_MS} while it is still running (a step that never
+   * returns would otherwise never report), `late` if it lands after that, `abandoned` if the
+   * service stops under it.
    */
-  private boundedStep(step: string, run: () => Promise<void>): void {
-    const started = Date.now();
-    let overran = false;
-    const report = (outcome: 'ok' | 'error' | 'overrun' | 'late', error?: unknown): void => {
-      const span = getTelemetry().startSpan('app.init.step', {
-        attributes: { 'init.step': step, outcome, elapsed_ms: Date.now() - started },
-      });
-      if (error !== undefined) span.recordError(error);
-      span.end();
-    };
-    const timer = setTimeout(() => {
-      overran = true;
-      report('overrun');
-      void this.flushDevTelemetry().catch(() => undefined);
-    }, POST_READY_STEP_REPORT_MS);
+  private runStep(attempt: number, step: string, run: () => Promise<void>): void {
+    this.postReadyStartedAt = Date.now();
+    const timer = setTimeout(
+      () => this.dispatchPostReady({ type: 'overrun', attempt, step }),
+      POST_READY_STEP_REPORT_MS
+    );
     // Don't hold jest's event loop open on our account; no-op in RN/Hermes.
     (timer as unknown as { unref?: () => void }).unref?.();
     const work = Promise.resolve()
       .then(run)
       .then(
-        () => report(overran ? 'late' : 'ok'),
-        (error: unknown) => report(overran ? 'late' : 'error', error)
+        () => this.dispatchPostReady({ type: 'settled', attempt, step, outcome: 'ok' }),
+        () => this.dispatchPostReady({ type: 'settled', attempt, step, outcome: 'error' })
       )
       .finally(() => {
         clearTimeout(timer);
@@ -1748,6 +1804,8 @@ export class LocationSharingService {
       span.recordError(err);
       throw err;
     } finally {
+      // A rebind that threw must not leave pairing gated shut for the life of the process.
+      this.pairingPoll.rebindEnd();
       span.end();
     }
   }
@@ -1758,7 +1816,9 @@ export class LocationSharingService {
     span: Span
   ): Promise<void> {
     const restorePairingReady = this.pairingReadyFlag;
-    this.stopPairingPolling();
+    // No poll may start against the node being replaced; `rebindNode` reopens the gate even if
+    // this throws.
+    this.pairingPoll.rebindStart();
     this.fixSub?.remove();
     this.fixSub = null;
     this.opaqueSub?.remove();
@@ -1811,7 +1871,7 @@ export class LocationSharingService {
       await mod.setPairingReady(true);
       this.pairingReadyFlag = true;
     }
-    this.startPairingPolling();
+    this.pairingPoll.rebindEnd();
     await this.pollPairingOnce();
     void this.syncTrail(0);
     // Friends are carried across in memory rather than reloaded, so this asserts the pool survived
@@ -3845,6 +3905,10 @@ export class LocationSharingService {
   }
 
   private async performShutdown(): Promise<void> {
+    // FIRST and synchronously: from here no poll starts, no post-ready step reports or applies,
+    // and nobody is left waiting on either — including an init that lands after this.
+    this.pairingPoll.stop();
+    this.dispatchPostReady({ type: 'stop' });
     // Hand the node back first: from here on we are tearing it down, so a headless session waking
     // mid-teardown is free to build its own. Only the mounted service ever held the claim.
     if (this.ownsNativeRuntime) {
@@ -3852,7 +3916,6 @@ export class LocationSharingService {
       releaseNativeRuntime();
     }
     // Stop callbacks synchronously before awaiting native teardown.
-    this.stopPairingPolling();
     this.stopBumpPolling();
     // Let acknowledge-time wiring finish before the module goes away. Bounded like every other
     // teardown await on this path (AGENTS.md: never `await` native teardown unbounded) — a
@@ -4886,11 +4949,16 @@ export class LocationSharingService {
    * the live watcher is already re-armed by the time this runs; this only picks up what the local
    * replica holds. Friends still missing a profile are retried by {@link backfillMissingProfiles}.
    */
-  private async importFriendProfiles(): Promise<void> {
-    if (!this.mod) return;
+  private async importFriendProfiles(attempt?: number): Promise<void> {
     for (const friend of pool.friendList(this.state)) {
+      // Re-read every time: a shutdown can land between friends, and nothing read after it may
+      // be applied.
+      const mod = this.mod;
+      if (!mod) return;
+      if (attempt !== undefined && !isStepLive(this.postReady, attempt)) return;
       if (!friend.profileTicket) continue;
-      const profile = await this.mod.readProfile(friend.endpointId).catch(() => null);
+      const profile = await mod.readProfile(friend.endpointId).catch(() => null);
+      if (attempt !== undefined && !isStepLive(this.postReady, attempt)) return;
       if (profile) this.applyProfile(profile);
     }
   }
@@ -4939,6 +5007,8 @@ export class LocationSharingService {
 
   /** Merge a verified profile into a known friend (monotonic by epoch); persist + emit if changed. */
   private applyProfile(profile: ProfileView): void {
+    // A read that lands after shutdown must not persist or emit: the service is gone.
+    if (this.status === 'stopped') return;
     let discoveryChanged = false;
     for (const [sessionId, friend] of this.discoveries) {
       if (friend.endpointId !== profile.endpointId) continue;
@@ -4976,9 +5046,7 @@ export class LocationSharingService {
     // Resume the pairing loop, and close the gap rather than only re-arming it: the poll
     // also drains `pollProfileEvents` and runs `reconcileCompletedPairs`, so a friend who
     // finished pairing while we were backgrounded is reconciled now, not in four seconds.
-    this.pollingSuspended = false;
-    this.startPairingPolling();
-    void this.pollPairingOnce();
+    this.pairingPoll.foreground();
     void this.engine?.flush();
     void this.syncTrail(0);
     // Re-derive rather than trust what start-up decided. Authorization moves in both
@@ -5029,84 +5097,22 @@ export class LocationSharingService {
     //
     // The bump loop is left alone too: it expires against `isBumpActive()` inside a two-minute
     // window a human opened.
-    this.pollingSuspended = true;
-    this.stopPairingPolling();
+    this.pairingPoll.background();
   }
 
   /**
-   * Start the bounded pairing/discovery poll loop (idempotent; native only).
-   *
-   * The cadence follows whether a session is live: {@link PAIRING_ACTIVE_POLL_INTERVAL_MS} while
-   * one is in flight, {@link PAIRING_POLL_INTERVAL_MS} at rest. Re-armed from the poll itself
-   * rather than a fixed interval, so a handshake that starts between ticks speeds the loop up
-   * immediately instead of on the next slow tick.
-   */
-  private startPairingPolling(): void {
-    if (this.pollTimer || !this.mod || this.pollingSuspended) return;
-    const arm = (delay: number): void => {
-      const timer = setTimeout(() => {
-        void this.pollPairingOnce().finally(() => {
-          // Only re-arm if polling was not stopped while this pass ran.
-          if (this.pollTimer === timer) {
-            this.pollTimer = null;
-            arm(this.pairingPollDelay());
-          }
-        });
-      }, delay);
-      this.pollTimer = timer;
-      // Don't keep the Node event loop (jest / tooling) alive on our account; no-op in RN/Hermes.
-      (timer as unknown as { unref?: () => void }).unref?.();
-    };
-    // The FIRST tick uses the same rule as every later one. Starting at the idle interval
-    // unconditionally meant `repollSoon` — the thing that exists to speed the loop up when a bump
-    // arms — actually slowed it to 4s for one window.
-    arm(this.pairingPollDelay());
-  }
-
-  /**
-   * How long to wait before the next pairing poll — the ONE place that decides the cadence.
-   *
-   * There used to be two drivers. This loop re-armed at 300ms while a session was live, and Bump
-   * ran its own 300ms `setInterval` calling the same `pollPairingOnce`, so an armed bump during a
-   * handshake ran both at once. Tempo, 2026-09-17 04:03-04:04 UTC: 6-7 `pairing.poll` spans per
-   * second on the iPhone being bumped and 2-3/s on the Pixel doing the bumping, each one six
-   * crossings of the native bridge that take the same pairing locks the handshake needs. The
-   * bump that produced them took 44s from armed to SAS gate.
-   *
-   * Sub-second sampling is still right while something is happening — the handshake itself is
-   * ~390ms of machine time — so the cadence is kept and the duplicate driver is gone.
-   */
-  private pairingPollDelay(): number {
-    const busy = this.pairSessions.length > 0 || this.isBumpActive();
-    return busy ? PAIRING_ACTIVE_POLL_INTERVAL_MS : PAIRING_POLL_INTERVAL_MS;
-  }
-
-  /**
-   * Re-arm the poll loop NOW rather than waiting out the delay it is currently sitting on.
-   *
-   * Arming a bump moves the cadence from 4s to 300ms, but the timer already scheduled does not
-   * know that — so without this, arming could sit idle for most of a wasted 4s window. This is
-   * what replaced Bump's own interval: the same responsiveness, from the one loop.
+   * Re-poll NOW rather than waiting out the cadence the driver is sitting on. Arming a bump moves
+   * the cadence from 4 s to 300 ms, but the timer already armed does not know that.
    */
   private repollSoon(): void {
-    if (!this.pollTimer || !this.mod) return;
-    this.stopPairingPolling();
-    this.startPairingPolling();
     void this.pollPairingOnce();
-  }
-
-  private stopPairingPolling(): void {
-    if (this.pollTimer) {
-      clearTimeout(this.pollTimer);
-      this.pollTimer = null;
-    }
   }
 
   /**
    * Watch for the bump window closing.
    *
    * This used to ALSO drive `pollPairingOnce` every 300ms, in parallel with the pairing loop doing
-   * the same — see {@link pairingPollDelay} for what that cost. All it does now is notice expiry
+   * the same — 6-7 `pairing.poll` spans a second on 2026-09-17. All it does now is notice expiry
    * and stand the radio down; the polling is the pairing loop's job and it speeds up on its own
    * while {@link isBumpActive} is true.
    */
@@ -5168,77 +5174,112 @@ export class LocationSharingService {
    * Drain the pairing + profile + discovery queues once. Any failure surfaces through the service
    * error path (deduped so a persistently-failing poll can't spam listeners) and never throws.
    */
-  private pollPairingOnce(): Promise<void> {
-    if (!this.mod) return Promise.resolve();
-    if (this.pollInFlight) return this.pollInFlight;
-    this.pollInFlight = this.doPollPairingOnce().finally(() => {
-      this.pollInFlight = null;
-    });
-    return this.pollInFlight;
+  private async pollPairingOnce(): Promise<void> {
+    await this.pairingPoll.request();
   }
 
-  private async doPollPairingOnce(): Promise<void> {
-    const mod = this.mod;
-    if (!mod) return;
+  /**
+   * A poll's native reads. Never throws: an error comes back on the result, so the span opened
+   * here is always ended by {@link applyPairingPoll}.
+   *
+   * TWO independent reads, not one Promise.all. `listPairSessions()` is what reveals the SAS gate,
+   * and it used to share a Promise.all with three BLE calls — Promise.all resolves at the SLOWEST
+   * member, so the visual gate waited on a Bluetooth query that has nothing to do with the
+   * handshake (Tempo: 27 polls over 1 s in a day, several 10-17 s). Both start together; the
+   * fetch returns when the pairing reads do, and the BLE reads are awaited while applying, after
+   * the SAS state has been emitted.
+   */
+  private async fetchPairingPoll(): Promise<PairingPollReads> {
     const span = getTelemetry().startSpan('pairing.poll');
+    const started = Date.now();
+    const mod = this.mod;
+    if (!mod) return { span, started, error: new Error('node not ready') };
+    const ble = Promise.all([
+      mod.nearbyBlePeers(),
+      mod.bleCapabilities(),
+      this.refreshBluetoothRadio(),
+    ]);
+    // A rejected BLE read must not surface as unhandled; it is reported when it is awaited.
+    ble.catch(() => undefined);
     try {
-      // TWO independent reads, not one Promise.all.
-      //
-      // `listPairSessions()` is what reveals the SAS gate. It used to share a Promise.all with
-      // three BLE calls, and Promise.all resolves at the SLOWEST member — so the visual gate
-      // waited on a Bluetooth query that has nothing to do with the handshake. Worse,
-      // `pollPairingOnce` coalesces on `pollInFlight`, so the next tick handed back the SAME
-      // stuck promise instead of re-reading: one slow BLE call stalled every pairing update for
-      // its whole duration. Tempo showed 27 polls over 1s in a day, several 10-17s.
-      //
-      // Both reads still start together; only the awaits are separated, so BLE is no slower.
-      const started = Date.now();
-      const blePromise = Promise.all([
-        mod.nearbyBlePeers(),
-        mod.bleCapabilities(),
-        this.refreshBluetoothRadio(),
-      ]);
-      // A rejected BLE read must not take the pairing path down with it; it is reported by the
-      // catch below only if the pairing read also fails.
-      blePromise.catch(() => undefined);
-
       const [pairEvents, profileEvents, sessions] = await Promise.all([
         mod.pollPairEvents(),
         mod.pollProfileEvents(),
         mod.listPairSessions(),
       ]);
-      const pairingReadMs = Date.now() - started;
+      return {
+        span,
+        started,
+        pairingReadMs: Date.now() - started,
+        pairEvents,
+        profileEvents,
+        sessions,
+        ble: ble.then(([peers, caps]) => ({ peers, caps })),
+      };
+    } catch (error) {
+      return { span, started, error };
+    }
+  }
 
-      this.pairSessions = sessions;
-      // EMIT NOW, before the slow tail below. Everything after this point — transport
-      // diagnostics, profile backfill, ticket imports — does I/O, and the old code emitted only
-      // once all of it had finished. The SAS challenge was known here and shown several seconds
-      // later. The tail still runs; it just no longer gates the screen.
-      this.emitIfPairingChanged();
-
-      const [peers, caps] = await blePromise;
-      const bleReadMs = Date.now() - started;
-      this.nearbyPeers = peers;
-      this.bleCaps = caps;
-      this.pairingReadyFlag = caps.pairingReady;
+  /**
+   * Apply one poll. `normal` is the current poll; `late` is one released as stalled that came back
+   * after a newer one had already read native state — its drained events are still handled (they
+   * were drained exactly once), but nothing it read about the current state may overwrite what the
+   * newer poll saw; `drop` is a poll that lands after shutdown.
+   */
+  private async applyPairingPoll(
+    result: FetchResult<PairingPollReads>,
+    mode: ApplyMode
+  ): Promise<void> {
+    if (!result.ok) return;
+    const reads = result.value;
+    const { span } = reads;
+    span.setAttribute('mode', mode);
+    try {
+      if (mode === 'drop') return;
+      if (reads.error !== undefined) throw reads.error;
+      const pairEvents = reads.pairEvents ?? [];
+      const profileEvents = reads.profileEvents ?? [];
+      const sessions = reads.sessions ?? [];
+      const current = mode === 'normal';
+      if (current) {
+        this.pairSessions = sessions;
+        // EMIT NOW, before the slow tail below. Everything after this point — BLE, transport
+        // diagnostics, ticket imports — does I/O, and the SAS challenge is known here.
+        this.emitIfPairingChanged();
+        const { peers, caps } = await reads.ble!;
+        this.nearbyPeers = peers;
+        this.bleCaps = caps;
+        this.pairingReadyFlag = caps.pairingReady;
+        span.setAttributes({
+          ble_peers: peers.length,
+          pairing_ready: caps.pairingReady,
+          ble_read_ms: Date.now() - reads.started,
+        });
+      }
       span.setAttributes({
         pair_events: pairEvents.length,
         profile_events: profileEvents.length,
         sessions: sessions.length,
         session_states: sessions.map((session) => session.state).join(','),
         sas_verified_sessions: sessions.filter((session) => session.sasVerified).length,
-        ble_peers: peers.length,
-        pairing_ready: caps.pairingReady,
         // Split so a future stall names its culprit. The old span covered all six calls and
         // identified none of them, which is why this took a day to find.
-        pairing_read_ms: pairingReadMs,
-        ble_read_ms: bleReadMs,
+        pairing_read_ms: reads.pairingReadMs ?? 0,
       });
-      await this.pollTransportDiagnosticsOnce();
+      if (current) await this.pollTransportDiagnosticsOnce();
       // Pair events FIRST: `pool.applyProfile` is a no-op for an endpoint that isn't a friend yet,
       // and both queues are drained together above, so applying profiles first threw away the
       // persona of anyone whose `ready` was sitting in the very same batch.
       for (const event of pairEvents) await this.handlePairEvent(event);
+      if (!current) {
+        // A late poll's session list is older than what a newer poll already applied, so the
+        // reconciliations below, which trust it, are the newer poll's job.
+        for (const profile of profileEvents) this.applyProfile(profile);
+        this.emitIfPairingChanged();
+        span.setStatus('ok');
+        return;
+      }
       // Ready is a drained, one-shot native event. A transient bridge/result failure must not lose
       // the completed friendship forever, so recover any unhandled Complete session snapshots too.
       await this.reconcileCompletedPairs(sessions);
@@ -5266,13 +5307,13 @@ export class LocationSharingService {
         this.errorListeners.forEach((listener) => listener(''));
       }
       this.emitIfPairingChanged();
-      // LAST, and deliberately after the emit above. This sweep dials a namespace per friend and
-      // is pure best-effort cosmetics — a handle and a sigil — whereas everything above it is the
-      // SAS gate the user is staring at. Running it earlier put an unbounded network walk between
-      // `verifying` landing in the native queue and the screen that renders it, and `pollInFlight`
-      // meant the 4s timer could not slip past: the next poll did not start until this one
-      // returned. Measured 2026-09-10: SAS screens opening a minute late on both sides of a pair.
-      await this.backfillMissingProfiles();
+      // LAST, and NOT part of the poll. This sweep dials a namespace per friend and is pure
+      // best-effort cosmetics — a handle and a sigil — whereas everything above it is the SAS gate
+      // the user is staring at. Inside the poll it put an unbounded network walk between
+      // `verifying` landing in the native queue and the screen that renders it (2026-09-10: SAS
+      // screens a minute late on both sides of a pair), and it would now count against the
+      // poll's stall bound for work that is not the poll's.
+      this.startProfileBackfill();
       span.setStatus('ok');
     } catch (err) {
       span.recordError(err);
@@ -5280,6 +5321,21 @@ export class LocationSharingService {
     } finally {
       span.end();
     }
+  }
+
+  /** The profile backfill sweep a poll started, if one is running. For tests. */
+  async awaitProfileBackfill(): Promise<void> {
+    await this.profileBackfillInFlight;
+  }
+
+  /** One profile backfill sweep at a time; a poll that finds one running leaves it be. */
+  private startProfileBackfill(): void {
+    if (this.profileBackfillInFlight) return;
+    this.profileBackfillInFlight = this.backfillMissingProfiles()
+      .catch((err: unknown) => this.reportPollError(err))
+      .finally(() => {
+        this.profileBackfillInFlight = null;
+      });
   }
 
   /** @internal Number of polls that observed a real transport change. Test-only accessor. */
@@ -5669,4 +5725,16 @@ export class LocationSharingService {
     this.lastPairingSig = JSON.stringify(snapshot.pairing);
     this.snapshotListeners.forEach((l) => l(snapshot));
   }
+}
+
+/** What one pairing poll read from native, handed from its fetch to its apply. */
+interface PairingPollReads {
+  readonly span: Span;
+  readonly started: number;
+  readonly error?: unknown;
+  readonly pairingReadMs?: number;
+  readonly pairEvents?: PairEvent[];
+  readonly profileEvents?: ProfileView[];
+  readonly sessions?: PairStateRecord[];
+  readonly ble?: Promise<{ peers: BlePeer[]; caps: BleCapabilities }>;
 }

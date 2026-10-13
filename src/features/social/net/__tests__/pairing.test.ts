@@ -1,8 +1,5 @@
 import type {
-  BleCapabilities,
-  BlePeer,
   BumpResolution,
-  PairEvent,
   PairInviteWithToken,
   PairResult,
   PairStateRecord,
@@ -19,6 +16,7 @@ import {
 
 import type { ContactCard } from '../../core/types';
 import { BUMP_SEARCH_DURATION_MS } from '../../core/pairing-countdown';
+import { FakeNativeModule } from '../__fixtures__/fake-pairing-module';
 
 /**
  * Wiring tests for the bilateral-pairing / profile client state in {@link LocationSharingService},
@@ -28,270 +26,6 @@ import { BUMP_SEARCH_DURATION_MS } from '../../core/pairing-countdown';
  * their native methods, a completed pair adding a friend with reciprocal sharing enabled, profile
  * events refreshing a friend, and polling cleanup on shutdown — without a live iroh node.
  */
-
-interface PublishProfileCall {
-  handle: string;
-  cryptidName: string;
-  sigil: string;
-  color: string;
-}
-
-class FakeNativeModule {
-  calls = {
-    publishProfile: [] as PublishProfileCall[],
-    initiatePairByToken: [] as string[],
-    initiatePairNearby: [] as string[],
-    respondPair: [] as { sessionId: string; accept: boolean }[],
-    pairSasChallenge: [] as string[],
-    submitPairChoice: [] as { sessionId: string; chosenIndex: number }[],
-    confirmPairDisplay: [] as { sessionId: string; matched: boolean }[],
-    cancelPair: [] as string[],
-    forgetSession: [] as string[],
-    revokePairInvite: [] as string[],
-    setPairingReady: [] as boolean[],
-    importProfileTicket: [] as string[],
-    publishIntroduction: [] as string[],
-    subscribe: [] as { topic: string; bootstrap: string[] }[],
-    unsubscribe: [] as string[],
-    shutdown: 0,
-    pollPairEvents: 0,
-    pollProfileEvents: 0,
-    listPairSessions: 0,
-    pairResult: [] as string[],
-    nearbyBlePeers: 0,
-    bleCapabilities: 0,
-    transportDiagnostics: 0,
-    createNode: 0,
-    start: 0,
-  };
-
-  // Drained-on-poll queues the test drives.
-  pairEvents: PairEvent[] = [];
-  profileEvents: ProfileView[] = [];
-  sessions: PairStateRecord[] = [];
-  peers: BlePeer[] = [];
-  challenges = new Map<string, SasChallenge>();
-  caps: BleCapabilities = {
-    available: true,
-    activeScanToggle: false,
-    rssi: false,
-    discoveryRefresh: false,
-    pairingReady: false,
-  };
-  pairResults = new Map<string, PairResult>();
-  ratchets = new Map<string, string>();
-  profiles = new Map<string, ProfileView>();
-  bumpResolution: BumpResolution = {
-    status: 'noPeers',
-    endpointId: null,
-    deviceId: null,
-    rssi: null,
-    peerCount: 0,
-    detail: 'none',
-  };
-  bumpResolutionPromise: Promise<BumpResolution> | null = null;
-  initiateNearbyPromise: Promise<string> | null = null;
-  initiateNearbyError: Error | null = null;
-  cancelPairError: Error | null = null;
-  forgetSessionError: Error | null = null;
-  onCancelPair: ((sessionId: string) => void) | null = null;
-  endpointId = 'aa11';
-  initiateByTokenPromise: Promise<string> | null = null;
-  bleAvailableAfterRestart = false;
-  /** True stands for a binary with a node host, which exports `restartNode`. */
-  hostRestart = false;
-  restarts: unknown[] = [];
-
-  get restartNode(): ((config?: unknown) => Promise<void>) | undefined {
-    if (!this.hostRestart) return undefined;
-    return async (config?: unknown) => {
-      this.restarts.push(config);
-      if (this.bleAvailableAfterRestart) this.caps = { ...this.caps, available: true };
-    };
-  }
-
-  private handlers: Record<string, (e: unknown) => void> = {};
-
-  async createNode() {
-    this.calls.createNode += 1;
-    if (this.calls.createNode > 1 && this.bleAvailableAfterRestart) {
-      this.caps = { ...this.caps, available: true };
-    }
-    return {
-      endpointId: this.endpointId,
-      identitySecret: 'ii',
-      recvSecret: 'rr',
-      recvPublic: 'rp',
-    };
-  }
-  async start() {
-    this.calls.start += 1;
-  }
-  async shutdown() {
-    this.calls.shutdown += 1;
-  }
-  async ticket() {
-    return 'ticket-self';
-  }
-  async docTicket() {
-    return 'doc-self';
-  }
-  async publishProfile(handle: string, cryptidName: string, sigil: string, color: string) {
-    this.calls.publishProfile.push({ handle, cryptidName, sigil, color });
-    return 1000;
-  }
-  async profileTicket() {
-    return 'profile-self';
-  }
-  async importProfileTicket(ticket: string) {
-    this.calls.importProfileTicket.push(ticket);
-  }
-  async importDocTicket() {}
-  async readProfile(endpointId: string) {
-    return this.profiles.get(endpointId) ?? null;
-  }
-  async deriveTopic(id: string) {
-    return `topic-${id}`;
-  }
-  async subscribe(topic: string, bootstrap: string[]) {
-    this.calls.subscribe.push({ topic, bootstrap });
-    return `sub-${topic}`;
-  }
-  async unsubscribe(subscriptionId: string) {
-    this.calls.unsubscribe.push(subscriptionId);
-  }
-  async publishIntroduction(subscriptionId: string) {
-    this.calls.publishIntroduction.push(subscriptionId);
-    return {
-      accepted: true,
-      rejection: null,
-      enqueued: 1,
-      published: 1,
-      pending: 0,
-      slotsSkipped: 0,
-      overflowDropped: 0,
-      suspended: false,
-    };
-  }
-  async publish() {}
-  async docsWrite() {}
-  async syncLatest() {}
-  async readLatest() {
-    return [];
-  }
-  async pruneTrail() {}
-  async transportDiagnostics() {
-    this.calls.transportDiagnostics += 1;
-    return { localAddresses: [], peers: [] };
-  }
-
-  async setPairingReady(ready: boolean) {
-    this.calls.setPairingReady.push(ready);
-    this.caps = { ...this.caps, pairingReady: ready };
-  }
-  async createPairInvite(_ttlSecs: number): Promise<PairInviteWithToken> {
-    return {
-      version: 1,
-      inviteId: 'iid',
-      secret: 'sec',
-      endpointId: 'aa11',
-      endpointTicket: 'et',
-      expiresAtMs: 0,
-      token: 'scpair2:cafef00d',
-    };
-  }
-  async revokePairInvite(token: string) {
-    this.calls.revokePairInvite.push(token);
-    return true;
-  }
-  async initiatePairByToken(token: string) {
-    this.calls.initiatePairByToken.push(token);
-    return this.initiateByTokenPromise ?? 'sess-invite';
-  }
-  async initiatePairNearby(peer: string) {
-    this.calls.initiatePairNearby.push(peer);
-    if (this.initiateNearbyError) throw this.initiateNearbyError;
-    return this.initiateNearbyPromise ?? 'sess-nearby';
-  }
-  async respondPair(sessionId: string, accept: boolean) {
-    this.calls.respondPair.push({ sessionId, accept });
-  }
-  async pairSasChallenge(sessionId: string) {
-    this.calls.pairSasChallenge.push(sessionId);
-    return this.challenges.get(sessionId) ?? null;
-  }
-  async submitPairChoice(sessionId: string, chosenIndex: number) {
-    this.calls.submitPairChoice.push({ sessionId, chosenIndex });
-  }
-  async confirmPairDisplay(sessionId: string, matched: boolean) {
-    this.calls.confirmPairDisplay.push({ sessionId, matched });
-  }
-  async cancelPair(sessionId: string) {
-    this.calls.cancelPair.push(sessionId);
-    if (this.cancelPairError) throw this.cancelPairError;
-    const result = this.pairResults.get(sessionId);
-    if (result && this.ratchets.get(result.peerEndpointId) === sessionId) {
-      this.ratchets.delete(result.peerEndpointId);
-    }
-    // Native cancel tears the session down: drop it and its challenge.
-    this.sessions = this.sessions.filter((s) => s.sessionId !== sessionId);
-    this.challenges.delete(sessionId);
-    this.pairResults.delete(sessionId);
-    this.onCancelPair?.(sessionId);
-  }
-  async forgetSession(endpointId: string) {
-    this.calls.forgetSession.push(endpointId);
-    if (this.forgetSessionError) throw this.forgetSessionError;
-    this.ratchets.delete(endpointId);
-  }
-  async pollPairEvents() {
-    this.calls.pollPairEvents += 1;
-    const drained = this.pairEvents;
-    this.pairEvents = [];
-    return drained;
-  }
-  async pollProfileEvents() {
-    this.calls.pollProfileEvents += 1;
-    const drained = this.profileEvents;
-    this.profileEvents = [];
-    return drained;
-  }
-  async listPairSessions() {
-    this.calls.listPairSessions += 1;
-    return this.sessions;
-  }
-  async pairResult(sessionId: string) {
-    this.calls.pairResult.push(sessionId);
-    return this.pairResults.get(sessionId) ?? null;
-  }
-  async nearbyBlePeers() {
-    this.calls.nearbyBlePeers += 1;
-    return this.peers;
-  }
-  async bleCapabilities() {
-    this.calls.bleCapabilities += 1;
-    return this.caps;
-  }
-  async bleAvailable() {
-    return this.caps.available;
-  }
-  radio: 'poweredOn' | 'poweredOff' | 'unauthorized' | 'unsupported' | 'unknown' = 'poweredOn';
-  async bluetoothRadioState() {
-    return this.radio;
-  }
-  async resolveBumpPeer() {
-    return this.bumpResolutionPromise ?? this.bumpResolution;
-  }
-
-  addListener(name: string, cb: (e: unknown) => void) {
-    this.handlers[name] = cb;
-    return {
-      remove: () => {
-        delete this.handlers[name];
-      },
-    };
-  }
-}
 
 const mockHolder: { mod: FakeNativeModule } = { mod: new FakeNativeModule() };
 
@@ -459,7 +193,6 @@ describe('LocationSharingService — pairing / profile wiring', () => {
   it('publishes the local profile on init', async () => {
     const svc = newService();
     await svc.init('@me', 'mothman', 'Mothra', '#111111');
-    await svc.awaitPostReadyWork();
     expect(mockHolder.mod.calls.publishProfile).toEqual([
       { handle: '@me', cryptidName: 'Mothra', sigil: 'mothman', color: '#111111' },
     ]);
@@ -469,7 +202,6 @@ describe('LocationSharingService — pairing / profile wiring', () => {
     const svc = newService();
     const snap = watch(svc);
     await svc.init('@me', 'mothman', 'Mothra', '#111111');
-    await svc.awaitPostReadyWork();
 
     await svc.updateProfile('@new', 'owl', 'Night Owl', '#2F9E6A');
 
@@ -488,7 +220,6 @@ describe('LocationSharingService — pairing / profile wiring', () => {
   it('restores a minimal publisher without interactive polling in headless mode', async () => {
     const svc = newService();
     await svc.init('@me', 'mothman', '', '', { mode: 'headless' });
-    await svc.awaitPostReadyWork();
 
     expect(mockHolder.mod.calls.publishProfile).toHaveLength(0);
     expect(mockHolder.mod.calls.pollPairEvents).toBe(0);
@@ -505,7 +236,6 @@ describe('LocationSharingService — pairing / profile wiring', () => {
   it('creates an invite link and initiates without auto-accepting when pairing from it', async () => {
     const svc = newService();
     await svc.init('@me', 'mothman');
-    await svc.awaitPostReadyWork();
     const link = await svc.createPairInvite(300);
     expect(link).toMatch(/^https:\/\/streetcrypt\.id\/pair#token=/);
 
@@ -519,7 +249,6 @@ describe('LocationSharingService — pairing / profile wiring', () => {
     const svc = newService();
     const snap = watch(svc);
     await svc.init('@me', 'mothman');
-    await svc.awaitPostReadyWork();
     await svc.createPairInvite(300);
 
     // A redemption creates a session keyed by the INVITE id — that is how this side learns the
@@ -546,7 +275,6 @@ describe('LocationSharingService — pairing / profile wiring', () => {
     const svc = newService();
     const snap = watch(svc);
     await svc.init('@me', 'mothman');
-    await svc.awaitPostReadyWork();
     await svc.createPairInvite(120);
 
     await expect(svc.cancelPairInvite()).resolves.toBe('cancelled');
@@ -563,7 +291,6 @@ describe('LocationSharingService — pairing / profile wiring', () => {
     const svc = newService();
     const snap = watch(svc);
     await svc.init('@me', 'mothman');
-    await svc.awaitPostReadyWork();
     await svc.createPairInvite(120);
     mockHolder.mod.sessions = [verifyingSession({ sessionId: 'iid', peerEndpointId: 'peer-race' })];
     mockHolder.mod.challenges.set('iid', sasChallenge());
@@ -580,7 +307,6 @@ describe('LocationSharingService — pairing / profile wiring', () => {
     const svc = newService();
     const snap = watch(svc);
     await svc.init('@me', 'mothman');
-    await svc.awaitPostReadyWork();
     const link = await svc.createPairInvite(120);
     const revoke = mockHolder.mod.revokePairInvite;
     Object.assign(mockHolder.mod, { revokePairInvite: undefined });
@@ -598,7 +324,6 @@ describe('LocationSharingService — pairing / profile wiring', () => {
     const svc = newService();
     const snap = watch(svc);
     await svc.init('@me', 'mothman');
-    await svc.awaitPostReadyWork();
     const invite = await mockHolder.mod.createPairInvite(120);
     let finishMint!: (invite: PairInviteWithToken) => void;
     jest.spyOn(mockHolder.mod, 'createPairInvite').mockReturnValueOnce(
@@ -620,7 +345,6 @@ describe('LocationSharingService — pairing / profile wiring', () => {
     const svc = newService();
     const snap = watch(svc);
     await svc.init('@me', 'mothman');
-    await svc.awaitPostReadyWork();
     await svc.createPairInvite(120);
     let finishRevoke!: (revoked: boolean) => void;
     jest.spyOn(mockHolder.mod, 'revokePairInvite').mockReturnValueOnce(
@@ -648,7 +372,6 @@ describe('LocationSharingService — pairing / profile wiring', () => {
     const svc = newService();
     const snap = watch(svc);
     await svc.init('@me', 'mothman');
-    await svc.awaitPostReadyWork();
     await svc.createPairInvite(300);
 
     mockHolder.mod.sessions = [verifyingSession({ sessionId: 'someone-elses-session' })];
@@ -663,7 +386,6 @@ describe('LocationSharingService — pairing / profile wiring', () => {
     const svc = newService();
     const snap = watch(svc);
     await svc.init('@me', 'mothman');
-    await svc.awaitPostReadyWork();
     await svc.createPairInvite(300);
     mockHolder.mod.sessions = [verifyingSession({ sessionId: 'iid', state: 'failed' })];
     await svc.refreshPairing();
@@ -677,7 +399,6 @@ describe('LocationSharingService — pairing / profile wiring', () => {
     const svc = newService();
     const snap = watch(svc);
     await svc.init('@me', 'mothman');
-    await svc.awaitPostReadyWork();
 
     mockHolder.mod.pairEvents = [
       { kind: 'failed', sessionId: 'sess-dead', peerEndpointId: 'peerX', nearby: true },
@@ -696,7 +417,6 @@ describe('LocationSharingService — pairing / profile wiring', () => {
     const svc = newService();
     const snap = watch(svc);
     await svc.init('@me', 'mothman');
-    await svc.awaitPostReadyWork();
 
     mockHolder.mod.challenges.set('sess-sas', sasChallenge({ role: 'displayer' }));
     mockHolder.mod.pairEvents = [
@@ -718,7 +438,6 @@ describe('LocationSharingService — pairing / profile wiring', () => {
     const svc = newService();
     const snap = watch(svc);
     await svc.init('@me', 'mothman');
-    await svc.awaitPostReadyWork();
 
     mockHolder.mod.pairEvents = [
       { kind: 'failed', sessionId: 'sess-dead', peerEndpointId: 'peerX', nearby: true },
@@ -736,7 +455,6 @@ describe('LocationSharingService — pairing / profile wiring', () => {
   it('moves directly from an armed bump window into link redemption', async () => {
     const svc = newService();
     await svc.init('@me', 'mothman');
-    await svc.awaitPostReadyWork();
     await svc.armBump();
 
     await svc.pairFromInput('scpair2:cafef00d');
@@ -749,7 +467,6 @@ describe('LocationSharingService — pairing / profile wiring', () => {
     const svc = newService();
     const snap = watch(svc);
     await svc.init('@me', 'mothman');
-    await svc.awaitPostReadyWork();
 
     mockHolder.mod.pairEvents = [
       { kind: 'pendingRequest', sessionId: 'incoming-1', peerEndpointId: 'peerX', nearby: false },
@@ -776,7 +493,6 @@ describe('LocationSharingService — pairing / profile wiring', () => {
     const svc = newService();
     const snap = watch(svc);
     await svc.init('@me', 'mothman');
-    await svc.awaitPostReadyWork();
 
     mockHolder.mod.pairEvents = [
       { kind: 'pendingRequest', sessionId: 'incoming-2', peerEndpointId: 'peerY', nearby: false },
@@ -816,7 +532,6 @@ describe('LocationSharingService — pairing / profile wiring', () => {
     const svc = newService();
     const snap = watch(svc);
     await svc.init('@me', 'mothman');
-    await svc.awaitPostReadyWork();
 
     // No `verifying` event this poll (e.g. missed while suspended) — only the session state shows
     // it. Reconciliation must still fetch the challenge and populate the snapshot.
@@ -853,7 +568,6 @@ describe('LocationSharingService — pairing / profile wiring', () => {
     const svc = newService();
     const snap = watch(svc);
     await svc.init('@me', 'mothman');
-    await svc.awaitPostReadyWork();
 
     mockHolder.mod.sessions = [
       verifyingSession({
@@ -898,7 +612,6 @@ describe('LocationSharingService — pairing / profile wiring', () => {
     const svc = newService();
     const snap = watch(svc);
     await svc.init('@me', 'mothman');
-    await svc.awaitPostReadyWork();
 
     mockHolder.mod.sessions = [
       verifyingSession({ sessionId: 'sess-gone', peerEndpointId: 'peerG' }),
@@ -921,7 +634,6 @@ describe('LocationSharingService — pairing / profile wiring', () => {
       if (message) errors.push(message);
     });
     await svc.init('@me', 'mothman');
-    await svc.awaitPostReadyWork();
 
     mockHolder.mod.sessions = [verifyingSession({ sessionId: 'sess-err' })];
     mockHolder.mod.pairSasChallenge = async () => {
@@ -935,7 +647,6 @@ describe('LocationSharingService — pairing / profile wiring', () => {
   it('picker SAS action submits the choice via the dedicated native method', async () => {
     const svc = newService();
     await svc.init('@me', 'mothman');
-    await svc.awaitPostReadyWork();
 
     mockHolder.mod.sessions = [
       verifyingSession({ sessionId: 'sess-pick', peerEndpointId: 'peerP' }),
@@ -957,7 +668,6 @@ describe('LocationSharingService — pairing / profile wiring', () => {
   it('displayer SAS action confirms the display via the dedicated native method', async () => {
     const svc = newService();
     await svc.init('@me', 'mothman');
-    await svc.awaitPostReadyWork();
 
     mockHolder.mod.sessions = [
       verifyingSession({ sessionId: 'sess-show', peerEndpointId: 'peerD' }),
@@ -975,7 +685,6 @@ describe('LocationSharingService — pairing / profile wiring', () => {
   it('rejects a role-mismatched SAS action without calling native', async () => {
     const svc = newService();
     await svc.init('@me', 'mothman');
-    await svc.awaitPostReadyWork();
 
     mockHolder.mod.sessions = [
       verifyingSession({ sessionId: 'sess-role', peerEndpointId: 'peerR' }),
@@ -991,7 +700,6 @@ describe('LocationSharingService — pairing / profile wiring', () => {
   it('rejects an invalid picker index before crossing the native bridge', async () => {
     const svc = newService();
     await svc.init('@me', 'mothman');
-    await svc.awaitPostReadyWork();
 
     await expect(svc.submitPairChoice('sess-invalid', 256)).rejects.toThrow(RangeError);
     expect(mockHolder.mod.calls.submitPairChoice).toHaveLength(0);
@@ -1001,7 +709,6 @@ describe('LocationSharingService — pairing / profile wiring', () => {
     const svc = newService();
     const snap = watch(svc);
     await svc.init('@me', 'mothman');
-    await svc.awaitPostReadyWork();
 
     mockHolder.mod.sessions = [
       verifyingSession({ sessionId: 'sess-cancel', peerEndpointId: 'peer-cancel' }),
@@ -1020,7 +727,6 @@ describe('LocationSharingService — pairing / profile wiring', () => {
   it('standing down cancels a live session but spares one that has completed', async () => {
     const svc = newService();
     await svc.init('@me', 'mothman');
-    await svc.awaitPostReadyWork();
 
     // What the screen holds: two sessions it believed were in flight when it last rendered.
     mockHolder.mod.sessions = [
@@ -1039,7 +745,6 @@ describe('LocationSharingService — pairing / profile wiring', () => {
   it('standing down ignores sessions native no longer knows about', async () => {
     const svc = newService();
     await svc.init('@me', 'mothman');
-    await svc.awaitPostReadyWork();
     mockHolder.mod.sessions = [];
 
     await svc.standDownPairing(['sess-vanished']);
@@ -1051,7 +756,6 @@ describe('LocationSharingService — pairing / profile wiring', () => {
     const svc = newService();
     const snap = watch(svc);
     await svc.init('@me', 'mothman');
-    await svc.awaitPostReadyWork();
 
     mockHolder.mod.sessions = [
       verifyingSession({ sessionId: 'sess-fail', peerEndpointId: 'peer-fail' }),
@@ -1081,7 +785,6 @@ describe('LocationSharingService — pairing / profile wiring', () => {
   it('initiates the peer resolved by an explicit Bump without auto-accepting', async () => {
     const svc = newService();
     await svc.init('@me', 'mothman');
-    await svc.awaitPostReadyWork();
     mockHolder.mod.bumpResolution = {
       status: 'resolved',
       endpointId: 'peer-nearby',
@@ -1103,7 +806,6 @@ describe('LocationSharingService — pairing / profile wiring', () => {
     const svc = newService();
     const snap = watch(svc);
     await svc.init('@me', 'mothman');
-    await svc.awaitPostReadyWork();
     await svc.armBump();
     let finishSearch!: (resolution: BumpResolution) => void;
     mockHolder.mod.bumpResolutionPromise = new Promise((resolve) => {
@@ -1126,7 +828,6 @@ describe('LocationSharingService — pairing / profile wiring', () => {
     const svc = newService();
     const snap = watch(svc);
     await svc.init('@me', 'mothman');
-    await svc.awaitPostReadyWork();
     mockHolder.mod.bumpResolution = {
       status: 'ambiguous',
       endpointId: null,
@@ -1149,7 +850,6 @@ describe('LocationSharingService — pairing / profile wiring', () => {
     const svc = newService();
     const snap = watch(svc);
     await svc.init('@me', 'mothman');
-    await svc.awaitPostReadyWork();
     let resolveBump!: (result: BumpResolution) => void;
     mockHolder.mod.bumpResolutionPromise = new Promise((resolve) => {
       resolveBump = resolve;
@@ -1176,7 +876,6 @@ describe('LocationSharingService — pairing / profile wiring', () => {
   it('cancels a nearby session created after the user cancels during contact', async () => {
     const svc = newService();
     await svc.init('@me', 'mothman');
-    await svc.awaitPostReadyWork();
     mockHolder.mod.bumpResolution = {
       status: 'resolved',
       endpointId: 'peer-slow',
@@ -1204,7 +903,6 @@ describe('LocationSharingService — pairing / profile wiring', () => {
   it('does not cancel a simultaneous nearby session that reaches verification before initiation returns', async () => {
     const svc = newService();
     await svc.init('@me', 'mothman');
-    await svc.awaitPostReadyWork();
     mockHolder.mod.bumpResolution = {
       status: 'resolved',
       endpointId: 'peer-simultaneous',
@@ -1250,7 +948,6 @@ describe('LocationSharingService — pairing / profile wiring', () => {
     try {
       const svc = newService();
       await svc.init('@me', 'mothman');
-      await svc.awaitPostReadyWork();
       mockHolder.mod.bumpResolution = {
         status: 'resolved',
         endpointId: 'peer-after-window',
@@ -1282,7 +979,6 @@ describe('LocationSharingService — pairing / profile wiring', () => {
     const svc = newService();
     const snap = watch(svc);
     await svc.init('@me', 'mothman');
-    await svc.awaitPostReadyWork();
     mockHolder.mod.bumpResolution = {
       status: 'resolved',
       endpointId: 'peer-fail-start',
@@ -1304,7 +1000,6 @@ describe('LocationSharingService — pairing / profile wiring', () => {
     const svc = newService();
     const snap = watch(svc);
     await svc.init('@me', 'mothman');
-    await svc.awaitPostReadyWork();
     await svc.armBump();
     mockHolder.mod.pairEvents = [
       {
@@ -1327,7 +1022,6 @@ describe('LocationSharingService — pairing / profile wiring', () => {
     const svc = newService();
     const snap = watch(svc);
     await svc.init('@me', 'mothman');
-    await svc.awaitPostReadyWork();
 
     mockHolder.mod.pairResults.set(
       'sess-ready',
@@ -1380,7 +1074,6 @@ describe('LocationSharingService — pairing / profile wiring', () => {
     const svc = newService();
     const snap = watch(svc);
     await svc.init('@me', 'mothman');
-    await svc.awaitPostReadyWork();
 
     mockHolder.mod.sessions = [
       verifyingSession({
@@ -1424,7 +1117,6 @@ describe('LocationSharingService — pairing / profile wiring', () => {
     const svc = newService();
     const snap = watch(svc);
     await svc.init('@me', 'mothman');
-    await svc.awaitPostReadyWork();
 
     // 1) Reach the SAS gate.
     mockHolder.mod.sessions = [
@@ -1465,7 +1157,6 @@ describe('LocationSharingService — pairing / profile wiring', () => {
     const svc = newService();
     const snap = watch(svc);
     await svc.init('@me', 'mothman');
-    await svc.awaitPostReadyWork();
 
     mockHolder.mod.pairResults.set(
       'sess-rejected',
@@ -1503,7 +1194,6 @@ describe('LocationSharingService — pairing / profile wiring', () => {
     const svc = newService();
     const snap = watch(svc);
     await svc.init('@me', 'mothman');
-    await svc.awaitPostReadyWork();
     await discover(svc, mockHolder.mod, 'peer-replay');
     await svc.rejectDiscoveredFriend();
     mockHolder.mod.profileEvents.push(profileView({ endpointId: 'peer-replay', epoch: 900 }));
@@ -1518,7 +1208,6 @@ describe('LocationSharingService — pairing / profile wiring', () => {
     const alice = newService();
     const aliceSnap = watch(alice);
     await alice.init('@alice', 'mothman');
-    await alice.awaitPostReadyWork();
 
     const bobMod = new FakeNativeModule();
     bobMod.endpointId = 'bb22';
@@ -1526,7 +1215,6 @@ describe('LocationSharingService — pairing / profile wiring', () => {
     const bob = newService();
     const bobSnap = watch(bob);
     await bob.init('@bob', 'mothman');
-    await bob.awaitPostReadyWork();
     bobMod.onCancelPair = (sessionId) => {
       if (aliceMod.ratchets.get('bb22') === sessionId) aliceMod.ratchets.delete('bb22');
       aliceMod.pairEvents.push({
@@ -1557,7 +1245,6 @@ describe('LocationSharingService — pairing / profile wiring', () => {
     const svc = newService();
     const snap = watch(svc);
     await svc.init('@me', 'mothman');
-    await svc.awaitPostReadyWork();
     await discover(svc, mockHolder.mod, 'first', 'first-session');
     await discover(svc, mockHolder.mod, 'second', 'second-session');
     expect(snap.current?.friends).toEqual([]);
@@ -1573,7 +1260,6 @@ describe('LocationSharingService — pairing / profile wiring', () => {
     const svc = newService();
     const snap = watch(svc);
     await svc.init('@me', 'mothman');
-    await svc.awaitPostReadyWork();
     await discover(svc, mockHolder.mod, 'same-peer', 'old-session');
     await svc.acknowledgeDiscoveredFriend();
     await discover(svc, mockHolder.mod, 'same-peer', 'new-session');
@@ -1594,7 +1280,6 @@ describe('LocationSharingService — pairing / profile wiring', () => {
     const svc = newService();
     const snap = watch(svc);
     await svc.init('@me', 'mothman');
-    await svc.awaitPostReadyWork();
     await discover(svc, mockHolder.mod, 'peer-retry');
     mockHolder.mod.cancelPairError = new Error('could not cancel');
     await expect(svc.rejectDiscoveredFriend()).rejects.toThrow('could not cancel');
@@ -1611,7 +1296,6 @@ describe('LocationSharingService — pairing / profile wiring', () => {
     const svc = newService();
     const snap = watch(svc);
     await svc.init('@me', 'mothman');
-    await svc.awaitPostReadyWork();
     await discover(svc, mockHolder.mod, 'kept-peer');
     await svc.acknowledgeDiscoveredFriend();
     await svc.cancelPair('discovery');
@@ -1626,7 +1310,6 @@ describe('LocationSharingService — pairing / profile wiring', () => {
       const svc = newService();
       const snap = watch(svc);
       await svc.init('@me', 'mothman');
-      await svc.awaitPostReadyWork();
       await discover(svc, mockHolder.mod, 'known-peer', 'nearby-id');
       await svc.acknowledgeDiscoveredFriend();
       mockHolder.mod.sessions = [
@@ -1663,7 +1346,6 @@ describe('LocationSharingService — pairing / profile wiring', () => {
     const svc = newService();
     const snap = watch(svc);
     await svc.init('@me', 'mothman');
-    await svc.awaitPostReadyWork();
     await discover(svc, mockHolder.mod, 'same-peer', 'old-discovery');
     await discover(svc, mockHolder.mod, 'same-peer', 'new-discovery');
     await svc.rejectDiscoveredFriend();
@@ -1679,7 +1361,6 @@ describe('LocationSharingService — pairing / profile wiring', () => {
     const svc = newService();
     const snap = watch(svc);
     await svc.init('@me', 'mothman');
-    await svc.awaitPostReadyWork();
     await discover(svc, mockHolder.mod, 'same-peer', 'old-accepted');
     await svc.acknowledgeDiscoveredFriend();
     await discover(svc, mockHolder.mod, 'same-peer', 'new-pending');
@@ -1702,7 +1383,6 @@ describe('LocationSharingService — pairing / profile wiring', () => {
     const svc = newService();
     const snap = watch(svc);
     await svc.init('@me', 'mothman');
-    await svc.awaitPostReadyWork();
     await discover(svc, mockHolder.mod, 'peer-save');
     const save = jest.spyOn(persistence, 'savePool').mockRejectedValueOnce(new Error('disk full'));
     try {
@@ -1722,7 +1402,6 @@ describe('LocationSharingService — pairing / profile wiring', () => {
     const svc = newService();
     const snap = watch(svc);
     await svc.init('@me', 'mothman');
-    await svc.awaitPostReadyWork();
     await discover(svc, mockHolder.mod, 'peer-write-race');
     let release = () => {};
     const gate = new Promise<void>((resolve) => {
@@ -1764,7 +1443,6 @@ describe('LocationSharingService — pairing / profile wiring', () => {
     const svc = newService();
     const snap = watch(svc);
     await svc.init('@me', 'mothman');
-    await svc.awaitPostReadyWork();
 
     mockHolder.mod.pairResults.set(
       'sess-np',
@@ -1785,7 +1463,6 @@ describe('LocationSharingService — pairing / profile wiring', () => {
     const svc = newService();
     const snap = watch(svc);
     await svc.init('@me', 'mothman');
-    await svc.awaitPostReadyWork();
 
     const friend: ContactCard = {
       endpointId: 'bb22',
@@ -1819,7 +1496,6 @@ describe('LocationSharingService — pairing / profile wiring', () => {
     const svc = newService();
     const snap = watch(svc);
     await svc.init('@me', 'mothman');
-    await svc.awaitPostReadyWork();
 
     // Both native queues are drained together, and `finalize` imports the peer's profile
     // namespace before it queues `ready` — so the profile really can share a batch with it.
@@ -1845,7 +1521,6 @@ describe('LocationSharingService — pairing / profile wiring', () => {
     const svc = newService();
     const snap = watch(svc);
     await svc.init('@me', 'mothman');
-    await svc.awaitPostReadyWork();
 
     // Profile first, with no friend to attach it to. The native queue is drained one-shot, so
     // dropping it here used to cost the persona until the next relaunch.
@@ -1882,7 +1557,6 @@ describe('LocationSharingService — pairing / profile wiring', () => {
     const svc = newService();
     const snap = watch(svc);
     await svc.init('@me', 'mothman');
-    await svc.awaitPostReadyWork();
 
     // A friend with a profile ticket and no epoch is what the sweep goes dialling for.
     mockHolder.mod.pairResults.set(
@@ -1951,7 +1625,6 @@ describe('LocationSharingService — pairing / profile wiring', () => {
     const svc = newService();
     const snap = watch(svc);
     await svc.init('@me', 'mothman');
-    await svc.awaitPostReadyWork();
     // An empty-pool sweep at launch must cost a later pair nothing.
     await svc.refreshPairing();
     mockHolder.mod.calls.importProfileTicket.length = 0;
@@ -1996,7 +1669,6 @@ describe('LocationSharingService — pairing / profile wiring', () => {
       const svc = newService();
       const snap = watch(svc);
       await svc.init('@me', 'mothman');
-      await svc.awaitPostReadyWork();
       mockHolder.mod.pairResults.set(
         'sess-hello',
         pairResult({ sessionId: 'sess-hello', peerEndpointId: 'cc330099', peerProfile: null })
@@ -2099,7 +1771,6 @@ describe('LocationSharingService — pairing / profile wiring', () => {
     const svc = newService();
     const snap = watch(svc);
     await svc.init('@me', 'mothman');
-    await svc.awaitPostReadyWork();
 
     // The pair completes with no verified profile — the usual outcome, since the peer's namespace
     // has only just been imported — and no profile event ever follows, which is what a one-way
@@ -2125,6 +1796,9 @@ describe('LocationSharingService — pairing / profile wiring', () => {
     const nowSpy = jest.spyOn(Date, 'now').mockReturnValue(realNow + 60_000);
     try {
       await svc.refreshPairing();
+      // The sweep runs after the poll, not inside it: it must not count against the poll's
+      // stall bound, nor stand between a SAS gate and the screen.
+      await svc.awaitProfileBackfill();
     } finally {
       nowSpy.mockRestore();
     }
@@ -2139,7 +1813,6 @@ describe('LocationSharingService — pairing / profile wiring', () => {
     const svc = newService();
     const snap = watch(svc);
     await svc.init('@me', 'mothman');
-    await svc.awaitPostReadyWork();
 
     await svc.setPairingReady(true);
     await svc.refreshPairing();
@@ -2155,7 +1828,6 @@ describe('LocationSharingService — pairing / profile wiring', () => {
     const svc = newService();
     const snap = watch(svc);
     await svc.init('@me', 'mothman');
-    await svc.awaitPostReadyWork();
     mockHolder.mod.radio = 'poweredOff';
 
     await expect(svc.armBump()).rejects.toThrow(/Bluetooth is off/);
@@ -2169,7 +1841,6 @@ describe('LocationSharingService — pairing / profile wiring', () => {
     mockHolder.mod.caps = { ...mockHolder.mod.caps, available: false };
     mockHolder.mod.bleAvailableAfterRestart = true;
     await svc.init('@me', 'mothman');
-    await svc.awaitPostReadyWork();
 
     await svc.ensureBleReady();
 
@@ -2190,7 +1861,6 @@ describe('LocationSharingService — pairing / profile wiring', () => {
     mockHolder.mod.bleAvailableAfterRestart = true;
     mockHolder.mod.hostRestart = true;
     await svc.init('@me', 'mothman');
-    await svc.awaitPostReadyWork();
 
     await svc.ensureBleReady();
 
@@ -2207,7 +1877,6 @@ describe('LocationSharingService — pairing / profile wiring', () => {
     mockHolder.mod.bleAvailableAfterRestart = true;
     mockHolder.mod.hostRestart = true;
     await svc.init('@me', 'mothman');
-    await svc.awaitPostReadyWork();
     const subscribesBefore = mockHolder.mod.calls.subscribe.length;
 
     await svc.ensureBleReady();
@@ -2220,7 +1889,6 @@ describe('LocationSharingService — pairing / profile wiring', () => {
     mockHolder.mod.caps = { ...mockHolder.mod.caps, available: false };
     mockHolder.mod.bleAvailableAfterRestart = true;
     await svc.init('@me', 'mothman');
-    await svc.awaitPostReadyWork();
     mockHolder.mod.sessions = [verifyingSession({ sessionId: 'active-session' })];
     await svc.refreshPairing();
 
@@ -2234,7 +1902,6 @@ describe('LocationSharingService — pairing / profile wiring', () => {
     mockHolder.mod.caps = { ...mockHolder.mod.caps, available: false };
     mockHolder.mod.bleAvailableAfterRestart = true;
     await svc.init('@me', 'mothman');
-    await svc.awaitPostReadyWork();
     let resolveSession!: (sessionId: string) => void;
     mockHolder.mod.initiateByTokenPromise = new Promise((resolve) => {
       resolveSession = resolve;
@@ -2263,7 +1930,6 @@ describe('LocationSharingService — pairing / profile wiring', () => {
     try {
       const svc = makeService();
       await svc.init('@me', 'mothman');
-      await svc.awaitPostReadyWork();
       await jest.advanceTimersByTimeAsync(0);
 
       await svc.armBump();
@@ -2285,7 +1951,6 @@ describe('LocationSharingService — pairing / profile wiring', () => {
     try {
       const svc = makeService();
       await svc.init('@me', 'mothman');
-      await svc.awaitPostReadyWork();
       await jest.advanceTimersByTimeAsync(0); // flush the immediate init poll
 
       const afterInit = mockHolder.mod.calls.pollPairEvents;
@@ -2310,7 +1975,6 @@ describe('LocationSharingService — pairing / profile wiring', () => {
     // production as polls of 10-17s while the native handshake itself takes ~390ms.
     const svc = newService();
     await svc.init('@me', 'mothman');
-    await svc.awaitPostReadyWork();
 
     const seen = watch(svc);
     const mod = mockHolder.mod;

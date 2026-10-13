@@ -28,19 +28,8 @@ import {
 } from '@/features/social/core/presence';
 import type { IncomingFix, LocationFix } from '@/features/social/core/types';
 import { type TrailPoint } from '@/features/social/net/background/trail-store';
-import {
-  awaitInitBounded,
-  INIT_WATCHDOG_MS,
-  isInitOverdue,
-} from '@/features/social/net/background/init-watchdog';
-import {
-  canRetryService,
-  INITIAL_SERVICE_LIFECYCLE,
-  isServiceReady,
-  reduceServiceLifecycle,
-  type ServiceLifecycle,
-  type ServiceLifecycleEvent,
-} from '@/features/social/core/service-lifecycle';
+import { INIT_WATCHDOG_MS } from '@/features/social/net/background/init-watchdog';
+import { isServiceReady, type ServiceLifecycle } from '@/features/social/core/service-lifecycle';
 import {
   BLUETOOTH_OFF_MESSAGE,
   BLUETOOTH_UNSUPPORTED_MESSAGE,
@@ -56,6 +45,7 @@ import {
   type TransportPreferences,
 } from '@/features/social/net/persistence';
 import { ExpoLocationProvider } from '@/features/social/net/expo-location-provider';
+import { ServiceSupervisor } from '@/features/social/net/service-supervisor';
 import { buildTransportReport, type TransportReport } from '@/features/social/net/transports';
 import {
   ensureLocalNetworkPermission,
@@ -197,98 +187,27 @@ function profileSignature(
  * already-"ready" instance. Initialised exactly once; a failed attempt clears the latch so a later
  * mount can retry instead of inheriting a rejected promise.
  */
-let sharedService: LocationSharingService | null = null;
-let sharedServiceInit: Promise<void> | null = null;
-
-/**
- * Where startup is, for the life of the process. Module scope for the same reason as the service:
- * it outlives any one mount of this provider. The rules live in `core/service-lifecycle.ts`; this
- * only holds the current state and tells mounted providers when it moves.
- */
-let sharedLifecycle: ServiceLifecycle = INITIAL_SERVICE_LIFECYCLE;
-const lifecycleListeners = new Set<() => void>();
-
-function transitionService(event: ServiceLifecycleEvent): ServiceLifecycle {
-  const next = reduceServiceLifecycle(sharedLifecycle, event);
-  if (next !== sharedLifecycle) {
-    sharedLifecycle = next;
-    lifecycleListeners.forEach((listener) => listener());
-  }
-  return sharedLifecycle;
-}
-
-/**
- * Mark an attempt `stalled` and say so with `app.init.timeout` — once, from whichever notices
- * first: the watchdog's timer, or a foreground resume that finds it overdue by the clock (see
- * `isInitOverdue`). Returns whether this call was the one that moved it.
- *
- * The span carries the phase because that is the question the data could not answer on 2026-09-18:
- * the journal stopped after `node.create` and nothing said what came next. Emitted from the live
- * process, so it lands even when the durable watermark is only read by some later launch.
- */
-function reportInitStalled(
-  service: LocationSharingService,
-  attempt: number,
-  trigger: 'watchdog' | 'foreground'
-): boolean {
-  const before = sharedLifecycle;
-  const after = transitionService({
-    type: 'watchdog',
-    attempt,
-    initPhase: service.currentInitPhase(),
-  });
-  if (after === before) return false;
-  getTelemetry()
-    .startSpan('app.init.timeout', {
-      attributes: {
-        'init.phase': service.currentInitPhase() ?? 'unknown',
-        'init.elapsed_ms': service.initElapsedMs(),
-        watchdog_ms: INIT_WATCHDOG_MS,
-        trigger,
-        'sc.drop_reason': 'init-timeout',
-      },
-    })
-    .end();
-  return true;
-}
-
-function subscribeToLifecycle(onChange: () => void): () => void {
-  lifecycleListeners.add(onChange);
-  return () => {
-    lifecycleListeners.delete(onChange);
-  };
-}
-
-function currentLifecycle(): ServiceLifecycle {
-  return sharedLifecycle;
-}
-
-function getSharedService(): LocationSharingService {
-  if (!sharedService) sharedService = new LocationSharingService();
-  return sharedService;
-}
-
-/**
- * Drop the shared service so the next mount builds a clean one.
- *
- * The in-process equivalent of the force-quit that was previously the only cure. The old service's
- * `init` may still be pending inside native code, so its `shutdown` is fired and NOT awaited — the
- * one thing we must not do here is block recovery on the same call that is already stuck (AGENTS.md:
- * never `await` native teardown unbounded). `createNode` refcounts, so the fresh service adopts the
- * live node rather than clobbering it.
- */
-function discardWedgedService(): void {
-  const wedged = sharedService;
-  sharedService = null;
-  sharedServiceInit = null;
-  if (wedged) {
-    try {
-      wedged.shutdown();
-    } catch {
-      // A wedged service failing to start its own teardown is exactly the case this exists for.
-    }
-  }
-}
+const supervisor = new ServiceSupervisor({
+  create: () => new LocationSharingService(),
+  watchdogMs: INIT_WATCHDOG_MS,
+  // The span carries the phase because that is the question the data could not answer on
+  // 2026-09-18: the journal stopped after `node.create` and nothing said what came next. Emitted
+  // from the live process, so it lands even when the durable watermark is only read by some later
+  // launch. Once per attempt, from whichever of the timer and a foreground noticed first.
+  onStall: ({ trigger, initPhase, elapsedMs }) => {
+    getTelemetry()
+      .startSpan('app.init.timeout', {
+        attributes: {
+          'init.phase': initPhase ?? 'unknown',
+          'init.elapsed_ms': elapsedMs,
+          watchdog_ms: INIT_WATCHDOG_MS,
+          trigger,
+          'sc.drop_reason': 'init-timeout',
+        },
+      })
+      .end();
+  },
+});
 
 export function LocationSharingProvider({ children }: PropsWithChildren) {
   const { profile } = useCryptidProfile();
@@ -310,7 +229,7 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
   const [serviceError, setServiceError] = useState<string | null>(null);
   const [disclosureStatus, setDisclosureStatus] = useState<LocationDisclosureStatus>('loading');
   const [serviceReady, setServiceReady] = useState(false);
-  const lifecycle = useSyncExternalStore(subscribeToLifecycle, currentLifecycle);
+  const lifecycle = useSyncExternalStore(supervisor.subscribe, supervisor.getLifecycle);
   // Bumped by the foreground self-heal to re-run the init effect against a rebuilt service.
   const [initAttempt, setInitAttempt] = useState(0);
   const locationStartRequested = useRef(false);
@@ -405,7 +324,7 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
   useEffect(() => {
     if (!initialProfile) return;
 
-    const service = getSharedService();
+    const service = supervisor.service;
     serviceRef.current = service;
     let active = true;
 
@@ -443,98 +362,58 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
         await service.hydrateFromStore();
         if (!active) return;
         await refreshTrail(service);
-        // Initialise the shared native node exactly once across all mounts. A failed attempt
-        // clears the latch (below) so a later mount retries rather than awaiting a rejected promise.
-        if (!sharedServiceInit) {
-          const { attempt: thisAttempt } = transitionService({ type: 'begin' });
-          const init = (async () => {
-            await ensureLocalNetworkPermission();
-            // REQUEST Bluetooth here (not just check), for two reasons:
-            //
-            // 1. The BLE transport attaches when the native node is CONSTRUCTED, so a grant that
-            //    arrives later leaves BLE detached until an explicit `ensureBleReady()` rebind.
-            //    Asking before `init` means the common path needs no rebind at all.
-            // 2. It breaks a deadlock. The only other prompt lives behind the Bump button, and the
-            //    strip hides that button whenever BLE reports unavailable — which is exactly what
-            //    ungranted permissions cause. A phone that had never been asked could therefore
-            //    never reach the ask, and just showed "Bluetooth is not available on this device
-            //    or build" forever.
-            //
-            // Cheap to repeat: once decided, `requestMultiple` resolves from the stored grant
-            // without showing UI, same as the local-network request above.
-            bluetoothPermissionGranted.current = await ensurePairingPermissions();
-            await service.init(
-              initialProfile.handle,
-              initialProfile.sigil,
-              initialProfile.cryptidName,
-              initialProfile.color
-            );
-          })();
-          // Bookkeeping that belongs to the ATTEMPT, not to whichever mount is waiting on it — so
-          // an init that lands after its watchdog still counts, and one that fails after a mount
-          // has gone still says so.
-          void init.then(
-            () => transitionService({ type: 'ready', attempt: thisAttempt }),
-            (error: unknown) =>
-              transitionService({
-                type: 'failed',
-                attempt: thisAttempt,
-                error: errorMessage(error),
-                initPhase: service.currentInitPhase(),
-              })
+        // Join the attempt in flight, or begin one: exactly one per process, whatever mounts. The
+        // supervisor bounds the wait by the watchdog, owns the retry latch, and reports a stall.
+        const result = await supervisor.attempt(async (svc) => {
+          await ensureLocalNetworkPermission();
+          // REQUEST Bluetooth here (not just check), for two reasons:
+          //
+          // 1. The BLE transport attaches when the native node is CONSTRUCTED, so a grant that
+          //    arrives later leaves BLE detached until an explicit `ensureBleReady()` rebind.
+          //    Asking before `init` means the common path needs no rebind at all.
+          // 2. It breaks a deadlock. The only other prompt lives behind the Bump button, and the
+          //    strip hides that button whenever BLE reports unavailable — which is exactly what
+          //    ungranted permissions cause. A phone that had never been asked could therefore
+          //    never reach the ask, and just showed "Bluetooth is not available on this device
+          //    or build" forever.
+          //
+          // Cheap to repeat: once decided, `requestMultiple` resolves from the stored grant
+          // without showing UI, same as the local-network request above.
+          bluetoothPermissionGranted.current = await ensurePairingPermissions();
+          await svc.init(
+            initialProfile.handle,
+            initialProfile.sigil,
+            initialProfile.cryptidName,
+            initialProfile.color
           );
-          sharedServiceInit = init.catch((error: unknown) => {
-            sharedServiceInit = null;
-            throw error;
+        });
+        if (result.outcome === 'failed') {
+          // The live-process record of a rejected init. The durable watermark names the same
+          // phase, but only to a LATER launch — and the process that failed may run for hours.
+          getTelemetry()
+            .startSpan('app.init.failed', {
+              attributes: {
+                'init.phase': service.currentInitPhase() ?? 'unknown',
+                'init.elapsed_ms': service.initElapsedMs(),
+                error: errorMessage(result.error),
+                'sc.drop_reason': 'init-failed',
+              },
+            })
+            .end();
+          throw result.error;
+        }
+        if (result.outcome === 'timeout') {
+          // It may still land, and if it does as the current attempt, that is a working service.
+          // This used to be ignored: the service came up and the UI kept saying it had not, until
+          // the next foreground discarded it.
+          void result.landed.then(async (landed) => {
+            if (!landed || !active || !isServiceReady(supervisor.lifecycle)) return;
+            publishedProfileSignature.current = profileSignature(initialProfile);
+            setServiceError(null);
+            await refreshTrail(service);
+            setServiceReady(true);
+            await service.syncTrail(0);
           });
-        }
-        // Held in a local, NOT re-read from `sharedServiceInit`: the catch above nulls the latch
-        // before it rethrows, so by the time a rejection lands the module-level binding is already
-        // null and awaiting it again would resolve on `null` and swallow the error.
-        const pending = sharedServiceInit;
-        const attempt = sharedLifecycle.attempt;
-        // Bounded, because a promise that never settles here is terminal for every later mount.
-        // A `failed` outcome re-awaits the original promise so the catch below still reports the
-        // error exactly as it used to; only `timeout` is new behaviour.
-        const outcome = await awaitInitBounded(pending, INIT_WATCHDOG_MS);
-        if (outcome === 'failed') {
-          try {
-            await pending;
-          } catch (initError: unknown) {
-            // The live-process record of a rejected init. The durable watermark names the same phase,
-            // but only to a LATER launch — and the process that failed may run for hours first.
-            getTelemetry()
-              .startSpan('app.init.failed', {
-                attributes: {
-                  'init.phase': service.currentInitPhase() ?? 'unknown',
-                  'init.elapsed_ms': service.initElapsedMs(),
-                  error: errorMessage(initError),
-                  'sc.drop_reason': 'init-failed',
-                },
-              })
-              .end();
-            throw initError;
-          }
-        }
-        if (outcome === 'timeout') {
-          // Let the stalled init keep running — it may still land — but mark it stalled, so a
-          // foreground resume (or a retry button) can rebuild rather than wait again. A no-op when
-          // a foreground resume already did both.
-          reportInitStalled(service, attempt, 'watchdog');
-          // And if it DOES land, that is a working service. This used to be ignored: the service
-          // came up and the UI kept saying it had not, until the next foreground discarded it.
-          void pending.then(
-            async () => {
-              if (!active || sharedLifecycle.attempt !== attempt) return;
-              if (!isServiceReady(sharedLifecycle)) return;
-              publishedProfileSignature.current = profileSignature(initialProfile);
-              setServiceError(null);
-              await refreshTrail(service);
-              setServiceReady(true);
-              await service.syncTrail(0);
-            },
-            () => undefined
-          );
           if (!active) return;
           setLocationStatus('error');
           setServiceError(
@@ -580,31 +459,33 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
    * flight (a slow node build, an unanswered permission prompt) must be left alone, or retrying
    * would restart a healthy launch out from under itself. See `canRetryService`.
    */
-  const retryServiceFrom = useCallback((trigger: 'foreground' | 'user'): boolean => {
-    // The watchdog's timer may not have run while the app was in the background; the clock has.
-    const service = sharedService;
-    if (service && isInitOverdue(sharedLifecycle.phase, service.initElapsedMs())) {
-      reportInitStalled(service, sharedLifecycle.attempt, 'foreground');
-    }
-    if (!canRetryService(sharedLifecycle)) return false;
-    getTelemetry()
-      .startSpan('app.init.recover', {
-        attributes: {
-          trigger,
-          'sc.drop_reason': sharedLifecycle.phase === 'stalled' ? 'init-timeout' : 'init-failed',
-          'init.phase': sharedLifecycle.initPhase ?? 'unknown',
-          attempt: sharedLifecycle.attempt,
-        },
-      })
-      .end();
-    discardWedgedService();
-    setServiceReady(false);
-    setServiceError(null);
-    setLocationStatus('starting');
-    // Re-runs the init effect above against a freshly built service.
-    setInitAttempt((n) => n + 1);
-    return true;
-  }, []);
+  const retryServiceFrom = useCallback(
+    (trigger: 'foreground' | 'user'): boolean =>
+      trigger === 'foreground' ? supervisor.foreground() : supervisor.retry(),
+    []
+  );
+
+  // A discarded service is rebuilt by re-running the init effect above against a fresh one.
+  useEffect(
+    () =>
+      supervisor.onDiscard((notice) => {
+        getTelemetry()
+          .startSpan('app.init.recover', {
+            attributes: {
+              trigger: notice.trigger,
+              'sc.drop_reason': notice.reason,
+              'init.phase': notice.initPhase ?? 'unknown',
+              attempt: notice.attempt,
+            },
+          })
+          .end();
+        setServiceReady(false);
+        setServiceError(null);
+        setLocationStatus('starting');
+        setInitAttempt((n) => n + 1);
+      }),
+    []
+  );
 
   const retryService = useCallback(() => {
     retryServiceFrom('user');

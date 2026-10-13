@@ -1,4 +1,4 @@
-import { awaitInitBounded, INIT_WATCHDOG_MS, isInitOverdue } from '../init-watchdog';
+import { awaitInitBounded, INIT_WATCHDOG_MS } from '../init-watchdog';
 
 describe('init watchdog', () => {
   beforeEach(() => jest.useFakeTimers());
@@ -52,25 +52,5 @@ describe('init watchdog', () => {
   it('bounds well short of the outage it exists to prevent', () => {
     expect(INIT_WATCHDOG_MS).toBeGreaterThanOrEqual(10_000);
     expect(INIT_WATCHDOG_MS).toBeLessThanOrEqual(60_000);
-  });
-
-  describe('isInitOverdue (the foreground resume asks the clock, not the timer)', () => {
-    it('is overdue once an initializing attempt has run past the watchdog', () => {
-      // 2026-10-13: a Pixel resumed 689 s into an init whose 30 s timer had never run.
-      expect(isInitOverdue('initializing', 689_519)).toBe(true);
-      expect(isInitOverdue('initializing', INIT_WATCHDOG_MS)).toBe(true);
-    });
-
-    it('leaves an attempt inside its watchdog alone', () => {
-      expect(isInitOverdue('initializing', INIT_WATCHDOG_MS - 1)).toBe(false);
-      // `init()` has not started yet (the hook is still asking for permissions).
-      expect(isInitOverdue('initializing', 0)).toBe(false);
-    });
-
-    it('only ever applies to an attempt in flight', () => {
-      for (const phase of ['idle', 'ready', 'failed', 'stalled']) {
-        expect(isInitOverdue(phase, 10 * INIT_WATCHDOG_MS)).toBe(false);
-      }
-    });
   });
 });
