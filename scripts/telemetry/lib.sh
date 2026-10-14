@@ -8,11 +8,22 @@
 #
 #   GRAFANA_URL         default https://grafana.delphinium.junephilip.com
 #   GRAFANA_TOKEN       Viewer service-account token; falls back to ~/.config/streetcryptid/grafana-token
-#   GRAFANA_ADDR        tailnet IP to pin the hostname to when proxying (default 100.89.102.169)
+#   GRAFANA_ADDR        tailnet IP to pin the hostname to when proxying. Unset = looked up from
+#                       `tailscale status` (the node named "grafana"); tailnet IPs change when a
+#                       node re-registers, so none is hardcoded here. To find it by hand:
+#                         ~/.local/tailscale/tailscale --socket=~/.local/tailscale/tailscaled.sock status
 #   SC_TELEMETRY_PROXY  e.g. socks5://127.0.0.1:1055; unset = connect directly
 
 GRAFANA_URL="${GRAFANA_URL:-https://grafana.delphinium.junephilip.com}"
-GRAFANA_ADDR="${GRAFANA_ADDR:-100.89.102.169}"
+
+# tailnet_grafana_addr: the 100.x address of the tailnet node named "grafana", from the userspace
+# tailscaled that scripts/claude-web/session-start.sh started. Prints nothing if it can't tell.
+tailnet_grafana_addr() {
+  _ts="$HOME/.local/tailscale"
+  [ -x "$_ts/tailscale" ] || return 0
+  "$_ts/tailscale" --socket="$_ts/tailscaled.sock" status 2>/dev/null |
+    awk '$2 == "grafana" { print $1; exit }'
+}
 
 if [ -z "${GRAFANA_TOKEN:-}" ]; then
   if [ -r "$HOME/.config/streetcryptid/grafana-token" ]; then
@@ -27,6 +38,11 @@ fi
 grafana_curl() {
   _path="$1"; shift
   if [ -n "${SC_TELEMETRY_PROXY:-}" ]; then
+    GRAFANA_ADDR="${GRAFANA_ADDR:-$(tailnet_grafana_addr)}"
+    if [ -z "$GRAFANA_ADDR" ]; then
+      echo "telemetry: could not find a tailnet node named 'grafana'; set GRAFANA_ADDR (see lib.sh)" >&2
+      return 2
+    fi
     _host=$(printf '%s' "$GRAFANA_URL" | sed -e 's#^[a-z]*://##' -e 's#[/:].*$##')
     # An explicit --proxy overrides the sandbox's HTTPS_PROXY, and --resolve keeps the lookup
     # local, so tailscaled is handed the tailnet IP rather than asked to resolve anything.

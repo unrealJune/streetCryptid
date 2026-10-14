@@ -27,6 +27,13 @@ resolves publicly but routes only over the tailnet. In a Claude Code web session
 `scripts/claude-web/session-start.sh` (a SessionStart hook) joins the tailnet as an ephemeral
 userspace node and the helpers route through its SOCKS5 listener; it needs `TS_AUTHKEY` and
 `GRAFANA_TOKEN` set on the cloud environment, and `*.tailscale.com` in its network allowlist.
+The helpers pin Grafana to its **tailnet IP, looked up at run time** from `tailscale status` (the node
+named `grafana`) — never hardcode it, it changes when the node re-registers. A `403` with
+`x-deny-reason: private_dest_ip` means the request left via the sandbox proxy instead of the SOCKS
+listener, or was pinned to a wrong address. Find it by hand with
+`~/.local/tailscale/tailscale --socket=$HOME/.local/tailscale/tailscaled.sock status | grep grafana`
+and pass it as `GRAFANA_ADDR=100.x.y.z`. Run the helpers as `sh scripts/telemetry/lq.sh …` if the
+exec bit is missing.
 
 Conventions when changing that code:
 
