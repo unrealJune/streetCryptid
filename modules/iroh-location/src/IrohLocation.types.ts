@@ -491,7 +491,7 @@ export interface BumpResolution {
  */
 export interface OnNativeFixEvent {
   kind: 'fix' | 'heartbeat';
-  /** Why the native runtime was executing: `movement` | `periodic` | `geofence_exit` | ... */
+  /** Why the native runtime was executing: `movement` | `periodic` | `geofence_exit` | `moving_fence` | ... */
   reason: string;
   /** The runtime's motion state at capture: `moving` | `stopped`. */
   state: string;
@@ -688,8 +688,8 @@ export interface IrohLocationApi {
   /**
    * What the native runtime is doing and why — `{ running, state, wake_reason, auth_status,
    * precise, anchor_armed, fence_registered, slc_available, candidate_pending,
-   * candidate_fence_armed, last_wake_age_ms?, candidate_age_ms?, anchor_age_ms?, stop_via?,
-   * last_visit_age_ms? }`.
+   * candidate_fence_armed, moving_fence_armed, last_wake_age_ms?, candidate_age_ms?, anchor_age_ms?,
+   * stop_via?, last_visit_age_ms? }`.
    *
    * `device.health` flattens this under `location.*`. On iOS a parked phone emits nothing by
    * construction, so "which state is it in and when did it last run" is the only way to tell it

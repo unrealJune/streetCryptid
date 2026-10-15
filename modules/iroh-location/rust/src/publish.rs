@@ -262,6 +262,13 @@ pub struct Drained {
     pub reached: u32,
 }
 
+/// The off-grid envelope a change of `parked` queued, if any. See [`parked_changed`].
+#[derive(Debug, Clone, Copy, Default)]
+struct News {
+    enqueued: u32,
+    overflow_dropped: u32,
+}
+
 /// Serializes every run of a [`DrainEngine`] over the same stores. One per node.
 ///
 /// The engine is built per call and holds no state, but the stores behind it are shared, and two
@@ -325,6 +332,25 @@ impl Motion {
             Motion::Moving | Motion::Unknown => previous,
         }
     }
+}
+
+/// Whether a run has changed what the wire says about the phone having stopped — `parked` to
+/// anything else, or anything else to `parked`.
+///
+/// Such a change is published at once, as an envelope OUTSIDE the slot grid, when the current slot
+/// is already covered. Until 2026-10-13 it was only saved, on the reasoning that the next slot would
+/// carry it — but the next slot needs a wake, and the wake that confirms a stop is routinely the
+/// last one a background-relaunched iPhone gets. That evening an iPhone sealed its 19:10 slot `live`
+/// on a coarse departure, opened a stop candidate in the same second and was suspended: whatever it
+/// had concluded next would have waited for a wake that never came, and her friend read "updated 47
+/// min ago" for a phone sitting still.
+///
+/// The extra envelope is visible to the stash as an off-grid publish, which says "something
+/// changed at T" and nothing about what. Parked publishing on iOS already rides irregular OS wakes,
+/// so the grid was never the whole of what the stash could see; a friend left reading a stop as a
+/// dead phone was judged the worse leak of the two.
+fn parked_changed(before: Option<u8>, after: Option<u8>) -> bool {
+    (before == Some(FIX_STATE_PARKED)) != (after == Some(FIX_STATE_PARKED))
 }
 
 /// Ties the gate, the queue and the sink together. Holds no state of its own — everything durable
@@ -405,7 +431,8 @@ impl<S: PublishSink> DrainEngine<'_, S> {
         // A standing `parked` survives a fix that proves nothing about motion: one accepted at the
         // stop (see `gate::still_parked` for the incident), or one the gate refused. Only a fix
         // that has left the stop, or a caller's `Motion::Moving`, ends it.
-        let parked = state.last_state == Some(FIX_STATE_PARKED);
+        let before = state.last_state;
+        let parked = before == Some(FIX_STATE_PARKED);
         let anchor = state
             .parked_at
             .take()
@@ -449,6 +476,9 @@ impl<S: PublishSink> DrainEngine<'_, S> {
         if plan.due > 0 {
             state.last_published_slot = Some(plan.current_slot);
         }
+        // A fix that has walked out of a stop is news now, not at the next slot.
+        let news = self.publish_news(&known, plan.due, before, state.last_state)?;
+        overflow_dropped += news.overflow_dropped;
         // Saved before the drain, not after: the drain reaches the network and can be killed
         // half-way, and re-running these slots on the next wake would double-publish them.
         self.gate.set(state);
@@ -456,12 +486,31 @@ impl<S: PublishSink> DrainEngine<'_, S> {
         let drained = self.drain_held(now_ms).await?;
         Ok(self.outcome(
             rejection,
-            plan.due,
+            plan.due + news.enqueued,
             drained,
             plan.skipped,
             overflow_dropped,
             false,
         ))
+    }
+
+    /// Queue the off-grid envelope [`parked_changed`] calls for, when no slot is carrying the
+    /// change already. Never advances `last_published_slot`: like an introduction, it is extra, not
+    /// early, and the next slot still comes due exactly when it would have.
+    fn publish_news(
+        &self,
+        known: &LocationFix,
+        due: u32,
+        before: Option<u8>,
+        after: Option<u8>,
+    ) -> Result<News, PublishError> {
+        if due > 0 || !parked_changed(before, after) {
+            return Ok(News::default());
+        }
+        Ok(News {
+            enqueued: 1,
+            overflow_dropped: self.queue.enqueue(known.clone())?.overflow_dropped,
+        })
     }
 
     /// Publish the slots that have come due without a new fix, reusing the last known position.
@@ -519,7 +568,8 @@ impl<S: PublishSink> DrainEngine<'_, S> {
         // silence is then self-describing — which matters because the silence is not bounded:
         // parked publishing rides on OS wakes, and p90 between contacts on iOS is 92 minutes with
         // a 17-hour tail. A caller that cannot prove a stop leaves the last real evidence standing.
-        state.last_state = motion.stamp(state.last_state);
+        let before = state.last_state;
+        state.last_state = motion.stamp(before);
         // The stop is anchored where it was first declared; later parked ticks do not move it.
         state.parked_at = match state.last_state {
             Some(FIX_STATE_PARKED) => state
@@ -538,6 +588,10 @@ impl<S: PublishSink> DrainEngine<'_, S> {
         if plan.due > 0 {
             state.last_published_slot = Some(plan.current_slot);
         }
+        // The declaration itself — or its retraction — goes out now even when the slot is
+        // covered. See `parked_changed`.
+        let news = self.publish_news(&known, plan.due, before, state.last_state)?;
+        overflow_dropped += news.overflow_dropped;
         // Saved unconditionally, unlike the slot index it carries. `plan.due == 0` — the current
         // slot is already covered — is the COMMON case on a parked phone, and the declaration is
         // the whole point of a parked tick: a wake that had no slot to fill has still
@@ -549,7 +603,7 @@ impl<S: PublishSink> DrainEngine<'_, S> {
         let drained = self.drain_held(now_ms).await?;
         Ok(self.outcome(
             None,
-            plan.due,
+            plan.due + news.enqueued,
             drained,
             plan.skipped,
             overflow_dropped,
