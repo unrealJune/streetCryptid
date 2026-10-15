@@ -76,6 +76,11 @@ Indigo/cyan field · **coral accent `#F0657F`** · **default friend green `#63D0
 - **Flip-dot halftone on `<canvas>`:** a fine dot field (step `S≈2.0`). Each dot is
   colored by feature (teal ramp = street, blue = water, green = park) and sized /
   brightened by road class. **The dot field _is_ the city.**
+- **Park texture is clustered ink, not white holes.** Map-anchored canopy noise
+  reaches the richer end of the park palette in patches, including when elevation
+  is unavailable. With elevation, it layers into hillshade before contours and the
+  park-edge band; alpine ground blending and thinning remain. Keep the dot lattice
+  and exploration treatment, rather than flattening parks with a solid underpaint.
 - **Transit is line work, not dots.** Rail / subway / light rail / tram / monorail /
   funicular / ferry come out of the same tiles and are stroked as vectors over the dot
   field in their own ink (never the amber, which stays reserved for YOU and the frontier

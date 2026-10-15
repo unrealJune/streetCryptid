@@ -173,8 +173,7 @@ float4 dotAt(float ix, float iy, float2 frag) {
     // Water outranks park: protected areas routinely cover open water (marine
     // sanctuaries, marine state parks, offshore refuges) and lakes sit inside
     // national parks, so a park polygon is no evidence the ground is dry.
-    // Calm: few holes, and the tone drifts slowly instead of per dot.
-    if (n < 0.03 * (1.0 - uLod)) return float4(0.0);   // zoomed out: water fills solid
+    // Calm: no random holes, and the tone drifts slowly instead of per dot.
     float f = fbm(np * 0.03 + 2.0);
     val = 0.44 + 0.10 * sin(center.y * 0.4 + center.x * 0.2) + 0.03 * n;
     color = rampLut(0.46 + 0.30 * f + 0.14 * n, 1.0);
@@ -185,22 +184,24 @@ float4 dotAt(float ix, float iy, float2 frag) {
     // Full strength within ~9 px of the park's edge, so a small city park still
     // reads; its interior is the quiet part.
     float band = 1.0 - smoothstep(0.58, 0.76, t.r);
+    // Clustered canopy ink, not missing dots. Stretch the noise's middle range
+    // so darker patches survive at both terrain and fallback zooms.
+    float f = fbm(np * 0.045);
+    float canopy = smoothstep(0.40, 0.70, f);
     if (uHasElev > 0.5) {
       // Terrain: hillshade tone, dotted contours, thinning above the treeline.
       float h = t.g;
       float sh = shadeAt(center, h);
       float alp = smoothstep(0.80, 0.88, h);
       float line = smoothstep(0.43, 0.47, abs(fract(h * 9.0) - 0.5));
-      if (band < 0.5 && line < 0.5 && n < 0.08 + 0.40 * alp) return float4(0.0);
-      color = mix(rampLut(0.32 + 0.42 * sh + 0.04 * n, 2.0), rampLut(0.08 + 0.22 * sh, 0.0), alp);
+      if (band < 0.5 && line < 0.5 && n < 0.40 * alp) return float4(0.0);
+      color = mix(rampLut(min(0.96, 0.32 + 0.42 * sh + 0.30 * canopy + 0.04 * n), 2.0), rampLut(0.08 + 0.22 * sh, 0.0), alp);
       val = mix(0.32 + 0.20 * sh, 0.54, line);
       color = mix(color, rampLut(0.96, 2.0), line * 0.75);
       maxA = 0.72; floorA = 0.34;
     } else {
       // Canopy: the same calm without elevation to shade.
-      float f = fbm(np * 0.045);
-      if (band < 0.5 && n < 0.22 * (1.0 - f)) return float4(0.0);
-      color = rampLut(0.40 + 0.46 * f + 0.04 * n, 2.0);
+      color = rampLut(min(0.96, 0.40 + 0.46 * f + 0.24 * canopy + 0.04 * n), 2.0);
       val = 0.40 + 0.24 * f;
       maxA = 0.74; floorA = 0.34;
     }
