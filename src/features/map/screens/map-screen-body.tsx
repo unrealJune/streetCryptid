@@ -35,6 +35,8 @@ import {
   type Rgb,
 } from '@/features/map';
 import { resolveMapBackAction } from '@/features/map/core/back-action';
+import { DEFAULT_PEAK_LABEL_OPTIONS, type PeakLabelOptions } from '@/features/map/core/map-labels';
+import { PeakLabelSettings } from '@/features/map/components/peak-label-settings';
 import { sampleTrailForMap } from '@/features/map/core/trail-sampling';
 import { friendPlaceName } from '@/features/map/core/readout';
 import { FriendDetailIsland } from '@/features/social/components/friend-detail-island';
@@ -108,6 +110,8 @@ export default function MapScreenBody() {
     peaks: true,
   });
   const explorationEnabled = layers.exploration;
+  const [peakLabelOptions, setPeakLabelOptions] = useState(DEFAULT_PEAK_LABEL_OPTIONS);
+  const [peakSettingsOpen, setPeakSettingsOpen] = useState(false);
   const setLayer = useCallback((layer: MapLayerId, enabled: boolean) => {
     setLayers((current) => ({ ...current, [layer]: enabled }));
   }, []);
@@ -475,6 +479,7 @@ export default function MapScreenBody() {
           transitEnabled={layers.transit}
           structuresEnabled={layers.structures}
           peaksEnabled={layers.peaks}
+          peakLabelOptions={peakLabelOptions}
           key={mapSessionKey}
           onReadout={onReadout}
           initialCenter={initialCenter}
@@ -529,6 +534,7 @@ export default function MapScreenBody() {
             layers={layers}
             onChange={setLayer}
             onExpandedChange={setLayersOpen}
+            onOpenPeakSettings={() => setPeakSettingsOpen(true)}
             theme={theme}
           />
           <LocateMeControl busy={locating} onPress={locateSelf} theme={theme} />
@@ -597,6 +603,14 @@ export default function MapScreenBody() {
           )}
         </MapDrawer>
       </View>
+      <PeakLabelSettings
+        visible={peakSettingsOpen}
+        options={peakLabelOptions}
+        peaksEnabled={layers.peaks}
+        theme={theme}
+        onChange={setPeakLabelOptions}
+        onClose={() => setPeakSettingsOpen(false)}
+      />
     </View>
   );
 }
@@ -614,6 +628,7 @@ function MapSession({
   transitEnabled,
   structuresEnabled,
   peaksEnabled,
+  peakLabelOptions,
   onReadout,
   onSelectFriend,
   onSelectSelf,
@@ -634,6 +649,7 @@ function MapSession({
   transitEnabled: boolean;
   structuresEnabled: boolean;
   peaksEnabled: boolean;
+  peakLabelOptions: PeakLabelOptions;
   onReadout(readout: MapReadout): void;
   onSelectFriend(friendId: string): void;
   onSelectSelf(): void;
@@ -652,6 +668,7 @@ function MapSession({
       transitEnabled={transitEnabled}
       structuresEnabled={structuresEnabled}
       peaksEnabled={peaksEnabled}
+      peakLabelOptions={peakLabelOptions}
       onReadout={onReadout}
       initialCenter={sessionCenter}
       locateTarget={locateTarget}

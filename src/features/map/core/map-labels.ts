@@ -237,6 +237,30 @@ export function chipWidthPx(kind: MapLabelKind, text: string): number {
  */
 export const PEAK_LABEL_MIN_ZOOM = 9;
 
+export interface PeakLabelOptions {
+  readonly minZoom: number;
+  /** null follows the existing zoom-dependent rank budget. */
+  readonly maxRank: number | null;
+  readonly maxLabels: number;
+  readonly includeUnranked: boolean;
+}
+
+export const DEFAULT_PEAK_LABEL_OPTIONS: PeakLabelOptions = {
+  minZoom: PEAK_LABEL_MIN_ZOOM,
+  maxRank: null,
+  maxLabels: MAX_PEAK_LABELS,
+  includeUnranked: true,
+};
+
+export function isDefaultPeakLabelOptions(options: PeakLabelOptions): boolean {
+  return (
+    options.minZoom === DEFAULT_PEAK_LABEL_OPTIONS.minZoom &&
+    options.maxRank === DEFAULT_PEAK_LABEL_OPTIONS.maxRank &&
+    options.maxLabels === DEFAULT_PEAK_LABEL_OPTIONS.maxLabels &&
+    options.includeUnranked === DEFAULT_PEAK_LABEL_OPTIONS.includeUnranked
+  );
+}
+
 /** OMT `mountain_peak` classes worth a chip (saddles, ridges and the like are not). */
 const PEAK_CLASSES: ReadonlySet<string> = new Set(['peak', 'volcano']);
 
@@ -286,7 +310,11 @@ interface PlacedBox {
  * there are few of them and they anchor the map — then street names by class and
  * length, each rejected if it would collide with anything already placed.
  */
-export function selectMapLabels(geometry: PackedGeometry, spec: RegionSpec): MapLabel[] {
+export function selectMapLabels(
+  geometry: PackedGeometry,
+  spec: RegionSpec,
+  peakOptions: PeakLabelOptions = DEFAULT_PEAK_LABEL_OPTIONS
+): MapLabel[] {
   const pxPerWorld = scaleFor(spec.zoom);
   const places = placeCandidates(geometry, spec);
   const areas = areaCandidates(geometry, spec, pxPerWorld).slice(0, MAX_AREA_LABELS);
@@ -294,7 +322,7 @@ export function selectMapLabels(geometry: PackedGeometry, spec: RegionSpec): Map
   const pois = poiCandidates(geometry, spec);
   const transitStops = transitStopCandidates(geometry, spec);
   const houseNumbers = houseNumberCandidates(geometry, spec);
-  const peaks = peakCandidates(geometry, spec);
+  const peaks = peakCandidates(geometry, spec, peakOptions);
 
   const placed: PlacedBox[] = [];
   const out: MapLabel[] = [];
@@ -329,7 +357,7 @@ export function selectMapLabels(geometry: PackedGeometry, spec: RegionSpec): Map
   // the hillside around you is named by.
   let peakCount = 0;
   for (const candidate of peaks) {
-    if (peakCount >= MAX_PEAK_LABELS) break;
+    if (peakCount >= peakOptions.maxLabels) break;
     if (tryPlace(candidate)) peakCount++;
   }
 
@@ -516,15 +544,20 @@ function transitStopCandidates(geometry: PackedGeometry, spec: RegionSpec): Cand
  * Ordered like POIs — nearest the camera first, because a region is nine times
  * the view — with the higher summit winning ties.
  */
-function peakCandidates(geometry: PackedGeometry, spec: RegionSpec): Candidate[] {
-  if (spec.zoom < PEAK_LABEL_MIN_ZOOM) return [];
-  const budget = peakRankBudget(spec.zoom);
+function peakCandidates(
+  geometry: PackedGeometry,
+  spec: RegionSpec,
+  options: PeakLabelOptions
+): Candidate[] {
+  if (spec.zoom < options.minZoom || options.maxLabels <= 0) return [];
+  const budget = options.maxRank ?? peakRankBudget(spec.zoom);
 
   // One chip per name: a summit on a tile seam arrives from both tiles.
   const best = new Map<string, Candidate>();
   for (const part of geometry.parts) {
     for (const peak of part.peaks) {
       if (!peak.name || !PEAK_CLASSES.has(peak.kind)) continue;
+      if (peak.rank === undefined && !options.includeUnranked) continue;
       if ((peak.rank ?? budget) > budget) continue;
       const name = peak.name.toUpperCase();
       if (best.has(name)) continue;

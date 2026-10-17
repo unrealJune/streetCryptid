@@ -76,6 +76,8 @@ import { FriendLocator } from './friend-locator';
 import { FriendClusterPuck } from './friend-cluster-puck';
 import { FriendLocatorStack } from './friend-locator-stack';
 import { MapLabelLayer } from './map-labels';
+import { DEFAULT_PEAK_LABEL_OPTIONS, type PeakLabelOptions } from '../core/map-labels';
+import { labelsForRegion } from './region-labels';
 import { OceanCryptidLayer } from './ocean-cryptid-layer';
 import { RegionRenderCache } from './render-bundle-cache';
 import {
@@ -243,6 +245,7 @@ export function MapView({
   transitEnabled = false,
   structuresEnabled = true,
   peaksEnabled = true,
+  peakLabelOptions = DEFAULT_PEAK_LABEL_OPTIONS,
   accessibilityLabel,
   onSelectSelf,
   onSelectFriend,
@@ -273,6 +276,7 @@ export function MapView({
   structuresEnabled?: boolean;
   /** Name summits with their elevations (default true). */
   peaksEnabled?: boolean;
+  peakLabelOptions?: PeakLabelOptions;
   accessibilityLabel?: string;
   onSelectSelf?: () => void;
   onSelectFriend?: (friendId: string) => void;
@@ -435,10 +439,15 @@ export function MapView({
     regionRenderCache,
   ]);
 
+  const placedLabels = useMemo(
+    () => (region ? labelsForRegion(region, peakLabelOptions) : []),
+    [region, peakLabelOptions]
+  );
+
   // Highway name chips belong to highway geometry: hiding one hides the other.
   const visibleLabels = useMemo(
     () =>
-      (region?.labels ?? []).filter((label) => {
+      placedLabels.filter((label) => {
         // A name belongs to the geometry it names: hiding a layer hides its
         // chips too, or the map grows labels for things that are not drawn.
         if (!highwaysEnabled && label.roadClass === HIGHWAY_CLASS) return false;
@@ -446,7 +455,7 @@ export function MapView({
         if (!peaksEnabled && label.kind === 'peak') return false;
         return true;
       }),
-    [region, highwaysEnabled, transitEnabled, peaksEnabled]
+    [placedLabels, highwaysEnabled, transitEnabled, peaksEnabled]
   );
 
   const animateProfileCamera = useCallback(
