@@ -27,7 +27,7 @@ function px(wx: number, wy: number): readonly [number, number] {
 // ─── streets ─────────────────────────────────────────────────────────────────
 
 describe('streets mask', () => {
-  it('roadClass-4 street center pixel equals ROAD_VALUES[4], parks/water stay 0', () => {
+  it('antialiases a thin roadClass-4 street without affecting parks/water', () => {
     // world [0.45,0.5]→[0.55,0.5] projects to screen (0,50)→(100,50)
     const [, sy] = px(0.5, 0.5); // expect 50
     const geo: MapGeometry = {
@@ -44,7 +44,10 @@ describe('streets mask', () => {
     };
     const masks = buildFeatureMasks(packGeometry(geo), camera, viewport);
 
-    expect(sample(masks.streets, 50, sy)).toBe(ROAD_VALUES[4]);
+    // At this zoom the 1.8px stroke covers 90% of each pixel beside its centreline.
+    expect(sample(masks.streets, 50, sy)).toBe(Math.round(ROAD_VALUES[4] * 0.9));
+    expect(sample(masks.streets, 50, sy - 1)).toBe(Math.round(ROAD_VALUES[4] * 0.9));
+    expect(sample(masks.streets, 50, sy + 1)).toBe(0);
     expect(sample(masks.parks, 50, sy)).toBe(0);
     expect(sample(masks.water, 50, sy)).toBe(0);
   });
