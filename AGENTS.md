@@ -577,8 +577,17 @@ on web is noise. Use it for ratios and for finding work that should not happen a
   times per region. On web RN Skia makes a new WebGL context per offscreen surface and never frees
   it; Chrome then drops contexts, the map's included (a white canvas with the crashed-GPU icon), so
   `offscreen.web.ts` keeps one.
+- **No region build waits behind another one's network** (`MapEngine`). A build awaits every tile of
+  its rect, and the old one-deep pipeline ran each started build to the end before the next began, so
+  one cold bundle (tens of seconds on LTE) froze every later pan on one bitmap, cached ground included.
+  Now the newest request starts at once beside the oldest (head + tail; a newer request replaces the
+  tail, never the head), and a tail that publishes first retires the head. Bundle stream slots serve the
+  newest waiter first, an idle warm holds at most one download even after its abort, and idle warming
+  stays below `DATA_ZOOM_FULL_DETAIL_ZOOM` — lowering that threshold silently made it warm 22 MiB
+  bundles.
 - **Regions are rasterized off React's render path, newest first** (`render/use-region-bundle.ts`).
-  A region superseded before its work starts is never drawn; a cache hit lands during render.
+  A region superseded before its work starts is never drawn; a cache hit lands during render; a
+  bitmap that finishes after its successor arrived is still shown, or a pan never shows one.
 - **The render cache key is everything the pixels depend on** (`render-bundle-cache.ts`): spec,
   cell field, the drawn geometry's tiles by identity, and the elevation raster by identity. It
   ignored elevation once, so the relief upgrade was answered from cache with the canopy bitmap it

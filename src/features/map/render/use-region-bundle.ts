@@ -46,7 +46,8 @@ const REGION_RENDER_CACHE_CAPACITY = 3;
  * region is picked up on the next task, its textures and its bitmap are built
  * in separate tasks (so input, network callbacks and tile decodes interleave),
  * and a region that is superseded before its work starts is never drawn at all.
- * A cache hit still lands synchronously.
+ * A cache hit still lands synchronously, and a bitmap that finishes after its
+ * successor arrived is still shown until the successor's is ready.
  */
 export function useRegionBundle(
   region: MapRegion | null,
@@ -139,8 +140,13 @@ export function useRegionBundle(
           emitMapPerfEvent('region-render', perfDetail(region, timing, textures.hasElevation));
           if (image && cellImage && lutImage)
             cache.set(region, lutImage, layerKey, { image, cellImage });
-          // A newer input already on its way replaces this; the cache keeps it either way.
-          if (ticket === generation.current) setRendered({ region, image, cellImage, timing });
+          // Shown even when a newer region is already on its way: it is newer than
+          // what is on screen, and holding it back until the stream of regions
+          // paused is how the map sat on one bitmap through a whole pan.
+          const bundle = { region, image, cellImage, timing };
+          setRendered((prev) =>
+            prev && prev.region.publication > region.publication ? prev : bundle
+          );
         }, 0)
       );
     });

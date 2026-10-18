@@ -250,11 +250,11 @@ describe('useMapEngine publication and recovery', () => {
     await finish(1);
     await advance(1200);
     expect(prefetchAround).toHaveBeenLastCalledWith(
-      expect.objectContaining({ zoom: 15 }),
+      expect.objectContaining({ zoom: 13 }),
       VIEWPORT,
       expect.any(AbortSignal)
     );
-    expect(prefetchPoints).toHaveBeenLastCalledWith(FRIENDS, 15, VIEWPORT, expect.any(AbortSignal));
+    expect(prefetchPoints).toHaveBeenLastCalledWith(FRIENDS, 13, VIEWPORT, expect.any(AbortSignal));
   });
 
   it('also preserves the newer preview when both requests come from live prefetch', async () => {

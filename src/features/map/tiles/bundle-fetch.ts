@@ -248,7 +248,11 @@ export class BundleFetchByteSource implements TileByteSource {
     const bundleRequest = bundleRequestFor(tile, this.opts.anchorZoom);
     const key = `bundle:${bundleKeyOf(bundleRequest)}`;
     const pending = this.inFlight.get(key);
-    if (pending) return pending;
+    if (pending) {
+      // The newest caller decides its place in line, not whoever queued it first.
+      this.opts.bundleUpstream.promote?.(bundleRequest);
+      return pending;
+    }
     addMapPerfMetric('bundleRequests', 1, metrics);
 
     const preview: PreviewStages = { overview: deferred(), structure: deferred() };

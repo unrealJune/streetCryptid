@@ -12,6 +12,7 @@ import {
 } from './bundle-stream';
 import { sharedBundleResumeStore, type BundleResumeStore } from './bundle-resume-store';
 import {
+  bundleKeyOf,
   MartinTileBundleSource,
   type TileBundleEntry,
   type TileBundleRequest,
@@ -24,17 +25,34 @@ const JOURNAL_CHUNK_BYTES = 256 * 1024;
 const IDLE_TIMEOUT_MS = 45_000;
 const TRANSFER_TIMEOUT_MS = 10 * 60_000;
 
+/**
+ * At most two streams on the wire, process-wide. Waiters are served NEWEST
+ * first: the stream asked for last is the ground the user is looking at now,
+ * and FIFO made a pan into cold ground wait for every bundle an earlier camera
+ * (or an idle warm) had queued — which the engine then waited on in turn. A
+ * waiter someone asks for again is promoted (`promoteStream`), because
+ * `BundleFetchByteSource` shares one request per bundle and a fresh caller
+ * would otherwise inherit the stale caller's place in line.
+ */
+const MAX_ACTIVE_STREAMS = 2;
 let active = 0;
-const waiting: (() => void)[] = [];
+const waiting: { key: string; admit: () => void }[] = [];
 
-async function acquire(): Promise<() => void> {
-  if (active >= 2) await new Promise<void>((resolve) => waiting.push(resolve));
-  else active++;
+async function acquire(key: string): Promise<() => void> {
+  if (active >= MAX_ACTIVE_STREAMS) {
+    await new Promise<void>((admit) => waiting.push({ key, admit }));
+  } else active++;
   return () => {
-    const next = waiting.shift();
-    if (next) next();
+    const next = waiting.pop();
+    if (next) next.admit();
     else active--;
   };
+}
+
+function promoteStream(key: string): void {
+  const at = waiting.findIndex((w) => w.key === key);
+  if (at < 0 || at === waiting.length - 1) return;
+  waiting.push(...waiting.splice(at, 1));
 }
 
 type DigestModule = {
@@ -70,13 +88,21 @@ export class StreamingBundleSource implements TileBundleSource {
     request: TileBundleRequest,
     onStage?: StageListener
   ): Promise<readonly TileBundleEntry[]> {
-    const release = await acquire();
+    const release = await acquire(this.streamKey(request));
     try {
       if (this.legacyOnly) return await this.legacy.getBundle(request);
       return await this.download(request, onStage, this.v2Only ? 2 : 3);
     } finally {
       release();
     }
+  }
+
+  promote(request: TileBundleRequest): void {
+    promoteStream(this.streamKey(request));
+  }
+
+  private streamKey(request: TileBundleRequest): string {
+    return `${this.sourceUrl}|${bundleKeyOf(request)}`;
   }
 
   private async download(

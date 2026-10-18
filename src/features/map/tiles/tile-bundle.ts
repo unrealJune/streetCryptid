@@ -61,6 +61,12 @@ export interface TileBundleSource {
     request: TileBundleRequest,
     onStage?: StageListener
   ): Promise<readonly TileBundleEntry[]>;
+  /**
+   * Someone else needs a request already handed to `getBundle`: if it is still
+   * waiting for a slot, move it to the front. Optional — a source with no queue
+   * has nothing to reorder.
+   */
+  promote?(request: TileBundleRequest): void;
 }
 
 export function bundleRequestFor(tile: TileCoord, anchorZoom: number): TileBundleRequest {

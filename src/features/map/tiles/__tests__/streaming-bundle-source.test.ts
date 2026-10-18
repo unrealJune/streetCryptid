@@ -315,3 +315,50 @@ it('admits at most two active streams across source instances', async () => {
   releases[2]();
   await Promise.all(pending);
 });
+
+it('admits the newest waiting stream first, and promotes one asked for again', async () => {
+  const releases = new Map<number, () => void>();
+  const order: number[] = [];
+  global.fetch = jest.fn(
+    (input) =>
+      new Promise<Response>((resolve) => {
+        const anchorX = Number(String(input).split('/').at(-3));
+        order.push(anchorX);
+        releases.set(anchorX, () =>
+          resolve(response(stream3Fixture({ ...streamRequest, anchorX }).all))
+        );
+      })
+  );
+  const source = new StreamingBundleSource(
+    'https://tiles.test/planet',
+    async () => new MemoryBundleResumeStore(),
+    hashBytes
+  );
+  const settle = async () => {
+    for (let i = 0; i < 20; i++) await Promise.resolve();
+  };
+  const pending = [164, 165, 166, 167, 168].map((anchorX) =>
+    source.getBundle({ ...streamRequest, anchorX })
+  );
+  await settle();
+  expect(order).toEqual([164, 165]);
+
+  source.promote({ ...streamRequest, anchorX: 166 }); // the view needs it again
+  releases.get(164)!();
+  await pending[0];
+  await settle();
+  expect(order).toEqual([164, 165, 166]);
+
+  releases.get(165)!();
+  await pending[1];
+  await settle();
+  expect(order).toEqual([164, 165, 166, 168]); // newest of the rest
+
+  releases.get(166)!();
+  await pending[2];
+  await settle();
+  releases.get(167)!();
+  releases.get(168)!();
+  await Promise.all(pending);
+  expect(order).toEqual([164, 165, 166, 168, 167]);
+});

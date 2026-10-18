@@ -27,7 +27,8 @@ const baseRequest: RegionRequest = {
 /** A controllable fake source: records requests, resolves on demand. */
 class FakeSource implements GeometrySource {
   requests: string[] = [];
-  private pending = new Map<string, (g: PackedGeometry) => void>();
+  /** Every caller of a tile waits on it: two live builds can request the same one. */
+  private pending: { key: string; resolve: (g: PackedGeometry) => void }[] = [];
   private failures = new Map<string, Error>();
   /** Keys reported as already cached by `has` (undefined ⇒ no `has` support). */
   cached?: Set<string>;
@@ -51,12 +52,23 @@ class FakeSource implements GeometrySource {
       return Promise.reject(failure);
     }
     if (this.auto) return Promise.resolve(this.geometryFor(tile));
-    return new Promise((resolve) => this.pending.set(key, resolve));
+    return new Promise((resolve) => this.pending.push({ key, resolve }));
   }
 
   resolveAll(geometry: PackedGeometry = EMPTY_GEOMETRY) {
-    for (const resolve of this.pending.values()) resolve(geometry);
-    this.pending.clear();
+    this.resolveWhere(() => true, geometry);
+  }
+
+  /** Resolve only the outstanding requests for `keys`. */
+  resolveKeys(keys: readonly string[], geometry: PackedGeometry = EMPTY_GEOMETRY) {
+    const wanted = new Set(keys);
+    this.resolveWhere((key) => wanted.has(key), geometry);
+  }
+
+  private resolveWhere(pick: (key: string) => boolean, geometry: PackedGeometry) {
+    const due = this.pending.filter((p) => pick(p.key));
+    this.pending = this.pending.filter((p) => !pick(p.key));
+    for (const { resolve } of due) resolve(geometry);
   }
 
   /** Tiles handed to prefetch, in order (deduped keys computed by the caller). */
@@ -72,6 +84,14 @@ class FakeSource implements GeometrySource {
 function makeEngine(source: GeometrySource) {
   return new MapEngine({ source, grid, dataZooms });
 }
+
+/** The tile keys a build for `c` requests. */
+function keysFor(c: CameraState): string[] {
+  const spec = computeRegionSpec(c, viewport, { dataZooms });
+  return tilesCovering(spec.rect, spec.tileZoom).map((t) => tileKeyOf(t.z, t.x, t.y));
+}
+const elsewhere: CameraState = { center: [0.16, 0.357], zoom: 13 };
+const further: CameraState = { center: [0.161, 0.358], zoom: 13 };
 
 describe('MapEngine.buildRegion', () => {
   afterEach(() => jest.restoreAllMocks());
@@ -404,34 +424,64 @@ describe('MapEngine.buildRegion', () => {
     expect(region!.cellField.cells.filter((c) => c.fraction > 0)).toHaveLength(1);
   });
 
-  it('pipelines: the in-flight build completes; a newer request replaces the QUEUED one', async () => {
+  it('starts a newer request at once instead of queueing it behind a build on the network', async () => {
     const source = new FakeSource();
     source.auto = false;
     const engine = makeEngine(source);
 
-    const first = engine.buildRegion(baseRequest); // in flight — will complete
-    const second = engine.buildRegion({
-      ...baseRequest,
-      camera: { center: [0.16, 0.357], zoom: 13 },
-    }); // waiting behind first
-    const third = engine.buildRegion({
-      ...baseRequest,
-      camera: { center: [0.161, 0.358], zoom: 13 },
-    }); // replaces second in the queue
+    const stuck = engine.buildRegion(baseRequest); // its tiles never arrive
+    const next = engine.buildRegion({ ...baseRequest, camera: elsewhere });
+    for (const key of keysFor(elsewhere)) expect(source.requests).toContain(key);
 
-    await expect(second).resolves.toBeNull(); // superseded while waiting
+    source.resolveKeys(keysFor(elsewhere));
+    const built = await next;
+    expect(built).not.toBeNull();
+    expect(engine.lastRegion).toBe(built);
+    // The older camera landing now would step the map backwards.
+    await expect(stuck).resolves.toBeNull();
+  });
+
+  it('still lands the older build when it finishes first', async () => {
+    const source = new FakeSource();
+    source.auto = false;
+    const engine = makeEngine(source);
+
+    const first = engine.buildRegion(baseRequest);
+    const second = engine.buildRegion({ ...baseRequest, camera: elsewhere });
+
+    source.resolveKeys(keysFor(camera));
+    const builtFirst = await first;
+    expect(builtFirst).not.toBeNull();
+    expect(engine.lastRegion).toBe(builtFirst);
 
     source.resolveAll();
-    const builtFirst = await first;
-    expect(builtFirst).not.toBeNull(); // never aborted — it lands
+    const builtSecond = await second;
+    expect(builtSecond).not.toBeNull();
+    expect(builtSecond!.publication).toBeGreaterThan(builtFirst!.publication);
+    expect(engine.lastRegion).toBe(builtSecond);
+  });
 
-    source.resolveAll(); // third's fetches started when first finished
+  it('a newer request replaces the newest build, never the oldest', async () => {
+    const source = new FakeSource();
+    source.auto = false;
+    const engine = makeEngine(source);
+
+    const first = engine.buildRegion(baseRequest); // the head: always lands
+    const second = engine.buildRegion({ ...baseRequest, camera: elsewhere });
+    const third = engine.buildRegion({ ...baseRequest, camera: further }); // replaces second
+
+    await expect(second).resolves.toBeNull();
+
+    source.resolveKeys(keysFor(camera));
+    expect(await first).not.toBeNull();
+
+    source.resolveAll();
     const builtThird = await third;
     expect(builtThird).not.toBeNull();
     expect(engine.lastRegion).toBe(builtThird);
   });
 
-  it('coalesces a queued camera already served by the build that just landed', async () => {
+  it('joins a live build whose region already covers the camera', async () => {
     const source = new FakeSource();
     source.auto = false;
     const timings: RegionTiming[] = [];
@@ -453,7 +503,7 @@ describe('MapEngine.buildRegion', () => {
     expect(source.requests).toHaveLength(tilesCovering(spec.rect, spec.tileZoom).length);
   });
 
-  it('does not coalesce a queued exploration revision into a stale cell field', async () => {
+  it('does not join a build of an older exploration revision', async () => {
     const source = new FakeSource();
     source.auto = false;
     const engine = makeEngine(source);
@@ -589,18 +639,16 @@ describe('MapEngine build progress', () => {
     expect(cold).toBe(true);
   });
 
-  it('never emits progress for a superseded (queued-then-replaced) request', async () => {
+  it('stops emitting progress for a request replaced before it lands', async () => {
     const source = new FakeSource();
     source.auto = false;
     const engine = makeEngine(source);
 
     const first = engine.buildRegion(baseRequest); // in flight
-    let secondEmitted = false;
+    const secondProgress: number[] = [];
     const second = engine.buildRegion(
       { ...baseRequest, camera: { center: [0.16, 0.357], zoom: 13 } },
-      () => {
-        secondEmitted = true;
-      }
+      (p) => secondProgress.push(p.loaded)
     );
     const third = engine.buildRegion({
       ...baseRequest,
@@ -608,11 +656,26 @@ describe('MapEngine build progress', () => {
     }); // replaces second
 
     await expect(second).resolves.toBeNull();
+    expect(secondProgress).toEqual([0]); // the start, and nothing after
     source.resolveAll();
     await first;
     source.resolveAll();
     await third;
-    expect(secondEmitted).toBe(false);
+    expect(secondProgress).toEqual([0]);
+  });
+
+  it('replays the current progress to a caller who joins mid-build', async () => {
+    const source = new FakeSource();
+    source.auto = false;
+    const engine = makeEngine(source);
+
+    const first = engine.buildRegion(baseRequest);
+    const seen: number[] = [];
+    const joined = engine.buildRegion(baseRequest, (p) => seen.push(p.total));
+    expect(seen).toHaveLength(1);
+    expect(seen[0]).toBe(keysFor(camera).length);
+    source.resolveAll();
+    expect(await joined).toBe(await first);
   });
 });
 
