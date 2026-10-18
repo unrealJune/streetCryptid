@@ -18,7 +18,7 @@ import { useIsAppActive } from '@/hooks/use-is-app-active';
 const SWEEP_MS = 2600;
 
 /** The animation the map ships with; the others are in {@link LOADING_PATTERNS}. */
-export const DEFAULT_LOADING_PATTERN: LoadingPattern = 'radial';
+export const DEFAULT_LOADING_PATTERN: LoadingPattern = 'twinkle';
 
 interface Box {
   readonly x: number;

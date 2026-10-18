@@ -163,5 +163,5 @@ describe('punchRect', () => {
 it('spreads the animation from the middle of the view', () => {
   draw({ loading: true });
   expect(uniforms().uCenter).toEqual([RECT.width / 2, RECT.height / 2]);
-  expect(uniforms().uMode).toBe(LOADING_PATTERNS.radial);
+  expect(uniforms().uMode).toBe(LOADING_PATTERNS.twinkle);
 });

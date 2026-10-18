@@ -4,7 +4,6 @@ import {
   Canvas,
   Circle,
   Group,
-  Image as SkiaImage,
   ImageShader,
   Path,
   Rect,
@@ -74,6 +73,8 @@ import { makeLutImage } from './region-shader';
 import { getRevealMaskEffect } from './reveal-mask-shader';
 import { prevRectUniform, REVEAL_TARGET } from './reveal-mask';
 import { useRegionBundle, type RegionBundle } from './use-region-bundle';
+import { hexClipInner, hexClipUniforms } from './hex-clip';
+import { HexClippedImage } from './hex-clipped-image';
 import { YouLocator } from './you-locator';
 import { LoadingHexGrid } from './loading-hex-grid';
 import { SunlightLayer } from './sunlight-layer';
@@ -474,10 +475,6 @@ export function MapView({
   // The area the outgoing layer already covered — the reveal shader swaps these
   // pixels in instantly and only hex-loads the newly-exposed ground around them.
   const prevRectVec = useMemo(() => prevRectUniform(prevRect), [prevRect]);
-  const revealUniforms = useDerivedValue(
-    () => ({ uReveal: revealFront.value, uPrevRect: prevRectVec }),
-    [prevRectVec]
-  );
 
   const selfAnchor = useMemo(
     () =>
@@ -530,6 +527,24 @@ export function MapView({
   const loadingLattice = useMemo(
     () => (hexLattice && viewport ? projectHexLattice(hexLattice, anchor, camera, viewport) : null),
     [hexLattice, anchor, camera, viewport]
+  );
+  /**
+   * The lattice the built map's edge is cut along (`hex-clip.ts`), so the loaded area ends on the
+   * skeleton's cells instead of as a rectangle in the hex field. Only while the skeleton is drawn.
+   */
+  const clipLattice = explorationEnabled ? loadingLattice : null;
+  // The skeleton may skip only what the clipped bitmap is sure to cover.
+  const curCovered = useMemo(
+    () => (curRect && clipLattice ? hexClipInner(curRect, clipLattice) : curRect),
+    [curRect, clipLattice]
+  );
+  const revealHexUniforms = useMemo(
+    () => (curRect ? hexClipUniforms(curRect, clipLattice) : hexClipUniforms(ZERO_RECT, null)),
+    [curRect, clipLattice]
+  );
+  const revealUniforms = useDerivedValue(
+    () => ({ uReveal: revealFront.value, uPrevRect: prevRectVec, ...revealHexUniforms }),
+    [prevRectVec, revealHexUniforms]
   );
   const locatorClusters = useMemo(
     () => clusterMarkers(locatorAnchors, CLUSTER_OVERLAP_PX / committedScale),
@@ -934,7 +949,7 @@ export function MapView({
                   {explorationEnabled && loadingRect && loadingLattice && (
                     <LoadingHexGrid
                       rect={loadingRect}
-                      covered={revealing || !curImage ? null : curRect}
+                      covered={revealing || !curImage ? null : curCovered}
                       lattice={loadingLattice}
                       loading={Boolean(pending) || revealing}
                       reducedMotion={reducedMotion}
@@ -945,14 +960,7 @@ export function MapView({
                     swaps its pixels in instantly where prev already covered
                     (uPrevRect), so only the newly-exposed ground hex-loads in. */}
                   {prevImage && prevRect && (
-                    <SkiaImage
-                      image={prevImage}
-                      x={prevRect.x}
-                      y={prevRect.y}
-                      width={prevRect.width}
-                      height={prevRect.height}
-                      fit="fill"
-                    />
+                    <HexClippedImage image={prevImage} rect={prevRect} lattice={clipLattice} />
                   )}
                   {curImage &&
                     curRect &&
@@ -973,13 +981,10 @@ export function MapView({
                         </Shader>
                       </Rect>
                     ) : (
-                      <SkiaImage
+                      <HexClippedImage
                         image={curImage}
-                        x={curRect.x}
-                        y={curRect.y}
-                        width={curRect.width}
-                        height={curRect.height}
-                        fit="fill"
+                        rect={curRect}
+                        lattice={clipLattice}
                         opacity={curOpacityValue}
                       />
                     ))}
@@ -1167,3 +1172,5 @@ function buildTrail(points: readonly TrailScreenPoint[], color: string) {
   for (const { screen } of points.slice(1)) path.lineTo(screen[0], screen[1]);
   return { color, path, points };
 }
+
+const ZERO_RECT = { x: 0, y: 0, width: 0, height: 0 };
