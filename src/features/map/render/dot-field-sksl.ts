@@ -32,7 +32,8 @@ import { GROUND_CODE_STEP } from '../core/terrain';
  *                  never a blend of two (nearest).
  *   - `terrainTex` R = park edge (the park fill blurred: 1 deep inside, falling
  *                  toward 0 at the boundary), G = elevation in contour bands
- *                  (`core/terrain.ts`: fract(G·9) crosses 0 on a contour) (linear).
+ *                  (`core/terrain.ts`: fract(G·9) crosses 0 on a contour),
+ *                  B = alpine weight from absolute elevation (linear).
  *
  * The mask records every feature that covers a point, so a dot that is both
  * park and water has to pick one. Precedence is street > water > park > ground
@@ -97,7 +98,7 @@ float fbm(float2 p) {
   for (int i = 0; i < 4; i++) { v += a * vnoise(p); p = p * 2.03 + float2(17.1, 9.2); a *= 0.5; }
   return v / 0.9375;
 }
-// R = park edge, G = elevation bands (linear)
+// R = park edge, G = elevation bands, B = alpine weight (linear)
 float2 terrainAt(float2 s) { return terrainTex.eval(toMaskPx(toWorld(s))).rg; }
 // Ground-cover kind: 0 none, 1.. = GROUND_KINDS index + 1 (nearest, never blended)
 float groundAt(float2 s) {
@@ -192,7 +193,9 @@ float4 dotAt(float ix, float iy, float2 frag) {
       // Terrain: hillshade tone, dotted contours, thinning above the treeline.
       float h = t.g;
       float sh = shadeAt(center, h);
-      float alp = smoothstep(0.80, 0.88, h);
+      // Alpine by absolute elevation (terrainTex.b, see core/terrain.ts), never by
+      // band: the band is relative to the region, so a band treeline moved with the view.
+      float alp = terrainTex.eval(toMaskPx(toWorld(center))).b;
       float line = smoothstep(0.43, 0.47, abs(fract(h * 9.0) - 0.5));
       if (band < 0.5 && line < 0.5 && n < 0.40 * alp) return float4(0.0);
       color = mix(rampLut(min(0.96, 0.32 + 0.42 * sh + 0.30 * canopy + 0.04 * n), 2.0), rampLut(0.08 + 0.22 * sh, 0.0), alp);

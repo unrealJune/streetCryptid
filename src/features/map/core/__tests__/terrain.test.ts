@@ -1,4 +1,7 @@
+import { latLonToWorld } from '../mercator';
 import {
+  ALPINE_FADE_M,
+  alpineWeight,
   bandValue,
   CONTOUR_BANDS,
   elevationBands,
@@ -9,6 +12,7 @@ import {
   MIN_RELIEF_M,
   rasterMaskRect,
   reliefRange,
+  treelineMetres,
 } from '../terrain';
 import { GROUND_KINDS } from '../types';
 const UNIT_RECT = { minX: 0, minY: 0, maxX: 1, maxY: 1 };
@@ -112,6 +116,39 @@ describe('reliefRange / encodeElevationBands', () => {
       0,
       255,
     ]);
+  });
+});
+
+describe('treeline', () => {
+  it('falls poleward from the subtropics and never goes below sea level', () => {
+    expect(treelineMetres(10)).toBe(treelineMetres(-25));
+    expect(treelineMetres(47)).toBeGreaterThan(1500);
+    expect(treelineMetres(47)).toBeLessThan(2500);
+    expect(treelineMetres(-47)).toBe(treelineMetres(47));
+    expect(treelineMetres(80)).toBe(0);
+  });
+
+  it('fades from forest to alpine across the band around it', () => {
+    expect(alpineWeight(1000 - ALPINE_FADE_M / 2, 1000)).toBe(0);
+    expect(alpineWeight(1000, 1000)).toBeCloseTo(0.5);
+    expect(alpineWeight(1000 + ALPINE_FADE_M / 2, 1000)).toBe(1);
+  });
+
+  it('writes the alpine weight into B by absolute elevation, whatever the relief', () => {
+    // The same 2600 m summit is alpine in a raster spanning 0–2600 m and in one
+    // spanning 2400–2600 m; the 300 m valley floor never is. A treeline keyed to
+    // the band would flip the low raster's hilltops to alpine.
+    const [x, y] = latLonToWorld({ lat: 47.8, lon: -123.7 });
+    const rect = { minX: x - 0.001, minY: y - 0.001, maxX: x + 0.001, maxY: y + 0.001 };
+    const blue = (metres: Float32Array, i: number) =>
+      elevationBandsRgba({ width: 20, height: 20, metres, rect })![i * 4 + 2];
+    const wide = new Float32Array(400).map((_, i) => (i / 399) * 2600);
+    const high = new Float32Array(400).map((_, i) => 2400 + (i / 399) * 200);
+    const low = new Float32Array(400).map((_, i) => (i / 399) * 300);
+    expect(blue(wide, 399)).toBe(255);
+    expect(blue(high, 399)).toBe(255);
+    expect(blue(wide, 0)).toBe(0);
+    expect(blue(low, 399)).toBe(0);
   });
 });
 

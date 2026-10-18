@@ -180,6 +180,9 @@ const PLACES: readonly Place[] = [
   // Forested hills around a basin, a lake and the sea within one range view:
   // what the terrain parkland, ground cover and peak labels are tuned on.
   { id: 'kyoto', label: 'Kyoto — basin, Higashiyama, Lake Biwa', lat: 35.0116, lon: 135.7681 },
+  // Rainforest, glaciers and peaks in a national park ringed by a national forest:
+  // where greenery and ground cover cut over between data zooms.
+  { id: 'olympics', label: 'Olympic Peninsula — Forks / Mount Olympus', lat: 47.85, lon: -123.75 },
   // Open water at globe zoom: what `--cryptids` exists to show, and the one view
   // where the exploration ladder has deliberately gone dark.
   { id: 'pacific', label: 'North Pacific — open water', lat: 25, lon: -150 },

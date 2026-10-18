@@ -17,8 +17,19 @@
  * start on a multiple of it: contours sit at real, absolute elevations (every
  * 50 m, say), and two neighbouring regions with similar relief draw the same
  * lines. `fract(h · CONTOUR_BANDS)` in the shader crosses 0 exactly on them.
+ *
+ * ## Why the treeline is in metres
+ *
+ * The band value is relative by construction, so anything keyed to it moves
+ * whenever the view's relief does. The treeline was: parkland turned alpine in
+ * the top ~15% of each region's bands, so a lowland valley's 300 m hilltops went
+ * grey at one zoom and green again once a pan or zoom-out brought a real summit
+ * into the region. It is now absolute ({@link treelineMetres}), carried per DEM
+ * pixel in `terrainTex.b` ({@link alpineWeight}), and a hill is alpine or not
+ * wherever you look at it from.
  */
 
+import { worldToLatLon } from './mercator';
 import type { RegionSpec } from './region';
 import type { WorldRect } from './types';
 
@@ -48,6 +59,29 @@ export const MIN_RELIEF_M = 15;
 
 /** Hillshade contrast per unit of band value (`uShadeGain`), tuned on Kyoto at z9.5–z12. */
 export const SHADE_GAIN = 6;
+
+/** Metres over which parkland fades from forest to alpine, centred on the treeline. */
+export const ALPINE_FADE_M = 300;
+
+/**
+ * Approximate climatic treeline (m) at a latitude: ~3700 m through the
+ * subtropics, falling 95 m per degree poleward to sea level near 67°. A
+ * deliberately smooth global fit (~2000 m for the Alps, ~1800 m for the
+ * Olympics, ~3000 m at Kyoto's latitude, ~600 m for southern Norway), tuned so
+ * the Olympics' ridges read alpine at range zoom as they did under the old
+ * relative treeline. What matters for the map is that it is a property of the
+ * place, not of the view.
+ */
+export function treelineMetres(lat: number): number {
+  return Math.max(0, 3700 - 95 * Math.max(0, Math.abs(lat) - 28));
+}
+
+/** 0 (forest) … 1 (alpine) for an elevation at a treeline: a smoothstep across {@link ALPINE_FADE_M}. */
+export function alpineWeight(metres: number, treeline: number): number {
+  const t = (metres - (treeline - ALPINE_FADE_M / 2)) / ALPINE_FADE_M;
+  const c = t <= 0 ? 0 : t >= 1 ? 1 : t;
+  return c * c * (3 - 2 * c);
+}
 
 /** How a region's elevations map onto the 0–1 band value the shader reads. */
 export interface ElevationBands {
@@ -147,7 +181,10 @@ export function encodeElevationBands(
 
 /**
  * {@link encodeElevationBands} as the `terrainTex` pixels it becomes: opaque
- * RGBA at the raster's size with the band in G and R left 0 for the park edge.
+ * RGBA at the raster's size with the band in G, the {@link alpineWeight} in B,
+ * and R left 0 for the park edge. One treeline serves the whole raster, taken
+ * at its centre's latitude (a region spans a degree or two at most where there
+ * is relief to draw).
  */
 export function elevationBandsRgba(raster: ElevationRaster): Uint8Array | null {
   const range = reliefRange(raster.metres);
@@ -158,11 +195,17 @@ export function elevationBandsRgba(raster: ElevationRaster): Uint8Array | null {
   // build, and a call per pixel is most of its cost under Hermes.
   const { metres } = raster;
   const span = CONTOUR_BANDS * bands.interval;
+  const { rect } = raster;
+  const { lat } = worldToLatLon([(rect.minX + rect.maxX) / 2, (rect.minY + rect.maxY) / 2]);
+  const alpineLo = treelineMetres(lat) - ALPINE_FADE_M / 2;
   const rgba = new Uint8Array(metres.length * 4);
   for (let i = 0, p = 1; i < metres.length; i++, p += 4) {
     const m = metres[i];
     const v = (((m > 0 ? m : 0) - bands.base) / span) * 255;
     rgba[p] = v <= 0 ? 0 : v >= 255 ? 255 : v + 0.5; // Uint8Array truncates: round half up
+    // alpineWeight, inlined for the same reason.
+    const t = (m - alpineLo) / ALPINE_FADE_M;
+    if (t > 0) rgba[p + 1] = t >= 1 ? 255 : t * t * (3 - 2 * t) * 255 + 0.5;
     rgba[p + 2] = 255;
   }
   return rgba;

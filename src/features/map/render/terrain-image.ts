@@ -35,8 +35,9 @@ import { assembleRegionPath, drawTileLayers, groundPath, parkPath } from './tile
  * nothing, would be a value that decodes as a third class — the Kyoto mockup
  * read the seams between neighbouring forest polygons as farmland that way.
  *
- * `terrainTex` holds the park edge (R) and elevation bands (G). The edge is the
- * park fill blurred by {@link PARK_EDGE_PX}; the blur reaches past the canvas
+ * `terrainTex` holds the park edge (R), elevation bands (G) and the alpine
+ * weight (B). The edge is the park fill blurred by {@link PARK_EDGE_PX}; the
+ * blur reaches past the canvas
  * because Skia sizes an image filter's input from the area it has to cover, so a
  * park running off the region does not grow a false boundary band at the seam.
  */
@@ -90,7 +91,7 @@ export function buildTerrainImage(
   spec: RegionSpec,
   elevation: ElevationRaster | null | undefined
 ): TerrainImage {
-  // G = band value; R stays 0 for the park edge to raise.
+  // G = band value, B = alpine weight; R stays 0 for the park edge to raise.
   const rgba = elevation ? elevationBandsRgba(elevation) : null;
   const { origin, scale } = maskProjection(spec);
   // One path for the whole region, never one per tile: blurring each tile's piece
