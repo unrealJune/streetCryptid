@@ -531,8 +531,12 @@ export function MapView({
   /**
    * The lattice the built map's edge is cut along (`hex-clip.ts`), so the loaded area ends on the
    * skeleton's cells instead of as a rectangle in the hex field. Only while the skeleton is drawn.
+   *
+   * Neither depends on the exploration layer: the skeleton is how the map says it is still
+   * loading. It used to mount only with exploration on, so hiding your explored cells also hid
+   * every sign that a region was on its way.
    */
-  const clipLattice = explorationEnabled ? loadingLattice : null;
+  const clipLattice = loadingLattice;
   // The skeleton may skip only what the clipped bitmap is sure to cover.
   const curCovered = useMemo(
     () => (curRect && clipLattice ? hexClipInner(curRect, clipLattice) : curRect),
@@ -946,7 +950,7 @@ export function MapView({
                       than flashing them onto bare background. The bitmaps are opaque, so it is
                       cut around the one that is currently covering, and draws no pixel that
                       something else is about to paint over. */}
-                  {explorationEnabled && loadingRect && loadingLattice && (
+                  {loadingRect && loadingLattice && (
                     <LoadingHexGrid
                       rect={loadingRect}
                       covered={revealing || !curImage ? null : curCovered}
