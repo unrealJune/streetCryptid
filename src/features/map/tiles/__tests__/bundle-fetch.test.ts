@@ -282,6 +282,39 @@ describe('BundleFetchByteSource — TTL and failure', () => {
     expect(await source.getTileBytes(T13)).toEqual([tagBytes(T13)]);
   });
 
+  it('trusts a stored "no tile" only for emptyTtlMs, and real bytes for ttlMs', async () => {
+    let now = 0;
+    let live = false;
+    const coarse = new FakeCoarseSource((tile) => (live ? tagBytes(tile) : null));
+    const store = new FakeStore();
+    const source = new BundleFetchByteSource({
+      coarseUpstream: coarse,
+      bundleUpstream: new FakeBundleSource(tagBytes),
+      store,
+      sourceId: 'terrain-v2',
+      anchorZoom: 10,
+      ttlMs: 1000,
+      emptyTtlMs: 10,
+      now: () => now,
+    });
+    const T7: TileCoord = { z: 7, x: 21, y: 44 };
+
+    // A server whose route is not live yet answers 404 → persisted as empty.
+    expect(await source.getTileBytes(T7)).toBeNull();
+    now = 5;
+    expect(await source.getTileBytes(T7)).toBeNull();
+    expect(coarse.requested).toHaveLength(1);
+
+    // Past emptyTtlMs the empty answer is asked again, long before ttlMs.
+    live = true;
+    now = 20;
+    expect(await source.getTileBytes(T7)).toEqual([tagBytes(T7)]);
+    expect(coarse.requested).toHaveLength(2);
+    now = 500;
+    await source.getTileBytes(T7);
+    expect(coarse.requested).toHaveLength(2);
+  });
+
   it('rejects a bundle failure when nothing is stored', async () => {
     const bundles = new FakeBundleSource(tagBytes);
     bundles.failing = true;

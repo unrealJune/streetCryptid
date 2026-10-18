@@ -34,8 +34,12 @@ import type { AeroAreaKind, AeroLineKind, Rgb } from './types';
  *
  * Verified on Cologne (dense pre-war street grid, the worst case) and SeaTac at
  * z13–z16 with `scripts/map-shot.ts`.
+ *
+ * Lowered from 4.5 together with the solid far-out fill
+ * ({@link BUILDING_FAR_FILL_ALPHA}): filled, a 2.5 px footprint is texture that
+ * says "built up", where as a bare outline it was a smudge.
  */
-export const BUILDING_MIN_PX = 4.5;
+export const BUILDING_MIN_PX = 2.5;
 
 /** Zoom at/below which buildings are dropped entirely (the tileset's own floor). */
 export const BUILDING_MIN_ZOOM = 13;
@@ -55,6 +59,26 @@ export const BUILDING_STROKE_WIDTH = 0.85;
  */
 export const BUILDING_STROKE_ALPHA = 0.62;
 export const BUILDING_FILL_ALPHA = 0.05;
+
+/**
+ * Fill opacity once the camera is too far out for the hatch to resolve. A
+ * footprint there is a few px across, so the fill IS the building: built-up
+ * blocks read as solid ground, which is what makes a neighbourhood view look
+ * like a city rather than an empty dot field between the streets. Ramps to
+ * {@link BUILDING_FILL_ALPHA} over {@link BUILDING_FILL_RAMP} below the hatch zoom.
+ */
+export const BUILDING_FAR_FILL_ALPHA = 0.34;
+export const BUILDING_FILL_RAMP = 1;
+
+/** Fill opacity at `zoom`: solid far out, faint under the hatch up close. */
+export function buildingFillAlphaFor(zoom: number): number {
+  const t = clamp(
+    (zoom - (BUILDING_HATCH_MIN_ZOOM - BUILDING_FILL_RAMP)) / BUILDING_FILL_RAMP,
+    0,
+    1
+  );
+  return BUILDING_FAR_FILL_ALPHA * (1 - t) + BUILDING_FILL_ALPHA * t;
+}
 
 export const BUILDING_GHOST_ALPHA = 0.24;
 
@@ -83,9 +107,9 @@ export const BUILDING_HATCH_ALPHA = 0.42;
 /**
  * Zoom at/below which the hatch is dropped and buildings are fill + outline only.
  * Below this a footprint is a handful of px across, so the hatch cannot resolve
- * and only muddies it.
+ * and only muddies it — at z14 it read as moiré over every block.
  */
-export const BUILDING_HATCH_MIN_ZOOM = 14;
+export const BUILDING_HATCH_MIN_ZOOM = 15;
 
 /** Per-kind aeroway polygon treatment. */
 export const AERO_AREA_STYLE: Record<
@@ -158,7 +182,7 @@ export function buildingStyleFor(zoom: number): {
   const width = buildingStrokeWidthFor(zoom);
   if (width === null) return null;
   return {
-    fillAlpha: BUILDING_FILL_ALPHA,
+    fillAlpha: buildingFillAlphaFor(zoom),
     strokeWidth: width,
     hatch: buildingHatchVisible(zoom),
   };

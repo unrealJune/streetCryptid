@@ -557,6 +557,10 @@ on web is noise. Use it for ratios and for finding work that should not happen a
   position, a live fix, or a friend, for at most `MAP_ANCHOR_WAIT_MS`. A re-anchor is a remount
   (new engine, empty caches), and opening on the dataset's fallback home meant every launch fetched
   and drew Seattle first, wherever the user was.
+- **A persisted "no tile" is not trusted for the tile TTL** (`BundleFetchOptions.emptyTtlMs`). A 404
+  from a route or bake that is not live yet looks exactly like a sparse tile; the terrain store
+  kept such answers for 30 days and drew relief in only some DEM tiles of a view (straight edges on
+  tile boundaries). Terrain trusts an empty answer for a day; bump its `sourceId` to flush one.
 - **Elevation is never resampled in JS.** The DEM crop goes to the GPU at its own resolution and the
   bilinear filter stretches it over the mask (`ElevationRaster.rect`). Per-mask-pixel sampling in JS
   cost 1.3–2.5 s of interpreter time per region build.

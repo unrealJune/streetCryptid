@@ -240,10 +240,22 @@ float4 dotAt(float ix, float iy, float2 frag) {
     }
   } else {
     // Background/building noise thins out as you zoom out, so the city field
-    // reads calm instead of a wall of dots.
-    if (n < 0.2 + (1.0 - e) * 0.16 + uLod * 0.35) return float4(0.0);
-    val = clamp(0.24 + 0.13 * n, 0.0, 1.0);
-    color = rampLut(val, 0.0);
+    // reads calm instead of a wall of dots. Zoomed out, where parks are a small
+    // share of the land, the same ground carries the relief: shaded slopes keep
+    // more (and darker) dots, lit ones thin, and contours stay dotted.
+    float relief = uHasElev * uLod;
+    float sh = 0.5; float line = 0.0;
+    if (relief > 0.001) {
+      float h = terrainAt(center).g;
+      sh = shadeAt(center, h);
+      // h = 0 is sea level or below the region's lowest band, not a contour.
+      line = h > 0.01 ? smoothstep(0.43, 0.47, abs(fract(h * 9.0) - 0.5)) : 0.0;
+    }
+    float shade = (0.5 - sh) * relief;  // > 0 in shadow
+    float thin = 0.2 + (1.0 - e) * 0.16 + uLod * 0.35 - shade * 0.9 - line * relief * 0.5;
+    if (n < thin) return float4(0.0);
+    val = clamp(0.24 + 0.13 * n + shade * 0.5 + line * relief * 0.18, 0.0, 1.0);
+    color = rampLut(clamp(val + shade * 0.6, 0.0, 1.0), 0.0);
     isArea = 0.0; kind = 3;
   }
 

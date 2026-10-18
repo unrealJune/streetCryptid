@@ -50,10 +50,15 @@ export const DATA_ZOOM_BIAS = 1;
  * pulls the whole 16×16 descendant square — 256 tiles, ~22 MiB, against ~3.3 MiB
  * for the 64-tile z13 bundle (infra/tiles/PLAN.md). That is one fetch per z10
  * cell, then cached in SQLite for the tile TTL, and it is only ever paid by
- * someone who zooms all the way in — which is why the threshold sits well past
- * the everyday street zoom rather than at the z14 data edge.
+ * someone who zooms in to neighbourhood level.
+ *
+ * It sat at camera z16 until 2026-10-18, which hid the `building` layer (z14
+ * only; z13 carries almost none) at every everyday street zoom and left the
+ * blocks between streets an empty dot field. Buildings are what make z14–15
+ * read as a city, so the threshold is now the z14 data edge itself, paying the
+ * larger bundle for them.
  */
-export const DATA_ZOOM_FULL_DETAIL_ZOOM = 16;
+export const DATA_ZOOM_FULL_DETAIL_ZOOM = 14;
 
 /** The (overzoomed) tile zoom to fetch geometry at, clamped to what the tileset carries. */
 export function dataZoomFor(cameraZoom: number, range: DataZoomRange): number {

@@ -212,7 +212,7 @@ describe('data zooms + fixed exploration resolution in region specs', () => {
   it('stamps the fixed cell resolution and tile zoom', () => {
     const spec = computeRegionSpec(camera, viewport, { dataZooms: planet });
     expect(spec.cellRes).toBe(resForZoom(camera.zoom));
-    expect(spec.tileZoom).toBe(13); // z15 camera → z14 display − bias
+    expect(spec.tileZoom).toBe(14); // z15 camera: past the full-detail zoom, no bias
 
     const globe = computeRegionSpec({ center: [0.6, 0.6], zoom: 3 }, viewport, {
       dataZooms: planet,

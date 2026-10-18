@@ -40,6 +40,12 @@ export interface BundleFetchOptions {
   readonly anchorZoom: number;
   /** Persisted tiles older than this are refetched (whole bundle again). */
   readonly ttlMs: number;
+  /**
+   * How long a persisted "no tile here" stays trusted (defaults to `ttlMs`). A
+   * 404 from a server whose route or bake is not live yet looks exactly like a
+   * sparse tile, and at `ttlMs` that answer would blank the area for a month.
+   */
+  readonly emptyTtlMs?: number;
   /** Injectable clock for tests. */
   readonly now?: () => number;
 }
@@ -147,6 +153,12 @@ export class BundleFetchByteSource implements TileByteSource {
     return this.now() - stored.fetchedAt <= this.opts.ttlMs;
   }
 
+  /** A structure row: an empty one is trusted only for `emptyTtlMs`. */
+  private isFreshStructure(stored: StoredTile): boolean {
+    if (stored.bytes || this.opts.emptyTtlMs === undefined) return this.isFresh(stored);
+    return this.now() - stored.fetchedAt <= this.opts.emptyTtlMs;
+  }
+
   private async readStored(tile: TileCoord): Promise<StoredParts | null> {
     const split = tile.z === TILE_BUNDLE_MAX_ZOOM;
     const [structure, labels] = await Promise.all([
@@ -158,7 +170,7 @@ export class BundleFetchByteSource implements TileByteSource {
     const complete = !split || labels !== null;
     return {
       parts: partsOf(structure.bytes, labels?.bytes),
-      fresh: complete && this.isFresh(structure) && (!labels || this.isFresh(labels)),
+      fresh: complete && this.isFreshStructure(structure) && (!labels || this.isFresh(labels)),
     };
   }
 

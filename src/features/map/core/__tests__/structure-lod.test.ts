@@ -13,6 +13,8 @@ import {
   buildingGhostInk,
   BUILDING_GHOST_ALPHA,
   BUILDING_FILL_ALPHA,
+  BUILDING_FAR_FILL_ALPHA,
+  buildingFillAlphaFor,
   buildingStyleFor,
 } from '../structure-lod';
 import { CryptidThemes } from '@/constants/cryptid-theme';
@@ -20,8 +22,8 @@ import { luminance } from '../color';
 import { AERO_AREA_KINDS, AERO_LINE_KINDS } from '../types';
 
 describe('buildingStyleFor', () => {
-  it.each([14, 15, 15.5, 15.99, 16, 17, 18])(
-    'keeps outlines and hatch at display zoom %s without requiring full-detail tiles',
+  it.each([15, 15.5, 15.99, 16, 17, 18])(
+    'keeps outlines and hatch over a faint fill at display zoom %s',
     (zoom) => {
       expect(buildingStyleFor(zoom)).toEqual({
         fillAlpha: BUILDING_FILL_ALPHA,
@@ -31,13 +33,23 @@ describe('buildingStyleFor', () => {
     }
   );
 
-  it.each([13, 13.5, 13.99])('outlines without hatch below street zoom at %s', (zoom) => {
+  it.each([13, 13.5, 13.99])('fills solid with an outline and no hatch at %s', (zoom) => {
     expect(buildingStyleFor(zoom)).toEqual({
-      fillAlpha: BUILDING_FILL_ALPHA,
+      fillAlpha: BUILDING_FAR_FILL_ALPHA,
       strokeWidth: buildingStrokeWidthFor(zoom),
       hatch: false,
     });
     expect(buildingStyleFor(zoom)!.strokeWidth).toBeGreaterThan(0);
+  });
+
+  it('hands the fill to the hatch gradually, never in one step', () => {
+    let last = buildingFillAlphaFor(13);
+    for (let z = 13; z <= 16; z += 0.125) {
+      const alpha = buildingFillAlphaFor(z);
+      expect(alpha).toBeLessThanOrEqual(last);
+      expect(last - alpha).toBeLessThan(0.05);
+      last = alpha;
+    }
   });
 
   it('does not change building style at the full-detail tile transition', () => {

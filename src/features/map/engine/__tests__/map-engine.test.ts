@@ -187,7 +187,7 @@ describe('MapEngine.buildRegion', () => {
   it('re-rasterizes covered vectors at z18 before the detail download completes', async () => {
     const source = new FakeSource();
     const engine = makeEngine(source);
-    const coarse = await engine.buildRegion({ ...baseRequest, camera: { ...camera, zoom: 15 } });
+    const coarse = await engine.buildRegion({ ...baseRequest, camera: { ...camera, zoom: 13 } });
     source.auto = false;
     const target = { ...baseRequest, camera: { ...camera, zoom: 18 } };
     let publishPreview!: (region: MapRegion) => void;
@@ -197,7 +197,7 @@ describe('MapEngine.buildRegion', () => {
     const detail = engine.buildRegion(target, undefined, publishPreview);
     const preview = await previewReady;
     expect(preview.spec.zoom).toBe(18);
-    expect(preview.spec.tileZoom).toBe(13);
+    expect(preview.spec.tileZoom).toBe(12);
     expect(preview.publication).toBeGreaterThan(coarse!.publication);
     expect(preview.geometry).toBe(coarse!.geometry);
     expect(shouldPrefetchRegion(preview.spec, target.camera, viewport, dataZooms)).toBe(true);
@@ -218,7 +218,7 @@ describe('MapEngine.buildRegion', () => {
     const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
     const source = new FakeSource();
     const engine = makeEngine(source);
-    await engine.buildRegion({ ...baseRequest, camera: { ...camera, zoom: 15 } });
+    await engine.buildRegion({ ...baseRequest, camera: { ...camera, zoom: 13 } });
     const target = { ...baseRequest, camera: { ...camera, zoom: 18 } };
     const spec = computeRegionSpec(target.camera, viewport, { dataZooms });
     const tile = tilesCovering(spec.rect, spec.tileZoom)[0];
@@ -226,7 +226,7 @@ describe('MapEngine.buildRegion', () => {
     const preview = jest.fn();
     const degraded = await engine.buildRegion(target, undefined, preview);
     expect(degraded).toBe(preview.mock.calls[0][0]);
-    expect(degraded!.spec).toMatchObject({ zoom: 18, tileZoom: 13 });
+    expect(degraded!.spec).toMatchObject({ zoom: 18, tileZoom: 12 });
     expect(warn).toHaveBeenCalled();
     const recovered = await engine.buildRegion(target);
     expect(recovered!.spec).toMatchObject({ zoom: 18, tileZoom: 14 });

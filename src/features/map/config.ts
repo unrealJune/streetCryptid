@@ -89,6 +89,7 @@ export const PRIVACY_ANCHOR_ZOOM = TILE_BUNDLE_ANCHOR_ZOOM;
  * the server, so it is deliberately long. Stale tiles still render offline.
  */
 const TILE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+const TERRAIN_EMPTY_TTL_MS = 24 * 60 * 60 * 1000;
 
 /** A geometry source plus the world it covers — what the map screen consumes. */
 export interface MapDataset {
@@ -177,9 +178,14 @@ export function createTerrainElevationSource(
       coarseUpstream: new MartinByteSource(terrainUrl),
       bundleUpstream: new MartinTileBundleSource(terrainUrl),
       store,
-      sourceId: 'terrain-v1',
+      // v2: v1 rows include 404s persisted as "no tile" while /terrain was not yet
+      // routed (2026-10-10..14), which drew relief in only some DEM tiles of a view.
+      sourceId: 'terrain-v2',
+      retiredSourceIds: ['terrain-v1'],
       anchorZoom: PRIVACY_ANCHOR_ZOOM,
       ttlMs: TILE_TTL_MS,
+      // The DEM covers the whole planet, so "no tile" is the suspicious answer.
+      emptyTtlMs: TERRAIN_EMPTY_TTL_MS,
     }),
     skiaImageDecoder
   );
