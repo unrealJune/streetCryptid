@@ -88,6 +88,9 @@ public class IrohBackgroundAppDelegateSubscriber: ExpoAppDelegateSubscriber {
     //    was opened later. Both now hold leases on ONE node through `NodeHost`, so a delivery on a
     //    JS-free launch simply acquires it, and an app opened later adopts the same one.
     let locationLaunch = launchOptions?[.location] != nil
+    // A process nobody opened is one iOS will not keep running, and the stop it is dwelling on may
+    // have to be declared before it has been proven. See `speculativeStop`.
+    BackgroundLocationRuntime.launchedInBackground = background || locationLaunch
     // Published on every launch, whatever this launch does with it — see the function.
     _ = Self.decideReactNativeDeferral(background: background)
     if BackgroundLocationRuntime.wasArmed && (background || locationLaunch) {
