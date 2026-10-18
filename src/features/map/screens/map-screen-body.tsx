@@ -41,6 +41,7 @@ import { FriendDetailIsland } from '@/features/social/components/friend-detail-i
 import {
   describePresence,
   isPresenceNearby,
+  distanceBetweenFixes,
   isPresenceOnline,
   isPresenceStale,
 } from '@/features/social/core/presence';
@@ -48,6 +49,15 @@ import { SharingMutedBanner } from '@/features/social/components/sharing-muted-b
 import type { LocationFix } from '@/features/social/core/types';
 import { useLocationSharing } from '@/features/social/hooks/use-location-sharing';
 import { SELF_AUTHOR, type TrailPoint } from '@/features/social/net/background/trail-store';
+
+/**
+ * Longest the map waits for somewhere to open on (a stored or live position)
+ * before opening on the dataset's fallback home. The stored position is normally
+ * read well inside this.
+ */
+const MAP_ANCHOR_WAIT_MS = 1500;
+/** A live fix this far from the stored one the map opened on moves the camera to it. */
+const MAP_REANCHOR_DISTANCE_M = 1000;
 
 /**
  * The map IS the product: full-bleed dot field with a single floating bottom
@@ -427,18 +437,48 @@ export default function MapScreenBody() {
   const sessionFocus = selection.sessionFocusId
     ? (mapFriends.find((friend) => friend.id === selection.sessionFocusId) ?? null)
     : null;
+  // The last position on disk counts: it is where the user almost always still is,
+  // and it is known within a few hundred ms of launch, long before a live read.
   const initialCenter =
-    sessionFocus?.location ??
-    (hasLiveSelfFix && selfFix ? { lat: selfFix.lat, lon: selfFix.lon } : null);
-  // Once we have ever had a live self fix, the map stays self-anchored.
+    sessionFocus?.location ?? (selfFix ? { lat: selfFix.lat, lon: selfFix.lon } : null);
+  // Once the map has been anchored on the user it stays so.
   // A fix going stale later must not recenter the session out from under the user.
   const [selfCenterSeen, setSelfCenterSeen] = useState(false);
-  if (!selfCenterSeen && hasLiveSelfFix && selfFix) setSelfCenterSeen(true);
-  // `useMapEngine` fixes its session anchor at mount, so the map opens on the
-  // dataset's fallback home and re-anchors on the user when the first fix lands.
-  // Keying on `selfCenterSeen` makes that re-anchor happen exactly once, whenever
-  // the fix arrives — there is no deadline to wait out, and no blank map if a fix
-  // never comes at all. Later fixes move the marker without moving the camera.
+  if (!selfCenterSeen && selfFix) setSelfCenterSeen(true);
+  // `useMapEngine` fixes its session anchor at mount, and a re-anchor is a REMOUNT: a
+  // new engine and render cache, and everything built for the old anchor thrown away.
+  // Mounting at the dataset's fallback home and re-anchoring when the first fix landed
+  // meant every launch first fetched and drew Seattle — for everyone, wherever they
+  // were. So the map waits for an anchor, briefly: the stored position, a live fix, or
+  // a friend to open on. Past `MAP_ANCHOR_WAIT_MS` it opens on the fallback home as
+  // before, and re-anchors once (by remount) if a fix arrives after all.
+  const [anchorWaitOver, setAnchorWaitOver] = useState(false);
+  useEffect(() => {
+    const timer = setTimeout(() => setAnchorWaitOver(true), MAP_ANCHOR_WAIT_MS);
+    return () => clearTimeout(timer);
+  }, []);
+  const mapReady = sessionFocus !== null || selfCenterSeen || anchorWaitOver;
+  // Anchored on a stored position, the first live fix may say the user has since
+  // travelled. Then fly there — a camera move, not a remount. (Derived during
+  // render, like `selfCenterSeen`.)
+  const [storedAnchor, setStoredAnchor] = useState<{
+    fix: LocationFix | null;
+    settled: boolean;
+  }>({ fix: null, settled: false });
+  // Not when the session opened on a friend: that camera belongs to them.
+  if (!storedAnchor.settled && mapReady && selfFix && !sessionFocus) {
+    if (!storedAnchor.fix) {
+      setStoredAnchor({ fix: hasLiveSelfFix ? null : selfFix, settled: hasLiveSelfFix });
+    } else if (hasLiveSelfFix) {
+      setStoredAnchor({ fix: storedAnchor.fix, settled: true });
+      if (distanceBetweenFixes(storedAnchor.fix, selfFix) >= MAP_REANCHOR_DISTANCE_M) {
+        setLocateTarget((current) => ({
+          requestId: (current?.requestId ?? 0) + 1,
+          location: { lat: selfFix.lat, lon: selfFix.lon },
+        }));
+      }
+    }
+  }
   const mapSessionKey = sessionFocus
     ? `friend-${sessionFocus.id}`
     : selfCenterSeen
@@ -468,28 +508,30 @@ export default function MapScreenBody() {
       style={[styles.container, { backgroundColor: theme.chrome.bg }]}
     >
       <View style={styles.mapLayer}>
-        <MapSession
-          accessibilityLabel={mapAccessibilityLabel}
-          explorationEnabled={explorationEnabled}
-          highwaysEnabled={layers.highways}
-          transitEnabled={layers.transit}
-          structuresEnabled={layers.structures}
-          peaksEnabled={layers.peaks}
-          key={mapSessionKey}
-          onReadout={onReadout}
-          initialCenter={initialCenter}
-          locateTarget={locateTarget}
-          onSelectFriend={selectFriend}
-          onSelectSelf={selectSelf}
-          onInteraction={closeLayers}
-          friends={mapFriends}
-          selectedFriendId={selectedEndpoint === SELF_AUTHOR ? null : selectedEndpoint}
-          selfHistory={selfHistory}
-          selfSelected={selectedEndpoint === SELF_AUTHOR}
-          selfColor={selfInk}
-          selfLocation={hasLiveSelfFix && selfFix ? { lat: selfFix.lat, lon: selfFix.lon } : null}
-          selfFix={hasLiveSelfFix ? selfFix : null}
-        />
+        {mapReady && (
+          <MapSession
+            accessibilityLabel={mapAccessibilityLabel}
+            explorationEnabled={explorationEnabled}
+            highwaysEnabled={layers.highways}
+            transitEnabled={layers.transit}
+            structuresEnabled={layers.structures}
+            peaksEnabled={layers.peaks}
+            key={mapSessionKey}
+            onReadout={onReadout}
+            initialCenter={initialCenter}
+            locateTarget={locateTarget}
+            onSelectFriend={selectFriend}
+            onSelectSelf={selectSelf}
+            onInteraction={closeLayers}
+            friends={mapFriends}
+            selectedFriendId={selectedEndpoint === SELF_AUTHOR ? null : selectedEndpoint}
+            selfHistory={selfHistory}
+            selfSelected={selectedEndpoint === SELF_AUTHOR}
+            selfColor={selfInk}
+            selfLocation={hasLiveSelfFix && selfFix ? { lat: selfFix.lat, lon: selfFix.lon } : null}
+            selfFix={hasLiveSelfFix ? selfFix : null}
+          />
+        )}
       </View>
       {/* The app's only top chrome: attribution on the left, Settings on the right.
           `pointerEvents="box-none"` so the empty span between them still pans the map. */}

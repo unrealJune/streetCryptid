@@ -1,5 +1,6 @@
 import type { RegionSpec } from '../core/region';
 import type { ElevationRaster } from '../core/terrain';
+import type { WorldRect } from '../core/types';
 import type { TileByteSource, TilePayload } from './tile-bytes';
 import { tileKeyOf, tilesCovering, type TileCoord, type TileKey } from './tile-math';
 
@@ -41,6 +42,9 @@ const MASK_ZOOM_OFFSET = Math.log2(0.4);
 /** Decoded tiles kept in memory: a region at z12 touches ~15, neighbours share most. */
 const DECODED_CAPACITY = 64;
 
+/** Region rasters kept for identity reuse — about the render cache's depth plus neighbours. */
+const RASTER_CAPACITY = 8;
+
 /** The DEM zoom whose pixels best match `spec`'s mask pixels. */
 export function terrainZoomFor(spec: RegionSpec): number {
   const z = Math.round(spec.zoom + MASK_ZOOM_OFFSET);
@@ -57,21 +61,47 @@ export function decodeTerrarium(image: DecodedImage): Float32Array {
   return out;
 }
 
-interface DemTile {
+/** One decoded DEM tile, kept as Terrarium RGBA: metres are decoded only for the pixels a region reads. */
+export interface DemTile {
   readonly size: number;
-  readonly metres: Float32Array;
+  readonly rgba: Uint8Array;
 }
 
 export class TerrariumElevationSource implements ElevationSource {
   private readonly decoded = new Map<TileKey, DemTile | null>();
+  /**
+   * The rasters of the last few regions, by rect and DEM zoom. A raster is a
+   * render-cache key (`render-bundle-cache.ts` compares it by identity), so
+   * returning to a region must hand back the SAME raster or its bitmap is drawn
+   * again for nothing.
+   */
+  private readonly rasters = new Map<string, Promise<ElevationRaster | null>>();
 
   constructor(
     private readonly bytes: TileByteSource,
     private readonly decodeImage: ImageDecoder
   ) {}
 
-  async elevationFor(spec: RegionSpec): Promise<ElevationRaster | null> {
+  elevationFor(spec: RegionSpec): Promise<ElevationRaster | null> {
     const z = terrainZoomFor(spec);
+    const { minX, minY, maxX, maxY } = spec.rect;
+    const key = `${z}|${minX},${minY},${maxX},${maxY}`;
+    let raster = this.rasters.get(key);
+    if (raster) {
+      this.rasters.delete(key);
+    } else {
+      raster = this.build(spec, z);
+      // A failure is not remembered: the next region asks the network again.
+      raster.catch(() => this.rasters.delete(key));
+    }
+    this.rasters.set(key, raster);
+    if (this.rasters.size > RASTER_CAPACITY) {
+      this.rasters.delete(this.rasters.keys().next().value!);
+    }
+    return raster;
+  }
+
+  private async build(spec: RegionSpec, z: number): Promise<ElevationRaster | null> {
     const tiles = tilesCovering(spec.rect, z);
     const dem = new Map<TileKey, DemTile | null>();
     await Promise.all(
@@ -80,7 +110,7 @@ export class TerrariumElevationSource implements ElevationSource {
       })
     );
     if (![...dem.values()].some(Boolean)) return null;
-    return sampleRaster(spec, z, dem);
+    return cropRaster(spec.rect, z, dem);
   }
 
   private async tile(t: TileCoord): Promise<DemTile | null> {
@@ -108,56 +138,73 @@ function decodeTile(payload: TilePayload | null, decodeImage: ImageDecoder): Dem
   if (!bytes || bytes.byteLength === 0) return null;
   const image = decodeImage(bytes);
   if (!image || image.width !== image.height || image.width === 0) return null;
-  return { size: image.width, metres: decodeTerrarium(image) };
+  return { size: image.width, rgba: image.rgba };
 }
 
 /**
- * Bilinear elevation at every mask pixel centre. A pixel over a tile the DEM
- * does not carry (open ocean) reads 0 m.
+ * The DEM pixels under `rect` at native resolution, in metres — every pixel
+ * whose centre a bilinear sample anywhere in `rect` can reach. A pixel over a
+ * tile the DEM does not carry (open ocean) reads 0 m.
+ *
+ * Deliberately NOT resampled to the mask: the render layer stretches this grid
+ * over the mask with the GPU's bilinear filter. Sampling every mask pixel in JS
+ * (four string-keyed tile lookups each) cost 1.3–2.5 s of Hermes-class
+ * interpreter time per region build on a 470×1020 mask, which blocked the JS
+ * thread exactly while the map was trying to draw. The crop is proportional to
+ * the DEM, which at street zoom is a few thousand pixels.
  */
-export function sampleRaster(
-  spec: RegionSpec,
+export function cropRaster(
+  rect: WorldRect,
   z: number,
   dem: ReadonlyMap<TileKey, DemTile | null>
 ): ElevationRaster {
-  const { maskWidth: width, maskHeight: height, rect } = spec;
   const n = 2 ** z;
   const size = [...dem.values()].find(Boolean)?.size ?? 256;
-  const spanX = rect.maxX - rect.minX;
-  const spanY = rect.maxY - rect.minY;
+  const world = n * size; // DEM px per world unit
 
   // Clamp into the fetched tiles: the bilinear neighbour of an edge pixel can
   // fall one tile outside `tilesCovering`, which would read as sea level and
   // draw a false cliff along the region border.
-  const minG = Math.floor(rect.minX * n) * size;
-  const maxGX = (Math.floor(rect.maxX * n) + 1) * size - 1;
-  const minGY = Math.floor(rect.minY * n) * size;
-  const maxGY = (Math.floor(rect.maxY * n) + 1) * size - 1;
-  const at = (rawX: number, rawY: number): number => {
-    const gx = Math.min(maxGX, Math.max(minG, rawX));
-    const gy = Math.min(maxGY, Math.max(minGY, rawY));
-    const tx = Math.floor(gx / size);
-    const ty = Math.floor(gy / size);
-    const tile = dem.get(tileKeyOf(z, tx, ty));
-    if (!tile) return 0;
-    const px = Math.min(size - 1, Math.max(0, gx - tx * size));
-    const py = Math.min(size - 1, Math.max(0, gy - ty * size));
-    return tile.metres[py * size + px];
-  };
+  const x0 = Math.max(Math.floor(rect.minX * n) * size, Math.floor(rect.minX * world - 0.5));
+  const y0 = Math.max(Math.floor(rect.minY * n) * size, Math.floor(rect.minY * world - 0.5));
+  const x1 = Math.min(
+    (Math.floor(rect.maxX * n) + 1) * size - 1,
+    Math.floor(rect.maxX * world - 0.5) + 1
+  );
+  const y1 = Math.min(
+    (Math.floor(rect.maxY * n) + 1) * size - 1,
+    Math.floor(rect.maxY * world - 0.5) + 1
+  );
+  const width = Math.max(1, x1 - x0 + 1);
+  const height = Math.max(1, y1 - y0 + 1);
 
   const metres = new Float32Array(width * height);
-  for (let j = 0; j < height; j++) {
-    const gy = (rect.minY + ((j + 0.5) / height) * spanY) * n * size - 0.5;
-    const iy = Math.floor(gy);
-    const fy = gy - iy;
-    for (let i = 0; i < width; i++) {
-      const gx = (rect.minX + ((i + 0.5) / width) * spanX) * n * size - 0.5;
-      const ix = Math.floor(gx);
-      const fx = gx - ix;
-      metres[j * width + i] =
-        (at(ix, iy) * (1 - fx) + at(ix + 1, iy) * fx) * (1 - fy) +
-        (at(ix, iy + 1) * (1 - fx) + at(ix + 1, iy + 1) * fx) * fy;
+  for (let gy = y0; gy < y0 + height; gy++) {
+    const ty = Math.floor(gy / size);
+    const row = (gy - ty * size) * size;
+    const out = (gy - y0) * width;
+    // One tile lookup per tile column per row, never per pixel.
+    for (let gx = x0; gx < x0 + width;) {
+      const tx = Math.floor(gx / size);
+      const end = Math.min(x0 + width, (tx + 1) * size);
+      const rgba = dem.get(tileKeyOf(z, tx, ty))?.rgba;
+      if (rgba) {
+        for (let p = (row + gx - tx * size) * 4, o = out + gx - x0; gx < end; gx++, p += 4, o++) {
+          metres[o] = rgba[p] * 256 + rgba[p + 1] + rgba[p + 2] / 256 - 32768;
+        }
+      }
+      gx = end;
     }
   }
-  return { width, height, metres };
+  return {
+    width,
+    height,
+    metres,
+    rect: {
+      minX: x0 / world,
+      minY: y0 / world,
+      maxX: (x0 + width) / world,
+      maxY: (y0 + height) / world,
+    },
+  };
 }

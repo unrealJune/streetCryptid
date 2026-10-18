@@ -4,10 +4,13 @@ import { createH3Grid, realH3 } from '../../core/h3-grid';
 import { latLonToWorld } from '../../core/mercator';
 import { computeRegionSpec, shouldPrefetchRegion } from '../../core/region';
 import type { CameraState, Viewport, WorldPoint, WorldRect } from '../../core/types';
-import type { PackedGeometry } from '../../tiles/packed-geometry';
+import { packGeometry, type PackedGeometry } from '../../tiles/packed-geometry';
 import { EMPTY_GEOMETRY, type GeometrySource } from '../../tiles/geometry-source';
 import { tileKeyOf, tilesCovering, type TileCoord } from '../../tiles/tile-math';
 import { MapEngine, type MapRegion, type RegionRequest, type RegionTiming } from '../map-engine';
+import type { ElevationRaster } from '../../core/terrain';
+
+const UNIT_RECT: WorldRect = { minX: 0, minY: 0, maxX: 1, maxY: 1 };
 
 const viewport: Viewport = { width: 100, height: 100 };
 const camera: CameraState = { center: latLonToWorld({ lat: 47.6205, lon: -122.3169 }), zoom: 14 };
@@ -106,6 +109,52 @@ describe('MapEngine.buildRegion', () => {
     const final = await detail;
     expect(final!.spec.tileZoom).toBe(14);
     expect(final!.publication).toBeGreaterThan(preview.publication);
+  });
+
+  it('draws the full z14 tile from its structure stage, which already had every pixel', async () => {
+    const structure = packGeometry({
+      streets: [],
+      transit: [],
+      rivers: [],
+      water: [],
+      parks: [],
+      places: [],
+    });
+    let streamed!: () => void;
+    const stagesDone = new Promise<void>((resolve) => (streamed = resolve));
+    const engine = makeEngine({
+      // The full tiles land after both stages, as they do on the wire.
+      getTile: () => stagesDone.then(() => EMPTY_GEOMETRY),
+      getPreview: async (_tiles, onStage) => {
+        await onStage({ tileZoom: 13, part: 'full' }, EMPTY_GEOMETRY);
+        await onStage({ tileZoom: 14, part: 'structure' }, structure);
+        streamed();
+      },
+    });
+    const previews: MapRegion[] = [];
+    const destination = { ...baseRequest, camera: { center: [0.6, 0.4] as WorldPoint, zoom: 18 } };
+    const final = (await engine.buildRegion(destination, undefined, (r) => previews.push(r)))!;
+    expect(previews.map((p) => p.spec.tileZoom)).toEqual([13, 14]);
+    expect(final.rasterGeometry).toBe(structure);
+  });
+
+  it('skips a zoom preview of far coarser data when the stream brings its own overview', async () => {
+    const source = new FakeSource();
+    const engine = new MapEngine({
+      source: {
+        getTile: (tile) => source.getTile(tile),
+        has: () => false,
+        getPreview: async () => {},
+      },
+      grid,
+      dataZooms,
+    });
+    await engine.buildRegion({ ...baseRequest, camera: { ...camera, zoom: 11 } });
+    const previews: MapRegion[] = [];
+    await engine.buildRegion({ ...baseRequest, camera: { ...camera, zoom: 18 } }, undefined, (r) =>
+      previews.push(r)
+    );
+    expect(previews).toEqual([]);
   });
 
   it('yields cached region work to a frame instead of chaining it through microtasks', async () => {
@@ -619,7 +668,7 @@ describe('MapEngine.prefetchPoints', () => {
 
 describe('MapEngine elevation', () => {
   it('carries the elevation for the built spec on the region', async () => {
-    const raster = { width: 1, height: 1, metres: new Float32Array([420]) };
+    const raster = { width: 1, height: 1, metres: new Float32Array([420]), rect: UNIT_RECT };
     const elevationFor = jest.fn(async () => raster);
     const engine = new MapEngine({
       source: new FakeSource(),
@@ -658,6 +707,32 @@ describe('MapEngine elevation', () => {
       await jest.advanceTimersByTimeAsync(5000);
       const region = (await built)!;
       expect(region.elevation).toBeNull();
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+  it('republishes the region with relief that lands after the grace period', async () => {
+    jest.useFakeTimers({ doNotFake: ['requestAnimationFrame', 'performance'] });
+    try {
+      let land!: (r: ElevationRaster) => void;
+      const engine = new MapEngine({
+        source: new FakeSource(),
+        elevation: { elevationFor: () => new Promise((resolve) => (land = resolve)) },
+        grid,
+        dataZooms,
+      });
+      const previews: MapRegion[] = [];
+      const built = engine.buildRegion(baseRequest, undefined, (r) => previews.push(r));
+      await jest.advanceTimersByTimeAsync(5000);
+      const region = (await built)!;
+      expect(region.elevation).toBeNull();
+      const raster = { width: 1, height: 1, metres: new Float32Array(1), rect: UNIT_RECT };
+      land(raster);
+      await jest.advanceTimersByTimeAsync(100);
+      expect(previews).toHaveLength(1);
+      expect(previews[0].elevation).toBe(raster);
+      expect(previews[0].publication).toBeGreaterThan(region.publication);
+      expect(previews[0].spec).toBe(region.spec);
     } finally {
       jest.useRealTimers();
     }

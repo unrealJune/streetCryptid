@@ -85,14 +85,17 @@ export interface FrameSummary {
   readonly estimatedDroppedFrames: number;
 }
 
-const DEV = typeof __DEV__ !== 'undefined' ? __DEV__ : process.env.NODE_ENV !== 'production';
+// Not gated on __DEV__: `just map-bench` measures a production bundle, because a dev bundle's
+// React checks would swamp what it is measuring. The variable is statically inlined, so a build
+// without it compiles the runner to a no-op, and `check-release-telemetry.mjs` forbids it on
+// every store profile.
 let runId = process.env.EXPO_PUBLIC_MAP_PERF_RUN?.trim() ?? '';
 
 let scenario: MapPerfScenarioName = 'launch';
 let metricScope: MapPerfMetricScope = { metrics: emptyPipeline() };
 
 export function isMapPerfRunEnabled(): boolean {
-  return DEV && runId.length > 0;
+  return runId.length > 0;
 }
 
 export function mapPerfRunId(): string | null {

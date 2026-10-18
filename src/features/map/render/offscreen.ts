@@ -1,0 +1,34 @@
+import { Skia, type SkImage, type SkPicture } from '@shopify/react-native-skia';
+
+/**
+ * Who will draw a rendered image.
+ *
+ * - `same-thread`: only the JS thread, as an input to another offscreen render
+ *   (the feature mask, ground and terrain textures the dot field samples). The
+ *   image stays a GPU texture.
+ * - `ui`: the on-screen canvas. Skia's GPU contexts are per thread, so the image
+ *   has to be copied back to CPU memory (`makeNonTextureImage`) for the UI
+ *   thread to upload it again.
+ *
+ * `drawAsImageFromPicture` always does the `ui` copy. That copy is a GPU→CPU
+ * readback, so it also waits for the GPU to finish everything queued before it:
+ * paying it for the three intermediate textures of every region build stalled
+ * the JS thread three extra times per build, and then re-uploaded what it had
+ * just read back.
+ */
+export type ImageConsumer = 'same-thread' | 'ui';
+
+/** Rasterize `picture` into a `width × height` GPU image for `consumer`. */
+export function renderPicture(
+  picture: SkPicture,
+  width: number,
+  height: number,
+  consumer: ImageConsumer
+): SkImage | null {
+  const surface = Skia.Surface.MakeOffscreen(width, height);
+  if (!surface) return null;
+  surface.getCanvas().drawPicture(picture);
+  surface.flush();
+  const image = surface.makeImageSnapshot();
+  return consumer === 'same-thread' ? image : image.makeNonTextureImage();
+}

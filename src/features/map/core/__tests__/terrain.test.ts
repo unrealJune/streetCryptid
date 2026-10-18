@@ -2,13 +2,16 @@ import {
   bandValue,
   CONTOUR_BANDS,
   elevationBands,
+  elevationBandsRgba,
   encodeElevationBands,
   GROUND_CODE_STEP,
   groundCode,
   MIN_RELIEF_M,
+  rasterMaskRect,
   reliefRange,
 } from '../terrain';
 import { GROUND_KINDS } from '../types';
+const UNIT_RECT = { minX: 0, minY: 0, maxX: 1, maxY: 1 };
 
 describe('groundCode', () => {
   it('gives every ground kind a distinct non-zero code that fits a byte', () => {
@@ -81,16 +84,54 @@ describe('reliefRange / encodeElevationBands', () => {
   it('returns null for an all-sea or flat region', () => {
     expect(reliefRange(new Float32Array(400).fill(-5))).toBeNull();
     expect(
-      encodeElevationBands({ width: 20, height: 20, metres: new Float32Array(400).fill(8) })
+      encodeElevationBands({
+        width: 20,
+        height: 20,
+        metres: new Float32Array(400).fill(8),
+        rect: UNIT_RECT,
+      })
     ).toBeNull();
   });
 
   it('encodes band values as bytes', () => {
     const metres = new Float32Array(400);
     for (let i = 0; i < metres.length; i++) metres[i] = i * 2; // 0..798 m
-    const encoded = encodeElevationBands({ width: 20, height: 20, metres })!;
+    const encoded = encodeElevationBands({ width: 20, height: 20, metres, rect: UNIT_RECT })!;
     expect(encoded.bands.interval).toBe(100);
     expect(encoded.bytes[0]).toBe(0);
     expect(encoded.bytes[225]).toBe(Math.round((450 / 900) * 255));
+  });
+
+  it('lays the bands into G of opaque RGBA, leaving R for the park edge', () => {
+    const metres = new Float32Array(400);
+    for (let i = 0; i < metres.length; i++) metres[i] = i * 2;
+    const rgba = elevationBandsRgba({ width: 20, height: 20, metres, rect: UNIT_RECT })!;
+    expect(Array.from(rgba.slice(225 * 4, 226 * 4))).toEqual([
+      0,
+      Math.round((450 / 900) * 255),
+      0,
+      255,
+    ]);
+  });
+});
+
+describe('rasterMaskRect', () => {
+  it('maps the raster rect into mask pixels, overhang included', () => {
+    const spec = {
+      rect: { minX: 0.5, minY: 0.25, maxX: 0.75, maxY: 0.5 },
+      maskWidth: 100,
+      maskHeight: 50,
+    };
+    const raster = {
+      width: 2,
+      height: 2,
+      metres: new Float32Array(4),
+      rect: { minX: 0.49, minY: 0.25, maxX: 0.76, maxY: 0.5 },
+    };
+    const r = rasterMaskRect(raster, spec);
+    expect(r.x).toBeCloseTo(-4, 9);
+    expect(r.y).toBeCloseTo(0, 9);
+    expect(r.width).toBeCloseTo(108, 9);
+    expect(r.height).toBeCloseTo(50, 9);
   });
 });

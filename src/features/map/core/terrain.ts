@@ -19,6 +19,9 @@
  * lines. `fract(h · CONTOUR_BANDS)` in the shader crosses 0 exactly on them.
  */
 
+import type { RegionSpec } from './region';
+import type { WorldRect } from './types';
+
 /** Ground-texture code step: kind i (GROUND_KINDS index) is stored as `(i + 1) · step`. */
 export const GROUND_CODE_STEP = 40;
 
@@ -55,14 +58,32 @@ export interface ElevationBands {
 }
 
 /**
- * Elevation in metres for every mask pixel of a region, row-major, covering
- * `spec.rect` at `spec.maskWidth × spec.maskHeight`. Sea and bathymetry may be
- * negative; they are drawn as sea level.
+ * Elevation in metres on a row-major grid covering `rect` edge to edge, at the
+ * DEM's own resolution rather than the mask's: the render layer stretches it
+ * over the mask with a bilinear filter ({@link rasterMaskRect}). Sea and
+ * bathymetry may be negative; they are drawn as sea level.
  */
 export interface ElevationRaster {
   readonly width: number;
   readonly height: number;
   readonly metres: Float32Array;
+  /** World rect the grid's outer pixel edges span. */
+  readonly rect: WorldRect;
+}
+
+/** Where `raster` lands on `spec`'s mask, in mask pixels (may overhang the mask). */
+export function rasterMaskRect(
+  raster: ElevationRaster,
+  spec: Pick<RegionSpec, 'rect' | 'maskWidth' | 'maskHeight'>
+): { readonly x: number; readonly y: number; readonly width: number; readonly height: number } {
+  const sx = spec.maskWidth / (spec.rect.maxX - spec.rect.minX);
+  const sy = spec.maskHeight / (spec.rect.maxY - spec.rect.minY);
+  return {
+    x: (raster.rect.minX - spec.rect.minX) * sx,
+    y: (raster.rect.minY - spec.rect.minY) * sy,
+    width: (raster.rect.maxX - raster.rect.minX) * sx,
+    height: (raster.rect.maxY - raster.rect.minY) * sy,
+  };
 }
 
 /**
@@ -94,14 +115,15 @@ export function bandValue(metres: number, bands: ElevationBands): number {
  * the bands. Null when there is too little land to say.
  */
 export function reliefRange(metres: Float32Array): readonly [number, number] | null {
-  const land: number[] = [];
-  // Sampling every pixel of a 600×1200 mask is ~720k values; a stride keeps the
-  // sort cheap and is plenty for two percentiles.
+  // A stride keeps the sort cheap and is plenty for two percentiles.
   const stride = Math.max(1, Math.floor(metres.length / 20000));
-  for (let i = 0; i < metres.length; i += stride) if (metres[i] > 0) land.push(metres[i]);
-  if (land.length < 16) return null;
-  land.sort((a, b) => a - b);
-  return [land[Math.floor(land.length * 0.01)], land[Math.floor((land.length - 1) * 0.995)]];
+  const sampled = new Float32Array(Math.ceil(metres.length / stride));
+  let count = 0;
+  for (let i = 0; i < metres.length; i += stride) if (metres[i] > 0) sampled[count++] = metres[i];
+  if (count < 16) return null;
+  // A typed-array sort is numeric and native; a comparator sort calls back into JS per compare.
+  const land = sampled.subarray(0, count).sort();
+  return [land[Math.floor(count * 0.01)], land[Math.floor((count - 1) * 0.995)]];
 }
 
 /**
@@ -121,4 +143,27 @@ export function encodeElevationBands(
     bytes[i] = Math.round(bandValue(raster.metres[i], bands) * 255);
   }
   return { bytes, bands };
+}
+
+/**
+ * {@link encodeElevationBands} as the `terrainTex` pixels it becomes: opaque
+ * RGBA at the raster's size with the band in G and R left 0 for the park edge.
+ */
+export function elevationBandsRgba(raster: ElevationRaster): Uint8Array | null {
+  const range = reliefRange(raster.metres);
+  if (!range) return null;
+  const bands = elevationBands(range[0], range[1]);
+  if (!bands) return null;
+  // `bandValue` inlined, in one pass: this runs on the JS thread for every region
+  // build, and a call per pixel is most of its cost under Hermes.
+  const { metres } = raster;
+  const span = CONTOUR_BANDS * bands.interval;
+  const rgba = new Uint8Array(metres.length * 4);
+  for (let i = 0, p = 1; i < metres.length; i++, p += 4) {
+    const m = metres[i];
+    const v = (((m > 0 ? m : 0) - bands.base) / span) * 255;
+    rgba[p] = v <= 0 ? 0 : v >= 255 ? 255 : v + 0.5; // Uint8Array truncates: round half up
+    rgba[p + 2] = 255;
+  }
+  return rgba;
 }

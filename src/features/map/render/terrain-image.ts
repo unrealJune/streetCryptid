@@ -3,8 +3,8 @@ import {
   BlendMode,
   BlurStyle,
   ColorType,
-  drawAsImageFromPicture,
-  FillType,
+  FilterMode,
+  MipmapMode,
   PaintStyle,
   Skia,
   type SkImage,
@@ -13,12 +13,17 @@ import {
 import { scaleFor } from '../core/camera';
 import type { RegionSpec } from '../core/region';
 import {
-  encodeElevationBands,
+  elevationBandsRgba,
   groundCode,
   PARK_EDGE_PX,
+  rasterMaskRect,
   type ElevationRaster,
 } from '../core/terrain';
-import type { MaskPaths } from './mask-paths';
+import { GROUND_KINDS } from '../core/types';
+import type { PackedGeometry } from '../tiles/packed-geometry';
+import { maskProjection } from './mask-image';
+import { renderPicture } from './offscreen';
+import { assembleRegionPath, drawTileLayers, groundPath, parkPath } from './tile-paths';
 
 /**
  * The two terrain textures the dot field samples beside the feature mask (see
@@ -48,28 +53,30 @@ function emptyImage(): SkImage | null {
   return image;
 }
 
-export function buildGroundImage(paths: MaskPaths, spec: RegionSpec): SkImage | null {
-  if (paths.ground.every((svg) => !svg)) return emptyImage();
+export function buildGroundImage(geometry: PackedGeometry, spec: RegionSpec): SkImage | null {
+  if (geometry.parts.every((tile) => tile.groundCover.count === 0)) return emptyImage();
   const recorder = Skia.PictureRecorder();
   const canvas = recorder.beginRecording(Skia.XYWHRect(0, 0, spec.maskWidth, spec.maskHeight));
   canvas.drawColor(Skia.Color('black'));
-  paths.ground.forEach((svg, kindIndex) => {
-    if (!svg) return;
-    const path = Skia.Path.MakeFromSVGString(svg);
-    if (!path) return;
-    path.setFillType(FillType.Winding);
+  const { origin, scale } = maskProjection(spec);
+  // Kind by kind across every tile, so the later kind wins an overlap wherever it falls.
+  GROUND_KINDS.forEach((_, kindIndex) => {
     const paint = Skia.Paint();
-    const code = groundCode(kindIndex);
-    paint.setColor(Skia.Color(`rgb(${code},0,0)`));
+    paint.setColor(Skia.Color(`rgb(${groundCode(kindIndex)},0,0)`));
     paint.setStyle(PaintStyle.Fill);
     paint.setBlendMode(BlendMode.Src);
     paint.setAntiAlias(false);
-    canvas.drawPath(path, paint);
+    drawTileLayers(canvas, geometry.parts, origin, scale, (tile) => {
+      const path = groundPath(tile, kindIndex);
+      if (path) canvas.drawPath(path, paint);
+    });
   });
-  return drawAsImageFromPicture(recorder.finishRecordingAsPicture(), {
-    width: spec.maskWidth,
-    height: spec.maskHeight,
-  });
+  return renderPicture(
+    recorder.finishRecordingAsPicture(),
+    spec.maskWidth,
+    spec.maskHeight,
+    'same-thread'
+  );
 }
 
 export interface TerrainImage {
@@ -79,45 +86,49 @@ export interface TerrainImage {
 }
 
 export function buildTerrainImage(
-  paths: MaskPaths,
+  geometry: PackedGeometry,
   spec: RegionSpec,
   elevation: ElevationRaster | null | undefined
 ): TerrainImage {
-  const encoded =
-    elevation && elevation.width === spec.maskWidth && elevation.height === spec.maskHeight
-      ? encodeElevationBands(elevation)
-      : null;
-  if (!paths.park && !encoded) return { image: emptyImage(), hasElevation: false };
+  // G = band value; R stays 0 for the park edge to raise.
+  const rgba = elevation ? elevationBandsRgba(elevation) : null;
+  const { origin, scale } = maskProjection(spec);
+  // One path for the whole region, never one per tile: blurring each tile's piece
+  // separately would draw a false park edge along every tile seam.
+  const park = assembleRegionPath(geometry.parts, origin, scale, (tile) => [parkPath(tile)]);
+  if (!park && !rgba) return { image: emptyImage(), hasElevation: false };
 
   const recorder = Skia.PictureRecorder();
   const canvas = recorder.beginRecording(Skia.XYWHRect(0, 0, spec.maskWidth, spec.maskHeight));
   canvas.drawColor(Skia.Color('black'));
 
-  if (encoded) {
-    // G = band value; R stays 0 for the park edge to raise.
-    const rgba = new Uint8Array(spec.maskWidth * spec.maskHeight * 4);
-    for (let i = 0; i < encoded.bytes.length; i++) {
-      rgba[i * 4 + 1] = encoded.bytes[i];
-      rgba[i * 4 + 3] = 255;
-    }
+  if (elevation && rgba) {
     const data = Skia.Data.fromBytes(rgba);
     const bands = Skia.Image.MakeImage(
       {
-        width: spec.maskWidth,
-        height: spec.maskHeight,
+        width: elevation.width,
+        height: elevation.height,
         colorType: ColorType.RGBA_8888,
         alphaType: AlphaType.Opaque,
       },
       data,
-      spec.maskWidth * 4
+      elevation.width * 4
     );
     data.dispose();
-    if (bands) canvas.drawImage(bands, 0, 0);
+    if (bands) {
+      // The raster is at DEM resolution: the GPU's bilinear filter is the resample.
+      const dst = rasterMaskRect(elevation, spec);
+      canvas.drawImageRectOptions(
+        bands,
+        Skia.XYWHRect(0, 0, elevation.width, elevation.height),
+        Skia.XYWHRect(dst.x, dst.y, dst.width, dst.height),
+        FilterMode.Linear,
+        MipmapMode.None
+      );
+    }
   }
 
-  const park = paths.park ? Skia.Path.MakeFromSVGString(paths.park) : null;
   if (park) {
-    park.setFillType(FillType.Winding);
     const logicalPerMask =
       ((spec.rect.maxX - spec.rect.minX) * scaleFor(spec.zoom)) / spec.maskWidth;
     const sigma = PARK_EDGE_PX / logicalPerMask;
@@ -132,10 +143,12 @@ export function buildTerrainImage(
   }
 
   return {
-    image: drawAsImageFromPicture(recorder.finishRecordingAsPicture(), {
-      width: spec.maskWidth,
-      height: spec.maskHeight,
-    }),
-    hasElevation: encoded !== null,
+    image: renderPicture(
+      recorder.finishRecordingAsPicture(),
+      spec.maskWidth,
+      spec.maskHeight,
+      'same-thread'
+    ),
+    hasElevation: rgba !== null,
   };
 }

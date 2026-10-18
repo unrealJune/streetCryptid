@@ -520,6 +520,47 @@ Conventions when changing that code:
 - Guard newly added native exports anyway (`typeof mod.configureTelemetry === 'function'`). Not
   because of bindgen now, but because a phone can be running an older binary than the JS bundle.
 
+## Map render pipeline
+
+**Measure with `just map-bench` before and after any change to how a region is built or drawn.**
+It drives the real app (production web bundle, CanvasKit on WebGL, the wasm core) in Chrome at
+phone metrics with a 4× throttled CPU, lets the map's own scripted camera run
+(`perf/use-map-perf-runner.ts`), and prints per view: time to ready and to settled, regions
+rasterized, JS long tasks, dropped frames. `--compare old.json` diffs two runs, `--profile` writes a
+V8 CPU profile, `--shots` photographs each view. It is NOT a phone: V8 is not Hermes, CanvasKit is
+not native Skia, and web decodes tiles in JS where a phone uses the Rust decoder, so tile decode time
+on web is noise. Use it for ratios and for finding work that should not happen at all.
+`EXPO_PUBLIC_MAP_PERF_RUN` arms the camera script in any bundle and is in `FORBIDDEN_KEYS`.
+
+- **A tile's Skia paths are built once per tile, never per region** (`render/tile-paths.ts`,
+  text in `render/tile-path-svg.ts`). Regions draw them under a transform. Projecting a whole region
+  into SVG text and having Skia parse it back, for every layer of every publication, was 43% of
+  region render time on the 2026-10-18 profile. A stroke width or dash interval drawn under
+  `drawTileLayers` must be divided by `k`. A blur must see one path for the whole region
+  (`assembleRegionPath`), or it draws a false park edge on every tile seam.
+- **Say who consumes an offscreen image** (`render/offscreen.ts`). `same-thread` stays a GPU
+  texture; `ui` is read back to CPU memory because Skia's GPU contexts are per thread. RN Skia's
+  `drawAsImageFromPicture` always reads back, which stalled the JS thread on the GPU three extra
+  times per region. On web RN Skia makes a new WebGL context per offscreen surface and never frees
+  it; Chrome then drops contexts, the map's included (a white canvas with the crashed-GPU icon), so
+  `offscreen.web.ts` keeps one.
+- **Regions are rasterized off React's render path, newest first** (`render/use-region-bundle.ts`).
+  A region superseded before its work starts is never drawn; a cache hit lands during render.
+- **The render cache key is everything the pixels depend on** (`render-bundle-cache.ts`): spec,
+  cell field, the drawn geometry's tiles by identity, and the elevation raster by identity. It
+  ignored elevation once, so the relief upgrade was answered from cache with the canopy bitmap it
+  was meant to replace. Anything new that changes the bitmap goes in the key, and anything feeding
+  it must be identity-stable for the same input (the elevation source memoizes rasters per rect).
+  `MapRegion.rasterGeometry` is how a z14 build's full tile (labels only, over its structure stage)
+  reuses the structure stage's bitmap.
+- **The map does not mount until it knows where to open** (`map-screen-body.tsx`): the stored
+  position, a live fix, or a friend, for at most `MAP_ANCHOR_WAIT_MS`. A re-anchor is a remount
+  (new engine, empty caches), and opening on the dataset's fallback home meant every launch fetched
+  and drew Seattle first, wherever the user was.
+- **Elevation is never resampled in JS.** The DEM crop goes to the GPU at its own resolution and the
+  bilinear filter stretches it over the mask (`ElevationRaster.rect`). Per-mask-pixel sampling in JS
+  cost 1.3–2.5 s of interpreter time per region build.
+
 ## Store screenshots
 
 **`just store-shots` photographs the REAL app, not a mockup** — there is no iOS simulator on the

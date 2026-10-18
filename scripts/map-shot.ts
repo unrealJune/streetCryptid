@@ -115,9 +115,10 @@ import {
 } from '../src/features/map/core/structure-lod';
 import { lodForZoom, NOISE_ORIGIN_WRAP } from '../src/features/map/render/shader-uniforms';
 import {
-  encodeElevationBands,
+  elevationBandsRgba,
   groundCode,
   PARK_EDGE_PX,
+  rasterMaskRect,
   SHADE_GAIN,
   type ElevationRaster,
 } from '../src/features/map/core/terrain';
@@ -1033,19 +1034,22 @@ function buildTerrain(
   spec: RegionSpec,
   elevation: ElevationRaster | null
 ): { image: any; hasElevation: boolean } {
-  const encoded = elevation ? encodeElevationBands(elevation) : null;
+  const rgba = elevation ? elevationBandsRgba(elevation) : null;
   const surface = CanvasKit.MakeSurface(spec.maskWidth, spec.maskHeight);
   if (!surface) throw new Error('terrain surface failed');
   const canvas = surface.getCanvas();
   canvas.clear(CanvasKit.BLACK);
-  if (encoded) {
-    const rgba = new Uint8Array(spec.maskWidth * spec.maskHeight * 4);
-    for (let i = 0; i < encoded.bytes.length; i++) {
-      rgba[i * 4 + 1] = encoded.bytes[i];
-      rgba[i * 4 + 3] = 255;
-    }
-    const bands = imageFrom(CanvasKit, rgba, spec.maskWidth, spec.maskHeight);
-    canvas.drawImage(bands, 0, 0);
+  if (elevation && rgba) {
+    const bands = imageFrom(CanvasKit, rgba, elevation.width, elevation.height);
+    const dst = rasterMaskRect(elevation, spec);
+    canvas.drawImageRectOptions(
+      bands,
+      CanvasKit.XYWHRect(0, 0, elevation.width, elevation.height),
+      CanvasKit.XYWHRect(dst.x, dst.y, dst.width, dst.height),
+      CanvasKit.FilterMode.Linear,
+      CanvasKit.MipmapMode.None,
+      null
+    );
     bands.delete();
   }
   if (paths.park) {
@@ -1072,7 +1076,7 @@ function buildTerrain(
   }
   const image = surface.makeImageSnapshot();
   surface.delete();
-  return { image, hasElevation: encoded !== null };
+  return { image, hasElevation: rgba !== null };
 }
 
 function imageFrom(CanvasKit: any, data: Uint8Array, width: number, height: number) {

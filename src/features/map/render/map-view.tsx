@@ -60,32 +60,20 @@ import { projectHexLattice } from '../core/hex-lattice';
 import { locateCamera } from '../core/locate-camera';
 import { clusterMarkers } from '../core/marker-clusters';
 import { PLACED_OCEAN_CRYPTIDS } from '../core/ocean-cryptids';
-import type { MapRegion } from '../engine/map-engine';
 import { useMapEngine } from '../hooks/use-map-engine';
 import { latLonToWorld } from '../core/mercator';
 import { HIGHWAY_CLASS } from '../core/road-lod';
 import { placeNameInRegion } from '../core/readout';
-import {
-  emitMapPerfEvent,
-  isMapPerfRunEnabled,
-  perfNow,
-  type RegionRenderTiming,
-} from '../perf/map-perf';
 import { useMapPerfRunner } from '../perf/use-map-perf-runner';
 import { FriendLocator } from './friend-locator';
 import { FriendClusterPuck } from './friend-cluster-puck';
 import { FriendLocatorStack } from './friend-locator-stack';
 import { MapLabelLayer } from './map-labels';
 import { OceanCryptidLayer } from './ocean-cryptid-layer';
-import { RegionRenderCache } from './render-bundle-cache';
-import {
-  makeCellStateImage,
-  makeLutImage,
-  makeRegionTextures,
-  renderRegionImage,
-} from './region-shader';
+import { makeLutImage } from './region-shader';
 import { getRevealMaskEffect } from './reveal-mask-shader';
 import { prevRectUniform, REVEAL_TARGET } from './reveal-mask';
+import { useRegionBundle, type RegionBundle } from './use-region-bundle';
 import { YouLocator } from './you-locator';
 import { LoadingHexGrid } from './loading-hex-grid';
 import { SunlightLayer } from './sunlight-layer';
@@ -162,16 +150,6 @@ interface ScreenRect {
   width: number;
   height: number;
 }
-
-interface RegionBundle {
-  region: MapRegion;
-  image: ReturnType<typeof renderRegionImage>;
-  /** The baked cell-state texture — reused by the loading reveal's alpha wipe. */
-  cellImage: ReturnType<typeof makeCellStateImage>;
-  timing: RegionRenderTiming;
-}
-
-const REGION_RENDER_CACHE_CAPACITY = 3;
 
 /**
  * A locator on the map: a friend's current position, or our own. No trail comes with it —
@@ -344,96 +322,15 @@ export function MapView({
   const trailDotRadius = useDerivedValue(() => 2.8 / Math.max(0.001, k.value));
 
   const lutImage = useMemo(() => makeLutImage(theme.canvas), [theme]);
-  const regionRenderCache = useMemo(
-    () =>
-      new RegionRenderCache<{
-        image: RegionBundle['image'];
-        cellImage: RegionBundle['cellImage'];
-      }>(REGION_RENDER_CACHE_CAPACITY),
-    []
-  );
-
-  // Build a region's mask + cell textures AND its bitmap together, once. On the
-  // next swap the whole bundle slides into the outgoing (`prev`) slot instead of
-  // being rebuilt — so each region is rasterized a single time, not twice per
-  // swap (the outgoing rebuild was ~180ms of pure waste per region change).
-  const curBundle = useMemo<RegionBundle | null>(() => {
-    if (!region) return null;
-    const renderExploration = explorationEnabled && region.spec.cellRes !== null;
-    const layerKey = `${renderExploration ? 'x' : '-'}${highwaysEnabled ? 'h' : '-'}${
-      transitEnabled ? 't' : '-'
-    }${structuresEnabled ? 'b' : '-'}`;
-    const cached = regionRenderCache.get(region, lutImage, layerKey);
-    if (cached) {
-      const timing: RegionRenderTiming = {
-        cacheHit: true,
-        maskMs: 0,
-        cellTextureMs: 0,
-        rasterMs: 0,
-        totalMs: 0,
-      };
-      emitMapPerfEvent('region-render', {
-        ...timing,
-        cells: region.cellField.cells.length,
-        maskWidth: region.spec.maskWidth,
-        maskHeight: region.spec.maskHeight,
-      });
-      return { region, image: cached.image, cellImage: cached.cellImage, timing };
-    }
-    const measure = isMapPerfRunEnabled();
-    const started = measure ? perfNow() : 0;
-    const maskStarted = measure ? perfNow() : 0;
-    const textures = makeRegionTextures(region, { highways: highwaysEnabled });
-    const maskMs = measure ? perfNow() - maskStarted : 0;
-    const cellStarted = measure ? perfNow() : 0;
-    const cellImage = makeCellStateImage(region);
-    const cellTextureMs = measure ? perfNow() - cellStarted : 0;
-    const rasterStarted = measure ? perfNow() : 0;
-    const image =
-      textures.mask && textures.ground && textures.terrain && cellImage && lutImage
-        ? renderRegionImage({
-            region,
-            palette: theme.canvas,
-            maskImage: textures.mask,
-            groundImage: textures.ground,
-            terrainImage: textures.terrain,
-            hasElevation: textures.hasElevation,
-            cellImage,
-            lutImage,
-            explorationEnabled: renderExploration,
-            transitEnabled,
-            structuresEnabled,
-          })
-        : null;
-    const rasterMs = measure ? perfNow() - rasterStarted : 0;
-    const timing = {
-      cacheHit: false,
-      maskMs,
-      cellTextureMs,
-      rasterMs,
-      totalMs: measure ? perfNow() - started : 0,
-    };
-    emitMapPerfEvent('region-render', {
-      ...timing,
-      cells: region.cellField.cells.length,
-      maskWidth: region.spec.maskWidth,
-      maskHeight: region.spec.maskHeight,
-    });
-    const bundle = { region, image, cellImage, timing };
-    if (image && cellImage && lutImage) {
-      regionRenderCache.set(region, lutImage, layerKey, { image, cellImage });
-    }
-    return bundle;
-  }, [
-    region,
-    theme,
+  // The newest region, rasterized off the render path (see `use-region-bundle.ts`).
+  const curBundle = useRegionBundle(region, {
+    palette: theme.canvas,
     lutImage,
     explorationEnabled,
     highwaysEnabled,
     transitEnabled,
     structuresEnabled,
-    regionRenderCache,
-  ]);
+  });
 
   // Highway name chips belong to highway geometry: hiding one hides the other.
   const visibleLabels = useMemo(

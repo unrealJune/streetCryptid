@@ -15,11 +15,15 @@ export function sameRegionRenderInput(a: MapRegion, b: MapRegion): boolean {
     aSpec.rect.maxX !== bSpec.rect.maxX ||
     aSpec.rect.maxY !== bSpec.rect.maxY ||
     a.cellField !== b.cellField ||
-    a.geometry.parts.length !== b.geometry.parts.length
+    // Relief that lands after a region is a new picture of the same geometry.
+    (a.elevation ?? null) !== (b.elevation ?? null)
   ) {
     return false;
   }
-  return a.geometry.parts.every((part, index) => part === b.geometry.parts[index]);
+  // The pixels come from the drawn geometry, not from labels that arrive later.
+  const aParts = (a.rasterGeometry ?? a.geometry).parts;
+  const bParts = (b.rasterGeometry ?? b.geometry).parts;
+  return aParts.length === bParts.length && aParts.every((part, index) => part === bParts[index]);
 }
 
 interface CacheEntry<Value> {

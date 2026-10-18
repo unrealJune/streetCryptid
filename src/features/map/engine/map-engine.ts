@@ -49,6 +49,15 @@ export interface MapRegion {
    * region carries geometry rather than a packed pixel buffer.
    */
   readonly geometry: PackedGeometry;
+  /**
+   * The geometry the dot-field raster is drawn from, when it is not `geometry`
+   * itself. A z14 build lands twice — the stream's `structure` stage, then the
+   * full tile — and the second adds only house numbers and POIs, which are
+   * labels, never pixels. Pointing it at the structure stage's geometry lets the
+   * render cache recognise the raster it already has instead of drawing the
+   * same bitmap again just to add names.
+   */
+  readonly rasterGeometry?: PackedGeometry;
   /** Fixed-resolution exploration cells, empty below their render threshold. */
   readonly cellField: RegionCellField;
   /** Named places inside the region (island headline lookup). */
@@ -325,9 +334,15 @@ export class MapEngine {
     onProgress?.({ rect: spec.rect, loaded, total, coldStart });
 
     const previous = this.last;
+    // The z14 stream opens with its own z13 overview. Geometry much coarser than
+    // that, re-rasterized at street zoom, is not a preview of the street — it is
+    // a wrong picture, and a full render the overview then has to wait behind.
+    const streamWillPreview =
+      coldStart && spec.tileZoom === 14 && !!onPreview && !!this.source.getPreview;
     if (
       coldStart &&
       previous &&
+      !(streamWillPreview && previous.spec.tileZoom < MIN_ZOOM_PREVIEW_TILE_ZOOM) &&
       spec.zoom - previous.spec.zoom >= PREFETCH_ZOOM_DELTA &&
       spec.rect.minX >= previous.spec.rect.minX &&
       spec.rect.minY >= previous.spec.rect.minY &&
@@ -341,7 +356,10 @@ export class MapEngine {
         request,
         { ...spec, tileZoom: previous.spec.tileZoom },
         previous.geometry,
-        { tiles: previous.timing.tiles, coldStart: false, sourceMs: 0, mergeMs: 0 }
+        { tiles: previous.timing.tiles, coldStart: false, sourceMs: 0, mergeMs: 0 },
+        // A raster carries its own rect, and the previous one covers this region:
+        // keep the terrain rather than flashing the canopy fallback until relief lands.
+        previous.elevation ?? null
       );
       this.last = preview;
       onPreview?.(preview);
@@ -350,25 +368,37 @@ export class MapEngine {
     const t0 = now();
     // Elevation loads beside the vectors and never fails a build: a region
     // without it draws parkland with the canopy fallback.
-    const elevation = this.elevation
+    const elevation: Promise<ElevationRaster | null> = this.elevation
       ? this.elevation.elevationFor(spec).catch((error: unknown) => {
           console.warn('[map] elevation unavailable:', error);
           return null;
         })
       : Promise.resolve(null);
+    // Whatever relief has landed so far: a preview drawn after it arrives should
+    // already be terrain, or the map redraws in a different style when detail lands.
+    let elevationNow: ElevationRaster | null = null;
+    void elevation.then((raster) => {
+      elevationNow = raster;
+    });
     // Set once full detail is in hand: a preview stage landing after it is wasted work.
     let detailLoaded = false;
+    // The z14 `structure` stage, whose pixels the full tile will repeat exactly.
+    let structureGeometry: PackedGeometry | null = null;
     const streamedPreview =
       coldStart && spec.tileZoom === 14 && onPreview && this.source.getPreview
         ? this.source
             .getPreview(tiles, async (stage, geometry) => {
               // Stages arrive in stream order: the z13 overview, then the z14 structure part.
+              if (stage.tileZoom === spec.tileZoom && stage.part === 'structure') {
+                structureGeometry = geometry;
+              }
               if (detailLoaded) return;
               const preview = await this.buildFromGeometry(
                 request,
                 { ...spec, tileZoom: stage.tileZoom },
                 geometry,
-                { tiles: tiles.length, coldStart: true, sourceMs: now() - t0, mergeMs: 0 }
+                { tiles: tiles.length, coldStart: true, sourceMs: now() - t0, mergeMs: 0 },
+                elevationNow
               );
               if (detailLoaded) return;
               this.last = preview;
@@ -413,10 +443,29 @@ export class MapEngine {
         sourceMs: t1 - t0,
         mergeMs: t2 - t1,
       },
-      await withDeadline(elevation, ELEVATION_GRACE_MS)
+      elevationNow ?? (await withDeadline(elevation, ELEVATION_GRACE_MS)),
+      structureGeometry
     );
     this.last = region;
     this.onTiming?.(region.timing);
+    if (!region.elevation && onPreview) {
+      // Relief that misses the grace window is an upgrade, not a loss: republish
+      // the same geometry with terrain, unless a newer region has replaced it.
+      void elevation.then(async (raster) => {
+        if (!raster || this.last !== region) return;
+        const upgraded = await this.buildFromGeometry(
+          request,
+          spec,
+          geometry,
+          region.timing,
+          raster,
+          region.rasterGeometry ?? null
+        );
+        if (this.last !== region) return;
+        this.last = upgraded;
+        onPreview(upgraded);
+      });
+    }
     return region;
   }
 
@@ -425,7 +474,8 @@ export class MapEngine {
     spec: RegionSpec,
     geometry: PackedGeometry,
     sourceTiming: Pick<RegionTiming, 'tiles' | 'coldStart' | 'sourceMs' | 'mergeMs'>,
-    elevation: ElevationRaster | null = null
+    elevation: ElevationRaster | null = null,
+    rasterGeometry: PackedGeometry | null = null
   ): Promise<MapRegion> {
     const queuedAt = now();
     // Cached tile promises otherwise chain region builds/renders through
@@ -492,6 +542,7 @@ export class MapEngine {
       publication: ++this.publication,
       spec,
       geometry,
+      ...(rasterGeometry ? { rasterGeometry } : {}),
       cellField,
       places: geometry.places,
       labels: selectMapLabels(geometry, spec),
@@ -505,11 +556,17 @@ export class MapEngine {
 }
 
 /**
+ * Coarsest data a zoom-in preview may re-rasterize when a streamed z13 overview
+ * is coming anyway (see `buildNow`).
+ */
+const MIN_ZOOM_PREVIEW_TILE_ZOOM = 12;
+
+/**
  * How long a finished vector build waits for elevation that is still loading.
  * Elevation only shades parkland, so it must never hold a map hostage: past this
- * the region lands with the canopy fallback.
+ * the region lands with the canopy fallback and is upgraded when relief arrives.
  */
-const ELEVATION_GRACE_MS = 1500;
+const ELEVATION_GRACE_MS = 300;
 
 function withDeadline<T>(promise: Promise<T | null>, ms: number): Promise<T | null> {
   return new Promise((resolve) => {
