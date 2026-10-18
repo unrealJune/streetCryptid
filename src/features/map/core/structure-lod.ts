@@ -44,6 +44,21 @@ export const BUILDING_MIN_PX = 2.5;
 /** Zoom at/below which buildings are dropped entirely (the tileset's own floor). */
 export const BUILDING_MIN_ZOOM = 13;
 
+/**
+ * The only tile zoom whose `building` layer is footprints. OpenMapTiles merges
+ * z13 buildings into block-sized unions and simplifies them, so a row of houses
+ * comes out as one ragged blob; drawn with street-level outlines and hatch (a
+ * z13 overview stage previewing a z14 view) it was a field of jagged shapes.
+ * Below this tile zoom a region draws no buildings at all, and they arrive
+ * with the z14 structure stage.
+ */
+export const BUILDING_TILE_ZOOM = 14;
+
+/** Whether a region built from `tileZoom` data may draw its building layer. */
+export function buildingsFromTileZoom(tileZoom: number): boolean {
+  return tileZoom >= BUILDING_TILE_ZOOM;
+}
+
 /** Building outline stroke width, region-logical px. */
 export const BUILDING_STROKE_WIDTH = 0.85;
 

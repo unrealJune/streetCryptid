@@ -557,6 +557,11 @@ on web is noise. Use it for ratios and for finding work that should not happen a
   position, a live fix, or a friend, for at most `MAP_ANCHOR_WAIT_MS`. A re-anchor is a remount
   (new engine, empty caches), and opening on the dataset's fallback home meant every launch fetched
   and drew Seattle first, wherever the user was.
+- **Buildings come from z14 tiles only** (`BUILDING_TILE_ZOOM`). OpenMapTiles merges z13 buildings
+  into simplified block-sized unions; drawn as footprints (the z13 overview stage of a z14 stream)
+  they were a field of ragged blobs. `DATA_ZOOM_FULL_DETAIL_ZOOM` is 14 so everyday street zooms
+  get real footprints; `SC_SHOT_TILE_ZOOM=13 bun scripts/map-shot.ts --places queenanne` shows the
+  blobs.
 - **A persisted "no tile" is not trusted for the tile TTL** (`BundleFetchOptions.emptyTtlMs`). A 404
   from a route or bake that is not live yet looks exactly like a sparse tile; the terrain store
   kept such answers for 30 days and drew relief in only some DEM tiles of a view (straight edges on

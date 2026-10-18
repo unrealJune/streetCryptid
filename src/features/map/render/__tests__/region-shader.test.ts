@@ -5,7 +5,7 @@ import { CryptidThemes } from '@/constants/cryptid-theme';
 import { scaleFor } from '../../core/camera';
 import { lineDotIntervals } from '../../core/dot-style';
 import { computeRegionSpec } from '../../core/region';
-import { AERODROME_DASH, aeroLineWidthFor } from '../../core/structure-lod';
+import { AERODROME_DASH, aeroLineWidthFor, BUILDING_TILE_ZOOM } from '../../core/structure-lod';
 import { transitWidthFor } from '../../core/transit-lod';
 import {
   AERO_LINE_KINDS,
@@ -164,9 +164,9 @@ interface Draw {
   cap?: string;
   intervals?: number[];
 }
-function draw(transitEnabled = true, structuresEnabled = true): Draw[] {
+function draw(transitEnabled = true, structuresEnabled = true, at: MapRegion = region): Draw[] {
   const canvas = renderRegionImage({
-    region,
+    region: at,
     palette: CryptidThemes.daybreak.canvas,
     maskImage: image,
     groundImage: image,
@@ -232,6 +232,16 @@ describe('dotted region overlays', () => {
       style: 'stroke',
     });
     expect(draws.filter((entry) => entry.style === 'fill')).toHaveLength(2);
+  });
+
+  // OpenMapTiles merges z13 buildings into ragged block-sized blobs: a z13
+  // overview stage previewing a street view must not draw them as footprints.
+  it('draws buildings only from z14 tiles', () => {
+    expect(spec.tileZoom).toBe(BUILDING_TILE_ZOOM);
+    const coarse = draw(false, true, { ...region, spec: { ...spec, tileZoom: 13 } });
+    expect(coarse.find((entry) => entry.svg === buildHatchPath(spec))).toBeUndefined();
+    // Only the apron fill is left.
+    expect(coarse.filter((entry) => entry.style === 'fill')).toHaveLength(1);
   });
 
   it('keeps both overlay toggles effective', () => {

@@ -59,6 +59,7 @@ import {
   BUILDING_HATCH_WIDTH,
   BUILDING_STROKE_ALPHA,
   buildingGhostInk,
+  buildingsFromTileZoom,
   buildingStyleFor,
 } from '../core/structure-lod';
 import {
@@ -387,7 +388,7 @@ function drawStructures(
     });
   }
 
-  const buildingStyle = buildingStyleFor(zoom);
+  const buildingStyle = buildingsFromTileZoom(region.spec.tileZoom) ? buildingStyleFor(zoom) : null;
   if (buildingStyle) {
     // One region path (clips need one): every footprint big enough at this zoom.
     const path = assembleRegionPath(tiles, origin, scale, (tile) =>
