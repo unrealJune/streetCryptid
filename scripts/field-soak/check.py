@@ -22,10 +22,14 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import plistlib
+import re
 import statistics
 import subprocess
 import sys
+import tempfile
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
@@ -280,6 +284,9 @@ def cmd_inbox(a: argparse.Namespace) -> None:
     cfg = C.load_config()
     chan = cfg["discord_channel_id"]
     me = _discord("GET", "/users/@me")["id"]
+    trusted_ids = {str(x) for x in (cfg.get("trusted_discord_user_ids") or [])}
+    if cfg.get("discord_user_id"):
+        trusted_ids.add(str(cfg["discord_user_id"]))
     cur = C.read_json(INBOX_CURSOR, {}) or {}
     q = f"?limit=50&after={cur['last']}" if cur.get("last") else "?limit=20"
     msgs = sorted(_discord("GET", f"/channels/{chan}/messages{q}"), key=lambda m: int(m["id"]))
@@ -287,7 +294,12 @@ def cmd_inbox(a: argparse.Namespace) -> None:
         if m["author"]["id"] == me or m.get("webhook_id"):
             continue
         ts = m["timestamp"][:16].replace("T", " ")
-        print(f"[{m['id']}] {ts} {m['author'].get('global_name') or m['author']['username']}: {m['content']}")
+        author = m["author"]
+        uid = str(author.get("id", ""))
+        uname = author.get("username", "")
+        display = author.get("global_name") or uname
+        tag = f"@{uname} id={uid}" + (", trusted" if uid in trusted_ids else "")
+        print(f"[{m['id']}] {ts} {display} ({tag}): {m['content']}")
     if msgs and not a.peek:
         C.write_json(INBOX_CURSOR, {"last": msgs[-1]["id"]})
     if not any(m["author"]["id"] != me and not m.get("webhook_id") for m in msgs):
@@ -306,6 +318,97 @@ def cmd_say(a: argparse.Namespace) -> None:
         body["message_reference"] = {"message_id": a.reply_to, "fail_if_not_exists": False}
     _discord("POST", f"/channels/{C.load_config()['discord_channel_id']}/messages", body)
     print("sent")
+
+
+BUILDS_HOST = "builds.delphinium.junephilip.com"
+BUILD_URL_RE = re.compile(
+    r"^https://builds\.delphinium\.junephilip\.com/get/"
+    r"([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})"
+    r"(?:/(?:app\.ipa|app\.plist))?/?$"
+)
+
+
+def cmd_install(a: argparse.Namespace) -> None:
+    """Download and install a signed iOS build from builds.delphinium.junephilip.com in place."""
+    raw_url = a.url.strip().strip("<>")
+    m = BUILD_URL_RE.match(raw_url)
+    if not m:
+        raise SystemExit(
+            f"refusing install: URL must be https://{BUILDS_HOST}/get/<uuid> (got {raw_url!r})"
+        )
+    upload_id = m.group(1).lower()
+    base_url = f"https://{BUILDS_HOST}/get/{upload_id}"
+    plist_url = f"{base_url}/app.plist"
+    ipa_url = f"{base_url}/app.ipa"
+
+    cfg = C.load_config()
+    udid = cfg.get("udid") or os.environ.get("FIELD_SOAK_UDID")
+    if not udid:
+        raise SystemExit("error: no device UDID in config.json or FIELD_SOAK_UDID")
+
+    try:
+        with urllib.request.urlopen(plist_url, timeout=20) as r:
+            manifest = plistlib.loads(r.read())
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            page = ""
+            try:
+                with urllib.request.urlopen(base_url, timeout=15) as r2:
+                    page = r2.read().decode("utf-8", errors="replace")
+            except Exception:  # noqa: BLE001
+                pass
+            if "/app.apk" in page or "<pre>Android</pre>" in page:
+                raise SystemExit(
+                    f"error: {base_url} is an Android (.apk) build, not an iOS (.ipa) build — "
+                    f"the field-soak iPhone needs the iOS upload link from {BUILDS_HOST}."
+                ) from None
+        raise SystemExit(f"error: could not fetch iOS manifest {plist_url}: {e}") from None
+
+    meta = ((manifest.get("items") or [{}])[0]).get("metadata") or {}
+    bundle_id = meta.get("bundle-identifier")
+    if bundle_id and bundle_id != C.APP_BUNDLE_ID:
+        raise SystemExit(
+            f"refusing install: manifest bundle-identifier is {bundle_id!r}, expected {C.APP_BUNDLE_ID!r}"
+        )
+
+    with tempfile.TemporaryDirectory(prefix="field-soak-ipa-") as tmp:
+        tmp_dir = Path(tmp)
+        ipa_path = tmp_dir / "app.ipa"
+        unpacked_dir = tmp_dir / "unpacked"
+        with urllib.request.urlopen(ipa_url, timeout=180) as r:
+            ipa_path.write_bytes(r.read())
+        subprocess.run(["ditto", "-x", "-k", str(ipa_path), str(unpacked_dir)], check=True)
+        apps = list((unpacked_dir / "Payload").glob("*.app"))
+        if len(apps) != 1:
+            raise SystemExit(f"error: expected 1 .app in Payload/, found {[p.name for p in apps]}")
+        app_path = apps[0]
+        info = plistlib.loads((app_path / "Info.plist").read_bytes())
+        app_bundle_id = info.get("CFBundleIdentifier")
+        if app_bundle_id != C.APP_BUNDLE_ID:
+            raise SystemExit(
+                f"refusing install: Info.plist CFBundleIdentifier is {app_bundle_id!r}, expected {C.APP_BUNDLE_ID!r}"
+            )
+        short_ver = str(info.get("CFBundleShortVersionString", meta.get("bundle-version", "?")))
+        build_ver = str(info.get("CFBundleVersion", "?"))
+        subprocess.run(
+            ["xcrun", "devicectl", "device", "install", "app", "--device", udid, str(app_path)],
+            check=True,
+        )
+
+    C.append_jsonl(
+        C.EVENTS,
+        {"ev": "install", "upload_id": upload_id, "version": short_ver, "build": build_ver, "url": base_url},
+    )
+    why = urllib.parse.quote(f"installed {short_ver} ({build_ver}) from {upload_id[:8]}")
+    launched = ""
+    try:
+        req = urllib.request.Request(f"http://127.0.0.1:{C.CONTROL_PORT}/launch?why={why}", method="POST")
+        with urllib.request.urlopen(req, timeout=30) as r:
+            resp = json.load(r)
+            launched = f"; launched pid={resp.get('pid')}"
+    except Exception as e:  # noqa: BLE001
+        launched = f"; launch via walker failed ({e})"
+    print(f"installed {C.APP_BUNDLE_ID} {short_ver} (build {build_ver}) from {base_url}{launched}")
 
 
 def main() -> None:
@@ -329,11 +432,15 @@ def main() -> None:
     sy = sub.add_parser("say")
     sy.add_argument("--reply-to")
     sy.add_argument("msg", nargs="+")
+    ins = sub.add_parser("install")
+    ins.add_argument("url", help=f"https://{BUILDS_HOST}/get/<uuid>")
     a = p.parse_args()
     if a.cmd == "inbox":
         return cmd_inbox(a)
     if a.cmd == "say":
         return cmd_say(a)
+    if a.cmd == "install":
+        return cmd_install(a)
     if a.cmd == "check":
         cmd_check(a)
     elif a.cmd == "tempo":

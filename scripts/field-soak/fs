@@ -15,6 +15,7 @@
 #   fs tempo '<traceql>' [hours]   raw Tempo search (token handled here, never printed)
 #   fs trace <traceID>             one full trace
 #   fs discover [hours]            instance ids seen recently, with build info
+#   fs install <url>               install an iOS build from https://builds.delphinium.junephilip.com/get/<uuid>
 #   fs notify "<msg>"              Discord (webhook file) or macOS notification
 #   fs events [hours] / fs journal-tail
 set -euo pipefail
@@ -61,7 +62,8 @@ print(urllib.parse.quote("\b"*int(sys.argv[2])+t))' "$1" "$clear")" ;;
     if [ "${1:-}" = all ]; then rm -f "$STATE"/queue/*.json; else rm -f "$STATE/queue/$1.json"; fi
     ls "$STATE/queue" ;;
   # fs inbox [--peek]  new Discord messages since last read | fs say [--reply-to ID] "msg"|@file
-  check | tempo | trace | discover | notify | inbox | say) exec "$PY" "$HERE/check.py" "$cmd" "$@" ;;
+  # fs install <url>   install a build from https://builds.delphinium.junephilip.com/get/<uuid>
+  check | tempo | trace | discover | notify | inbox | say | install) exec "$PY" "$HERE/check.py" "$cmd" "$@" ;;
   events) exec "$PY" -c 'import sys,json,time;sys.path.insert(0,sys.argv[1]);import common as C
 for r in C.read_jsonl(C.EVENTS,time.time()-float(sys.argv[2])*3600):print(time.strftime("%m-%d %H:%M:%S",time.localtime(r["t"])),json.dumps({k:v for k,v in r.items() if k!="t"}))' "$HERE" "${1:-24}" ;;
   journal-tail) tail -n "${1:-80}" "$STATE/journal.md" 2>/dev/null || echo "(no journal yet)" ;;

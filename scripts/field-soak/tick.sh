@@ -21,7 +21,7 @@ mode="${1:-full}"  # full: the scheduled tick | chat: woken by a Discord message
 log="$STATE/ticks/$(date +%Y%m%d-%H%M%S)-$mode.log"
 if [ "$mode" = chat ]; then
   timeout_s=$((15 * 60))
-  prompt="Someone just wrote to you on Discord. This is a CHAT tick, not a full one: load the field-soak skill for context and its rules, run \`fs inbox\`, and answer each message with \`fs say --reply-to <id>\`. Do what the messages ask if the skill allows it (look at the app, plan or change an outing, check how something is doing), and log anything asked in journal.md. Do not run the full tick checklist. State dir: $STATE."
+  prompt="Someone just wrote to you on Discord. This is a CHAT tick, not a full one: load the field-soak skill for context and its rules, run \`fs inbox\`, and answer each message with \`fs say --reply-to <id>\`. Do what the messages ask if the skill allows it (look at the app, plan or change an outing, check how something is doing, or install an app update via \`fs install <url>\` when a \`trusted\` user gives a \`https://builds.delphinium.junephilip.com/get/<uuid>\` link), and log anything asked in journal.md. Do not run the full tick checklist. State dir: $STATE."
 else
   timeout_s=$((45 * 60))
   prompt="Run one field-soak tick: invoke the field-soak skill and follow it exactly. State dir: $STATE."
