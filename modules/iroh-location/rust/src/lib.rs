@@ -5527,6 +5527,7 @@ impl Subscription {
             sink: &sink,
             quality: gate::FixQualityConfig::default(),
             lock: &self.node.drain_lock,
+            clock: &publish::SystemClock,
         };
         engine
             .publish_introduction(now_ms)
@@ -5568,6 +5569,7 @@ impl Subscription {
             sink: &sink,
             quality: gate::FixQualityConfig::default(),
             lock: &self.node.drain_lock,
+            clock: &publish::SystemClock,
         };
         engine
             .heartbeat(
@@ -5615,6 +5617,7 @@ impl Subscription {
             sink: &sink,
             quality: gate::FixQualityConfig::default(),
             lock: &self.node.drain_lock,
+            clock: &publish::SystemClock,
         };
         engine
             .ingest(fix, battery, interval_ms, now_ms)

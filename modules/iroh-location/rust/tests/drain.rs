@@ -5,12 +5,14 @@
 //! not persist — and not one of them is reachable through a live relay on demand. Before the
 //! traits, the only way to exercise `ingest_fix` was to have two phones and wait.
 
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 use iroh_location::gate::{BatteryState, FixQualityConfig, GateState};
 use iroh_location::publish::{
     DrainEngine, DrainLock, EnqueueOutcome, FixQueue, FlushOutcome, GateStateStore, Motion,
     PublishError, PublishSink, Recipients, RecoveryOutcome, Sealed, SeqCounter, StoreError,
+    WallClock,
 };
 use iroh_location::LocationFix;
 
@@ -165,6 +167,20 @@ struct FakeSink {
     recoveries: Mutex<Vec<Vec<String>>>,
     /// What recovery reports: a peer mid-exchange.
     recovering: Mutex<bool>,
+    /// The harness's wall clock, which this sink can move. See `stall_ms`.
+    wall: Arc<AtomicU64>,
+    /// Wall time each send takes — a process suspended mid-send and resumed at the next wake.
+    stall_ms: Mutex<u64>,
+}
+
+/// The wall clock the engine stamps seals from. Stands still unless a test moves it, so every
+/// stamp below reads as the caller's `now_ms`, exactly as it did before the clock existed.
+struct FakeClock(Arc<AtomicU64>);
+
+impl WallClock for FakeClock {
+    fn now_ms(&self) -> u64 {
+        self.0.load(Ordering::SeqCst)
+    }
 }
 
 impl FakeSink {
@@ -193,6 +209,8 @@ impl PublishSink for FakeSink {
         // A real send is an await, and that await is the window two concurrent drains race
         // through. Without a suspension point here the fake could never show it.
         tokio::task::yield_now().await;
+        let stall = *self.stall_ms.lock().unwrap();
+        self.wall.fetch_add(stall, Ordering::SeqCst);
         let mut sent = self.sent.lock().unwrap();
         if let Some(limit) = *self.fail_after.lock().unwrap() {
             if sent.len() >= limit {
@@ -249,10 +267,12 @@ struct Harness {
     gate: FakeGate,
     sink: FakeSink,
     lock: DrainLock,
+    clock: FakeClock,
 }
 
 impl Harness {
     fn new() -> Self {
+        let wall = Arc::new(AtomicU64::new(0));
         Self {
             seq: FakeSeq::default(),
             queue: FakeQueue::default(),
@@ -261,8 +281,12 @@ impl Harness {
                 watching: vec![],
             },
             gate: FakeGate::default(),
-            sink: FakeSink::default(),
+            sink: FakeSink {
+                wall: wall.clone(),
+                ..FakeSink::default()
+            },
             lock: DrainLock::default(),
+            clock: FakeClock(wall),
         }
     }
 
@@ -275,6 +299,7 @@ impl Harness {
             sink: &self.sink,
             quality: FixQualityConfig::default(),
             lock: &self.lock,
+            clock: &self.clock,
         }
     }
 }
@@ -2070,4 +2095,69 @@ async fn concurrent_drains_never_seal_the_same_entry_twice() {
     assert_eq!(a.unwrap().published + b.unwrap().published, 1);
     let sent = h.sink.sent.lock().unwrap();
     assert_eq!(sent.len(), 1, "one queued fix, one envelope: {sent:?}");
+}
+
+// --- Seal-time stamps ----------------------------------------------------------------------------
+//
+// 2026-10-19: an iPhone SE was suspended inside a send at 13:16 and resumed at 13:46, and every
+// envelope sealed after that carried a `published_delta_s` computed from 13:16. On 2026-10-18 an
+// iPhone 16 Pro Max's understated contact by 179 minutes. A reader keeps the highest seq, which is
+// the stale one, and read a phone that had just published as "out of contact 3 hr".
+
+#[tokio::test]
+async fn an_envelope_sealed_after_a_stalled_send_is_stamped_when_it_was_sealed() {
+    let h = Harness::new();
+    let now = INTERVAL * 10;
+    let ts = now - INTERVAL;
+    h.queue.enqueue(fix(ts, 20.0)).unwrap();
+    h.queue.enqueue(fix(ts, 20.0)).unwrap();
+    *h.sink.stall_ms.lock().unwrap() = 30 * MINUTE;
+
+    h.engine().drain(now).await.unwrap();
+
+    let stamps = h.sink.stamps.lock().unwrap();
+    assert_eq!(stamps.len(), 2);
+    assert_eq!(
+        stamps[0].1,
+        Some((INTERVAL / 1000) as u32),
+        "sealed before anything stalled"
+    );
+    assert_eq!(
+        stamps[1].1,
+        Some(((INTERVAL + 30 * MINUTE) / 1000) as u32),
+        "sealed half an hour later, and says so"
+    );
+    let state = h.gate.get();
+    assert_eq!(state.last_published_at, Some(now + 60 * MINUTE));
+}
+
+#[tokio::test]
+async fn a_heartbeat_that_waited_on_the_lock_is_stamped_when_it_ran() {
+    let h = Harness::new();
+    let base = INTERVAL * 10;
+    h.engine()
+        .ingest(fix(base, 20.0), healthy_battery(), INTERVAL, base)
+        .await
+        .unwrap();
+
+    let later = base + INTERVAL;
+    let held = h.lock.lock().await;
+    let engine = h.engine();
+    let heartbeat = engine.heartbeat(Motion::Unknown, healthy_battery(), INTERVAL, later);
+    let suspended = async {
+        // The heartbeat has read the caller's clock and is waiting on the run before it; the
+        // process is suspended for three hours and resumes.
+        tokio::task::yield_now().await;
+        h.clock.0.fetch_add(180 * MINUTE, Ordering::SeqCst);
+        drop(held);
+    };
+    let (out, ()) = tokio::join!(heartbeat, suspended);
+    assert_eq!(out.unwrap().published, 1);
+
+    let stamps = h.sink.stamps.lock().unwrap();
+    assert_eq!(
+        stamps.last().unwrap().1,
+        Some(((INTERVAL + 180 * MINUTE) / 1000) as u32),
+        "contact is when the envelope was sealed, not when the heartbeat was asked for"
+    );
 }
