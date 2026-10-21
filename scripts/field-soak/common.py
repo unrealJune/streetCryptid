@@ -59,6 +59,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "udid": None,
     "se2_instance_id": None,
     "partner_instance_id": None,
+    "trusted_discord_user_ids": ["218123061428355075"],
     "city": {"name": "Kyoto", "tz": "Asia/Tokyo"},
     "home": {"lat": 35.0302, "lon": 135.7725, "label": "home — by the Kamo river fork"},
 }
