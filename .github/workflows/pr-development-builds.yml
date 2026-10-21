@@ -161,7 +161,7 @@ jobs:
         with:
           oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
           oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
-          tags: tag:ci
+          tags: tag:ci,tag:ci-builds
           # Bland fixed node name so the tailnet admin view shows nothing
           # identifying, and no `tailscale status` is ever run. MagicDNS stays on
           # (the internal host resolves through the tailnet); the tailnet name the
@@ -359,7 +359,7 @@ jobs:
         with:
           oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
           oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
-          tags: tag:ci
+          tags: tag:ci,tag:ci-builds
           # Bland fixed node name so the tailnet admin view shows nothing
           # identifying, and no `tailscale status` is ever run. MagicDNS stays on
           # (the internal host resolves through the tailnet); the tailnet name the
