@@ -1,8 +1,9 @@
-import { drawAsImageFromPicture, PaintStyle, Skia, type SkImage } from '@shopify/react-native-skia';
+import { PaintStyle, Skia, type SkImage } from '@shopify/react-native-skia';
 
 import type { RegionCellField } from '../core/cell-field';
 import type { RegionSpec } from '../core/region';
 import { cellStateFillGeometry } from './cell-overlay-paths';
+import { renderPicture } from './offscreen';
 
 /**
  * Bake the region's cell field into the cell state texture the dot-field
@@ -37,8 +38,6 @@ export function buildCellStateImage(field: RegionCellField, spec: RegionSpec): S
     canvas.drawPath(path, paint);
   }
 
-  return drawAsImageFromPicture(recorder.finishRecordingAsPicture(), {
-    width: spec.maskWidth,
-    height: spec.maskHeight,
-  });
+  // The load reveal samples this on the UI thread's canvas, so it must be pixels.
+  return renderPicture(recorder.finishRecordingAsPicture(), spec.maskWidth, spec.maskHeight, 'ui');
 }

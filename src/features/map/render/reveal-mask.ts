@@ -1,3 +1,5 @@
+import { HEX_CLIP_SKSL_FN } from './hex-clip';
+
 /**
  * The loading reveal's pure core — SkSL source, constants, and JS twins of the
  * shader math — kept Skia-free so the wipe ordering is unit-testable off-GPU
@@ -21,6 +23,7 @@
  */
 export const REVEAL_MASK_SKSL = `
 uniform shader image;    // the finished region bitmap (opaque)
+${HEX_CLIP_SKSL_FN}
 uniform shader cell;     // cell state: B = reveal order, G = jitter
 uniform float  uReveal;  // wipe front 0..~1 (see REVEAL_TARGET)
 uniform float4 uPrevRect; // previously-rendered area (x, y, w, h); w<=0 = none
@@ -41,7 +44,9 @@ half4 main(float2 xy) {
     float2 hi = uPrevRect.xy + uPrevRect.zw;
     covered = (xy.x >= lo.x && xy.x <= hi.x && xy.y >= lo.y && xy.y <= hi.y) ? 1.0 : 0.0;
   }
-  float a = max(wipe, covered);
+  // The region's edge follows the hex lattice, exactly as it will once the reveal hands back to
+  // the plain (clipped) image — see hex-clip.ts.
+  float a = max(wipe, covered) * hexClip(xy);
   // Wavefront flash: each newly-exposed hex flares as it crosses the front.
   // Peaks half-revealed, exactly zero when hidden or fully shown (so the settled
   // frame equals the plain image), and suppressed over already-covered ground.

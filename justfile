@@ -268,6 +268,24 @@ store-shots *args:
     echo "==> capturing"
     bun scripts/store-shots.ts --web-build "$out" {{args}}
 
+# Benchmark the map's smoothness on the REAL app: a production web bundle in Chrome
+# at phone metrics with a throttled CPU, driven by the map's own scripted camera.
+# Reports JS-thread long tasks, dropped frames, and time until each view settles.
+#   just map-bench
+#   just map-bench "--cpu 6 --out /tmp/after.json --compare /tmp/before.json"
+map-bench *args:
+    #!/usr/bin/env sh
+    set -eu
+    out="${SC_BENCH_BUILD_DIR:-.expo/web-map-bench}"
+    echo "==> tile CORS proxy"
+    SC_TILE_UPSTREAM="${SC_TILE_UPSTREAM:-https://martin.streetcrypt.id}" bun scripts/tile-proxy.ts &
+    proxy=$!
+    trap 'kill "$proxy" 2>/dev/null || true' EXIT INT TERM
+    echo "==> exporting the web build to $out"
+    EXPO_PUBLIC_TILE_URL="${SC_TILE_PROXY_URL:-http://localhost:8099/planet}"       EXPO_PUBLIC_MAP_PERF_RUN=bench EXPO_PUBLIC_MAP_PERF_DEEP_ZOOM=1       EXPO_PUBLIC_DEV_TELEMETRY=0 EXPO_PUBLIC_OTEL_ENDPOINT=       bunx expo export --platform web --output-dir "$out" >/dev/null
+    echo "==> benchmarking"
+    bun scripts/map-bench.ts --web-build "$out" {{args}}
+
 # Photograph the bottom island at every detent, on the REAL app — the same web
 # build + CanvasKit + wasm path `store-shots` drives, aimed at the drawer rather
 # than at a marketing plate. Safe-area insets are injected, because a browser

@@ -5,18 +5,28 @@ import { CryptidThemes } from '@/constants/cryptid-theme';
 import { scaleFor } from '../../core/camera';
 import { lineDotIntervals } from '../../core/dot-style';
 import { computeRegionSpec } from '../../core/region';
-import { AERODROME_DASH, aeroLineWidthFor } from '../../core/structure-lod';
+import { AERODROME_DASH, aeroLineWidthFor, BUILDING_TILE_ZOOM } from '../../core/structure-lod';
 import { transitWidthFor } from '../../core/transit-lod';
-import { TRANSIT_MODES, type MapGeometry, type WorldPoint } from '../../core/types';
+import {
+  AERO_LINE_KINDS,
+  TRANSIT_MODES,
+  type MapGeometry,
+  type WorldPoint,
+} from '../../core/types';
 import type { MapRegion } from '../../engine/map-engine';
 import { packGeometry } from '../../tiles/packed-geometry';
 import { buildMaskPaths } from '../mask-paths';
 import { renderRegionImage } from '../region-shader';
-import { buildHatchPath, buildStructurePaths } from '../structure-paths';
-import { buildTransitPaths } from '../transit-paths';
+import { buildHatchPath } from '../structure-paths';
+import { linesSvg, TILE_PATH_UNITS } from '../tile-path-svg';
 
 jest.mock('../dot-field-shader', () => ({
   getDotFieldEffect: () => ({ makeShaderWithChildren: () => ({}) }),
+}));
+
+// The "image" is the recording canvas, so a test can read back what was drawn.
+jest.mock('../offscreen', () => ({
+  renderPicture: () => jest.requireMock('@shopify/react-native-skia').drawAsImageFromPicture(),
 }));
 
 jest.mock('@shopify/react-native-skia', () => {
@@ -26,6 +36,7 @@ jest.mock('@shopify/react-native-skia', () => {
     save: jest.fn(),
     restore: jest.fn(),
     scale: jest.fn(),
+    translate: jest.fn(),
     clipPath: jest.fn(),
   };
   return {
@@ -57,7 +68,20 @@ jest.mock('@shopify/react-native-skia', () => {
       },
       Path: {
         MakeFromSVGString: (svg: string) => ({ svg, setFillType: jest.fn() }),
+        // An assembled region path names the tile paths it was built from.
+        Make: () => {
+          const parts: string[] = [];
+          return {
+            get svg() {
+              return parts.join(' ');
+            },
+            setFillType: jest.fn(),
+            addPath: (src: { svg: string }) => parts.push(src.svg),
+            dispose: jest.fn(),
+          };
+        },
       },
+      Matrix: jest.fn(),
       PathEffect: { MakeDash: jest.fn((intervals: number[]) => intervals) },
       PictureRecorder: () => ({
         beginRecording: () => canvas,
@@ -140,9 +164,9 @@ interface Draw {
   cap?: string;
   intervals?: number[];
 }
-function draw(transitEnabled = true, structuresEnabled = true): Draw[] {
+function draw(transitEnabled = true, structuresEnabled = true, at: MapRegion = region): Draw[] {
   const canvas = renderRegionImage({
-    region,
+    region: at,
     palette: CryptidThemes.daybreak.canvas,
     maskImage: image,
     groundImage: image,
@@ -158,50 +182,66 @@ function draw(transitEnabled = true, structuresEnabled = true): Draw[] {
 
 beforeEach(() => jest.clearAllMocks());
 
+/** Canvas units per tile-path unit: what every width and interval is divided by. */
+const k = scaleFor(spec.zoom) / TILE_PATH_UNITS;
+const tile = geometry.parts[0];
+const transitSvg = (index: number) => linesSvg(tile.transit, (i) => tile.transit.mode[i] === index);
+const aeroLineSvg = (kind: number) =>
+  linesSvg(tile.aeroLines, (i) => tile.aeroLines.kind[i] === kind);
+
 describe('dotted region overlays', () => {
   it('renders every transit mode, including ferries, as a casing plus round dots', () => {
-    const paths = buildTransitPaths(geometry, spec);
     const draws = draw(true, false);
     expect(draws).toHaveLength(TRANSIT_MODES.length * 2);
-    for (const mode of TRANSIT_MODES) {
+    TRANSIT_MODES.forEach((mode, index) => {
       const width = transitWidthFor(mode, spec.zoom)!;
       // Casing first, dots over it: the continuous stroke is what makes the
       // chain read as one route rather than a row of unrelated marks.
-      const [casing, dots] = draws.filter((entry) => entry.svg === paths[mode]);
-      expect(casing).toMatchObject({ style: 'stroke', width, cap: 'round' });
+      const [casing, dots] = draws.filter((entry) => entry.svg === transitSvg(index));
+      expect(casing).toMatchObject({ style: 'stroke', width: width / k, cap: 'round' });
       expect(casing.intervals).toBeUndefined();
-      expect(dots).toMatchObject({
-        style: 'stroke',
-        width,
-        cap: 'round',
-        intervals: lineDotIntervals(width),
-      });
-      expect(paths[mode]!.match(/M/g)).toHaveLength(2);
-    }
+      expect(dots).toMatchObject({ style: 'stroke', width: width / k, cap: 'round' });
+      // Widths and dash intervals are in tile-path units under the tile transform.
+      lineDotIntervals(width).forEach((v, i) => expect(dots.intervals![i]).toBeCloseTo(v / k, 6));
+      expect(transitSvg(index).match(/M/g)).toHaveLength(2);
+    });
   });
 
   // A runway is a road that happens to be very straight. Drawn as a chain of
   // 4px beads it was the loudest mark on any region containing an airport.
   it('strokes runways and taxiways solid, dashing only the aerodrome boundary', () => {
-    const paths = buildStructurePaths(geometry, spec);
     const draws = draw(false, true);
-    const runway = draws.find((entry) => entry.svg === paths.aeroLines.runway)!;
+    const runway = draws.find(
+      (entry) => entry.svg === aeroLineSvg(AERO_LINE_KINDS.indexOf('runway'))
+    )!;
     expect(runway).toMatchObject({
       style: 'stroke',
       cap: 'round',
-      width: aeroLineWidthFor('runway', spec.zoom),
+      width: aeroLineWidthFor('runway', spec.zoom)! / k,
     });
     expect(runway.intervals).toBeUndefined();
-    const taxiway = draws.find((entry) => entry.svg === paths.aeroLines.taxiway)!;
-    expect(taxiway.width).toBe(aeroLineWidthFor('taxiway', spec.zoom));
+    const taxiway = draws.find(
+      (entry) => entry.svg === aeroLineSvg(AERO_LINE_KINDS.indexOf('taxiway'))
+    )!;
+    expect(taxiway.width).toBe(aeroLineWidthFor('taxiway', spec.zoom)! / k);
     expect(taxiway.intervals).toBeUndefined();
-    expect(draws.filter((entry) => entry.intervals)).toEqual([
-      expect.objectContaining({ intervals: [...AERODROME_DASH] }),
-    ]);
+    const dashed = draws.filter((entry) => entry.intervals);
+    expect(dashed).toHaveLength(1);
+    AERODROME_DASH.forEach((v, i) => expect(dashed[0].intervals![i]).toBeCloseTo(v / k, 6));
     expect(draws.find((entry) => entry.svg === buildHatchPath(spec))).toMatchObject({
       style: 'stroke',
     });
     expect(draws.filter((entry) => entry.style === 'fill')).toHaveLength(2);
+  });
+
+  // OpenMapTiles merges z13 buildings into ragged block-sized blobs: a z13
+  // overview stage previewing a street view must not draw them as footprints.
+  it('draws buildings only from z14 tiles', () => {
+    expect(spec.tileZoom).toBe(BUILDING_TILE_ZOOM);
+    const coarse = draw(false, true, { ...region, spec: { ...spec, tileZoom: 13 } });
+    expect(coarse.find((entry) => entry.svg === buildHatchPath(spec))).toBeUndefined();
+    // Only the apron fill is left.
+    expect(coarse.filter((entry) => entry.style === 'fill')).toHaveLength(1);
   });
 
   it('keeps both overlay toggles effective', () => {

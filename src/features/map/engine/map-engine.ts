@@ -49,6 +49,15 @@ export interface MapRegion {
    * region carries geometry rather than a packed pixel buffer.
    */
   readonly geometry: PackedGeometry;
+  /**
+   * The geometry the dot-field raster is drawn from, when it is not `geometry`
+   * itself. A z14 build lands twice — the stream's `structure` stage, then the
+   * full tile — and the second adds only house numbers and POIs, which are
+   * labels, never pixels. Pointing it at the structure stage's geometry lets the
+   * render cache recognise the raster it already has instead of drawing the
+   * same bitmap again just to add names.
+   */
+  readonly rasterGeometry?: PackedGeometry;
   /** Fixed-resolution exploration cells, empty below their render threshold. */
   readonly cellField: RegionCellField;
   /** Named places inside the region (island headline lookup). */
@@ -122,15 +131,45 @@ export interface MapEngineOptions {
   readonly onTiming?: (timing: RegionTiming) => void;
 }
 
+/** One region build in flight, and everyone waiting on it. */
+interface Build {
+  readonly request: RegionRequest;
+  readonly spec: RegionSpec;
+  /** Replaced before it landed: publishes nothing more, and its callers already have null. */
+  detached: boolean;
+  readonly waiters: {
+    resolve: (region: MapRegion | null) => void;
+    reject: (error: unknown) => void;
+  }[];
+  readonly progressListeners: BuildProgressListener[];
+  readonly previewListeners: ((region: MapRegion) => void)[];
+  /** Replayed to a caller who joins mid-build, so its skeleton starts where the build is. */
+  lastProgress: BuildProgress | null;
+}
+
 /**
- * Region builder with a one-deep pipeline: at most one build runs at a time,
- * and at most one request waits behind it (a newer request replaces the waiting
- * one, which resolves null). Started builds always run to completion and land —
- * never aborted — so continuous movement (which requests regions faster than
- * they build) still lands a fresh region every build interval instead of
- * starving behind its own prefetches. The freshest request is never more than
- * one build behind. Failures degrade to the last good region instead of
- * blanking the map.
+ * Region builder with at most two live builds: the HEAD, the oldest still in
+ * flight, and the TAIL, the newest request, which starts the moment it is asked
+ * for rather than waiting for the head to finish.
+ *
+ * - A newer request replaces the tail (which resolves null and stops
+ *   publishing), never the head. So continuous movement, which requests regions
+ *   faster than they build, still lands the head every build interval instead
+ *   of starving every build in turn.
+ * - Whichever lands first wins. A tail that publishes (a preview counts)
+ *   retires the head, which could only step the map backwards, and becomes the
+ *   head itself.
+ * - A request whose view a live build already covers joins that build.
+ *
+ * This replaced a one-deep pipeline whose started build always ran to the end
+ * before the next one began. A build waits on every tile of its rect, and a
+ * tile can wait on a cold bundle download (tens of seconds on a weak
+ * connection, minutes for a z14 bundle), so one slow fetch held every later
+ * pan, even into ground already cached, behind it: the map sat on one bitmap
+ * while the finger moved. A retired build's downloads are never cancelled
+ * (they are shared, and persisted for the next visit); the bundle source serves
+ * the newest waiter first so they do not stand in front of the tail either.
+ * Failures degrade to the last good region instead of blanking the map.
  */
 export class MapEngine {
   private readonly source: GeometrySource;
@@ -147,14 +186,8 @@ export class MapEngine {
    */
   private readonly rollup: ExplorationRollup;
 
-  private busy = false;
-  private queued: {
-    request: RegionRequest;
-    onProgress?: BuildProgressListener;
-    onPreview?: (region: MapRegion) => void;
-    resolve: (region: MapRegion | null) => void;
-    reject: (error: unknown) => void;
-  } | null = null;
+  private head: Build | null = null;
+  private tail: Build | null = null;
   private last: MapRegion | null = null;
   private publication = 0;
   private readonly cellFieldCache = new Map<string, RegionCellField>();
@@ -173,26 +206,136 @@ export class MapEngine {
   }
 
   /**
-   * Build (or enqueue) a region for `request`. Resolves with the built region,
-   * the last good region on failure, or null if a newer request replaced this
-   * one while it waited in the queue. `onProgress` (if given) fires only for the
-   * build that actually runs — a superseded (queued-then-replaced) request never
-   * emits, so its skeleton/reveal is never raised. On cold zoom-ins, `onPreview`
-   * can publish a sharper raster of already-covered geometry before new tiles
-   * arrive; its spec retains the actual (possibly coarser) data zoom.
+   * Build a region for `request`. Resolves with the built region, the last good
+   * region on failure, or null if a newer build replaced this one before it
+   * landed; `onProgress` stops firing once it is replaced. On cold zoom-ins,
+   * `onPreview` can publish a sharper raster of already-covered geometry before
+   * new tiles arrive; its spec retains the actual (possibly coarser) data zoom.
    */
   buildRegion(
     request: RegionRequest,
     onProgress?: BuildProgressListener,
     onPreview?: (region: MapRegion) => void
   ): Promise<MapRegion | null> {
-    if (this.busy) {
-      this.queued?.resolve(null); // superseded while waiting
-      return new Promise((resolve, reject) => {
-        this.queued = { request, onProgress, onPreview, resolve, reject };
-      });
+    const joined = this.joinable(request);
+    if (joined) {
+      // Back over the head's ground: wherever the tail was going, it is not here.
+      if (joined === this.head && this.tail) {
+        this.detach(this.tail);
+        this.tail = null;
+      }
+      return this.attach(joined, onProgress, onPreview);
     }
-    return this.runBuild(request, onProgress, onPreview);
+    if (this.tail) this.detach(this.tail);
+    const build: Build = {
+      request,
+      spec: computeRegionSpec(request.camera, request.viewport, { dataZooms: this.dataZooms }),
+      detached: false,
+      waiters: [],
+      progressListeners: [],
+      previewListeners: [],
+      lastProgress: null,
+    };
+    if (this.head) this.tail = build;
+    else this.head = build;
+    const result = this.attach(build, onProgress, onPreview);
+    this.run(build);
+    return result;
+  }
+
+  /** A live build whose region already serves `request`, newest first. */
+  private joinable(request: RegionRequest): Build | null {
+    for (const build of [this.tail, this.head]) {
+      if (
+        build &&
+        build.request.explorationVersion === request.explorationVersion &&
+        !shouldPrefetchRegion(build.spec, request.camera, request.viewport, this.dataZooms)
+      ) {
+        return build;
+      }
+    }
+    return null;
+  }
+
+  private attach(
+    build: Build,
+    onProgress?: BuildProgressListener,
+    onPreview?: (region: MapRegion) => void
+  ): Promise<MapRegion | null> {
+    if (onProgress) {
+      build.progressListeners.push(onProgress);
+      if (build.lastProgress) onProgress(build.lastProgress);
+    }
+    if (onPreview) build.previewListeners.push(onPreview);
+    return new Promise((resolve, reject) => build.waiters.push({ resolve, reject }));
+  }
+
+  /** Retire a build: its callers get null now, and nothing it finishes is published. */
+  private detach(build: Build): void {
+    build.detached = true;
+    build.progressListeners.length = 0;
+    build.previewListeners.length = 0;
+    for (const waiter of build.waiters.splice(0)) waiter.resolve(null);
+  }
+
+  private run(build: Build): void {
+    this.buildNow(build).then(
+      (region) => {
+        this.finish(build);
+        for (const waiter of build.waiters.splice(0)) waiter.resolve(region);
+      },
+      (error: unknown) => {
+        this.finish(build);
+        for (const waiter of build.waiters.splice(0)) waiter.reject(error);
+      }
+    );
+  }
+
+  private finish(build: Build): void {
+    if (this.head === build) {
+      this.head = this.tail;
+      this.tail = null;
+    } else if (this.tail === build) {
+      this.tail = null;
+    }
+  }
+
+  private emitProgress(build: Build, progress: BuildProgress): void {
+    if (build.detached) return;
+    build.lastProgress = progress;
+    for (const listener of build.progressListeners) listener(progress);
+  }
+
+  /**
+   * Make `region` the engine's current one on behalf of `build`; null when the
+   * build was replaced. A tail publishing retires the head: the head's camera is
+   * older, so anything it landed afterwards would step the map backwards.
+   */
+  private publish(build: Build, region: MapRegion): MapRegion | null {
+    if (build.detached) return null;
+    if (build === this.tail && this.head) {
+      this.detach(this.head);
+      this.head = build;
+      this.tail = null;
+    }
+    return this.commit(region);
+  }
+
+  /**
+   * Numbered here, not when assembled: two live builds can assemble out of
+   * order, and the render side keeps whichever publication is higher.
+   */
+  private commit(region: MapRegion): MapRegion {
+    if (region === this.last) return region;
+    const published = { ...region, publication: ++this.publication };
+    this.last = published;
+    return published;
+  }
+
+  private emitPreview(build: Build, region: MapRegion): void {
+    const published = this.publish(build, region);
+    if (!published) return;
+    for (const listener of build.previewListeners) listener(published);
   }
 
   /**
@@ -271,49 +414,9 @@ export class MapEngine {
     await this.source.prefetch(tiles, signal);
   }
 
-  private async runBuild(
-    request: RegionRequest,
-    onProgress?: BuildProgressListener,
-    onPreview?: (region: MapRegion) => void
-  ): Promise<MapRegion | null> {
-    this.busy = true;
-    try {
-      return await this.buildNow(request, onProgress, onPreview);
-    } finally {
-      this.busy = false;
-      const next = this.queued;
-      this.queued = null;
-      if (next) {
-        const built = this.last;
-        if (
-          built &&
-          built.explorationVersion === next.request.explorationVersion &&
-          !shouldPrefetchRegion(
-            built.spec,
-            next.request.camera,
-            next.request.viewport,
-            this.dataZooms
-          )
-        ) {
-          next.resolve(built);
-        } else {
-          this.runBuild(next.request, next.onProgress, next.onPreview).then(
-            next.resolve,
-            next.reject
-          );
-        }
-      }
-    }
-  }
-
-  private async buildNow(
-    request: RegionRequest,
-    onProgress?: BuildProgressListener,
-    onPreview?: (region: MapRegion) => void
-  ): Promise<MapRegion | null> {
-    const spec = computeRegionSpec(request.camera, request.viewport, {
-      dataZooms: this.dataZooms,
-    });
+  private async buildNow(build: Build): Promise<MapRegion | null> {
+    const { request, spec } = build;
+    const wantsPreview = () => build.previewListeners.length > 0;
     const tiles = tilesCovering(spec.rect, spec.tileZoom);
 
     // Cold vs warm is a cache question, decided before any fetch: a swap is warm
@@ -322,12 +425,18 @@ export class MapEngine {
     const total = tiles.length;
     const coldStart = this.source.has ? !tiles.every((t) => this.source.has!(t)) : true;
     let loaded = 0;
-    onProgress?.({ rect: spec.rect, loaded, total, coldStart });
+    this.emitProgress(build, { rect: spec.rect, loaded, total, coldStart });
 
     const previous = this.last;
+    // The z14 stream opens with its own z13 overview. Geometry much coarser than
+    // that, re-rasterized at street zoom, is not a preview of the street — it is
+    // a wrong picture, and a full render the overview then has to wait behind.
+    const streamWillPreview =
+      coldStart && spec.tileZoom === 14 && wantsPreview() && !!this.source.getPreview;
     if (
       coldStart &&
       previous &&
+      !(streamWillPreview && previous.spec.tileZoom < MIN_ZOOM_PREVIEW_TILE_ZOOM) &&
       spec.zoom - previous.spec.zoom >= PREFETCH_ZOOM_DELTA &&
       spec.rect.minX >= previous.spec.rect.minX &&
       spec.rect.minY >= previous.spec.rect.minY &&
@@ -341,38 +450,51 @@ export class MapEngine {
         request,
         { ...spec, tileZoom: previous.spec.tileZoom },
         previous.geometry,
-        { tiles: previous.timing.tiles, coldStart: false, sourceMs: 0, mergeMs: 0 }
+        { tiles: previous.timing.tiles, coldStart: false, sourceMs: 0, mergeMs: 0 },
+        // A raster carries its own rect, and the previous one covers this region:
+        // keep the terrain rather than flashing the canopy fallback until relief lands.
+        previous.elevation ?? null
       );
-      this.last = preview;
-      onPreview?.(preview);
+      this.emitPreview(build, preview);
     }
 
     const t0 = now();
     // Elevation loads beside the vectors and never fails a build: a region
     // without it draws parkland with the canopy fallback.
-    const elevation = this.elevation
+    const elevation: Promise<ElevationRaster | null> = this.elevation
       ? this.elevation.elevationFor(spec).catch((error: unknown) => {
           console.warn('[map] elevation unavailable:', error);
           return null;
         })
       : Promise.resolve(null);
+    // Whatever relief has landed so far: a preview drawn after it arrives should
+    // already be terrain, or the map redraws in a different style when detail lands.
+    let elevationNow: ElevationRaster | null = null;
+    void elevation.then((raster) => {
+      elevationNow = raster;
+    });
     // Set once full detail is in hand: a preview stage landing after it is wasted work.
     let detailLoaded = false;
+    // The z14 `structure` stage, whose pixels the full tile will repeat exactly.
+    let structureGeometry: PackedGeometry | null = null;
     const streamedPreview =
-      coldStart && spec.tileZoom === 14 && onPreview && this.source.getPreview
+      coldStart && spec.tileZoom === 14 && wantsPreview() && this.source.getPreview
         ? this.source
             .getPreview(tiles, async (stage, geometry) => {
               // Stages arrive in stream order: the z13 overview, then the z14 structure part.
-              if (detailLoaded) return;
+              if (stage.tileZoom === spec.tileZoom && stage.part === 'structure') {
+                structureGeometry = geometry;
+              }
+              if (detailLoaded || build.detached) return;
               const preview = await this.buildFromGeometry(
                 request,
                 { ...spec, tileZoom: stage.tileZoom },
                 geometry,
-                { tiles: tiles.length, coldStart: true, sourceMs: now() - t0, mergeMs: 0 }
+                { tiles: tiles.length, coldStart: true, sourceMs: now() - t0, mergeMs: 0 },
+                elevationNow
               );
               if (detailLoaded) return;
-              this.last = preview;
-              onPreview(preview);
+              this.emitPreview(build, preview);
             })
             .catch((error: unknown) => {
               console.warn('[map] streamed preview unavailable; waiting for detail:', error);
@@ -384,7 +506,7 @@ export class MapEngine {
         tiles.map((t) =>
           this.source.getTile(t).then((part) => {
             loaded++;
-            onProgress?.({ rect: spec.rect, loaded, total, coldStart });
+            this.emitProgress(build, { rect: spec.rect, loaded, total, coldStart });
             return part;
           })
         )
@@ -393,17 +515,20 @@ export class MapEngine {
       await streamedPreview;
     } catch (error) {
       await streamedPreview;
+      if (build.detached) return null;
       if (this.last) {
         console.warn('[map] tile load failed; retaining available geometry:', error);
         return this.last;
       }
       throw error;
     }
+    // Replaced while its tiles were on the wire: they are cached; the region is not wanted.
+    if (build.detached) return null;
     const t1 = now();
 
     const geometry = mergeGeometry(parts);
     const t2 = now();
-    const region = await this.buildFromGeometry(
+    const assembled = await this.buildFromGeometry(
       request,
       spec,
       geometry,
@@ -413,10 +538,30 @@ export class MapEngine {
         sourceMs: t1 - t0,
         mergeMs: t2 - t1,
       },
-      await withDeadline(elevation, ELEVATION_GRACE_MS)
+      elevationNow ?? (await withDeadline(elevation, ELEVATION_GRACE_MS)),
+      structureGeometry
     );
-    this.last = region;
+    const region = this.publish(build, assembled);
+    if (!region) return null;
     this.onTiming?.(region.timing);
+    if (!region.elevation && wantsPreview()) {
+      // Relief that misses the grace window is an upgrade, not a loss: republish
+      // the same geometry with terrain, unless a newer region has replaced it.
+      void elevation.then(async (raster) => {
+        if (!raster || this.last !== region) return;
+        const upgraded = await this.buildFromGeometry(
+          request,
+          spec,
+          geometry,
+          region.timing,
+          raster,
+          region.rasterGeometry ?? null
+        );
+        if (this.last !== region) return;
+        const published = this.commit(upgraded);
+        for (const listener of build.previewListeners) listener(published);
+      });
+    }
     return region;
   }
 
@@ -425,7 +570,8 @@ export class MapEngine {
     spec: RegionSpec,
     geometry: PackedGeometry,
     sourceTiming: Pick<RegionTiming, 'tiles' | 'coldStart' | 'sourceMs' | 'mergeMs'>,
-    elevation: ElevationRaster | null = null
+    elevation: ElevationRaster | null = null,
+    rasterGeometry: PackedGeometry | null = null
   ): Promise<MapRegion> {
     const queuedAt = now();
     // Cached tile promises otherwise chain region builds/renders through
@@ -489,9 +635,10 @@ export class MapEngine {
     };
 
     const region: MapRegion = {
-      publication: ++this.publication,
+      publication: 0, // numbered by `commit` when published
       spec,
       geometry,
+      ...(rasterGeometry ? { rasterGeometry } : {}),
       cellField,
       places: geometry.places,
       labels: selectMapLabels(geometry, spec),
@@ -505,11 +652,17 @@ export class MapEngine {
 }
 
 /**
+ * Coarsest data a zoom-in preview may re-rasterize when a streamed z13 overview
+ * is coming anyway (see `buildNow`).
+ */
+const MIN_ZOOM_PREVIEW_TILE_ZOOM = 12;
+
+/**
  * How long a finished vector build waits for elevation that is still loading.
  * Elevation only shades parkland, so it must never hold a map hostage: past this
- * the region lands with the canopy fallback.
+ * the region lands with the canopy fallback and is upgraded when relief arrives.
  */
-const ELEVATION_GRACE_MS = 1500;
+const ELEVATION_GRACE_MS = 300;
 
 function withDeadline<T>(promise: Promise<T | null>, ms: number): Promise<T | null> {
   return new Promise((resolve) => {

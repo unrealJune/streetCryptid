@@ -13,14 +13,13 @@ describe('dataZoomFor', () => {
 
   it('overzooms geometry by DATA_ZOOM_BIAS levels below the display tile zoom', () => {
     expect(DATA_ZOOM_BIAS).toBe(1);
-    expect(dataZoomFor(15, planet)).toBe(13); // capped display zoom 14 − bias
-    expect(dataZoomFor(14, planet)).toBe(13);
+    expect(dataZoomFor(13.9, planet)).toBe(12);
     expect(dataZoomFor(8.7, planet)).toBe(7);
   });
 
-  it('drops the bias past the full-detail zoom, to reach the POI layer', () => {
+  it('drops the bias at the full-detail zoom, to reach the building and POI layers', () => {
     // Below the threshold the bias still applies…
-    expect(dataZoomFor(DATA_ZOOM_FULL_DETAIL_ZOOM - 0.01, planet)).toBe(13);
+    expect(dataZoomFor(DATA_ZOOM_FULL_DETAIL_ZOOM - 0.01, planet)).toBe(12);
     // …and at it, geometry comes from the tileset's finest level, which is the
     // only one carrying a dense `poi` layer (and `housenumber` at all).
     expect(dataZoomFor(DATA_ZOOM_FULL_DETAIL_ZOOM, planet)).toBe(14);

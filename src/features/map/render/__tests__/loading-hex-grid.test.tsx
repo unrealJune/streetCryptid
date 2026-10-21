@@ -4,6 +4,7 @@ import { cancelAnimation, withRepeat } from 'react-native-reanimated';
 
 import type { ScreenHexLattice } from '../../core/hex-lattice';
 import { LoadingHexGrid, punchRect } from '../loading-hex-grid';
+import { LOADING_PATTERNS } from '../loading-hex-shader';
 
 jest.mock('@shopify/react-native-skia', () => ({
   Group: 'Group',
@@ -155,4 +156,12 @@ describe('punchRect', () => {
       { x: 50, y: 0, width: 50, height: 100 },
     ]);
   });
+});
+
+// Loading starts where the view is, so the rings spread from its middle — which is the middle of
+// `rect`, in the shader's rect-relative space.
+it('spreads the animation from the middle of the view', () => {
+  draw({ loading: true });
+  expect(uniforms().uCenter).toEqual([RECT.width / 2, RECT.height / 2]);
+  expect(uniforms().uMode).toBe(LOADING_PATTERNS.twinkle);
 });

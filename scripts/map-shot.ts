@@ -30,6 +30,10 @@
  * without it the shot shows the canopy fallback, as a phone does before the
  * terrain bake is live.
  *
+ * `SC_SHOT_PR=1` renders at one device px per logical px — what a phone's region
+ * bitmap actually gets (`MAX_IMAGE_DIM`) — and `SC_SHOT_TILE_ZOOM=13` forces the
+ * data zoom, e.g. to see what a z13 preview stage draws at street zoom.
+ *
  * `--labels` and `--cryptids` draw the two React overlays the shotter otherwise
  * cannot show: the name chips `selectMapLabels` places (street, park, POI, house
  * number) and the sea cryptids `visibleOceanCryptids` places. Both call the same
@@ -94,6 +98,7 @@ import {
 import { DOT_FIELD_SKSL } from '../src/features/map/render/dot-field-sksl';
 import { buildMaskPaths } from '../src/features/map/render/mask-paths';
 import { buildHatchPath, buildStructurePaths } from '../src/features/map/render/structure-paths';
+import { buildingBinSvgs, TILE_PATH_UNITS } from '../src/features/map/render/tile-path-svg';
 import { buildTransitPaths } from '../src/features/map/render/transit-paths';
 import {
   TRANSIT_ALPHA,
@@ -112,12 +117,14 @@ import {
   BUILDING_STROKE_ALPHA,
   buildingGhostInk,
   buildingStyleFor,
+  buildingsFromTileZoom,
 } from '../src/features/map/core/structure-lod';
 import { lodForZoom, NOISE_ORIGIN_WRAP } from '../src/features/map/render/shader-uniforms';
 import {
-  encodeElevationBands,
+  elevationBandsRgba,
   groundCode,
   PARK_EDGE_PX,
+  rasterMaskRect,
   SHADE_GAIN,
   type ElevationRaster,
 } from '../src/features/map/core/terrain';
@@ -168,9 +175,14 @@ const PLACES: readonly Place[] = [
   // Home, and the densest built ground in the fixture set: downtown towers on
   // one side of I-5, Capitol Hill's blocks on the other.
   { id: 'seattle', label: 'Seattle — downtown / Capitol Hill', lat: 47.6097, lon: -122.3331 },
+  // Small detached houses on a grid: the building outline worst case.
+  { id: 'queenanne', label: 'Seattle — Queen Anne houses', lat: 47.6325, lon: -122.357 },
   // Forested hills around a basin, a lake and the sea within one range view:
   // what the terrain parkland, ground cover and peak labels are tuned on.
   { id: 'kyoto', label: 'Kyoto — basin, Higashiyama, Lake Biwa', lat: 35.0116, lon: 135.7681 },
+  // Rainforest, glaciers and peaks in a national park ringed by a national forest:
+  // where greenery and ground cover cut over between data zooms.
+  { id: 'olympics', label: 'Olympic Peninsula — Forks / Mount Olympus', lat: 47.85, lon: -123.75 },
   // Open water at globe zoom: what `--cryptids` exists to show, and the one view
   // where the exploration ladder has deliberately gone dark.
   { id: 'pacific', label: 'North Pacific — open water', lat: 25, lon: -150 },
@@ -183,7 +195,7 @@ const PLACES: readonly Place[] = [
  */
 const DEFAULT_ZOOMS = [4, 7, 10, 13];
 const VIEWPORT: Viewport = { width: 390, height: 780 };
-const PIXEL_RATIO = 2;
+const PIXEL_RATIO = Number(process.env.SC_SHOT_PR ?? 2);
 
 /**
  * The pre-fix river width: a flat 5 mask px at every zoom, with no taper.
@@ -282,7 +294,10 @@ async function main(): Promise<void> {
 
     for (const zoom of zooms) {
       const camera: CameraState = { center: home, zoom };
-      const spec = computeRegionSpec(camera, VIEWPORT, { dataZooms: PLANET_DATA_ZOOMS });
+      const baseSpec = computeRegionSpec(camera, VIEWPORT, { dataZooms: PLANET_DATA_ZOOMS });
+      const spec = process.env.SC_SHOT_TILE_ZOOM
+        ? { ...baseSpec, tileZoom: Number(process.env.SC_SHOT_TILE_ZOOM) }
+        : baseSpec;
       const geometry = await loadGeometry(source, spec);
       // The ladder decides the resolution; `spec.cellRes` is null once the
       // camera drops below its coarsest rung, which is exactly when the layer
@@ -567,7 +582,37 @@ function drawStructures(
   palette: MapPalette,
   field: ReturnType<typeof buildCellField> | null
 ): void {
-  const paths = buildStructurePaths(geometry, spec);
+  const paths = { ...buildStructurePaths(geometry, spec) };
+  // Buildings the way the app draws them: each tile's binned paths, assembled
+  // into one region path by matrix (`tile-paths.ts` `assembleRegionPath`).
+  {
+    const scale = scaleFor(spec.zoom);
+    const k = scale / TILE_PATH_UNITS;
+    const out = new CanvasKit.PathBuilder();
+    for (const tile of geometry.parts) {
+      const m = [
+        k,
+        0,
+        (tile.originX - spec.rect.minX) * scale,
+        0,
+        k,
+        (tile.originY - spec.rect.minY) * scale,
+        0,
+        0,
+        1,
+      ];
+      for (const bin of buildingBinSvgs(tile.buildings)) {
+        if (bin.minZoom > spec.zoom) continue;
+        const p = CanvasKit.Path.MakeFromSVGString(bin.svg);
+        if (!p) continue;
+        out.addPath(p, m);
+        p.delete();
+      }
+    }
+    const built = out.detachAndDelete();
+    paths.buildings = built.toSVGString();
+    built.delete();
+  }
   let ink = palette.building;
 
   const paintOf = (alpha: number, width: number | null, dash?: readonly [number, number]) => {
@@ -625,7 +670,7 @@ function drawStructures(
       draw(svg, AERO_LINE_ALPHA[kind], width);
     }
   }
-  const buildingStyle = buildingStyleFor(spec.zoom);
+  const buildingStyle = buildingsFromTileZoom(spec.tileZoom) ? buildingStyleFor(spec.zoom) : null;
   if (buildingStyle && paths.buildings) {
     const explored = field ? CanvasKit.Path.MakeFromSVGString(exploredCellPath(field, spec)) : null;
     if (field) {
@@ -1033,19 +1078,22 @@ function buildTerrain(
   spec: RegionSpec,
   elevation: ElevationRaster | null
 ): { image: any; hasElevation: boolean } {
-  const encoded = elevation ? encodeElevationBands(elevation) : null;
+  const rgba = elevation ? elevationBandsRgba(elevation) : null;
   const surface = CanvasKit.MakeSurface(spec.maskWidth, spec.maskHeight);
   if (!surface) throw new Error('terrain surface failed');
   const canvas = surface.getCanvas();
   canvas.clear(CanvasKit.BLACK);
-  if (encoded) {
-    const rgba = new Uint8Array(spec.maskWidth * spec.maskHeight * 4);
-    for (let i = 0; i < encoded.bytes.length; i++) {
-      rgba[i * 4 + 1] = encoded.bytes[i];
-      rgba[i * 4 + 3] = 255;
-    }
-    const bands = imageFrom(CanvasKit, rgba, spec.maskWidth, spec.maskHeight);
-    canvas.drawImage(bands, 0, 0);
+  if (elevation && rgba) {
+    const bands = imageFrom(CanvasKit, rgba, elevation.width, elevation.height);
+    const dst = rasterMaskRect(elevation, spec);
+    canvas.drawImageRectOptions(
+      bands,
+      CanvasKit.XYWHRect(0, 0, elevation.width, elevation.height),
+      CanvasKit.XYWHRect(dst.x, dst.y, dst.width, dst.height),
+      CanvasKit.FilterMode.Linear,
+      CanvasKit.MipmapMode.None,
+      null
+    );
     bands.delete();
   }
   if (paths.park) {
@@ -1072,7 +1120,7 @@ function buildTerrain(
   }
   const image = surface.makeImageSnapshot();
   surface.delete();
-  return { image, hasElevation: encoded !== null };
+  return { image, hasElevation: rgba !== null };
 }
 
 function imageFrom(CanvasKit: any, data: Uint8Array, width: number, height: number) {

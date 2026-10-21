@@ -2,8 +2,6 @@ import {
   AlphaType,
   ClipOp,
   ColorType,
-  drawAsImageFromPicture,
-  FillType,
   FilterMode,
   MipmapMode,
   PaintStyle,
@@ -20,29 +18,48 @@ import {
 import { buildPaletteLut } from '../core/region';
 import { lineDotIntervals } from '../core/dot-style';
 import type { RoadLayerOptions } from '../core/road-lod';
-import type { AeroAreaKind, AeroLineKind, MapPalette, Rgb, TransitMode } from '../core/types';
+import { scaleFor } from '../core/camera';
+import {
+  AERO_AREA_KINDS,
+  AERO_LINE_KINDS,
+  TRANSIT_MODES,
+  type AeroAreaKind,
+  type AeroLineKind,
+  type MapPalette,
+  type Rgb,
+} from '../core/types';
 import type { MapRegion } from '../engine/map-engine';
+import type { PackedGeometry } from '../tiles/packed-geometry';
 import { buildCellStateImage } from './cell-state-image';
 import { cellLatticePath, cellRimPath, exploredCellPath } from './cell-overlay-paths';
 import { GHOST_LATTICE_WIDTH } from '../core/hex-lattice';
 import { getDotFieldEffect } from './dot-field-shader';
-import { buildMaskImageFromPaths } from './mask-image';
-import { buildMaskPaths } from './mask-paths';
+import { buildMaskImage } from './mask-image';
+import { renderPicture } from './offscreen';
 import { buildGroundImage, buildTerrainImage } from './terrain-image';
-import { buildHatchPath, buildStructurePaths } from './structure-paths';
-import { buildTransitPaths } from './transit-paths';
+import { buildHatchPath } from './structure-paths';
+import {
+  aeroAreaPath,
+  aeroLinePath,
+  assembleRegionPath,
+  buildingBins,
+  drawTileLayers,
+  transitPath,
+} from './tile-paths';
 import { TRANSIT_ALPHA, TRANSIT_CASING_ALPHA, transitWidthFor } from '../core/transit-lod';
 import {
   AERODROME_DASH,
   AERODROME_STROKE_WIDTH,
   AERO_AREA_STYLE,
   AERO_LINE_ALPHA,
+  aeroAreaVisible,
   aeroLineWidthFor,
   BUILDING_GHOST_ALPHA,
   BUILDING_HATCH_ALPHA,
   BUILDING_HATCH_WIDTH,
   BUILDING_STROKE_ALPHA,
   buildingGhostInk,
+  buildingsFromTileZoom,
   buildingStyleFor,
 } from '../core/structure-lod';
 import {
@@ -94,16 +111,21 @@ export interface RegionTextures {
   readonly hasElevation: boolean;
 }
 
-/** One path build feeds all three, so the geometry is projected once. */
+/** The three feature textures, drawn from each tile's cached paths (`tile-paths.ts`). */
 export function makeRegionTextures(region: MapRegion, layers?: RoadLayerOptions): RegionTextures {
-  const paths = buildMaskPaths(region.geometry, region.spec, layers);
-  const terrain = buildTerrainImage(paths, region.spec, region.elevation);
+  const geometry = drawnGeometry(region);
+  const terrain = buildTerrainImage(geometry, region.spec, region.elevation);
   return {
-    mask: buildMaskImageFromPaths(paths, region.spec),
-    ground: buildGroundImage(paths, region.spec),
+    mask: buildMaskImage(geometry, region.spec, layers),
+    ground: buildGroundImage(geometry, region.spec),
     terrain: terrain.image,
     hasElevation: terrain.hasElevation,
   };
+}
+
+/** What the raster draws: labels-only stages add nothing to it (`MapRegion.rasterGeometry`). */
+export function drawnGeometry(region: MapRegion): PackedGeometry {
+  return region.rasterGeometry ?? region.geometry;
 }
 
 /** The region's cell field baked as a texture (R=fraction G=jitter B=reveal order). */
@@ -248,7 +270,7 @@ export function renderRegionImage({
   }
   const recorded = picture.finishRecordingAsPicture();
 
-  const image = drawAsImageFromPicture(recorded, { width, height });
+  const image = renderPicture(recorded, width, height, 'ui');
   if (!image && __DEV__) console.warn(`[map] region raster failed (${width}×${height})`);
   return image;
 }
@@ -309,8 +331,11 @@ function drawStructures(
   explorationEnabled: boolean
 ): void {
   if (reveal <= 0) return;
-  const paths = buildStructurePaths(region.geometry, region.spec);
   const ink: Rgb = palette.building;
+  const { zoom, rect } = region.spec;
+  const origin = [rect.minX, rect.minY] as const;
+  const scale = scaleFor(zoom);
+  const tiles = drawnGeometry(region).parts;
 
   canvas.save();
   canvas.scale(pixelRatio, pixelRatio);
@@ -318,32 +343,36 @@ function drawStructures(
   // Explicit back-to-front order, not the enum's: the paved ground goes down
   // first so the property boundary's dashes stay on top of it.
   for (const kind of AERO_AREA_DRAW_ORDER) {
-    const svg = paths.aeroAreas[kind];
-    if (!svg) continue;
+    if (!aeroAreaVisible(kind, zoom)) continue;
+    const kindIndex = AERO_AREA_KINDS.indexOf(kind);
     const style = AERO_AREA_STYLE[kind];
-    if (style.fillAlpha > 0) drawWindingFill(canvas, svg, fillPaint(ink, style.fillAlpha * reveal));
-    if (style.strokeAlpha > 0) {
-      const path = Skia.Path.MakeFromSVGString(svg);
-      if (!path) continue;
-      const paint = strokePaint(ink, AERODROME_STROKE_WIDTH, style.strokeAlpha * reveal);
+    const fill = style.fillAlpha > 0 ? fillPaint(ink, style.fillAlpha * reveal) : null;
+    const stroke =
+      style.strokeAlpha > 0
+        ? strokePaint(ink, AERODROME_STROKE_WIDTH, style.strokeAlpha * reveal)
+        : null;
+    drawTileLayers(canvas, tiles, origin, scale, (tile, k) => {
+      const path = aeroAreaPath(tile, kindIndex);
+      if (!path) return;
+      if (fill) canvas.drawPath(path, fill);
+      if (!stroke) return;
+      stroke.setStrokeWidth(AERODROME_STROKE_WIDTH / k);
       // The aerodrome boundary is a limit, not a wall — dash it so it never
       // reads as another building edge.
       if (kind === 'aerodrome') {
-        const dash = Skia.PathEffect.MakeDash([AERODROME_DASH[0], AERODROME_DASH[1]]);
-        if (dash) paint.setPathEffect(dash);
+        const dash = Skia.PathEffect.MakeDash([AERODROME_DASH[0] / k, AERODROME_DASH[1] / k]);
+        if (dash) stroke.setPathEffect(dash);
       }
-      canvas.drawPath(path, paint);
-    }
+      canvas.drawPath(path, stroke);
+    });
   }
 
   // Taxiways under runways: a runway is the landmark and must never be crossed
   // out by the taxiway network that feeds it.
   for (const kind of AERO_LINE_DRAW_ORDER) {
-    const svg = paths.aeroLines[kind];
-    const width = aeroLineWidthFor(kind, region.spec.zoom);
-    if (width === null || !svg) continue;
-    const path = Skia.Path.MakeFromSVGString(svg);
-    if (!path) continue;
+    const width = aeroLineWidthFor(kind, zoom);
+    if (width === null) continue;
+    const kindIndex = AERO_LINE_KINDS.indexOf(kind);
     // Both kinds are plain solid strokes. A runway drawn as a chain of 4px
     // round dots was the loudest mark on any region that contained an airport —
     // louder than the motorways beside it — for a surface that is, to someone
@@ -351,14 +380,23 @@ function drawStructures(
     // road now, because that is what it is.
     const paint = strokePaint(ink, width, AERO_LINE_ALPHA[kind] * reveal);
     paint.setStrokeCap(StrokeCap.Round);
-    canvas.drawPath(path, paint);
+    drawTileLayers(canvas, tiles, origin, scale, (tile, k) => {
+      const path = aeroLinePath(tile, kindIndex);
+      if (!path) return;
+      paint.setStrokeWidth(width / k);
+      canvas.drawPath(path, paint);
+    });
   }
 
-  const buildingStyle = buildingStyleFor(region.spec.zoom);
-  if (paths.buildings && buildingStyle) {
-    const path = Skia.Path.MakeFromSVGString(paths.buildings);
+  const buildingStyle = buildingsFromTileZoom(region.spec.tileZoom) ? buildingStyleFor(zoom) : null;
+  if (buildingStyle) {
+    // One region path (clips need one): every footprint big enough at this zoom.
+    const path = assembleRegionPath(tiles, origin, scale, (tile) =>
+      buildingBins(tile)
+        .filter((bin) => bin.minZoom <= zoom)
+        .map((bin) => bin.path)
+    );
     if (path) {
-      path.setFillType(FillType.Winding);
       const explored = explorationEnabled
         ? Skia.Path.MakeFromSVGString(exploredCellPath(region.cellField, region.spec))
         : null;
@@ -426,15 +464,6 @@ function drawBuildingHatch(
   canvas.restore();
 }
 
-/** Fill one batched sub-path string with non-zero winding (unions overlaps). */
-function drawWindingFill(canvas: SkCanvas, svg: string, paint: SkPaint): void {
-  if (!svg) return;
-  const path = Skia.Path.MakeFromSVGString(svg);
-  if (!path) return;
-  path.setFillType(FillType.Winding);
-  canvas.drawPath(path, paint);
-}
-
 function fillPaint(rgb: Rgb, alpha: number): SkPaint {
   const paint = Skia.Paint();
   paint.setColor(Skia.Color(`rgba(${rgb[0]}, ${rgb[1]}, ${rgb[2]}, ${alpha})`));
@@ -457,28 +486,34 @@ function drawTransitLines(
   reveal: number
 ): void {
   if (reveal <= 0) return;
-  const paths = buildTransitPaths(region.geometry, region.spec);
+  const { zoom, rect } = region.spec;
+  const origin = [rect.minX, rect.minY] as const;
+  const scale = scaleFor(zoom);
 
   canvas.save();
   canvas.scale(pixelRatio, pixelRatio);
-  for (const [mode, svg] of Object.entries(paths) as [TransitMode, string][]) {
-    const width = transitWidthFor(mode, region.spec.zoom);
-    if (width === null || !svg) continue;
-    const path = Skia.Path.MakeFromSVGString(svg);
-    if (!path) continue;
+  TRANSIT_MODES.forEach((mode, modeIndex) => {
+    const width = transitWidthFor(mode, zoom);
+    if (width === null) return;
     const alpha = TRANSIT_ALPHA[mode] * reveal;
     // The casing goes down whether or not the dots can: a solid route is a
     // worse transit line than a dotted one, but an ABSENT one is worse still.
     const casing = strokePaint(palette.transit, width, alpha * TRANSIT_CASING_ALPHA);
     casing.setStrokeCap(StrokeCap.Round);
-    canvas.drawPath(path, casing);
     const paint = strokePaint(palette.transit, width, alpha);
-    const dots = Skia.PathEffect.MakeDash(lineDotIntervals(width));
-    if (!dots) continue;
-    paint.setPathEffect(dots);
     paint.setStrokeCap(StrokeCap.Round);
-    canvas.drawPath(path, paint);
-  }
+    drawTileLayers(canvas, drawnGeometry(region).parts, origin, scale, (tile, k) => {
+      const path = transitPath(tile, modeIndex);
+      if (!path) return;
+      casing.setStrokeWidth(width / k);
+      canvas.drawPath(path, casing);
+      const dots = Skia.PathEffect.MakeDash(lineDotIntervals(width).map((v) => v / k));
+      if (!dots) return;
+      paint.setStrokeWidth(width / k);
+      paint.setPathEffect(dots);
+      canvas.drawPath(path, paint);
+    });
+  });
   canvas.restore();
 }
 

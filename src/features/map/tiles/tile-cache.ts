@@ -25,22 +25,38 @@ export class CachedGeometrySource implements GeometrySource {
     return this.upstream.getPreview?.(tiles, onStage) ?? Promise.resolve();
   }
 
+  /** The warm whose download is still on the wire, aborted or not. */
+  private warming: Promise<void> | null = null;
+
   /**
    * Idle prefetch: warm the cache one tile at a time so at most one bundle is
    * ever in flight (kind to a weak connection), skipping tiles already cached
-   * or in flight. Best-effort — failures are swallowed — and it bails the moment
-   * the signal aborts (e.g. the user starts panning again).
+   * or in flight. Best-effort — failures are swallowed — and it stops at the
+   * next tile once the signal aborts (e.g. the user starts panning again).
+   *
+   * An abort cannot recall the tile already requested: the download below is
+   * shared and deliberately never cancelled. So a warm counts as running until
+   * that download settles, and a new one is refused while it does. Resolving at
+   * the abort instead let every idle pause start another bundle, until warms of
+   * ground nobody went to held every stream slot a real build needed.
    */
-  async prefetch(tiles: readonly TileCoord[], signal?: AbortSignal): Promise<void> {
-    for (const tile of tiles) {
-      if (signal?.aborted) return;
-      if (this.has(tile)) continue;
-      try {
-        await this.getTile(tile, signal);
-      } catch {
-        // A failed or aborted warm is harmless; the real request will retry.
+  prefetch(tiles: readonly TileCoord[], signal?: AbortSignal): Promise<void> {
+    if (this.warming || signal?.aborted) return Promise.resolve();
+    const warm = (async () => {
+      for (const tile of tiles) {
+        if (signal?.aborted) return;
+        if (this.has(tile)) continue;
+        try {
+          await this.getTile(tile);
+        } catch {
+          // A failed warm is harmless; the real request will retry.
+        }
       }
-    }
+    })().finally(() => {
+      this.warming = null;
+    });
+    this.warming = warm;
+    return warm;
   }
 
   getTile(tile: TileCoord, signal?: AbortSignal): Promise<PackedGeometry> {

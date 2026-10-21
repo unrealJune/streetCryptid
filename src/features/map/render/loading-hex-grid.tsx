@@ -11,11 +11,14 @@ import {
 
 import type { ScreenHexLattice } from '../core/hex-lattice';
 import type { Rgb } from '../core/types';
-import { LOADING_HEX_SKSL } from './loading-hex-shader';
+import { LOADING_HEX_SKSL, LOADING_PATTERNS, type LoadingPattern } from './loading-hex-shader';
 import { useIsAppActive } from '@/hooks/use-is-app-active';
 
-/** One full traverse of the sweep's wavelength. */
+/** One cycle of the animation: a ring travelling one wavelength out, or every cell lit once. */
 const SWEEP_MS = 2600;
+
+/** The animation the map ships with; the others are in {@link LOADING_PATTERNS}. */
+export const DEFAULT_LOADING_PATTERN: LoadingPattern = 'twinkle';
 
 interface Box {
   readonly x: number;
@@ -78,6 +81,7 @@ export function LoadingHexGrid({
   loading,
   reducedMotion,
   ink,
+  pattern = DEFAULT_LOADING_PATTERN,
 }: {
   /** Where to draw, anchor-space px. Generously larger than the view: see `loadingRect`. */
   rect: Box;
@@ -92,6 +96,7 @@ export function LoadingHexGrid({
   loading: boolean;
   reducedMotion: boolean;
   ink: Rgb;
+  pattern?: LoadingPattern;
 }) {
   const phase = useSharedValue(0.5);
   // Off screen is the same answer as reduced motion: stop moving. See `useIsAppActive`.
@@ -127,6 +132,10 @@ export function LoadingHexGrid({
   // so are the pieces, which is what lets them all share one set of uniforms.
   const originX = lattice.originX - rect.x;
   const originY = lattice.originY - rect.y;
+  // `rect` is centred on the committed view, so its middle is where the build starts from.
+  const centerX = rect.width / 2;
+  const centerY = rect.height / 2;
+  const mode = LOADING_PATTERNS[pattern];
   const uniforms = useDerivedValue(() => ({
     uOrigin: [originX, originY],
     uRadius: Math.max(0.5, lattice.radius),
@@ -134,6 +143,8 @@ export function LoadingHexGrid({
     uWidth: Math.max(0.01, lattice.strokeWidth),
     uPhase: phase.value,
     uSweep: sweep,
+    uCenter: [centerX, centerY],
+    uMode: mode,
     uInk,
   }));
   const pieces = useMemo(() => punchRect(rect, covered), [rect, covered]);

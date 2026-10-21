@@ -29,7 +29,7 @@ import {
   createLiveExplorationSource,
 } from '../exploration/exploration-source';
 import { sharedExplorationStore } from '../exploration/exploration-store';
-import type { DataZoomRange } from '../tiles/tile-math';
+import { DATA_ZOOM_FULL_DETAIL_ZOOM, type DataZoomRange } from '../tiles/tile-math';
 import { useMapTheme } from './use-map-theme';
 
 /** How long the camera must sit still before idle neighbor prefetch kicks in. */
@@ -340,8 +340,12 @@ export function useMapEngine(
       // never delays warming the ground the user is about to reach. One shared
       // signal: any camera change (or friends update) aborts the whole chain.
       void (async () => {
-        // Idle warming must not fill the connection with 256-tile detail bundles.
-        const warmCamera = { ...camera, zoom: Math.min(camera.zoom, 15) };
+        // Idle warming must not fill the connection with 256-tile detail bundles
+        // (~22 MiB each): warm the z13 stage below the full-detail threshold.
+        const warmCamera = {
+          ...camera,
+          zoom: Math.min(camera.zoom, DATA_ZOOM_FULL_DETAIL_ZOOM - 1),
+        };
         await engine.prefetchAround(warmCamera, viewport, controller.signal);
         await engine.prefetchPoints(friendTargets, warmCamera.zoom, viewport, controller.signal);
       })();

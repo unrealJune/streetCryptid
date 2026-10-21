@@ -49,8 +49,12 @@ const TELEMETRY_KEYS = ['EXPO_PUBLIC_OTEL_ENDPOINT', 'EXPO_PUBLIC_DEV_TELEMETRY'
  * map is a trade-off worth recording, so unlike {@link TELEMETRY_KEYS} this has no entry in
  * {@link ACKNOWLEDGED} to reach for. If you find yourself wanting one, the answer is a separate
  * profile that is not in {@link STORE_PROFILES}.
+ *
+ * `EXPO_PUBLIC_MAP_PERF_RUN` arms the map's scripted camera benchmark (`perf/use-map-perf-runner.ts`),
+ * which flies the map on its own a few seconds after launch. `just map-bench` sets it on a
+ * production web bundle; a phone must never move its own map.
  */
-const FORBIDDEN_KEYS = ['EXPO_PUBLIC_SCREENSHOT_FIXTURES'];
+const FORBIDDEN_KEYS = ['EXPO_PUBLIC_SCREENSHOT_FIXTURES', 'EXPO_PUBLIC_MAP_PERF_RUN'];
 
 /**
  * Deliberate, temporary exceptions.

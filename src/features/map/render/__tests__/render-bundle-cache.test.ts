@@ -109,4 +109,21 @@ describe('sameRegionRenderInput', () => {
       })
     ).toBe(false);
   });
+
+  // The relief upgrade republishes the same geometry with terrain; a hit here
+  // would keep drawing the canopy fallback it was meant to replace.
+  it('rejects a region whose relief changed', () => {
+    const elevation = { width: 1, height: 1, metres: new Float32Array(1), rect: region.spec.rect };
+    expect(sameRegionRenderInput(region, { ...region, elevation })).toBe(false);
+    expect(sameRegionRenderInput({ ...region, elevation }, { ...region, elevation })).toBe(true);
+  });
+
+  // A z14 build's full tile adds only labels to its structure stage.
+  it('matches on the geometry the raster is drawn from', () => {
+    const labelled = { ...region, geometry: changedGeometry, rasterGeometry: region.geometry };
+    expect(sameRegionRenderInput(region, labelled)).toBe(true);
+    expect(sameRegionRenderInput(region, { ...region, rasterGeometry: changedGeometry })).toBe(
+      false
+    );
+  });
 });

@@ -1,4 +1,5 @@
 import type { RegionSpec } from '../../core/region';
+import { rasterMaskRect } from '../../core/terrain';
 import {
   decodeTerrarium,
   TERRAIN_MAX_ZOOM,
@@ -62,7 +63,7 @@ describe('TerrariumElevationSource', () => {
   const encoded = (img: DecodedImage) => [img as unknown as Uint8Array];
   const decode = (bytes: Uint8Array) => bytes as unknown as DecodedImage;
 
-  it('samples the covering tiles bilinearly at mask pixel centres', async () => {
+  it('returns the covering tile at DEM resolution, placed on its own rect', async () => {
     // A slope rising east: 10 m per DEM pixel across one z10 tile.
     const tile = { z: 10, x: 900, y: 400 };
     const spec = specOver(tile, 11.3, 16); // DEM zoom 10 → exactly this tile
@@ -75,11 +76,51 @@ describe('TerrariumElevationSource', () => {
     };
     const raster = (await new TerrariumElevationSource(bytes, decode).elevationFor(spec))!;
     expect(requested).toEqual([tile]);
-    expect(raster.width).toBe(16);
-    // Mask pixel i covers DEM px 16i..16i+16; its centre is DEM px 16i + 7.5.
-    expect(raster.metres[0]).toBeCloseTo(75, 1);
-    expect(raster.metres[15]).toBeCloseTo((16 * 15 + 7.5) * 10, 1);
-    expect(raster.metres[16 * 8 + 3]).toBeCloseTo(raster.metres[3], 3); // no north-south slope
+    // Not resampled to the 16 px mask: the GPU's bilinear filter does that.
+    expect([raster.width, raster.height]).toEqual([256, 256]);
+    expect(raster.rect).toEqual(tileWorldRect(tile));
+    expect(raster.metres[0]).toBe(0);
+    expect(raster.metres[255]).toBe(2550);
+    expect(raster.metres[256 * 100 + 7]).toBe(70); // no north-south slope
+    const onMask = rasterMaskRect(raster, spec);
+    expect(onMask.x).toBeCloseTo(0, 6);
+    expect(onMask.width).toBeCloseTo(16, 4);
+  });
+
+  it('crops to the pixels a bilinear sample can reach, stitched across tiles', async () => {
+    // Two z12 tiles side by side; the east one is missing (open sea).
+    const west = { z: 12, x: 100, y: 100 };
+    const r = tileWorldRect(west);
+    const px = (r.maxX - r.minX) / 4; // one DEM pixel of a 4 px tile
+    const spec: RegionSpec = {
+      // From the middle of west pixel 1 to the middle of east pixel 0.
+      rect: {
+        minX: r.minX + 1.5 * px,
+        minY: r.minY + 1.5 * px,
+        maxX: r.maxX + 0.5 * px,
+        maxY: r.minY + 2.5 * px,
+      },
+      maskWidth: 8,
+      maskHeight: 4,
+      zoom: 13.3, // DEM zoom 12
+      tileZoom: 13,
+      cellRes: null,
+    };
+    const source = new TerrariumElevationSource(
+      {
+        async getTileBytes(t) {
+          return t.x === west.x ? encoded(image(4, (x, y) => 100 * y + x)) : null;
+        },
+      },
+      decode
+    );
+    const raster = (await source.elevationFor(spec))!;
+    // Columns west 1..3 + east 0..1, rows 1..3.
+    expect([raster.width, raster.height]).toEqual([5, 3]);
+    expect(raster.rect.minX).toBeCloseTo(r.minX + px, 12);
+    expect(raster.rect.maxX).toBeCloseTo(r.maxX + 2 * px, 12);
+    expect(Array.from(raster.metres.slice(0, 5))).toEqual([101, 102, 103, 0, 0]);
+    expect(Array.from(raster.metres.slice(10, 15))).toEqual([301, 302, 303, 0, 0]);
   });
 
   it('returns null where no terrain tile exists (open sea, or no terrain server)', async () => {
@@ -104,5 +145,26 @@ describe('TerrariumElevationSource', () => {
     await source.elevationFor(specOver(tile, 11.3, 8));
     expect(fetches).toBe(1);
     expect(decoder).toHaveBeenCalledTimes(1);
+  });
+
+  it('hands a region back the same raster, and forgets failures', async () => {
+    const tile = { z: 10, x: 7, y: 7 };
+    let fail = true;
+    const source = new TerrariumElevationSource(
+      {
+        async getTileBytes() {
+          if (fail) throw new Error('offline');
+          return encoded(image(4, () => 100));
+        },
+      },
+      decode
+    );
+    const spec = specOver(tile, 11.3, 8);
+    await expect(source.elevationFor(spec)).rejects.toThrow('offline');
+    fail = false;
+    const first = await source.elevationFor(spec);
+    expect(first).not.toBeNull();
+    // Identity, not equality: the render cache keys a bitmap on this object.
+    expect(await source.elevationFor({ ...spec })).toBe(first);
   });
 });

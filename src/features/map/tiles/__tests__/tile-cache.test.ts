@@ -329,6 +329,30 @@ describe('CachedGeometrySource.prefetch', () => {
     expect(cache.has(T1)).toBe(false);
   });
 
+  it('refuses a new warm while an aborted one is still downloading', async () => {
+    const upstream = new FakeSource();
+    const cache = new CachedGeometrySource(upstream, 8);
+    const controller = new AbortController();
+    const first = cache.prefetch([T1, T3], controller.signal);
+    await Promise.resolve();
+    expect(upstream.callCount).toBe(1);
+    controller.abort(); // the user moved: T1's download cannot be recalled
+
+    await cache.prefetch([T2]); // would be a second bundle on the wire
+    expect(upstream.callCount).toBe(1);
+
+    upstream.resolveLast(makeGeometry('T1'));
+    await first;
+    expect(upstream.callCount).toBe(1); // stopped before T3
+
+    const next = cache.prefetch([T2]);
+    await Promise.resolve();
+    expect(upstream.callCount).toBe(2);
+    upstream.resolveLast(makeGeometry('T2'));
+    await next;
+    expect(cache.has(T2)).toBe(true);
+  });
+
   it('stops immediately when already aborted', async () => {
     const upstream = new FakeSource();
     const cache = new CachedGeometrySource(upstream, 8);
