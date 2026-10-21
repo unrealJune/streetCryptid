@@ -293,6 +293,54 @@ pub type DrainLock = tokio::sync::Mutex<()>;
 /// stopped publishing, and a duplicate envelope is a far cheaper failure than silence.
 pub const DRAIN_LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(90);
 
+/// The wall clock, read at the moment an envelope is sealed.
+///
+/// Every entry point still takes `now_ms` as a value — it is what the slot grid and the gate decide
+/// against, and a test pins it. But it is read BEFORE the run waits for [`DrainLock`] and before
+/// each envelope's send, and on iOS the process can be suspended at either await and resumed at the
+/// next wake, half an hour or three hours later. The envelopes sealed after that went out stamped
+/// with the old reading, so `published_delta_s` told friends the sender was last alive that long
+/// before it actually was. On 2026-10-19 an iPhone SE's `connect` ran 13:16→13:46 across a
+/// suspension and every envelope that followed understated contact by 30 minutes; on 2026-10-18 an
+/// iPhone 16 Pro Max's understated it by 179. The last envelope sealed carries the highest seq, so
+/// it is the one a reader keeps — and a `live` stamp read that way is "out of contact 3 hr" beside
+/// a LAST FIX ACK from half an hour ago.
+///
+/// So the engine measures how much wall time has passed since the call began and adds it to
+/// `now_ms` ([`CallClock`]): `now_ms` stays the caller's, and a stamp is never older than the
+/// moment it was sealed.
+pub trait WallClock: Send + Sync {
+    fn now_ms(&self) -> u64;
+}
+
+/// [`WallClock`] from the system clock.
+pub struct SystemClock;
+
+impl WallClock for SystemClock {
+    fn now_ms(&self) -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0)
+    }
+}
+
+/// The caller's `now_ms`, advanced by however much wall time has passed since the call began.
+#[derive(Clone, Copy)]
+struct CallClock {
+    now_ms: u64,
+    wall_at_call: u64,
+}
+
+impl CallClock {
+    fn at(&self, clock: &dyn WallClock) -> u64 {
+        // `saturating_sub`: a wall clock stepped backwards (NTP) must not wind a stamp back past
+        // the caller's own reading.
+        self.now_ms
+            .saturating_add(clock.now_ms().saturating_sub(self.wall_at_call))
+    }
+}
+
 /// What the caller of [`DrainEngine::heartbeat`] knows about whether the phone has settled.
 ///
 /// A heartbeat used to mean "parked" by definition, on the reasoning that it was only reached from
@@ -364,9 +412,19 @@ pub struct DrainEngine<'a, S: PublishSink> {
     pub quality: FixQualityConfig,
     /// Shared by every engine over these stores. See [`DrainLock`].
     pub lock: &'a DrainLock,
+    /// What a seal is stamped from. See [`WallClock`].
+    pub clock: &'a dyn WallClock,
 }
 
 impl<S: PublishSink> DrainEngine<'_, S> {
+    /// Read at entry, before anything this call awaits. See [`WallClock`].
+    fn call_clock(&self, now_ms: u64) -> CallClock {
+        CallClock {
+            now_ms,
+            wall_at_call: self.clock.now_ms(),
+        }
+    }
+
     /// Take the run lock, or give up waiting after [`DRAIN_LOCK_WAIT`] and run unserialized.
     async fn serialize(&self) -> Option<tokio::sync::MutexGuard<'_, ()>> {
         match tokio::time::timeout(DRAIN_LOCK_WAIT, self.lock.lock()).await {
@@ -394,9 +452,10 @@ impl<S: PublishSink> DrainEngine<'_, S> {
         interval_ms: u64,
         now_ms: u64,
     ) -> Result<IngestOutcome, PublishError> {
+        let clock = self.call_clock(now_ms);
         let _run = self.serialize().await;
         let outcome = self
-            .ingest_untraced(fix, battery, interval_ms, now_ms)
+            .ingest_untraced(fix, battery, interval_ms, clock)
             .await?;
         trace_outcome("engine.ingest", &outcome);
         Ok(outcome)
@@ -407,8 +466,9 @@ impl<S: PublishSink> DrainEngine<'_, S> {
         fix: LocationFix,
         battery: BatteryState,
         interval_ms: u64,
-        now_ms: u64,
+        clock: CallClock,
     ) -> Result<IngestOutcome, PublishError> {
+        let now_ms = clock.now_ms;
         let mut state = self.gate.get();
 
         // Quality first — and note it does NOT stop the clock. A refused fix falls through to the
@@ -483,7 +543,7 @@ impl<S: PublishSink> DrainEngine<'_, S> {
         // half-way, and re-running these slots on the next wake would double-publish them.
         self.gate.set(state);
 
-        let drained = self.drain_held(now_ms).await?;
+        let drained = self.drain_held(clock).await?;
         Ok(self.outcome(
             rejection,
             plan.due + news.enqueued,
@@ -537,9 +597,10 @@ impl<S: PublishSink> DrainEngine<'_, S> {
         interval_ms: u64,
         now_ms: u64,
     ) -> Result<IngestOutcome, PublishError> {
+        let clock = self.call_clock(now_ms);
         let _run = self.serialize().await;
         let outcome = self
-            .heartbeat_untraced(motion, battery, interval_ms, now_ms)
+            .heartbeat_untraced(motion, battery, interval_ms, clock)
             .await?;
         trace_outcome("engine.heartbeat", &outcome);
         Ok(outcome)
@@ -550,8 +611,9 @@ impl<S: PublishSink> DrainEngine<'_, S> {
         motion: Motion,
         battery: BatteryState,
         interval_ms: u64,
-        now_ms: u64,
+        clock: CallClock,
     ) -> Result<IngestOutcome, PublishError> {
+        let now_ms = clock.now_ms;
         let mut state = self.gate.get();
 
         if gate::critically_low(&battery) {
@@ -600,7 +662,7 @@ impl<S: PublishSink> DrainEngine<'_, S> {
         // earlier failed drain would then go out stamped `live` from a phone that is parked.
         self.gate.set(state);
 
-        let drained = self.drain_held(now_ms).await?;
+        let drained = self.drain_held(clock).await?;
         Ok(self.outcome(
             None,
             plan.due + news.enqueued,
@@ -639,13 +701,14 @@ impl<S: PublishSink> DrainEngine<'_, S> {
     /// `enqueued: 0` means this device has never had a position to share — a fresh install that
     /// has not captured yet. There is nothing to introduce and the first capture will do it.
     pub async fn publish_introduction(&self, now_ms: u64) -> Result<IngestOutcome, PublishError> {
+        let clock = self.call_clock(now_ms);
         let _run = self.serialize().await;
         let state = self.gate.get();
         let Some(known) = state.last_known_fix.as_ref().map(LocationFix::from) else {
             return Ok(self.outcome(None, 0, Drained::default(), 0, 0, false));
         };
         let overflow_dropped = self.queue.enqueue(known)?.overflow_dropped;
-        let drained = self.drain_held(now_ms).await?;
+        let drained = self.drain_held(clock).await?;
         Ok(self.outcome(None, 1, drained, 0, overflow_dropped, false))
     }
 
@@ -659,12 +722,13 @@ impl<S: PublishSink> DrainEngine<'_, S> {
     /// Returns how many reached the wire. A send failure is **not** an error here — a wake that
     /// published three of five envelopes did useful work, and the remainder is still queued.
     pub async fn drain(&self, now_ms: u64) -> Result<Drained, PublishError> {
+        let clock = self.call_clock(now_ms);
         let _run = self.serialize().await;
-        self.drain_held(now_ms).await
+        self.drain_held(clock).await
     }
 
     /// [`drain`](Self::drain) for a caller that already holds the run lock.
-    async fn drain_held(&self, now_ms: u64) -> Result<Drained, PublishError> {
+    async fn drain_held(&self, clock: CallClock) -> Result<Drained, PublishError> {
         let recipients = self.recipients.get();
         let watchers = self.recipients.watchers();
         let mut published = 0u32;
@@ -687,9 +751,13 @@ impl<S: PublishSink> DrainEngine<'_, S> {
             // Two clocks, and the gap between them is exactly "parked" — a fresh envelope carrying
             // an hours-old position. One clock is what made a parked friend and a dead one render
             // identically.
+            //
+            // And "when" is read now, per envelope, not when the call began: the process may have
+            // been suspended inside the lock wait or the previous envelope's send. See `WallClock`.
             fix.state = state_stamp;
             fix.published_delta_s = Some(
-                now_ms
+                clock
+                    .at(self.clock)
                     .saturating_sub(ts)
                     .saturating_div(1000)
                     .min(u32::MAX as u64) as u32,
@@ -758,13 +826,15 @@ impl<S: PublishSink> DrainEngine<'_, S> {
             // whose fixes are sitting in its own replica — which read as perfect health for a whole
             // day on 2026-08-31, because nothing recorded either moment natively.
             if reached > 0 {
-                self.stamp(|state| state.last_published_at = Some(now_ms));
+                let at = clock.at(self.clock);
+                self.stamp(|state| state.last_published_at = Some(at));
             }
             // Only a flush that actually reached a peer counts. `NoTargets` is a successful call
             // that pushed nothing, and stamping it would report a fresh push on a phone that has
             // never had anywhere to send.
             if matches!(self.sink.flush().await, Ok(FlushOutcome::Pushed)) {
-                self.stamp(|state| state.last_pushed_at = Some(now_ms));
+                let at = clock.at(self.clock);
+                self.stamp(|state| state.last_pushed_at = Some(at));
             }
         }
         Ok(Drained { published, reached })

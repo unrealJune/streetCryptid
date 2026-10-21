@@ -168,6 +168,14 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
   /// Belt and braces on purpose — `CLLocation.speed` alone is not trustworthy in the field.
   private static let stopDwellSeconds: TimeInterval = 180
 
+  /// How long a candidate must hold before it may be declared `parked` on the wire without a
+  /// known-slow speed behind it. See `speculativeStop`.
+  ///
+  /// A walk keeps a fix inside `stopJitterRadiusM` for about forty seconds at 1.3 m/s; a minute
+  /// needs under 0.85 m/s, which is standing about rather than going somewhere. Short against
+  /// the dwell on purpose: this is for a process that will not live to finish the dwell.
+  private static let speculativeHoldSeconds: TimeInterval = 60
+
   /// The accuracy we ask for while a stop candidate is dwelling.
   ///
   /// Deliberately not the speed tier's choice. The dwell runs an *unfiltered* stream (see
@@ -310,6 +318,15 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
   /// exit runs `enterMoving` and retracts — so for a process that will not live to finish the dwell
   /// the wire is told at once, and the dwell carries on underneath to confirm or abandon it.
   /// `abandonStopCandidate` owes the retraction. Persisted with the candidate.
+  ///
+  /// It needs evidence that the phone is still, and an armed fence is not that. Until 2026-10-20
+  /// every candidate declared, re-centres included — and a re-centre is a fix that has LEFT the
+  /// last candidate. The field-soak iPhone, whose simulated GPS reports no speed at all, therefore
+  /// opened a candidate on every walking fix and its wire alternated `live`/`parked` every 30-60 s
+  /// for whole outings (64 false declarations on one walk), each flip an off-grid envelope. A real
+  /// phone does the same on any fix with an unknown speed, which is most Wi-Fi fixes. So a
+  /// candidate declares at once only when its fix reports a known slow speed; otherwise it must
+  /// hold for `speculativeHoldSeconds` first, and a re-centre retracts rather than re-declares.
   private var speculativeStop = false {
     didSet { candidateDirty = true }
   }
@@ -934,11 +951,15 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
       location.distance(from: candidate.centre) <= Self.stopJitterRadiusM
     else {
       // No candidate, or this fix has wandered out of the one we had. Either way the dwell starts
-      // again from here.
-      openStopCandidate(at: location)
+      // again from here — but a wander is the phone going somewhere, and says so.
+      openStopCandidate(at: location, recentring: stopCandidate != nil)
       return
     }
-    guard Date().timeIntervalSince(candidate.since) >= Self.stopDwellSeconds else {
+    let held = Date().timeIntervalSince(candidate.since)
+    // A second look, a minute on, from inside the candidate: the evidence a candidate opened on an
+    // unknown speed was waiting for.
+    if held >= Self.speculativeHoldSeconds { declareSpeculativeStop() }
+    guard held >= Self.stopDwellSeconds else {
       holdCandidateCadence()
       return
     }
@@ -952,7 +973,7 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
   /// only rung on the ladder that answers a short departure: SLC wants roughly half a kilometre,
   /// and walking out of a cafe does not qualify. If the stop is confirmed the fence is already
   /// where it needs to be; if it is not, `abandonStopCandidate` takes it away again.
-  private func openStopCandidate(at location: CLLocation) {
+  private func openStopCandidate(at location: CLLocation, recentring: Bool) {
     stopCandidate = (centre: location, since: Date())
     // The candidate fence takes over as the tripwire; `didUpdateLocations` re-arms the moving one
     // if the candidate is abandoned.
@@ -961,17 +982,40 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
     // says so. It does mean the dwell below is now the only thing keeping this process alive.
     candidateFence = armStopAnchorFence(at: location) ? location : nil
     holdCandidateCadence()
-    // And for a process that will not live to finish the dwell, say so now. Only behind a fence:
-    // that is what makes the claim retractable on a phone nothing else will wake.
-    // Re-declared on a re-centre too: the fix that wandered out of the old candidate may have
-    // carried the wire to `live` on its way here, and repeating `parked` costs nothing when it
-    // did not.
-    if candidateFence != nil, Self.launchedInBackground, !Self.appLooksActive {
-      if !speculativeStop { reporter.event(.transition, reason: "speculative_stop") }
-      speculativeStop = true
-      owesDeclaration = true
-      owesRetraction = false
+    // A re-centre is a fix that left the last candidate: the phone is moving, and a `parked` the
+    // wire was told for the old one is owed back. Never re-declared here — on a walk that was a
+    // flip per fix. See `speculativeStop`.
+    if recentring {
+      retractSpeculativeStop()
+      return
     }
+    // A fresh candidate, on a fix that knows it is slow, may say so now: a process that will not
+    // live to finish the dwell gets no second look. Without a speed it waits for one.
+    if Self.isKnownStill(location) { declareSpeculativeStop() }
+  }
+
+  /// Tell the wire `parked` for the current candidate, if this process may.
+  ///
+  /// Only behind a fence: that is what makes the claim retractable on a phone nothing else will
+  /// wake. Only for a process launched in the background and off screen: a foreground-started
+  /// process lives to finish the dwell.
+  private func declareSpeculativeStop() {
+    guard !speculativeStop, candidateFence != nil, Self.launchedInBackground,
+      !Self.appLooksActive
+    else { return }
+    reporter.event(.transition, reason: "speculative_stop")
+    speculativeStop = true
+    owesDeclaration = true
+    owesRetraction = false
+  }
+
+  /// The candidate the wire was told about was wrong; owe the retraction.
+  private func retractSpeculativeStop() {
+    guard speculativeStop else { return }
+    reporter.event(.transition, reason: "speculative_retracted")
+    speculativeStop = false
+    owesDeclaration = false
+    owesRetraction = true
   }
 
   /// Keep deliveries arriving while a candidate dwells.
@@ -1008,11 +1052,7 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
       candidateFence = nil
     }
     // The wire was told `parked` for this candidate; it was wrong, and it is owed the retraction.
-    if speculativeStop {
-      speculativeStop = false
-      owesDeclaration = false
-      owesRetraction = true
-    }
+    retractSpeculativeStop()
     manager.startUpdatingLocation()
     persistCandidateIfChanged()
   }
@@ -1720,6 +1760,12 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
   /// is not evidence of motion.
   private static func isMovingFast(_ location: CLLocation) -> Bool {
     location.speed >= 0 && location.speed > 1.0
+  }
+
+  /// The converse, and not its negation: a negative speed is not evidence of stillness either.
+  /// Simulated locations and most Wi-Fi fixes report one.
+  private static func isKnownStill(_ location: CLLocation) -> Bool {
+    location.speed >= 0 && location.speed <= 1.0
   }
 
   /// Whichever of Core Location's cached position and the last one delivered to us is newer.

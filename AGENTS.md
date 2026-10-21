@@ -224,7 +224,12 @@ Conventions when changing that code:
   process launched in the background** (`speculativeStop`, gated on
   `BackgroundLocationRuntime.launchedInBackground` and the app not being active): the candidate's
   `sc.stop-anchor` region is the same exit `stopped` relies on, so the claim is exactly as
-  retractable — its exit retracts, and `abandonStopCandidate` owes one. A claim is settled in the
+  retractable — its exit retracts, and `abandonStopCandidate` owes one. A fence is not evidence of
+  stillness, though: the candidate declares at once only on a fix with a known slow speed, and
+  otherwise after `speculativeHoldSeconds` (60 s) inside its radius; a re-centre — a fix that left
+  the last candidate — retracts and never re-declares. Until 2026-10-20 every re-centre declared,
+  and the field-soak iPhone (simulated GPS, speed always -1) flipped `live`/`parked` every 30-60 s
+  for whole walks, each flip an off-grid envelope (`moving.declared_parked`). A claim is settled in the
   same task as the fix that caused it (`settleClaims`), fix first, so the drain anchors a
   declaration on that fix and judges it against the right stop.
 - **A position Core Location hands back is not a capture.** `didUpdateLocations` drops a location
@@ -380,7 +385,11 @@ Conventions when changing that code:
   recipes locally when you want a local device/simulator build; CI covers the rest.
 - **A frozen dot has two possible causes and the wire carries which.** `LocationFix.ts` says when the
   POSITION was measured and deliberately does not advance on a heartbeat; `published_delta_s` says
-  when the ENVELOPE was sealed, which is the only proof the sending process was alive. `state`
+  when the ENVELOPE was sealed, which is the only proof the sending process was alive. It is read
+  from the wall clock AT the seal (`publish::WallClock`), never only from the caller's `now_ms`: an
+  iOS process suspended inside the drain-lock wait or a send resumes at the next wake, and stamping
+  from the reading taken before it understated contact by 30-179 min (2026-10-18/19) — a reader
+  keeps the highest seq, so a phone that had just published read "out of contact 3 hr". `state`
   (`FIX_STATE_*`) says why the position is what it is. Both are stamped in `DrainEngine::drain`, are
   `None` on capture and in storage, and drive `PresenceState` in `features/social/core/presence.ts`
   — a parked friend is rendered at full opacity with a dashed marker, not dimmed. Do NOT infer
