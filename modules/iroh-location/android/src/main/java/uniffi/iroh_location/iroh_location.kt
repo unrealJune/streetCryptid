@@ -741,6 +741,8 @@ external fun uniffi_iroh_location_checksum_func_record_friend_pull(
 ): Int
 external fun uniffi_iroh_location_checksum_func_node_host(
 ): Int
+external fun uniffi_iroh_location_checksum_func_isolation_status(
+): Int
 external fun uniffi_iroh_location_checksum_func_record_location_runtime(
 ): Int
 external fun uniffi_iroh_location_checksum_func_configure_telemetry(
@@ -1315,6 +1317,8 @@ external fun uniffi_iroh_location_fn_func_record_friend_pull(`event`: RustBuffer
 ): Unit
 external fun uniffi_iroh_location_fn_func_node_host(uniffi_out_err: UniffiRustCallStatus, 
 ): Long
+external fun uniffi_iroh_location_fn_func_isolation_status(uniffi_out_err: UniffiRustCallStatus, 
+): RustBuffer.ByValue
 external fun uniffi_iroh_location_fn_func_record_location_runtime(`event`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
 external fun uniffi_iroh_location_fn_func_configure_telemetry(`endpoint`: RustBuffer.ByValue,`instanceId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
@@ -1492,6 +1496,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_iroh_location_checksum_func_node_host() != 26497) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_iroh_location_checksum_func_isolation_status() != 43250) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_iroh_location_checksum_func_record_location_runtime() != 22013) {
@@ -8527,6 +8534,11 @@ data class HostSnapshot (
     var `restarts`: kotlin.ULong
     , 
     /**
+     * Rebuilds from the stored settings because the phone could reach nobody (`isolation.rs`).
+     */
+    var `heals`: kotlin.ULong
+    , 
+    /**
      * Shutdowns that finished cleanly inside their budget.
      */
     var `shutdowns`: kotlin.ULong
@@ -8567,6 +8579,7 @@ public object FfiConverterTypeHostSnapshot: FfiConverterRustBuffer<HostSnapshot>
             FfiConverterULong.read(buf),
             FfiConverterULong.read(buf),
             FfiConverterULong.read(buf),
+            FfiConverterULong.read(buf),
         )
     }
 
@@ -8579,6 +8592,7 @@ public object FfiConverterTypeHostSnapshot: FfiConverterRustBuffer<HostSnapshot>
             FfiConverterULong.allocationSize(value.`adoptions`) +
             FfiConverterULong.allocationSize(value.`replacements`) +
             FfiConverterULong.allocationSize(value.`restarts`) +
+            FfiConverterULong.allocationSize(value.`heals`) +
             FfiConverterULong.allocationSize(value.`shutdowns`) +
             FfiConverterULong.allocationSize(value.`shutdownFailures`) +
             FfiConverterULong.allocationSize(value.`shutdownTimeouts`)
@@ -8593,6 +8607,7 @@ public object FfiConverterTypeHostSnapshot: FfiConverterRustBuffer<HostSnapshot>
             FfiConverterULong.write(value.`adoptions`, buf)
             FfiConverterULong.write(value.`replacements`, buf)
             FfiConverterULong.write(value.`restarts`, buf)
+            FfiConverterULong.write(value.`heals`, buf)
             FfiConverterULong.write(value.`shutdowns`, buf)
             FfiConverterULong.write(value.`shutdownFailures`, buf)
             FfiConverterULong.write(value.`shutdownTimeouts`, buf)
@@ -8753,6 +8768,112 @@ public object FfiConverterTypeIngestOutcome: FfiConverterRustBuffer<IngestOutcom
             FfiConverterUInt.write(value.`slotsSkipped`, buf)
             FfiConverterUInt.write(value.`overflowDropped`, buf)
             FfiConverterBoolean.write(value.`suspended`, buf)
+    }
+}
+
+
+
+/**
+ * The tracker's state, for `device.health`.
+ */
+data class IsolationStatus (
+    /**
+     * Whether this phone currently counts as reaching nobody.
+     */
+    var `isolated`: kotlin.Boolean
+    , 
+    /**
+     * When the silent streak that made it isolated began (wall clock, ms).
+     */
+    var `isolatedSinceMs`: kotlin.ULong?
+    , 
+    /**
+     * Consecutive silent passes in the current streak.
+     */
+    var `silentPasses`: kotlin.UInt
+    , 
+    /**
+     * When anyone last answered (wall clock, ms). `None` until something has, this process.
+     */
+    var `lastAnswerMs`: kotlin.ULong?
+    , 
+    /**
+     * Recovery steps taken in the current episode.
+     */
+    var `networkChanges`: kotlin.UInt
+    , 
+    var `rebuilds`: kotlin.UInt
+    , 
+    /**
+     * A rebuild is due and has not been done. The mounted app acts on this (`rebindNode`); with
+     * no app holding the node, the node acts on it itself.
+     */
+    var `rebuildDue`: kotlin.Boolean
+    , 
+    /**
+     * The last rebuild of the node, for any reason, this process.
+     */
+    var `lastRebuildMs`: kotlin.ULong?
+    , 
+    /**
+     * Episodes this process has seen, and how many ended.
+     */
+    var `episodes`: kotlin.UInt
+    , 
+    var `recoveries`: kotlin.UInt
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeIsolationStatus: FfiConverterRustBuffer<IsolationStatus> {
+    override fun read(buf: ByteBuffer): IsolationStatus {
+        return IsolationStatus(
+            FfiConverterBoolean.read(buf),
+            FfiConverterOptionalULong.read(buf),
+            FfiConverterUInt.read(buf),
+            FfiConverterOptionalULong.read(buf),
+            FfiConverterUInt.read(buf),
+            FfiConverterUInt.read(buf),
+            FfiConverterBoolean.read(buf),
+            FfiConverterOptionalULong.read(buf),
+            FfiConverterUInt.read(buf),
+            FfiConverterUInt.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: IsolationStatus) = (
+            FfiConverterBoolean.allocationSize(value.`isolated`) +
+            FfiConverterOptionalULong.allocationSize(value.`isolatedSinceMs`) +
+            FfiConverterUInt.allocationSize(value.`silentPasses`) +
+            FfiConverterOptionalULong.allocationSize(value.`lastAnswerMs`) +
+            FfiConverterUInt.allocationSize(value.`networkChanges`) +
+            FfiConverterUInt.allocationSize(value.`rebuilds`) +
+            FfiConverterBoolean.allocationSize(value.`rebuildDue`) +
+            FfiConverterOptionalULong.allocationSize(value.`lastRebuildMs`) +
+            FfiConverterUInt.allocationSize(value.`episodes`) +
+            FfiConverterUInt.allocationSize(value.`recoveries`)
+    )
+
+    override fun write(value: IsolationStatus, buf: ByteBuffer) {
+            FfiConverterBoolean.write(value.`isolated`, buf)
+            FfiConverterOptionalULong.write(value.`isolatedSinceMs`, buf)
+            FfiConverterUInt.write(value.`silentPasses`, buf)
+            FfiConverterOptionalULong.write(value.`lastAnswerMs`, buf)
+            FfiConverterUInt.write(value.`networkChanges`, buf)
+            FfiConverterUInt.write(value.`rebuilds`, buf)
+            FfiConverterBoolean.write(value.`rebuildDue`, buf)
+            FfiConverterOptionalULong.write(value.`lastRebuildMs`, buf)
+            FfiConverterUInt.write(value.`episodes`, buf)
+            FfiConverterUInt.write(value.`recoveries`, buf)
     }
 }
 
@@ -12498,6 +12619,19 @@ public object FfiConverterSequenceTypeTransportAddressDiagnostic: FfiConverterRu
             return FfiConverterTypeNodeHost.lift(
     uniffiRustCall() { _status ->
     UniffiLib.uniffi_iroh_location_fn_func_node_host(
+    
+        _status)
+}
+    )
+    }
+    
+
+        /**
+         * The process tracker's status, for `device.health`.
+         */ fun `isolationStatus`(): IsolationStatus {
+            return FfiConverterTypeIsolationStatus.lift(
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_iroh_location_fn_func_isolation_status(
     
         _status)
 }
