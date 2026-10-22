@@ -1231,7 +1231,7 @@ fn seed_bootstrap(
         let ticket: EndpointTicket = t
             .parse()
             .map_err(|_| LocationError::Decode("bad endpoint ticket".into()))?;
-        memory.add_endpoint_info(ticket.endpoint_addr().clone());
+        memory.add_endpoint_info(relay::scrub_addr(ticket.endpoint_addr().clone()));
         ids.push(ticket.endpoint_addr().id);
     }
     Ok(ids)
@@ -2547,6 +2547,8 @@ impl LocationNode {
         } else {
             iroh::RelayMode::Disabled
         };
+        // Peer addresses from stored tickets are filtered against this list (`relay::scrub_addr`).
+        relay::set_known_relays(relay_enabled.then_some(relay_urls.as_slice()));
         let secret = SecretKey::from_bytes(&self.identity_seed);
         #[cfg(any(target_os = "android", target_vendor = "apple"))]
         let endpoint_id = secret.public();
@@ -3272,7 +3274,7 @@ impl LocationNode {
             })
             .map(|(ticket, budget_ms)| {
                 (
-                    ticket.endpoint_addr().clone(),
+                    relay::scrub_addr(ticket.endpoint_addr().clone()),
                     std::time::Duration::from_millis(budget_ms),
                 )
             })
@@ -4579,7 +4581,7 @@ impl LocationNode {
         let peers: Vec<EndpointAddr> = peer_tickets
             .iter()
             .filter_map(|ticket| ticket.parse::<EndpointTicket>().ok())
-            .map(|ticket| ticket.endpoint_addr().clone())
+            .map(|ticket| relay::scrub_addr(ticket.endpoint_addr().clone()))
             .collect();
         let dialed = peers.len();
         let span = tracing::info_span!(
