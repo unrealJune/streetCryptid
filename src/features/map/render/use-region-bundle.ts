@@ -33,6 +33,18 @@ export interface RegionBundleOptions {
 
 const REGION_RENDER_CACHE_CAPACITY = 3;
 
+type RegionImages = { image: SkImage | null; cellImage: SkImage | null };
+
+/**
+ * Release a region's bitmaps. They are full-screen CPU copies (`renderPicture`'s `ui` path) behind
+ * JSI wrappers Hermes thinks are tiny, so nothing else ever frees them: before this, panning grew
+ * the native heap ~80 MB every 30 s and a Pixel 10 was killed at 3.5 GB.
+ */
+function disposeImages(value: RegionImages): void {
+  value.image?.dispose();
+  value.cellImage?.dispose();
+}
+
 /**
  * The newest region, rasterized: its feature textures and its bitmap, built
  * once and cached (`RegionRenderCache`), so the outgoing layer of a swap is
@@ -62,12 +74,15 @@ export function useRegionBundle(
     structuresEnabled,
   } = options;
   const cache = useMemo(
-    () =>
-      new RegionRenderCache<{ image: SkImage | null; cellImage: SkImage | null }>(
-        REGION_RENDER_CACHE_CAPACITY
-      ),
+    () => new RegionRenderCache<RegionImages>(REGION_RENDER_CACHE_CAPACITY),
     []
   );
+  /**
+   * Bitmaps no longer in the cache, waiting until nothing can still draw them. MapView draws the
+   * bundle this hook returns AND the one it returned before (the retained outgoing layer), so a
+   * retired value is only released once it is neither — see the sweep below.
+   */
+  const retired = useRef(new Set<RegionImages>());
   const [rendered, setRendered] = useState<RegionBundle | null>(null);
   /** Bumped by every new input: work still queued for an older one drops itself. */
   const generation = useRef(0);
@@ -130,6 +145,11 @@ export function useRegionBundle(
                 })
               : null;
           const rasterMs = measure ? perfNow() - rasterStarted : 0;
+          // The feature textures are inputs to that one raster and nothing else. Disposing the
+          // wrappers only drops references; anything the raster still holds stays alive.
+          textures.mask?.dispose();
+          textures.ground?.dispose();
+          textures.terrain?.dispose();
           const timing = {
             cacheHit: false,
             maskMs,
@@ -138,8 +158,13 @@ export function useRegionBundle(
             totalMs: measure ? perfNow() - started : 0,
           };
           emitMapPerfEvent('region-render', perfDetail(region, timing, textures.hasElevation));
-          if (image && cellImage && lutImage)
-            cache.set(region, lutImage, layerKey, { image, cellImage });
+          if (image && cellImage && lutImage) {
+            const evicted = cache.set(region, lutImage, layerKey, { image, cellImage });
+            if (evicted) retired.current.add(evicted);
+          } else {
+            // Never cached, so never looked up again: released once it is off screen.
+            retired.current.add({ image, cellImage });
+          }
           // Shown even when a newer region is already on its way: it is newer than
           // what is on screen, and holding it back until the stream of regions
           // paused is how the map sat on one bitmap through a whole pan.
@@ -178,6 +203,25 @@ export function useRegionBundle(
     null
   );
   if (newest !== shown) setShown(newest);
+
+  // Release retired bitmaps that are neither on screen nor the outgoing layer MapView retains.
+  const previous = useRef<RegionBundle | null>(null);
+  useEffect(() => {
+    const live = new Set<SkImage | null>([
+      newest?.image ?? null,
+      newest?.cellImage ?? null,
+      previous.current?.image ?? null,
+      previous.current?.cellImage ?? null,
+    ]);
+    for (const value of retired.current) {
+      if (live.has(value.image ?? null) && value.image) continue;
+      if (live.has(value.cellImage ?? null) && value.cellImage) continue;
+      retired.current.delete(value);
+      disposeImages(value);
+    }
+    previous.current = newest;
+  }, [newest]);
+
   return newest;
 }
 

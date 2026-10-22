@@ -52,8 +52,10 @@ export class RegionRenderCache<Value> {
     return entry.value;
   }
 
-  set(region: MapRegion, themeKey: unknown, layerKey: string, value: Value): void {
+  /** Insert `value`, returning the value it pushed out (the caller owns releasing it). */
+  set(region: MapRegion, themeKey: unknown, layerKey: string, value: Value): Value | undefined {
     this.entries.push({ region, themeKey, layerKey, value });
-    if (this.entries.length > this.capacity) this.entries.shift();
+    if (this.entries.length > this.capacity) return this.entries.shift()?.value;
+    return undefined;
   }
 }
