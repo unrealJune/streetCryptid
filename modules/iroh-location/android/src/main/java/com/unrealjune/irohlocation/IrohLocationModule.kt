@@ -693,7 +693,30 @@ class IrohLocationModule : Module() {
         "shutdowns" to snapshot.shutdowns.toDouble(),
         "shutdownFailures" to snapshot.shutdownFailures.toDouble(),
         "shutdownTimeouts" to snapshot.shutdownTimeouts.toDouble(),
+        "heals" to snapshot.heals.toDouble(),
       )
+    }
+
+    /**
+     * Whether this phone currently reaches nobody, and what has been done about it (`isolation.rs`).
+     * `rebuildDue` is the mounted app's cue to heal through `rebindNode`; with no app holding the
+     * node the Rust core heals it itself.
+     */
+    Function("isolationStatus") {
+      if (!IrohAndroidBootstrap.installed) return@Function null
+      val status = uniffi.iroh_location.isolationStatus()
+      buildMap<String, Any> {
+        put("isolated", status.isolated)
+        put("silentPasses", status.silentPasses.toInt())
+        put("networkChanges", status.networkChanges.toInt())
+        put("rebuilds", status.rebuilds.toInt())
+        put("rebuildDue", status.rebuildDue)
+        put("episodes", status.episodes.toInt())
+        put("recoveries", status.recoveries.toInt())
+        status.isolatedSinceMs?.let { put("isolatedSinceMs", it.toDouble()) }
+        status.lastAnswerMs?.let { put("lastAnswerMs", it.toDouble()) }
+        status.lastRebuildMs?.let { put("lastRebuildMs", it.toDouble()) }
+      }
     }
 
     // Device identity — the background drain path's own copy. See DeviceSecretsStore.kt for why

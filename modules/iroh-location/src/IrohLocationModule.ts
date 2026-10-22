@@ -12,6 +12,7 @@ import type {
   NativeControlMsg,
   NativeRatchetEvent,
   NativeLocationFix,
+  IsolationStatus,
   NodeHostSnapshot,
   NodeKeys,
   PairEvent,
@@ -178,6 +179,7 @@ export declare class IrohLocationNativeModule
   nativeNodeOwner?(): string;
   restartNode?(config?: TransportConfig): Promise<void>;
   nodeHostSnapshot?(): NodeHostSnapshot | null;
+  isolationStatus?(): IsolationStatus | null;
   startNativeBackground?(): void;
   stopNativeBackground?(): void;
   /**

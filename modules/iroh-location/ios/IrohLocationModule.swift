@@ -569,7 +569,28 @@ public final class IrohLocationModule: Module {
         "shutdowns": Double(snapshot.shutdowns),
         "shutdownFailures": Double(snapshot.shutdownFailures),
         "shutdownTimeouts": Double(snapshot.shutdownTimeouts),
+        "heals": Double(snapshot.heals),
       ]
+    }
+
+    /// Whether this phone currently reaches nobody, and what has been done about it (`isolation.rs`).
+    /// `rebuildDue` is the mounted app's cue to heal through `rebindNode`; with no app holding the
+    /// node the Rust core heals it itself.
+    Function("isolationStatus") { () -> [String: Any] in
+      let status = isolationStatus()
+      var out: [String: Any] = [
+        "isolated": status.isolated,
+        "silentPasses": Int(status.silentPasses),
+        "networkChanges": Int(status.networkChanges),
+        "rebuilds": Int(status.rebuilds),
+        "rebuildDue": status.rebuildDue,
+        "episodes": Int(status.episodes),
+        "recoveries": Int(status.recoveries),
+      ]
+      if let at = status.isolatedSinceMs { out["isolatedSinceMs"] = Double(at) }
+      if let at = status.lastAnswerMs { out["lastAnswerMs"] = Double(at) }
+      if let at = status.lastRebuildMs { out["lastRebuildMs"] = Double(at) }
+      return out
     }
 
     // A module torn down without its JS calling `shutdown` (a reload, a crashed context) would

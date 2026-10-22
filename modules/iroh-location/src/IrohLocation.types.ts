@@ -84,6 +84,28 @@ export interface NodeHostSnapshot {
   shutdowns: number;
   shutdownFailures: number;
   shutdownTimeouts: number;
+  /** Rebuilds because the phone reached nobody. Absent on binaries from before `isolation.rs`. */
+  heals?: number;
+}
+
+/**
+ * Whether this phone currently reaches nobody — every dial, the stash's included, unanswered — and
+ * what has been done about it. Mirrors `IsolationStatus` in `modules/iroh-location/rust/src/isolation.rs`.
+ */
+export interface IsolationStatus {
+  isolated: boolean;
+  /** When the silent streak that made it isolated began (epoch ms). */
+  isolatedSinceMs?: number;
+  silentPasses: number;
+  /** When anyone last answered (epoch ms), this process. */
+  lastAnswerMs?: number;
+  networkChanges: number;
+  rebuilds: number;
+  /** The mounted app should heal now, through `rebindNode('isolated')`. */
+  rebuildDue: boolean;
+  lastRebuildMs?: number;
+  episodes: number;
+  recoveries: number;
 }
 
 export interface TransportConfig {
@@ -743,6 +765,8 @@ export interface IrohLocationApi {
   restartNode?(config?: TransportConfig): Promise<void>;
   /** The node host's view of who holds the node, for `device.health`. OPTIONAL. */
   nodeHostSnapshot?(): NodeHostSnapshot | null;
+  /** Whether this phone reaches nobody, for `device.health` and the heal. OPTIONAL. */
+  isolationStatus?(): IsolationStatus | null;
   startNativeBackground?(): void;
   stopNativeBackground?(): void;
   /**

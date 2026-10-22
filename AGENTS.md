@@ -126,6 +126,17 @@ Conventions when changing that code:
   `onFriendsPulled` and re-reads the replica — a local read, never a second dial. Android had the
   same hole (the service keeps the app mounted, so every capture is a hand-off) and pulls the same
   way after a hand-off while no activity is in the foreground. See `infra/otel/README.md`.
+- **A phone that reaches nobody notices, and heals itself** (`rust/src/isolation.rs`). On 2026-10-22
+  the field-soak SE showed a friend "parked here 12 hr" while she was publishing live elsewhere:
+  every dial the SE made, the stash's included, timed out for hours while its relays and Wi-Fi
+  looked fine. Silence counts only when the STASH was dialled and did not answer (friends sleep);
+  an answer is any `peer.contact`, a push peer that reported, or a pull namespace that reached
+  `ContentReady`/closed (`ns_idle` alone is not one). Isolated after 3 silent passes over 10 min →
+  `Endpoint::network_change()` → after 10 more, a rebuild, at most once an hour. The core rebuilds
+  only when NO app holds the node (`NodeHost::heal_isolated`; the background runtimes re-acquire
+  per wake); with one mounted, the heartbeat's `healIfIsolated` calls `rebindNode('isolated')`,
+  because only JS can rewire its subscriptions. Do not let the core rebuild under an app lease.
+  `node.isolation{event=recovered,last_step}` says whether a step or time fixed it.
 - **`bg.wake` and `bg.backfill` do not exist.** They went dead when capture moved into Rust — the
   location wake is native and emits no JS span at all. Six e2e scenarios asserted them,
   `background-location-e2e.sh` gated its PASS on `bg.wake > 0` so it could never pass, and two
