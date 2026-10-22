@@ -125,7 +125,8 @@
       "expo-sharing",
       "./plugins/withSharedSigning",
       "./plugins/withBackupExclusion",
-      "./plugins/withDeferredReactNativeStart"
+      "./plugins/withDeferredReactNativeStart",
+      "./plugins/withProfileable"
     ],
     "experiments": {
       "typedRoutes": true,

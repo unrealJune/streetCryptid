@@ -28,6 +28,8 @@ pub mod gate;
 mod h3;
 /// `location.runtime` spans: the native location runtime reporting itself (see the module docs).
 pub mod location_runtime;
+/// `process.memory` spans: the platform runtime sampling its own process (see the module docs).
+pub mod process_memory;
 /// Festival-mesh radio capsules: the outer wrapper that carries an envelope over open
 /// radio without a linkable identity (pure; see `mesh.rs` and `docs/mesh/DESIGN.md`).
 pub mod mesh;

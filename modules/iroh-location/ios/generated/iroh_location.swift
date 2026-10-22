@@ -7569,6 +7569,161 @@ public func FfiConverterTypePeerTransportDiagnostic_lower(_ value: PeerTransport
 
 
 /**
+ * One sample. Every field is optional because each platform can read a different subset.
+ */
+public struct ProcessMemorySample: Equatable, Hashable {
+    /**
+     * What took the sample (`pulse`, `started`, ...).
+     */
+    public var trigger: String
+    /**
+     * `/proc/self/status` (Linux/Android).
+     */
+    public var rssBytes: UInt64?
+    public var rssAnonBytes: UInt64?
+    public var rssFileBytes: UInt64?
+    public var swapBytes: UInt64?
+    /**
+     * The platform's malloc heap, allocated (Android: `Debug.getNativeHeapAllocatedSize`).
+     */
+    public var nativeHeapBytes: UInt64?
+    /**
+     * The managed heap in use (Android: `Runtime.totalMemory - freeMemory`).
+     */
+    public var javaHeapBytes: UInt64?
+    /**
+     * Proportional set size, when the platform can afford to compute it.
+     */
+    public var pssBytes: UInt64?
+    public var threads: UInt32?
+    /**
+     * Open file descriptors (sockets included).
+     */
+    public var fds: UInt32?
+    /**
+     * Memory mappings (`/proc/self/maps` lines).
+     */
+    public var maps: UInt32?
+    /**
+     * Since the process started.
+     */
+    public var uptimeMs: UInt64?
+    /**
+     * Whether an app UI is mounted in this process right now.
+     */
+    public var appWired: Bool?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * What took the sample (`pulse`, `started`, ...).
+         */trigger: String, 
+        /**
+         * `/proc/self/status` (Linux/Android).
+         */rssBytes: UInt64?, rssAnonBytes: UInt64?, rssFileBytes: UInt64?, swapBytes: UInt64?, 
+        /**
+         * The platform's malloc heap, allocated (Android: `Debug.getNativeHeapAllocatedSize`).
+         */nativeHeapBytes: UInt64?, 
+        /**
+         * The managed heap in use (Android: `Runtime.totalMemory - freeMemory`).
+         */javaHeapBytes: UInt64?, 
+        /**
+         * Proportional set size, when the platform can afford to compute it.
+         */pssBytes: UInt64?, threads: UInt32?, 
+        /**
+         * Open file descriptors (sockets included).
+         */fds: UInt32?, 
+        /**
+         * Memory mappings (`/proc/self/maps` lines).
+         */maps: UInt32?, 
+        /**
+         * Since the process started.
+         */uptimeMs: UInt64?, 
+        /**
+         * Whether an app UI is mounted in this process right now.
+         */appWired: Bool?) {
+        self.trigger = trigger
+        self.rssBytes = rssBytes
+        self.rssAnonBytes = rssAnonBytes
+        self.rssFileBytes = rssFileBytes
+        self.swapBytes = swapBytes
+        self.nativeHeapBytes = nativeHeapBytes
+        self.javaHeapBytes = javaHeapBytes
+        self.pssBytes = pssBytes
+        self.threads = threads
+        self.fds = fds
+        self.maps = maps
+        self.uptimeMs = uptimeMs
+        self.appWired = appWired
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension ProcessMemorySample: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeProcessMemorySample: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ProcessMemorySample {
+        return
+            try ProcessMemorySample(
+                trigger: FfiConverterString.read(from: &buf), 
+                rssBytes: FfiConverterOptionUInt64.read(from: &buf), 
+                rssAnonBytes: FfiConverterOptionUInt64.read(from: &buf), 
+                rssFileBytes: FfiConverterOptionUInt64.read(from: &buf), 
+                swapBytes: FfiConverterOptionUInt64.read(from: &buf), 
+                nativeHeapBytes: FfiConverterOptionUInt64.read(from: &buf), 
+                javaHeapBytes: FfiConverterOptionUInt64.read(from: &buf), 
+                pssBytes: FfiConverterOptionUInt64.read(from: &buf), 
+                threads: FfiConverterOptionUInt32.read(from: &buf), 
+                fds: FfiConverterOptionUInt32.read(from: &buf), 
+                maps: FfiConverterOptionUInt32.read(from: &buf), 
+                uptimeMs: FfiConverterOptionUInt64.read(from: &buf), 
+                appWired: FfiConverterOptionBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: ProcessMemorySample, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.trigger, into: &buf)
+        FfiConverterOptionUInt64.write(value.rssBytes, into: &buf)
+        FfiConverterOptionUInt64.write(value.rssAnonBytes, into: &buf)
+        FfiConverterOptionUInt64.write(value.rssFileBytes, into: &buf)
+        FfiConverterOptionUInt64.write(value.swapBytes, into: &buf)
+        FfiConverterOptionUInt64.write(value.nativeHeapBytes, into: &buf)
+        FfiConverterOptionUInt64.write(value.javaHeapBytes, into: &buf)
+        FfiConverterOptionUInt64.write(value.pssBytes, into: &buf)
+        FfiConverterOptionUInt32.write(value.threads, into: &buf)
+        FfiConverterOptionUInt32.write(value.fds, into: &buf)
+        FfiConverterOptionUInt32.write(value.maps, into: &buf)
+        FfiConverterOptionUInt64.write(value.uptimeMs, into: &buf)
+        FfiConverterOptionBool.write(value.appWired, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeProcessMemorySample_lift(_ buf: RustBuffer) throws -> ProcessMemorySample {
+    return try FfiConverterTypeProcessMemorySample.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeProcessMemorySample_lower(_ value: ProcessMemorySample) -> RustBuffer {
+    return FfiConverterTypeProcessMemorySample.lower(value)
+}
+
+
+/**
  * A verified cryptid **profile** as surfaced to the app (§3). Returned already signature- and
  * endpoint-verified; the bridge can render it directly.
  */
@@ -10662,6 +10817,15 @@ public func recordLocationRuntime(event: LocationRuntimeEvent)  {try! rustCall()
 }
 }
 /**
+ * Record one sample as a `process.memory` span. Cheap and synchronous, like `location.runtime`.
+ */
+public func recordProcessMemory(sample: ProcessMemorySample)  {try! rustCall() {
+    uniffi_iroh_location_fn_func_record_process_memory(
+        FfiConverterTypeProcessMemorySample_lower(sample),$0
+    )
+}
+}
+/**
  * Point developer telemetry at an OTLP/HTTP collector (`http://<lan-ip>:4318`), or disable it by
  * passing an empty endpoint. Returns whether export is active — always `false` when the crate was
  * built without the `otel` feature (store builds), so the uniffi surface is identical either way
@@ -10768,6 +10932,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_func_record_location_runtime() != 22013) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_iroh_location_checksum_func_record_process_memory() != 12906) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_func_configure_telemetry() != 42673) {

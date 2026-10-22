@@ -134,6 +134,7 @@ class BackgroundLocationService : Service() {
       } else {
         reporter.event(LocationRuntimeKind.STARTED, reason = "service")
       }
+      ProcessMemorySampler.sample("started")
       reporter.startPulse()
     }
   }

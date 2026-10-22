@@ -743,6 +743,8 @@ external fun uniffi_iroh_location_checksum_func_node_host(
 ): Int
 external fun uniffi_iroh_location_checksum_func_record_location_runtime(
 ): Int
+external fun uniffi_iroh_location_checksum_func_record_process_memory(
+): Int
 external fun uniffi_iroh_location_checksum_func_configure_telemetry(
 ): Int
 external fun uniffi_iroh_location_checksum_func_flush_telemetry(
@@ -1317,6 +1319,8 @@ external fun uniffi_iroh_location_fn_func_node_host(uniffi_out_err: UniffiRustCa
 ): Long
 external fun uniffi_iroh_location_fn_func_record_location_runtime(`event`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
+external fun uniffi_iroh_location_fn_func_record_process_memory(`sample`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
 external fun uniffi_iroh_location_fn_func_configure_telemetry(`endpoint`: RustBuffer.ByValue,`instanceId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): Byte
 external fun uniffi_iroh_location_fn_func_flush_telemetry(
@@ -1495,6 +1499,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_iroh_location_checksum_func_record_location_runtime() != 22013) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_iroh_location_checksum_func_record_process_memory() != 12906) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_iroh_location_checksum_func_configure_telemetry() != 42673) {
@@ -9839,6 +9846,129 @@ public object FfiConverterTypePeerTransportDiagnostic: FfiConverterRustBuffer<Pe
 
 
 /**
+ * One sample. Every field is optional because each platform can read a different subset.
+ */
+data class ProcessMemorySample (
+    /**
+     * What took the sample (`pulse`, `started`, ...).
+     */
+    var `trigger`: kotlin.String
+    , 
+    /**
+     * `/proc/self/status` (Linux/Android).
+     */
+    var `rssBytes`: kotlin.ULong?
+    , 
+    var `rssAnonBytes`: kotlin.ULong?
+    , 
+    var `rssFileBytes`: kotlin.ULong?
+    , 
+    var `swapBytes`: kotlin.ULong?
+    , 
+    /**
+     * The platform's malloc heap, allocated (Android: `Debug.getNativeHeapAllocatedSize`).
+     */
+    var `nativeHeapBytes`: kotlin.ULong?
+    , 
+    /**
+     * The managed heap in use (Android: `Runtime.totalMemory - freeMemory`).
+     */
+    var `javaHeapBytes`: kotlin.ULong?
+    , 
+    /**
+     * Proportional set size, when the platform can afford to compute it.
+     */
+    var `pssBytes`: kotlin.ULong?
+    , 
+    var `threads`: kotlin.UInt?
+    , 
+    /**
+     * Open file descriptors (sockets included).
+     */
+    var `fds`: kotlin.UInt?
+    , 
+    /**
+     * Memory mappings (`/proc/self/maps` lines).
+     */
+    var `maps`: kotlin.UInt?
+    , 
+    /**
+     * Since the process started.
+     */
+    var `uptimeMs`: kotlin.ULong?
+    , 
+    /**
+     * Whether an app UI is mounted in this process right now.
+     */
+    var `appWired`: kotlin.Boolean?
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeProcessMemorySample: FfiConverterRustBuffer<ProcessMemorySample> {
+    override fun read(buf: ByteBuffer): ProcessMemorySample {
+        return ProcessMemorySample(
+            FfiConverterString.read(buf),
+            FfiConverterOptionalULong.read(buf),
+            FfiConverterOptionalULong.read(buf),
+            FfiConverterOptionalULong.read(buf),
+            FfiConverterOptionalULong.read(buf),
+            FfiConverterOptionalULong.read(buf),
+            FfiConverterOptionalULong.read(buf),
+            FfiConverterOptionalULong.read(buf),
+            FfiConverterOptionalUInt.read(buf),
+            FfiConverterOptionalUInt.read(buf),
+            FfiConverterOptionalUInt.read(buf),
+            FfiConverterOptionalULong.read(buf),
+            FfiConverterOptionalBoolean.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: ProcessMemorySample) = (
+            FfiConverterString.allocationSize(value.`trigger`) +
+            FfiConverterOptionalULong.allocationSize(value.`rssBytes`) +
+            FfiConverterOptionalULong.allocationSize(value.`rssAnonBytes`) +
+            FfiConverterOptionalULong.allocationSize(value.`rssFileBytes`) +
+            FfiConverterOptionalULong.allocationSize(value.`swapBytes`) +
+            FfiConverterOptionalULong.allocationSize(value.`nativeHeapBytes`) +
+            FfiConverterOptionalULong.allocationSize(value.`javaHeapBytes`) +
+            FfiConverterOptionalULong.allocationSize(value.`pssBytes`) +
+            FfiConverterOptionalUInt.allocationSize(value.`threads`) +
+            FfiConverterOptionalUInt.allocationSize(value.`fds`) +
+            FfiConverterOptionalUInt.allocationSize(value.`maps`) +
+            FfiConverterOptionalULong.allocationSize(value.`uptimeMs`) +
+            FfiConverterOptionalBoolean.allocationSize(value.`appWired`)
+    )
+
+    override fun write(value: ProcessMemorySample, buf: ByteBuffer) {
+            FfiConverterString.write(value.`trigger`, buf)
+            FfiConverterOptionalULong.write(value.`rssBytes`, buf)
+            FfiConverterOptionalULong.write(value.`rssAnonBytes`, buf)
+            FfiConverterOptionalULong.write(value.`rssFileBytes`, buf)
+            FfiConverterOptionalULong.write(value.`swapBytes`, buf)
+            FfiConverterOptionalULong.write(value.`nativeHeapBytes`, buf)
+            FfiConverterOptionalULong.write(value.`javaHeapBytes`, buf)
+            FfiConverterOptionalULong.write(value.`pssBytes`, buf)
+            FfiConverterOptionalUInt.write(value.`threads`, buf)
+            FfiConverterOptionalUInt.write(value.`fds`, buf)
+            FfiConverterOptionalUInt.write(value.`maps`, buf)
+            FfiConverterOptionalULong.write(value.`uptimeMs`, buf)
+            FfiConverterOptionalBoolean.write(value.`appWired`, buf)
+    }
+}
+
+
+
+/**
  * A verified cryptid **profile** as surfaced to the app (§3). Returned already signature- and
  * endpoint-verified; the bridge can render it directly.
  */
@@ -12517,6 +12647,18 @@ public object FfiConverterSequenceTypeTransportAddressDiagnostic: FfiConverterRu
     UniffiLib.uniffi_iroh_location_fn_func_record_location_runtime(
     
         FfiConverterTypeLocationRuntimeEvent.lower(`event`),_status)
+}
+    
+    
+
+        /**
+         * Record one sample as a `process.memory` span. Cheap and synchronous, like `location.runtime`.
+         */ fun `recordProcessMemory`(`sample`: ProcessMemorySample)
+        = 
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_iroh_location_fn_func_record_process_memory(
+    
+        FfiConverterTypeProcessMemorySample.lower(`sample`),_status)
 }
     
     
