@@ -137,6 +137,41 @@ internal object ServiceRecovery {
       false
     }
 
+  // Battery-optimisation exemption.
+
+  /**
+   * Whether the app is exempt from battery optimisation ("Unrestricted"). An exempt app may start
+   * its foreground service from the background at any time, which makes every recovery path above
+   * succeed without the user's help — the one setting that fully closes the 2026-10-21 failure.
+   */
+  fun isBatteryOptimizationExempt(context: Context): Boolean =
+    context.getSystemService(android.os.PowerManager::class.java)
+      ?.isIgnoringBatteryOptimizations(context.packageName) ?: false
+
+  /**
+   * Ask for the exemption with the system's one-tap dialog, falling back to the settings list when
+   * a vendor build has no handler for the direct request. Returns whether anything was shown.
+   */
+  fun requestBatteryOptimizationExemption(context: Context): Boolean {
+    if (isBatteryOptimizationExempt(context)) return false
+    val direct =
+      Intent(android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS)
+        .setData(android.net.Uri.parse("package:${context.packageName}"))
+        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    val list =
+      Intent(android.provider.Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)
+        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    for (intent in listOf(direct, list)) {
+      try {
+        context.startActivity(intent)
+        return true
+      } catch (e: Exception) {
+        Log.w(TAG, "battery exemption request not shown: ${intent.action}", e)
+      }
+    }
+    return false
+  }
+
   // Watchdog.
 
   private fun alarmIntent(context: Context): PendingIntent =

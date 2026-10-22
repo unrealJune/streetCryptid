@@ -206,6 +206,9 @@ async function taskAttributes(): Promise<Attributes> {
   // background failure this path exists to close.
   const iroh = tryGetIrohLocation();
   attrs['task.location_running'] = iroh?.nativeBackgroundRunning?.();
+  // Android: whether the service may restart itself from the background (ServiceRecovery). Absent
+  // on iOS and on binaries that predate the export.
+  attrs['battery.optimization_exempt'] = iroh?.batteryOptimizationExempt?.();
 
   // The runtime's own account of itself, flattened under `location.*`.
   //

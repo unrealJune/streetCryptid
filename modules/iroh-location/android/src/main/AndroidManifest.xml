@@ -36,6 +36,10 @@
          user. RECEIVE_BOOT_COMPLETED: the service's own boot path, not expo-task-manager's. -->
     <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <!-- The one-tap "Unrestricted" prompt from the background-reliability onboarding step. Google
+         Play restricts which apps may use it; continuous location sharing is the core function
+         here, which is the case the policy allows, but the declaration has to say so. -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
 
     <application>
         <!-- `location` is one of the few FGS types Android 15 still lets a boot receiver start,
