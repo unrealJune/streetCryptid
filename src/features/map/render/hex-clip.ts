@@ -100,6 +100,32 @@ export function hexClipInner(rect: Box, lattice: ScreenHexLattice): Box | null {
   return { x: rect.x + inset, y: rect.y + inset, width, height };
 }
 
+/**
+ * The lattice to clip `rect` with, or null when the clip would cut cells inside `view` — the view
+ * the region was built around, which its pad surrounds.
+ *
+ * The clip drops every cell that is not wholly inside the rect. A cell touching the view has its
+ * centre within one radius of it and reaches one radius further, so the clip is safe only while
+ * the pad between view and rect edge is at least a cell's diameter. Zoomed far in it is not: a
+ * res-9 cell is ~430 px across at z18, wider than the pad, and the cells on screen whose far side
+ * poked past the rect were drawn as loading skeleton over a finished map, until a pan moved them
+ * inside. Without the clip the bitmap ends as a rectangle, but a full pad away from anything shown.
+ */
+export function clipLatticeFor(
+  rect: Box,
+  view: Box,
+  lattice: ScreenHexLattice | null
+): ScreenHexLattice | null {
+  if (!lattice) return null;
+  const pad = Math.min(
+    view.x - rect.x,
+    view.y - rect.y,
+    rect.x + rect.width - (view.x + view.width),
+    rect.y + rect.height - (view.y + view.height)
+  );
+  return pad >= 2 * lattice.radius ? lattice : null;
+}
+
 /** Uniforms for {@link HEX_CLIP_SKSL_FN}; `null` lattice turns the clip off. */
 export function hexClipUniforms(rect: Box, lattice: ScreenHexLattice | null) {
   return {

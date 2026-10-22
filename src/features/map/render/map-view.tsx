@@ -30,6 +30,7 @@ import {
   applyViewTransform,
   scaleFor,
   viewTransformFor,
+  visibleWorldRect,
   worldToScreen,
   type ViewTransform,
 } from '../core/camera';
@@ -73,7 +74,7 @@ import { makeLutImage } from './region-shader';
 import { getRevealMaskEffect } from './reveal-mask-shader';
 import { prevRectUniform, REVEAL_TARGET } from './reveal-mask';
 import { useRegionBundle, type RegionBundle } from './use-region-bundle';
-import { hexClipInner, hexClipUniforms } from './hex-clip';
+import { clipLatticeFor, hexClipInner, hexClipUniforms } from './hex-clip';
 import { HexClippedImage } from './hex-clipped-image';
 import { YouLocator } from './you-locator';
 import { LoadingHexGrid } from './loading-hex-grid';
@@ -188,6 +189,19 @@ function anchorRect(rect: WorldRect, anchor: CameraState, viewport: Viewport): S
   const [x, y] = worldToScreen(anchor, viewport, [rect.minX, rect.minY]);
   const s = scaleFor(anchor.zoom);
   return { x, y, width: (rect.maxX - rect.minX) * s, height: (rect.maxY - rect.minY) * s };
+}
+
+/** The view a region was built around (its rect minus the pad), in anchor space. */
+function regionViewRect(
+  spec: { readonly rect: WorldRect; readonly zoom: number },
+  anchor: CameraState,
+  viewport: Viewport
+): ScreenRect {
+  const center: [number, number] = [
+    (spec.rect.minX + spec.rect.maxX) / 2,
+    (spec.rect.minY + spec.rect.maxY) / 2,
+  ];
+  return anchorRect(visibleWorldRect({ center, zoom: spec.zoom }, viewport), anchor, viewport);
 }
 
 /**
@@ -535,16 +549,39 @@ export function MapView({
    * Neither depends on the exploration layer: the skeleton is how the map says it is still
    * loading. It used to mount only with exploration on, so hiding your explored cells also hid
    * every sign that a region was on its way.
+   *
+   * Decided per region, and null when its cells are too big for its pad (`clipLatticeFor`).
    */
-  const clipLattice = loadingLattice;
+  const curClipLattice = useMemo(
+    () =>
+      track.cur && curRect && viewport
+        ? clipLatticeFor(
+            curRect,
+            regionViewRect(track.cur.region.spec, anchor, viewport),
+            loadingLattice
+          )
+        : null,
+    [track.cur, curRect, anchor, viewport, loadingLattice]
+  );
+  const prevClipLattice = useMemo(
+    () =>
+      track.prev && prevRect && viewport
+        ? clipLatticeFor(
+            prevRect,
+            regionViewRect(track.prev.region.spec, anchor, viewport),
+            loadingLattice
+          )
+        : null,
+    [track.prev, prevRect, anchor, viewport, loadingLattice]
+  );
   // The skeleton may skip only what the clipped bitmap is sure to cover.
   const curCovered = useMemo(
-    () => (curRect && clipLattice ? hexClipInner(curRect, clipLattice) : curRect),
-    [curRect, clipLattice]
+    () => (curRect && curClipLattice ? hexClipInner(curRect, curClipLattice) : curRect),
+    [curRect, curClipLattice]
   );
   const revealHexUniforms = useMemo(
-    () => (curRect ? hexClipUniforms(curRect, clipLattice) : hexClipUniforms(ZERO_RECT, null)),
-    [curRect, clipLattice]
+    () => (curRect ? hexClipUniforms(curRect, curClipLattice) : hexClipUniforms(ZERO_RECT, null)),
+    [curRect, curClipLattice]
   );
   const revealUniforms = useDerivedValue(
     () => ({ uReveal: revealFront.value, uPrevRect: prevRectVec, ...revealHexUniforms }),
@@ -964,7 +1001,7 @@ export function MapView({
                     swaps its pixels in instantly where prev already covered
                     (uPrevRect), so only the newly-exposed ground hex-loads in. */}
                   {prevImage && prevRect && (
-                    <HexClippedImage image={prevImage} rect={prevRect} lattice={clipLattice} />
+                    <HexClippedImage image={prevImage} rect={prevRect} lattice={prevClipLattice} />
                   )}
                   {curImage &&
                     curRect &&
@@ -988,7 +1025,7 @@ export function MapView({
                       <HexClippedImage
                         image={curImage}
                         rect={curRect}
-                        lattice={clipLattice}
+                        lattice={curClipLattice}
                         opacity={curOpacityValue}
                       />
                     ))}
