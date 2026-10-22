@@ -101,8 +101,19 @@ class BackgroundLocationService : Service() {
 
   override fun onCreate() {
     super.onCreate()
-    startForeground(NOTIFICATION_ID, notification())
+    // A redelivered restart lands here with the app in the background, where Android 12+ refuses
+    // the promotion. Uncaught, that refusal crashes the process and Android backs the next restart
+    // off by months (`restartDelay=+218d` on a Pixel, 2026-10-21) — see [ServiceRecovery]. Caught,
+    // it is a clean stop with a watchdog and a resume notification behind it.
+    try {
+      startForeground(NOTIFICATION_ID, notification())
+    } catch (e: Exception) {
+      ServiceRecovery.recordBlocked(applicationContext, "on-create: ${e.javaClass.simpleName}")
+      stopSelf()
+      return
+    }
     running = true
+    ServiceRecovery.noteStarted(applicationContext)
     startLocationUpdates()
     startStationaryTicker()
     // Off the main thread: configuring telemetry loads the native library. A process restarted
@@ -110,7 +121,19 @@ class BackgroundLocationService : Service() {
     // the one with nobody else to configure it, so the `started` span goes out after it.
     scope.launch(Dispatchers.IO) {
       TelemetryConfigurator.applyPersisted(applicationContext)
-      reporter.event(LocationRuntimeKind.STARTED, reason = "service")
+      // Refusals since the last good start, reported now because the processes they happened in
+      // may never have exported anything. `detail` carries the count, the gap and the last cause.
+      val blocked = ServiceRecovery.takeBlocked(applicationContext)
+      if (blocked != null) {
+        val gapS = (System.currentTimeMillis() - blocked.firstAtMs) / 1000
+        reporter.event(
+          LocationRuntimeKind.STARTED,
+          reason = "recovered",
+          detail = "fgs_start_blocked count=${blocked.count} gap_s=$gapS last=${blocked.reason}",
+        )
+      } else {
+        reporter.event(LocationRuntimeKind.STARTED, reason = "service")
+      }
       reporter.startPulse()
     }
   }
@@ -123,7 +146,15 @@ class BackgroundLocationService : Service() {
   override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int = START_REDELIVER_INTENT
 
   override fun onDestroy() {
+    // False when `onCreate` was refused the foreground and stopped early: nothing was started, and
+    // the background lease may belong to someone else in this process, so there is nothing to undo.
+    val started = running
     running = false
+    if (!started) {
+      scope.cancel()
+      super.onDestroy()
+      return
+    }
     reporter.stopPulse()
     stationaryTicker?.cancel()
     stationaryTicker = null
@@ -395,12 +426,16 @@ class BackgroundLocationService : Service() {
      */
     private const val MIN_TICK_INTERVAL_MS = 60_000L
 
+    /** The user turned sharing on (or the cadence changed while it was on). */
     fun start(context: Context) {
+      ServiceRecovery.setWanted(context, true)
       val intent = Intent(context, BackgroundLocationService::class.java)
       context.startForegroundService(intent)
     }
 
+    /** The user turned sharing off: nothing may bring the service back until they turn it on. */
     fun stop(context: Context) {
+      ServiceRecovery.setWanted(context, false)
       context.stopService(Intent(context, BackgroundLocationService::class.java))
     }
   }
