@@ -113,7 +113,16 @@ class BackgroundLocationService : Service() {
       return
     }
     running = true
-    ServiceRecovery.noteStarted(applicationContext)
+    // The other way Android refuses: for a background-restricted app it logs "startForeground()
+    // not allowed due to bg restriction" and returns normally, leaving an ordinary background
+    // service the system will stop within minutes (seen on an emulator, 2026-10-22). Keep running
+    // and publishing while it lasts, but treat it as the refusal it is.
+    val promoted = Build.VERSION.SDK_INT < Build.VERSION_CODES.Q || foregroundServiceType != 0
+    if (!promoted) {
+      ServiceRecovery.recordBlocked(applicationContext, "on-create: not-foreground")
+    } else {
+      ServiceRecovery.noteStarted(applicationContext)
+    }
     startLocationUpdates()
     startStationaryTicker()
     // Off the main thread: configuring telemetry loads the native library. A process restarted
@@ -123,7 +132,8 @@ class BackgroundLocationService : Service() {
       TelemetryConfigurator.applyPersisted(applicationContext)
       // Refusals since the last good start, reported now because the processes they happened in
       // may never have exported anything. `detail` carries the count, the gap and the last cause.
-      val blocked = ServiceRecovery.takeBlocked(applicationContext)
+      // Only a start that actually reached the foreground ends the outage being reported.
+      val blocked = if (promoted) ServiceRecovery.takeBlocked(applicationContext) else null
       if (blocked != null) {
         val gapS = (System.currentTimeMillis() - blocked.firstAtMs) / 1000
         reporter.event(
@@ -132,7 +142,10 @@ class BackgroundLocationService : Service() {
           detail = "fgs_start_blocked count=${blocked.count} gap_s=$gapS last=${blocked.reason}",
         )
       } else {
-        reporter.event(LocationRuntimeKind.STARTED, reason = "service")
+        reporter.event(
+          LocationRuntimeKind.STARTED,
+          reason = if (promoted) "service" else "service-not-foreground",
+        )
       }
       ProcessMemorySampler.sample("started")
       reporter.startPulse()
