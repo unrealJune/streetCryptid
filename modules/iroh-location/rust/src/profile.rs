@@ -492,7 +492,13 @@ impl ProfileDocs {
     ///
     /// Recorded in the book, so every later start reopens it whether or not JS runs.
     pub async fn import_ticket(&self, ticket: &str) -> Result<NamespaceId> {
-        let parsed: iroh_docs::DocTicket = ticket.parse().map_err(|e| anyhow!("{e}"))?;
+        let mut parsed: iroh_docs::DocTicket = ticket.parse().map_err(|e| anyhow!("{e}"))?;
+        // A ticket names the relays its owner had when it was minted; see `relay::scrub_addr`.
+        parsed.nodes = parsed
+            .nodes
+            .into_iter()
+            .map(crate::relay::scrub_addr)
+            .collect();
         let doc = self.docs.import(parsed).await?;
         let ns = doc.id();
         if ns != self.own_ns {

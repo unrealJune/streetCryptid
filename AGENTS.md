@@ -559,6 +559,13 @@ Conventions when changing that code:
   change. Failures log under `iroh_location::system_dns` as
   `system dns: <type> <host> failed: <reason>`, and which backend a node got is logged once at
   start (`system dns: iroh lookups go through …`).
+- **A stored ticket's relay is history, not an address** (`relay::scrub_addr`). Tickets record the
+  relay their owner had when they were minted and live as long as the friendship, so every friend
+  paired before 2026-10-11 still named a retired `iroh-*.junephilip.com` relay, which now lands on a
+  wildcard record that fails TLS; every phone held a doomed connection to it. Every ticket-derived
+  dial (gossip bootstrap, push, pull, docs/profile ticket import) keeps only relays in this node's
+  own relay map and leaves the rest to the N0 address lookup. Retiring a relay is a config change
+  and nothing more. The wasm build leaves addresses alone (a browser can only use relays).
 - Guard newly added native exports anyway (`typeof mod.configureTelemetry === 'function'`). Not
   because of bindgen now, but because a phone can be running an older binary than the JS bundle.
 
