@@ -26,6 +26,8 @@ mod durable;
 pub mod friend_pull;
 pub mod gate;
 mod h3;
+/// `node.isolation`: noticing this phone reaches nobody, and healing it (see the module docs).
+pub mod isolation;
 /// `location.runtime` spans: the native location runtime reporting itself (see the module docs).
 pub mod location_runtime;
 /// Festival-mesh radio capsules: the outer wrapper that carries an envelope over open
@@ -3386,6 +3388,20 @@ impl LocationNode {
                 }
             }
 
+            // A peer granted a zero budget was never waited for, so its silence says nothing.
+            let stash_dialed = roles.stash().is_some_and(|stash| {
+                report
+                    .per_peer
+                    .iter()
+                    .any(|p| &p.peer == stash && p.outcome != docs::PeerOutcome::Skipped)
+            });
+            self.observe_reachability(
+                report.per_peer.iter().any(|p| p.latency_ms.is_some()),
+                stash_dialed,
+                isolation::Source::Push,
+                &started.endpoint,
+            );
+
             Ok(report
                 .per_peer
                 .iter()
@@ -4565,7 +4581,60 @@ impl LocationNode {
     }
 }
 
+/// Bounds the `network_change` an isolated node runs on itself.
+const ISOLATION_NETWORK_CHANGE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 impl LocationNode {
+    /// Feed one delivery pass to the process's isolation tracker and act on what it says. See
+    /// `isolation.rs`.
+    ///
+    /// Silence counts only when the stash was among the peers dialled: friends' phones are asleep
+    /// most of the time, and a phone whose only peers are asleep is not isolated. An answer counts
+    /// from anyone.
+    ///
+    /// The rebuild is taken here only when no app holds the node; the background runtimes re-read
+    /// the host's node on every wake, so a replaced node is invisible to them. A mounted app heals
+    /// through `rebindNode`, which re-wires what it built on the old node.
+    fn observe_reachability(
+        &self,
+        answered: bool,
+        stash_dialed: bool,
+        source: isolation::Source,
+        endpoint: &Endpoint,
+    ) {
+        let observation = if answered {
+            isolation::Observation::Answered
+        } else if stash_dialed {
+            isolation::Observation::Silent
+        } else {
+            return;
+        };
+        let effects = isolation::observe(observation, source);
+        if effects.contains(&isolation::Effect::NetworkChange) {
+            let endpoint = endpoint.clone();
+            tokio::spawn(async move {
+                tracing::info!("network_change: this phone is reaching nobody");
+                if tokio::time::timeout(ISOLATION_NETWORK_CHANGE_TIMEOUT, endpoint.network_change())
+                    .await
+                    .is_err()
+                {
+                    tracing::warn!("node.isolation: network_change did not finish");
+                }
+            });
+        }
+        let heal = observation == isolation::Observation::Silent
+            && isolation::tracker().rebuild_due(isolation::now_ms())
+            && host::node_host().snapshot().app_leases == 0;
+        if heal {
+            // The address only, compared against the host's own node: a test's node, or one
+            // already replaced, is never healed in its place.
+            let me = self as *const Self as usize;
+            tokio::spawn(async move {
+                host::node_host().heal_isolated(me).await;
+            });
+        }
+    }
+
     /// The body of [`Self::sync_latest`] and [`Self::pull_latest`]. Kept out of the exported block
     /// so UniFFI does not see it.
     async fn pull_inner(
@@ -4584,6 +4653,7 @@ impl LocationNode {
             .map(|ticket| relay::scrub_addr(ticket.endpoint_addr().clone()))
             .collect();
         let dialed = peers.len();
+        let dialed_ids: Vec<[u8; 32]> = peers.iter().map(|addr| *addr.id.as_bytes()).collect();
         let span = tracing::info_span!(
             "trail.sync",
             sc.author = %telemetry::short_hex(&self.author),
@@ -4641,8 +4711,20 @@ impl LocationNode {
             let tallies = contact::tally_pull(&pass.delivered);
             let peers_delivered = tallies.len();
             current.record("sync.peers_delivered", peers_delivered);
+            let roles = self.peer_roles().await;
+            // A namespace that reached `ContentReady` or closed was answered by somebody even when
+            // there was nothing new; one that only went idle was not (our own namespace emits
+            // local events with nobody on the other end — 2026-10-22's silent passes all read
+            // `ns_idle = 1`).
+            self.observe_reachability(
+                pass.ends.content_ready > 0 || pass.ends.closed > 0 || !pass.delivered.is_empty(),
+                roles
+                    .stash()
+                    .is_some_and(|stash| dialed_ids.contains(stash)),
+                isolation::Source::Pull,
+                &started.endpoint,
+            );
             if !tallies.is_empty() {
-                let roles = self.peer_roles().await;
                 for (peer, tally) in tallies {
                     let path = match EndpointId::from_bytes(&peer) {
                         Ok(id) => delivery_label(&started.endpoint, id).await,

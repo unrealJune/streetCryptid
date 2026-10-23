@@ -248,6 +248,24 @@ async function taskAttributes(): Promise<Attributes> {
     // Same bargain as the block above.
   }
 
+  // Whether this phone reaches anybody (`isolation.rs`). `isolation.isolated` with
+  // `isolation.isolated_since_ms` says a phone has been dialling every peer, the stash included, and
+  // hearing nothing — the reader-side failure that, on 2026-10-22, made a friend's day-old stop look
+  // current. `network_changes` / `rebuilds` say what the core has tried in this episode, and
+  // `recoveries` against `episodes` whether trying helps. Absent on a binary from before it.
+  try {
+    const isolation = iroh?.isolationStatus?.();
+    if (isolation) {
+      for (const [key, value] of Object.entries(isolation)) {
+        if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+          attrs[`isolation.${snakeCase(key)}`] = value;
+        }
+      }
+    }
+  } catch {
+    // Same bargain as the block above.
+  }
+
   // What the background wakes since the last record actually COST.
   //
   // Everything else here describes the phone at the instant of reporting. These describe the

@@ -1067,6 +1067,12 @@ uint64_t uniffi_iroh_location_fn_func_node_host(RustCallStatus *_Nonnull out_sta
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_FUNC_ISOLATION_STATUS
+#define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_FUNC_ISOLATION_STATUS
+RustBuffer uniffi_iroh_location_fn_func_isolation_status(RustCallStatus *_Nonnull out_status
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_FUNC_RECORD_LOCATION_RUNTIME
 #define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_FUNC_RECORD_LOCATION_RUNTIME
 void uniffi_iroh_location_fn_func_record_location_runtime(RustBuffer event, RustCallStatus *_Nonnull out_status
@@ -1448,6 +1454,12 @@ uint16_t uniffi_iroh_location_checksum_func_record_friend_pull(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_FUNC_NODE_HOST
 #define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_FUNC_NODE_HOST
 uint16_t uniffi_iroh_location_checksum_func_node_host(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_FUNC_ISOLATION_STATUS
+#define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_FUNC_ISOLATION_STATUS
+uint16_t uniffi_iroh_location_checksum_func_isolation_status(void
     
 );
 #endif
