@@ -569,8 +569,11 @@ Conventions when changing that code:
 - **`process.memory` and `net.health` ride the five-minute runtime pulse, and are counters.**
   `memory.rust_live_bytes` comes from a counting `#[global_allocator]` (`alloc_stats.rs`, `otel`
   only) and is what splits Bionic's native heap into Rust's share and everyone else's;
-  `memory.open_span_events` counts events the exporter buffers on spans that have not ended, which
-  is a heap that grows without a leak. `net.health` carries relay-actor failures by host and class
+  `memory.open_span_events` counts events recorded on spans that have not ended; the exporter is
+  handed at most 128 of them per span (`ledger::CapSpanEvents`, the SDK's own export limit),
+  because iroh's endpoint-lifetime `actor` span collected ~1,500 an hour that it held forever. The
+  OTLP reload slot is never an empty `Vec` (`idle_slot`): an empty one answers `Interest::never`
+  and switched off every span and event in the process until the first `configure`. `net.health` carries relay-actor failures by host and class
   (counted by `RelayTap` from the `active-relay` span's `url`, because Loki drops that field),
   home-relay state, iroh's socket counters as deltas, resolver outcomes and Android's network
   context. It reads the node with `try_lock` and reports `busy` rather than wait. Do not turn

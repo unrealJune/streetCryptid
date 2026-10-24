@@ -61,6 +61,11 @@ pub struct NetworkContext {
 const RELAY_TARGET: &str = "iroh::socket::transports::relay";
 /// The span the relay actor runs under, one per relay URL it talks to.
 const RELAY_SPAN: &str = "active-relay";
+/// The host recorded for a relay failure with no `active-relay` span in scope. It is not a relay,
+/// so it is never counted as a foreign one: on 2026-10-24 the first build of this read
+/// `relay.foreign_errors = 4` on a Pixel whose four failures were all against its own home relay,
+/// opened before the subscriber could see spans (see `telemetry::imp::idle_slot`).
+const UNKNOWN_HOST: &str = "unknown";
 /// How much of a message we keep as a sample. Error chains run long; the class is the summary.
 const SAMPLE_CHARS: usize = 200;
 
@@ -254,7 +259,7 @@ where
         let mut fields = Fields::default();
         event.record(&mut fields);
         let message = fields.message.unwrap_or_default();
-        let host = host.unwrap_or_else(|| "unknown".to_owned());
+        let host = host.unwrap_or_else(|| UNKNOWN_HOST.to_owned());
         let class = classify(&message);
         with_tally(|t| {
             *t.relay.entry((host.clone(), class)).or_default() += 1;
@@ -423,7 +428,7 @@ pub fn record_network_health(trigger: String, context: Option<NetworkContext>) {
     let foreign_errors: u64 = tally
         .relay
         .iter()
-        .filter(|((host, _), _)| !known.is_empty() && !known.contains(host))
+        .filter(|((host, _), _)| !known.is_empty() && host != UNKNOWN_HOST && !known.contains(host))
         .map(|(_, n)| n)
         .sum();
     let dns_failed: u64 = tally.dns_failed.values().sum();

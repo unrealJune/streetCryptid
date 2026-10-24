@@ -607,19 +607,28 @@ pulse (Android only so far; `process_memory.rs`, `ProcessMemorySampler.kt`). On 
 the Pixel stayed under 1 GB for 36 h, but `memory.native_heap_bytes` still climbed ~5 MB/h in the
 background. The fields below exist to say whose that growth is:
 
-| Field                                                                                                    | Says                                                                                                                                                                        |
-| -------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `memory.native_heap_bytes`                                                                               | Bionic's whole malloc heap: Rust, Hermes, Skia, React Native                                                                                                                |
-| `memory.rust_live_bytes`                                                                                 | Rust's exact share (counting allocator, `alloc_stats.rs`). Climbing with the native heap: ours. Flat: someone else's                                                        |
-| `memory.rust_allocs_total` / `memory.rust_allocated_total_bytes`                                         | cumulative. Climbing fast with `rust_live_bytes` flat is churn (CPU), not a leak                                                                                            |
-| `memory.open_spans` / `memory.open_span_events`                                                          | spans that have not ended, and the events the exporter is buffering on them until they do                                                                                   |
-| `memory.heaviest_open_span`                                                                              | `name=events` of the open span holding the most (once past 256). A never-ending span collecting events is a heap that only grows                                            |
-| `memory.native_heap_size_bytes` / `_free_bytes`                                                          | the heap's mapped size and free part. Free growing with size is fragmentation                                                                                               |
-| `memory.pss_bytes`, `graphics_bytes`, `code_bytes`, `stack_bytes`, `private_other_bytes`, `system_bytes` | `Debug.MemoryInfo` summary (PSS). Taken on the first sample and every sixth (30 min), because it walks every mapping. `graphics` is GPU/gralloc, where Skia's textures land |
-| `memory.rss_*`, `swap_bytes`, `java_heap_bytes`, `threads`, `fds`, `maps`                                | as before: RSS + swap is what the LMK weighs; climbing handles are a handle leak                                                                                            |
+| Field                                                                                                    | Says                                                                                                                                                                          |
+| -------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `memory.native_heap_bytes`                                                                               | Bionic's whole malloc heap: Rust, Hermes, Skia, React Native                                                                                                                  |
+| `memory.rust_live_bytes`                                                                                 | Rust's exact share (counting allocator, `alloc_stats.rs`). Climbing with the native heap: ours. Flat: someone else's                                                          |
+| `memory.rust_allocs_total` / `memory.rust_allocated_total_bytes`                                         | cumulative. Climbing fast with `rust_live_bytes` flat is churn (CPU), not a leak                                                                                              |
+| `memory.open_spans` / `memory.open_span_events`                                                          | spans that have not ended, and the events recorded on them. The exporter is handed at most 128 per span (`CapSpanEvents`), so past that this counts events, not buffered heap |
+| `memory.heaviest_open_span`                                                                              | `name=events` of the open span holding the most (once past 256). A never-ending span collecting events is a heap that only grows                                              |
+| `memory.native_heap_size_bytes` / `_free_bytes`                                                          | the heap's mapped size and free part. Free growing with size is fragmentation                                                                                                 |
+| `memory.pss_bytes`, `graphics_bytes`, `code_bytes`, `stack_bytes`, `private_other_bytes`, `system_bytes` | `Debug.MemoryInfo` summary (PSS). Taken on the first sample and every sixth (30 min), because it walks every mapping. `graphics` is GPU/gralloc, where Skia's textures land   |
+| `memory.rss_*`, `swap_bytes`, `java_heap_bytes`, `threads`, `fds`, `maps`                                | as before: RSS + swap is what the LMK weighs; climbing handles are a handle leak                                                                                              |
 
 `rust_live_bytes` and the ledger fields come from Rust and are absent from a build without the
 `otel` feature.
+
+The first day of these fields found two things (2026-10-24). iroh's socket `actor` span lives as
+long as the endpoint and every `iroh::socket` debug line lands on it, about 1,500 an hour, and
+`tracing-opentelemetry` kept every one until the span closed — which it never does — although the
+SDK keeps only 128 at export. `CapSpanEvents` now stops handing a span's events to the exporter at
+128; Loki still gets them all through the log bridge. And until the first `configure`, the empty
+OTLP reload slot switched every callsite in the process off (`telemetry::imp::idle_slot`), so a
+span opened before then — iroh's endpoint and relay actors on a JS launch — was invisible for its
+whole life, to the ledger and `RelayTap` too.
 
 ```traceql
 # One phone's memory over time.

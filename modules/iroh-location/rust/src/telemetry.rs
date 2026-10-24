@@ -62,7 +62,9 @@ const DEFAULT_FILTER: &str = concat!(
 /// span CLOSES, and some spans never do: iroh's `active-relay` lives as long as its relay actor,
 /// and on 2026-10-15..22 a dead relay's actor logged a warning and a retry under it every 16 s for
 /// days. That is a heap that grows for as long as the process lives without a single allocation
-/// being "leaked". `memory.open_span_events` is the count of such buffered events, and
+/// being "leaked" — until [`ledger::CapSpanEvents`], which stops handing a span's events to the
+/// exporter at the 128 the SDK would keep. `memory.open_span_events` counts events recorded on
+/// open spans (past the cap, more than are buffered), and
 /// `memory.heaviest_open_span` names the open span holding the most of them, so a climbing
 /// `memory.rust_live_bytes` can be checked against this before anyone reaches for heapprofd.
 // Installed by the `otel` subscriber only; a store build compiles it and never uses it.
@@ -85,6 +87,101 @@ pub(crate) mod ledger {
     const HEAVY: u64 = 256;
 
     struct Events(AtomicU64);
+
+    /// The most events the exporter is handed for one span. The SDK keeps at most this many when a
+    /// span ends (`SpanLimits::max_events_per_span` defaults to 128) and drops the rest, so every
+    /// event past it was heap held until the close only to be thrown away, and a span that never
+    /// closes held it for the life of the process. On 2026-10-24 a Pixel's iroh socket `actor`
+    /// span (the endpoint's lifetime span, which every `iroh::socket` debug line lands on) passed
+    /// 512 events in its first half hour, about 1,500 an hour.
+    pub(crate) const EXPORTED_EVENTS_PER_SPAN: u64 = 128;
+
+    /// Hands `inner` (the OpenTelemetry trace layer) a span's events only until that span holds
+    /// [`EXPORTED_EVENTS_PER_SPAN`]; everything else passes through untouched. The count is the
+    /// ledger's, so this must sit INSIDE [`SpanLedger`] in the stack: `Layered` calls the inner
+    /// layer first, so the count it reads excludes the event in hand. The events it withholds
+    /// still reach Loki through the log bridge, which is a separate layer.
+    pub(crate) struct CapSpanEvents<L>(pub L);
+
+    impl<S, L> Layer<S> for CapSpanEvents<L>
+    where
+        S: Subscriber + for<'a> LookupSpan<'a>,
+        L: Layer<S>,
+    {
+        fn on_register_dispatch(&self, subscriber: &tracing::Dispatch) {
+            self.0.on_register_dispatch(subscriber);
+        }
+
+        fn on_layer(&mut self, subscriber: &mut S) {
+            self.0.on_layer(subscriber);
+        }
+
+        fn register_callsite(
+            &self,
+            metadata: &'static tracing::Metadata<'static>,
+        ) -> tracing::subscriber::Interest {
+            self.0.register_callsite(metadata)
+        }
+
+        fn enabled(&self, metadata: &tracing::Metadata<'_>, ctx: Context<'_, S>) -> bool {
+            self.0.enabled(metadata, ctx)
+        }
+
+        fn on_new_span(&self, attrs: &Attributes<'_>, id: &Id, ctx: Context<'_, S>) {
+            self.0.on_new_span(attrs, id, ctx);
+        }
+
+        fn on_record(&self, id: &Id, values: &tracing::span::Record<'_>, ctx: Context<'_, S>) {
+            self.0.on_record(id, values, ctx);
+        }
+
+        fn on_follows_from(&self, id: &Id, follows: &Id, ctx: Context<'_, S>) {
+            self.0.on_follows_from(id, follows, ctx);
+        }
+
+        fn event_enabled(&self, event: &Event<'_>, ctx: Context<'_, S>) -> bool {
+            self.0.event_enabled(event, ctx)
+        }
+
+        fn on_event(&self, event: &Event<'_>, ctx: Context<'_, S>) {
+            let held = ctx
+                .event_span(event)
+                .and_then(|span| span.extensions().get::<Events>().map(|e| e.0.load(Relaxed)));
+            if held.is_some_and(|held| held >= EXPORTED_EVENTS_PER_SPAN) {
+                return;
+            }
+            self.0.on_event(event, ctx);
+        }
+
+        fn on_enter(&self, id: &Id, ctx: Context<'_, S>) {
+            self.0.on_enter(id, ctx);
+        }
+
+        fn on_exit(&self, id: &Id, ctx: Context<'_, S>) {
+            self.0.on_exit(id, ctx);
+        }
+
+        fn on_close(&self, id: Id, ctx: Context<'_, S>) {
+            self.0.on_close(id, ctx);
+        }
+
+        fn on_id_change(&self, old: &Id, new: &Id, ctx: Context<'_, S>) {
+            self.0.on_id_change(old, new, ctx);
+        }
+
+        fn max_level_hint(&self) -> Option<tracing::level_filters::LevelFilter> {
+            self.0.max_level_hint()
+        }
+
+        #[doc(hidden)]
+        unsafe fn downcast_raw(&self, id: std::any::TypeId) -> Option<*const ()> {
+            if id == std::any::TypeId::of::<Self>() {
+                return Some(self as *const Self as *const ());
+            }
+            // SAFETY: forwarded unchanged; `inner` upholds its own contract.
+            unsafe { self.0.downcast_raw(id) }
+        }
+    }
 
     /// Counts open spans and the events recorded on them (see the module docs).
     pub(crate) struct SpanLedger;
@@ -192,6 +289,39 @@ pub(crate) mod ledger {
                 );
             });
         }
+
+        #[test]
+        fn the_exporter_is_handed_only_the_events_it_will_keep() {
+            use std::sync::Arc;
+
+            struct Seen(Arc<AtomicU64>);
+            impl<S: Subscriber> Layer<S> for Seen {
+                fn on_event(&self, _: &Event<'_>, _: Context<'_, S>) {
+                    self.0.fetch_add(1, Relaxed);
+                }
+            }
+
+            let seen = Arc::new(AtomicU64::new(0));
+            // Production order: the capped layer inside the ledger. Fewer than `HEAVY` events, so
+            // this span never competes with the test above for `HEAVIEST`.
+            let subscriber = tracing_subscriber::registry()
+                .with(CapSpanEvents(Seen(seen.clone())))
+                .with(SpanLedger);
+            let sent = EXPORTED_EVENTS_PER_SPAN + 72;
+            assert!(sent < HEAVY);
+            tracing::subscriber::with_default(subscriber, || {
+                let actor = tracing::info_span!("socket-actor-cap-test");
+                {
+                    let _in = actor.enter();
+                    for _ in 0..sent {
+                        tracing::debug!("re-stun");
+                    }
+                }
+                // An event outside any span is not the cap's business.
+                tracing::warn!("no span");
+            });
+            assert_eq!(seen.load(Relaxed), EXPORTED_EVENTS_PER_SPAN + 1);
+        }
     }
 }
 
@@ -214,8 +344,21 @@ mod imp {
 
     /// The subscriber stack under the reload slot: `Registry` + global `EnvFilter`.
     type Base = Layered<EnvFilter, Registry>;
-    /// The reload slot holds a (possibly empty) stack of boxed layers — trace + log bridge.
+    /// The reload slot holds a stack of boxed layers — trace + log bridge, or [`idle_slot`].
     type Slot = Vec<Box<dyn Layer<Base> + Send + Sync>>;
+
+    /// What the reload slot holds while nothing is exported. NOT an empty `Vec`:
+    /// tracing-subscriber's `Layer for Vec` answers `Interest::never()` when it holds no layers,
+    /// and `Layered` lets an outer `never` switch the callsite off for the whole stack. So until
+    /// the first `configure`, every span and event in the process was disabled — the ledger, the
+    /// relay tap and Android's logcat included — and a span opened in that window stayed disabled
+    /// for its whole life. iroh opens its endpoint and relay-actor spans at node start, which on a
+    /// JS launch comes before JS configures telemetry: on 2026-10-24 a Pixel's first `net.health`
+    /// attributed all four of its relay failures to `unknown`. `Identity` is enabled for
+    /// everything and offers no level hint, which leaves both decisions to the `EnvFilter`.
+    fn idle_slot() -> Slot {
+        vec![tracing_subscriber::layer::Identity::new().boxed()]
+    }
 
     static RELOAD_HANDLE: OnceLock<reload::Handle<Slot, Base>> = OnceLock::new();
     /// Live providers, kept for flush/shutdown when telemetry is reconfigured or drained.
@@ -227,7 +370,7 @@ mod imp {
     pub(crate) fn init_tracing() {
         let filter = EnvFilter::try_from_default_env()
             .unwrap_or_else(|_| EnvFilter::new(super::DEFAULT_FILTER));
-        let (reload_layer, handle) = reload::Layer::new(Slot::new());
+        let (reload_layer, handle) = reload::Layer::new(idle_slot());
 
         // The ledger and the relay tap sit OUTSIDE the reload slot: they are what `process.memory`
         // and `net.health` read, and they must count from the first span, before (and whether or
@@ -272,7 +415,7 @@ mod imp {
 
         let endpoint = endpoint.trim().trim_end_matches('/').to_owned();
         if endpoint.is_empty() {
-            let _ = handle.reload(Slot::new());
+            let _ = handle.reload(idle_slot());
             return false;
         }
 
@@ -319,7 +462,8 @@ mod imp {
         use opentelemetry::trace::TracerProvider as _;
         let tracer = tracer_provider.tracer("iroh-location");
         let layers: Slot = vec![
-            tracing_opentelemetry::layer().with_tracer(tracer).boxed(),
+            super::ledger::CapSpanEvents(tracing_opentelemetry::layer().with_tracer(tracer))
+                .boxed(),
             OpenTelemetryTracingBridge::new(&logger_provider).boxed(),
         ];
         let swapped = handle.reload(layers).is_ok();
@@ -381,6 +525,47 @@ mod imp {
     #[cfg(test)]
     pub(crate) fn parse_parent_for_test(value: &str) -> Option<SpanContext> {
         remote_parent(value)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+        use std::sync::Arc;
+        use tracing_subscriber::filter::LevelFilter;
+
+        #[test]
+        fn an_empty_slot_would_switch_every_callsite_off_and_the_idle_one_does_not() {
+            // The trap itself: an empty `Vec` layer claims "nothing, ever".
+            assert_eq!(
+                Layer::<Base>::max_level_hint(&Slot::new()),
+                Some(LevelFilter::OFF)
+            );
+            assert_eq!(Layer::<Base>::max_level_hint(&idle_slot()), None);
+
+            struct Opened(Arc<AtomicU64>);
+            impl<S: tracing::Subscriber> Layer<S> for Opened {
+                fn on_new_span(
+                    &self,
+                    _: &tracing::span::Attributes<'_>,
+                    _: &tracing::span::Id,
+                    _: tracing_subscriber::layer::Context<'_, S>,
+                ) {
+                    self.0.fetch_add(1, Relaxed);
+                }
+            }
+
+            let opened = Arc::new(AtomicU64::new(0));
+            let (slot, _handle) = reload::Layer::new(idle_slot());
+            let subscriber = tracing_subscriber::registry()
+                .with(EnvFilter::new("trace"))
+                .with(slot)
+                .with(Opened(opened.clone()));
+            tracing::subscriber::with_default(subscriber, || {
+                tracing::info_span!("opened-before-any-exporter").in_scope(|| {});
+            });
+            assert_eq!(opened.load(Relaxed), 1);
+        }
     }
 }
 
