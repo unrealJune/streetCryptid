@@ -125,8 +125,10 @@ internal class LocationRuntimeReporter(
         }
       } ?: return
     record(event)
-    // The same five-minute clock, so a memory trend lines up with the runtime's own record.
+    // The same five-minute clock, so a memory or network trend lines up with the runtime's own
+    // record.
     ProcessMemorySampler.sample("pulse")
+    NetworkHealthSampler.sample("pulse")
   }
 
   /** Called holding [lock]. */

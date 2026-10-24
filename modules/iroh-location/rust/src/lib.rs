@@ -15,6 +15,8 @@
 //! minor adjustment when first compiled against the pinned versions. iroh-docs (durable
 //! trail recovery) is added in the `docs-recovery` milestone.
 
+/// Rust's share of the native heap, counted by a wrapper around the system allocator.
+mod alloc_stats;
 mod ble;
 mod contact;
 pub mod crypto;
@@ -35,6 +37,8 @@ pub mod process_memory;
 pub mod mesh;
 /// Native MVT tile/bundle decoder for the map pipeline (pure; see `mvt.rs`).
 pub mod mvt;
+/// `net.health` spans: relay failures by host, the endpoint's counters, the platform's network.
+pub mod net_health;
 /// Which docs namespaces a node reopens on every start, in `state_dir` (see the module docs).
 pub mod ns_book;
 pub mod outbox;

@@ -52,6 +52,16 @@ pub(crate) fn set_known_relays(relay_urls: Option<&[String]>) {
         .unwrap_or_else(|poisoned| poisoned.into_inner()) = known;
 }
 
+/// The relays this node uses, as recorded by [`set_known_relays`]. `net_health` reads it to tell a
+/// failure against our own relay from one against a stale relay a peer address still named.
+#[allow(dead_code)]
+pub(crate) fn known_relays() -> Option<Vec<RelayUrl>> {
+    KNOWN_RELAYS
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone()
+}
+
 /// Drop every relay URL from a peer's address that this node does not itself use.
 ///
 /// A ticket records the relay its owner was homed on WHEN it was minted, and the app keeps tickets

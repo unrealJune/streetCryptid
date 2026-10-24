@@ -56,6 +56,145 @@ const DEFAULT_FILTER: &str = concat!(
     "iroh_relay=info,iroh_gossip=info,iroh_docs=info,iroh_location=debug",
 );
 
+/// How much the exporter is holding in memory for spans that have not ended.
+///
+/// `tracing-opentelemetry` keeps every event recorded on a span in that span's builder until the
+/// span CLOSES, and some spans never do: iroh's `active-relay` lives as long as its relay actor,
+/// and on 2026-10-15..22 a dead relay's actor logged a warning and a retry under it every 16 s for
+/// days. That is a heap that grows for as long as the process lives without a single allocation
+/// being "leaked". `memory.open_span_events` is the count of such buffered events, and
+/// `memory.heaviest_open_span` names the open span holding the most of them, so a climbing
+/// `memory.rust_live_bytes` can be checked against this before anyone reaches for heapprofd.
+// Installed by the `otel` subscriber only; a store build compiles it and never uses it.
+#[cfg_attr(not(feature = "otel"), allow(dead_code))]
+pub(crate) mod ledger {
+    use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+    use std::sync::Mutex;
+
+    use tracing::span::{Attributes, Id};
+    use tracing::{Event, Subscriber};
+    use tracing_subscriber::layer::Context;
+    use tracing_subscriber::registry::LookupSpan;
+    use tracing_subscriber::Layer;
+
+    static OPEN_SPANS: AtomicU64 = AtomicU64::new(0);
+    static OPEN_SPAN_EVENTS: AtomicU64 = AtomicU64::new(0);
+    /// (span id, name, events) of the open span with the most events, once it has a lot.
+    static HEAVIEST: Mutex<Option<(u64, &'static str, u64)>> = Mutex::new(None);
+    /// Below this a span is ordinary and not worth naming.
+    const HEAVY: u64 = 256;
+
+    struct Events(AtomicU64);
+
+    /// Counts open spans and the events recorded on them (see the module docs).
+    pub(crate) struct SpanLedger;
+
+    impl<S> Layer<S> for SpanLedger
+    where
+        S: Subscriber + for<'a> LookupSpan<'a>,
+    {
+        fn on_new_span(&self, _attrs: &Attributes<'_>, id: &Id, ctx: Context<'_, S>) {
+            if let Some(span) = ctx.span(id) {
+                span.extensions_mut().insert(Events(AtomicU64::new(0)));
+                OPEN_SPANS.fetch_add(1, Relaxed);
+            }
+        }
+
+        fn on_event(&self, event: &Event<'_>, ctx: Context<'_, S>) {
+            let Some(span) = ctx.event_span(event) else {
+                return;
+            };
+            let Some(events) = span
+                .extensions()
+                .get::<Events>()
+                .map(|e| e.0.fetch_add(1, Relaxed) + 1)
+            else {
+                return;
+            };
+            OPEN_SPAN_EVENTS.fetch_add(1, Relaxed);
+            // Checked only at powers of two, so the lock is taken a handful of times per span.
+            if events >= HEAVY && events.is_power_of_two() {
+                let mut heaviest = HEAVIEST.lock().unwrap_or_else(|p| p.into_inner());
+                if heaviest.is_none_or(|(_, _, most)| events > most) {
+                    *heaviest = Some((span.id().into_u64(), span.name(), events));
+                }
+            }
+        }
+
+        fn on_close(&self, id: Id, ctx: Context<'_, S>) {
+            let Some(span) = ctx.span(&id) else {
+                return;
+            };
+            let Some(events) = span.extensions().get::<Events>().map(|e| e.0.load(Relaxed)) else {
+                return;
+            };
+            OPEN_SPANS.fetch_sub(1, Relaxed);
+            OPEN_SPAN_EVENTS.fetch_sub(events, Relaxed);
+            let mut heaviest = HEAVIEST.lock().unwrap_or_else(|p| p.into_inner());
+            if heaviest.is_some_and(|(open, _, _)| open == id.into_u64()) {
+                *heaviest = None;
+            }
+        }
+    }
+
+    /// What the ledger holds right now.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub(crate) struct Snapshot {
+        pub open_spans: u64,
+        pub open_span_events: u64,
+        /// `name=events` of the heaviest open span, once one has passed `HEAVY` events.
+        pub heaviest: Option<String>,
+    }
+
+    pub(crate) fn snapshot() -> Snapshot {
+        let heaviest = HEAVIEST
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .map(|(_, name, events)| format!("{name}={events}"));
+        Snapshot {
+            open_spans: OPEN_SPANS.load(Relaxed),
+            open_span_events: OPEN_SPAN_EVENTS.load(Relaxed),
+            heaviest,
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use tracing_subscriber::layer::SubscriberExt;
+
+        #[test]
+        fn names_a_long_lived_span_that_keeps_collecting_events() {
+            let subscriber = tracing_subscriber::registry().with(SpanLedger);
+            tracing::subscriber::with_default(subscriber, || {
+                let relay = tracing::info_span!("active-relay-ledger-test");
+                {
+                    let _in = relay.enter();
+                    for _ in 0..HEAVY {
+                        tracing::warn!("retry");
+                    }
+                }
+                let held = snapshot();
+                assert!(held.open_span_events >= HEAVY, "{held:?}");
+                assert!(
+                    held.heaviest
+                        .as_deref()
+                        .is_some_and(|h| h.starts_with("active-relay-ledger-test=")),
+                    "{held:?}"
+                );
+                drop(relay);
+                assert_ne!(
+                    snapshot()
+                        .heaviest
+                        .as_deref()
+                        .map(|h| h.starts_with("active-relay-ledger-test=")),
+                    Some(true)
+                );
+            });
+        }
+    }
+}
+
 #[cfg(feature = "otel")]
 mod imp {
     use std::sync::{Mutex, OnceLock};
@@ -90,9 +229,14 @@ mod imp {
             .unwrap_or_else(|_| EnvFilter::new(super::DEFAULT_FILTER));
         let (reload_layer, handle) = reload::Layer::new(Slot::new());
 
+        // The ledger and the relay tap sit OUTSIDE the reload slot: they are what `process.memory`
+        // and `net.health` read, and they must count from the first span, before (and whether or
+        // not) the app ever configures an exporter.
         let registry = tracing_subscriber::registry()
             .with(filter)
-            .with(reload_layer);
+            .with(reload_layer)
+            .with(super::ledger::SpanLedger)
+            .with(crate::net_health::RelayTap);
 
         #[cfg(target_os = "android")]
         let registry = registry.with(

@@ -13,6 +13,21 @@
 //! Java heap is Kotlin/React Native, a growing file RSS is mapped files (tiles, databases), and
 //! climbing `threads` / `fds` / `maps` is a handle leak rather than a heap one.
 //!
+//! ## Splitting the native heap
+//! The first Pixel run on the map-leak fix (2026-10-22/23, 36 h, no kill) still grew
+//! `memory.native_heap_bytes` ~5 MB/h in the background, and that number is everyone's malloc.
+//! So the span also carries what this side can measure about whose it is:
+//! - `memory.rust_live_bytes` (and the cumulative `rust_allocs_total` / `rust_allocated_total_bytes`)
+//!   from the counting allocator in `alloc_stats` — Rust's exact share. Growing with the native
+//!   heap: it is ours. Flat: it is Hermes, Skia or React Native.
+//! - `memory.open_spans` / `memory.open_span_events` / `memory.heaviest_open_span` from the
+//!   telemetry ledger — events buffered on spans that never end, a growth that is no leak at all
+//!   (see `telemetry::ledger`).
+//! - `memory.native_heap_size_bytes` / `_free_bytes` from the platform: a heap whose free share
+//!   climbs is fragmenting, not leaking.
+//! - The `Debug.MemoryInfo` summary on Android (`graphics`, `code`, `stack`, `private_other`,
+//!   `system`, and `pss_bytes`), sampled at a slower cadence because it walks every mapping.
+//!
 //! Strippable the same way as the rest of the telemetry: with no endpoint configured the span goes
 //! nowhere, and with the `otel` feature off there is no exporter at all. Nothing here carries user
 //! content — byte counts and handle counts only.
@@ -42,6 +57,24 @@ pub struct ProcessMemorySample {
     pub uptime_ms: Option<u64>,
     /// Whether an app UI is mounted in this process right now.
     pub app_wired: Option<bool>,
+    /// The malloc heap's mapped size and its free part (Android: `Debug.getNativeHeapSize` /
+    /// `getNativeHeapFreeSize`). Free climbing with size is fragmentation, not a leak.
+    #[uniffi(default = None)]
+    pub native_heap_size_bytes: Option<u64>,
+    #[uniffi(default = None)]
+    pub native_heap_free_bytes: Option<u64>,
+    /// `Debug.MemoryInfo` summary stats (PSS), sampled less often than the rest. `graphics` is GPU
+    /// and gralloc memory — where Skia's textures land.
+    #[uniffi(default = None)]
+    pub graphics_bytes: Option<u64>,
+    #[uniffi(default = None)]
+    pub code_bytes: Option<u64>,
+    #[uniffi(default = None)]
+    pub stack_bytes: Option<u64>,
+    #[uniffi(default = None)]
+    pub private_other_bytes: Option<u64>,
+    #[uniffi(default = None)]
+    pub system_bytes: Option<u64>,
 }
 
 /// Record one sample as a `process.memory` span. Cheap and synchronous, like `location.runtime`.
@@ -62,7 +95,22 @@ pub fn record_process_memory(sample: ProcessMemorySample) {
         memory.maps = tracing::field::Empty,
         memory.uptime_ms = tracing::field::Empty,
         memory.app_wired = tracing::field::Empty,
+        memory.native_heap_size_bytes = tracing::field::Empty,
+        memory.native_heap_free_bytes = tracing::field::Empty,
+        memory.graphics_bytes = tracing::field::Empty,
+        memory.code_bytes = tracing::field::Empty,
+        memory.stack_bytes = tracing::field::Empty,
+        memory.private_other_bytes = tracing::field::Empty,
+        memory.system_bytes = tracing::field::Empty,
+        memory.rust_live_bytes = tracing::field::Empty,
+        memory.rust_allocs_total = tracing::field::Empty,
+        memory.rust_allocated_total_bytes = tracing::field::Empty,
+        memory.open_spans = tracing::field::Empty,
+        memory.open_span_events = tracing::field::Empty,
+        memory.heaviest_open_span = tracing::field::Empty,
     );
+    let rust = crate::alloc_stats::snapshot();
+    let ledger = crate::telemetry::ledger::snapshot();
     let u64s = [
         ("memory.rss_bytes", sample.rss_bytes),
         ("memory.rss_anon_bytes", sample.rss_anon_bytes),
@@ -72,6 +120,27 @@ pub fn record_process_memory(sample: ProcessMemorySample) {
         ("memory.java_heap_bytes", sample.java_heap_bytes),
         ("memory.pss_bytes", sample.pss_bytes),
         ("memory.uptime_ms", sample.uptime_ms),
+        (
+            "memory.native_heap_size_bytes",
+            sample.native_heap_size_bytes,
+        ),
+        (
+            "memory.native_heap_free_bytes",
+            sample.native_heap_free_bytes,
+        ),
+        ("memory.graphics_bytes", sample.graphics_bytes),
+        ("memory.code_bytes", sample.code_bytes),
+        ("memory.stack_bytes", sample.stack_bytes),
+        ("memory.private_other_bytes", sample.private_other_bytes),
+        ("memory.system_bytes", sample.system_bytes),
+        ("memory.rust_live_bytes", rust.map(|r| r.live_bytes)),
+        ("memory.rust_allocs_total", rust.map(|r| r.allocs_total)),
+        (
+            "memory.rust_allocated_total_bytes",
+            rust.map(|r| r.allocated_total_bytes),
+        ),
+        ("memory.open_spans", Some(ledger.open_spans)),
+        ("memory.open_span_events", Some(ledger.open_span_events)),
     ];
     for (field, value) in u64s {
         if let Some(value) = value {
@@ -90,6 +159,9 @@ pub fn record_process_memory(sample: ProcessMemorySample) {
     }
     if let Some(wired) = sample.app_wired {
         span.record("memory.app_wired", wired);
+    }
+    if let Some(heaviest) = &ledger.heaviest {
+        span.record("memory.heaviest_open_span", heaviest.as_str());
     }
     drop(span.entered());
 }

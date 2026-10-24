@@ -210,6 +210,7 @@ fn log_failure(host: &str, rrtype: u16, err: &dyn std::fmt::Display, negative: b
     if negative {
         tracing::trace!("{msg}");
     } else {
+        crate::net_health::note_dns_failure(rr_name(rrtype), host, &err.to_string());
         tracing::debug!("{msg}");
     }
 }
@@ -254,27 +255,38 @@ mod system {
             .ok_or_else(|| DnsError::from(n0_error::AnyError::from_std(Malformed)))
     }
 
+    /// One platform query, counted for `net.health` when it answers. Failures are counted where
+    /// they are logged ([`super::log_failure`]), which is the only place that knows a negative
+    /// answer from a fault.
+    async fn counted(host: String, rrtype: u16) -> Result<Vec<Vec<u8>>, DnsError> {
+        let result = platform::query(host, rrtype).await;
+        if result.is_ok() {
+            crate::net_health::note_dns_ok();
+        }
+        result
+    }
+
     #[derive(Debug, Default)]
     struct SystemResolver;
 
     impl Resolver for SystemResolver {
         fn lookup_ipv4(&self, host: String) -> BoxFuture<Result<BoxIter<Ipv4Addr>, DnsError>> {
             Box::pin(async move {
-                let addrs = decode(platform::query(host, RR_A).await?, rdata::a)?;
+                let addrs = decode(counted(host, RR_A).await?, rdata::a)?;
                 Ok(Box::new(addrs.into_iter()) as BoxIter<Ipv4Addr>)
             })
         }
 
         fn lookup_ipv6(&self, host: String) -> BoxFuture<Result<BoxIter<Ipv6Addr>, DnsError>> {
             Box::pin(async move {
-                let addrs = decode(platform::query(host, RR_AAAA).await?, rdata::aaaa)?;
+                let addrs = decode(counted(host, RR_AAAA).await?, rdata::aaaa)?;
                 Ok(Box::new(addrs.into_iter()) as BoxIter<Ipv6Addr>)
             })
         }
 
         fn lookup_txt(&self, host: String) -> BoxFuture<Result<BoxIter<TxtRecordData>, DnsError>> {
             Box::pin(async move {
-                let records = decode(platform::query(host, RR_TXT).await?, rdata::txt)?;
+                let records = decode(counted(host, RR_TXT).await?, rdata::txt)?;
                 Ok(Box::new(records.into_iter().map(TxtRecordData::from))
                     as BoxIter<TxtRecordData>)
             })
