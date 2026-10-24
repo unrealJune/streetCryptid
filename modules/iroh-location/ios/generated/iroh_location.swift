@@ -6935,6 +6935,116 @@ public func FfiConverterTypeMeshTag_lower(_ value: MeshTag) -> RustBuffer {
 
 
 /**
+ * The platform's view of the network the process is on. Every field is optional because each
+ * platform can read a different subset (and iOS currently sends none).
+ */
+public struct NetworkContext: Equatable, Hashable {
+    /**
+     * `wifi`, `cellular`, `ethernet`, `bluetooth`, `none`, joined with `+` when several apply.
+     */
+    public var transport: String?
+    /**
+     * The OS has validated internet access on it.
+     */
+    public var validated: Bool?
+    /**
+     * The OS saw a captive portal.
+     */
+    public var captivePortal: Bool?
+    /**
+     * A VPN carries the default network.
+     */
+    public var vpn: Bool?
+    /**
+     * `off`, `opportunistic`, or `strict:<server>` (Android private DNS).
+     */
+    public var privateDns: String?
+    /**
+     * The default network has a global IPv6 address.
+     */
+    public var hasIpv6: Bool?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * `wifi`, `cellular`, `ethernet`, `bluetooth`, `none`, joined with `+` when several apply.
+         */transport: String? = nil, 
+        /**
+         * The OS has validated internet access on it.
+         */validated: Bool? = nil, 
+        /**
+         * The OS saw a captive portal.
+         */captivePortal: Bool? = nil, 
+        /**
+         * A VPN carries the default network.
+         */vpn: Bool? = nil, 
+        /**
+         * `off`, `opportunistic`, or `strict:<server>` (Android private DNS).
+         */privateDns: String? = nil, 
+        /**
+         * The default network has a global IPv6 address.
+         */hasIpv6: Bool? = nil) {
+        self.transport = transport
+        self.validated = validated
+        self.captivePortal = captivePortal
+        self.vpn = vpn
+        self.privateDns = privateDns
+        self.hasIpv6 = hasIpv6
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension NetworkContext: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeNetworkContext: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NetworkContext {
+        return
+            try NetworkContext(
+                transport: FfiConverterOptionString.read(from: &buf), 
+                validated: FfiConverterOptionBool.read(from: &buf), 
+                captivePortal: FfiConverterOptionBool.read(from: &buf), 
+                vpn: FfiConverterOptionBool.read(from: &buf), 
+                privateDns: FfiConverterOptionString.read(from: &buf), 
+                hasIpv6: FfiConverterOptionBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: NetworkContext, into buf: inout [UInt8]) {
+        FfiConverterOptionString.write(value.transport, into: &buf)
+        FfiConverterOptionBool.write(value.validated, into: &buf)
+        FfiConverterOptionBool.write(value.captivePortal, into: &buf)
+        FfiConverterOptionBool.write(value.vpn, into: &buf)
+        FfiConverterOptionString.write(value.privateDns, into: &buf)
+        FfiConverterOptionBool.write(value.hasIpv6, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNetworkContext_lift(_ buf: RustBuffer) throws -> NetworkContext {
+    return try FfiConverterTypeNetworkContext.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNetworkContext_lower(_ value: NetworkContext) -> RustBuffer {
+    return FfiConverterTypeNetworkContext.lower(value)
+}
+
+
+/**
  * One published position, as the app's trail store wants it.
  */
 public struct OwnPublished: Equatable, Hashable {
@@ -7565,6 +7675,205 @@ public func FfiConverterTypePeerTransportDiagnostic_lift(_ buf: RustBuffer) thro
 #endif
 public func FfiConverterTypePeerTransportDiagnostic_lower(_ value: PeerTransportDiagnostic) -> RustBuffer {
     return FfiConverterTypePeerTransportDiagnostic.lower(value)
+}
+
+
+/**
+ * One sample. Every field is optional because each platform can read a different subset.
+ */
+public struct ProcessMemorySample: Equatable, Hashable {
+    /**
+     * What took the sample (`pulse`, `started`, ...).
+     */
+    public var trigger: String
+    /**
+     * `/proc/self/status` (Linux/Android).
+     */
+    public var rssBytes: UInt64?
+    public var rssAnonBytes: UInt64?
+    public var rssFileBytes: UInt64?
+    public var swapBytes: UInt64?
+    /**
+     * The platform's malloc heap, allocated (Android: `Debug.getNativeHeapAllocatedSize`).
+     */
+    public var nativeHeapBytes: UInt64?
+    /**
+     * The managed heap in use (Android: `Runtime.totalMemory - freeMemory`).
+     */
+    public var javaHeapBytes: UInt64?
+    /**
+     * Proportional set size, when the platform can afford to compute it.
+     */
+    public var pssBytes: UInt64?
+    public var threads: UInt32?
+    /**
+     * Open file descriptors (sockets included).
+     */
+    public var fds: UInt32?
+    /**
+     * Memory mappings (`/proc/self/maps` lines).
+     */
+    public var maps: UInt32?
+    /**
+     * Since the process started.
+     */
+    public var uptimeMs: UInt64?
+    /**
+     * Whether an app UI is mounted in this process right now.
+     */
+    public var appWired: Bool?
+    /**
+     * The malloc heap's mapped size and its free part (Android: `Debug.getNativeHeapSize` /
+     * `getNativeHeapFreeSize`). Free climbing with size is fragmentation, not a leak.
+     */
+    public var nativeHeapSizeBytes: UInt64?
+    public var nativeHeapFreeBytes: UInt64?
+    /**
+     * `Debug.MemoryInfo` summary stats (PSS), sampled less often than the rest. `graphics` is GPU
+     * and gralloc memory — where Skia's textures land.
+     */
+    public var graphicsBytes: UInt64?
+    public var codeBytes: UInt64?
+    public var stackBytes: UInt64?
+    public var privateOtherBytes: UInt64?
+    public var systemBytes: UInt64?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * What took the sample (`pulse`, `started`, ...).
+         */trigger: String, 
+        /**
+         * `/proc/self/status` (Linux/Android).
+         */rssBytes: UInt64?, rssAnonBytes: UInt64?, rssFileBytes: UInt64?, swapBytes: UInt64?, 
+        /**
+         * The platform's malloc heap, allocated (Android: `Debug.getNativeHeapAllocatedSize`).
+         */nativeHeapBytes: UInt64?, 
+        /**
+         * The managed heap in use (Android: `Runtime.totalMemory - freeMemory`).
+         */javaHeapBytes: UInt64?, 
+        /**
+         * Proportional set size, when the platform can afford to compute it.
+         */pssBytes: UInt64?, threads: UInt32?, 
+        /**
+         * Open file descriptors (sockets included).
+         */fds: UInt32?, 
+        /**
+         * Memory mappings (`/proc/self/maps` lines).
+         */maps: UInt32?, 
+        /**
+         * Since the process started.
+         */uptimeMs: UInt64?, 
+        /**
+         * Whether an app UI is mounted in this process right now.
+         */appWired: Bool?, 
+        /**
+         * The malloc heap's mapped size and its free part (Android: `Debug.getNativeHeapSize` /
+         * `getNativeHeapFreeSize`). Free climbing with size is fragmentation, not a leak.
+         */nativeHeapSizeBytes: UInt64? = nil, nativeHeapFreeBytes: UInt64? = nil, 
+        /**
+         * `Debug.MemoryInfo` summary stats (PSS), sampled less often than the rest. `graphics` is GPU
+         * and gralloc memory — where Skia's textures land.
+         */graphicsBytes: UInt64? = nil, codeBytes: UInt64? = nil, stackBytes: UInt64? = nil, privateOtherBytes: UInt64? = nil, systemBytes: UInt64? = nil) {
+        self.trigger = trigger
+        self.rssBytes = rssBytes
+        self.rssAnonBytes = rssAnonBytes
+        self.rssFileBytes = rssFileBytes
+        self.swapBytes = swapBytes
+        self.nativeHeapBytes = nativeHeapBytes
+        self.javaHeapBytes = javaHeapBytes
+        self.pssBytes = pssBytes
+        self.threads = threads
+        self.fds = fds
+        self.maps = maps
+        self.uptimeMs = uptimeMs
+        self.appWired = appWired
+        self.nativeHeapSizeBytes = nativeHeapSizeBytes
+        self.nativeHeapFreeBytes = nativeHeapFreeBytes
+        self.graphicsBytes = graphicsBytes
+        self.codeBytes = codeBytes
+        self.stackBytes = stackBytes
+        self.privateOtherBytes = privateOtherBytes
+        self.systemBytes = systemBytes
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension ProcessMemorySample: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeProcessMemorySample: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ProcessMemorySample {
+        return
+            try ProcessMemorySample(
+                trigger: FfiConverterString.read(from: &buf), 
+                rssBytes: FfiConverterOptionUInt64.read(from: &buf), 
+                rssAnonBytes: FfiConverterOptionUInt64.read(from: &buf), 
+                rssFileBytes: FfiConverterOptionUInt64.read(from: &buf), 
+                swapBytes: FfiConverterOptionUInt64.read(from: &buf), 
+                nativeHeapBytes: FfiConverterOptionUInt64.read(from: &buf), 
+                javaHeapBytes: FfiConverterOptionUInt64.read(from: &buf), 
+                pssBytes: FfiConverterOptionUInt64.read(from: &buf), 
+                threads: FfiConverterOptionUInt32.read(from: &buf), 
+                fds: FfiConverterOptionUInt32.read(from: &buf), 
+                maps: FfiConverterOptionUInt32.read(from: &buf), 
+                uptimeMs: FfiConverterOptionUInt64.read(from: &buf), 
+                appWired: FfiConverterOptionBool.read(from: &buf), 
+                nativeHeapSizeBytes: FfiConverterOptionUInt64.read(from: &buf), 
+                nativeHeapFreeBytes: FfiConverterOptionUInt64.read(from: &buf), 
+                graphicsBytes: FfiConverterOptionUInt64.read(from: &buf), 
+                codeBytes: FfiConverterOptionUInt64.read(from: &buf), 
+                stackBytes: FfiConverterOptionUInt64.read(from: &buf), 
+                privateOtherBytes: FfiConverterOptionUInt64.read(from: &buf), 
+                systemBytes: FfiConverterOptionUInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: ProcessMemorySample, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.trigger, into: &buf)
+        FfiConverterOptionUInt64.write(value.rssBytes, into: &buf)
+        FfiConverterOptionUInt64.write(value.rssAnonBytes, into: &buf)
+        FfiConverterOptionUInt64.write(value.rssFileBytes, into: &buf)
+        FfiConverterOptionUInt64.write(value.swapBytes, into: &buf)
+        FfiConverterOptionUInt64.write(value.nativeHeapBytes, into: &buf)
+        FfiConverterOptionUInt64.write(value.javaHeapBytes, into: &buf)
+        FfiConverterOptionUInt64.write(value.pssBytes, into: &buf)
+        FfiConverterOptionUInt32.write(value.threads, into: &buf)
+        FfiConverterOptionUInt32.write(value.fds, into: &buf)
+        FfiConverterOptionUInt32.write(value.maps, into: &buf)
+        FfiConverterOptionUInt64.write(value.uptimeMs, into: &buf)
+        FfiConverterOptionBool.write(value.appWired, into: &buf)
+        FfiConverterOptionUInt64.write(value.nativeHeapSizeBytes, into: &buf)
+        FfiConverterOptionUInt64.write(value.nativeHeapFreeBytes, into: &buf)
+        FfiConverterOptionUInt64.write(value.graphicsBytes, into: &buf)
+        FfiConverterOptionUInt64.write(value.codeBytes, into: &buf)
+        FfiConverterOptionUInt64.write(value.stackBytes, into: &buf)
+        FfiConverterOptionUInt64.write(value.privateOtherBytes, into: &buf)
+        FfiConverterOptionUInt64.write(value.systemBytes, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeProcessMemorySample_lift(_ buf: RustBuffer) throws -> ProcessMemorySample {
+    return try FfiConverterTypeProcessMemorySample.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeProcessMemorySample_lower(_ value: ProcessMemorySample) -> RustBuffer {
+    return FfiConverterTypeProcessMemorySample.lower(value)
 }
 
 
@@ -9726,6 +10035,30 @@ fileprivate struct FfiConverterOptionTypeLocationFix: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionTypeNetworkContext: FfiConverterRustBuffer {
+    typealias SwiftType = NetworkContext?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeNetworkContext.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeNetworkContext.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionTypePairResult: FfiConverterRustBuffer {
     typealias SwiftType = PairResult?
 
@@ -10662,6 +10995,28 @@ public func recordLocationRuntime(event: LocationRuntimeEvent)  {try! rustCall()
 }
 }
 /**
+ * Record one `net.health` span: the tallies since the last call (which this resets) and the live
+ * endpoint's state. Sync and bounded: it reads the node with `try_lock`, and a node lock someone
+ * is holding is reported as `net.node = busy` rather than waited for — the pulse must never be
+ * the thing that queues behind a wedged call (see `tests/node_lock.rs`).
+ */
+public func recordNetworkHealth(trigger: String, context: NetworkContext?)  {try! rustCall() {
+    uniffi_iroh_location_fn_func_record_network_health(
+        FfiConverterString.lower(trigger),
+        FfiConverterOptionTypeNetworkContext.lower(context),$0
+    )
+}
+}
+/**
+ * Record one sample as a `process.memory` span. Cheap and synchronous, like `location.runtime`.
+ */
+public func recordProcessMemory(sample: ProcessMemorySample)  {try! rustCall() {
+    uniffi_iroh_location_fn_func_record_process_memory(
+        FfiConverterTypeProcessMemorySample_lower(sample),$0
+    )
+}
+}
+/**
  * Point developer telemetry at an OTLP/HTTP collector (`http://<lan-ip>:4318`), or disable it by
  * passing an empty endpoint. Returns whether export is active — always `false` when the crate was
  * built without the `otel` feature (store builds), so the uniffi surface is identical either way
@@ -10768,6 +11123,12 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_func_record_location_runtime() != 22013) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_iroh_location_checksum_func_record_network_health() != 40417) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_iroh_location_checksum_func_record_process_memory() != 12906) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_func_configure_telemetry() != 42673) {

@@ -206,6 +206,9 @@ async function taskAttributes(): Promise<Attributes> {
   // background failure this path exists to close.
   const iroh = tryGetIrohLocation();
   attrs['task.location_running'] = iroh?.nativeBackgroundRunning?.();
+  // Android: whether the service may restart itself from the background (ServiceRecovery). Absent
+  // on iOS and on binaries that predate the export.
+  attrs['battery.optimization_exempt'] = iroh?.batteryOptimizationExempt?.();
 
   // The runtime's own account of itself, flattened under `location.*`.
   //
@@ -356,6 +359,23 @@ async function intentAttributes(): Promise<Attributes> {
     attrs['telemetry.queued'] = await unshippedCount();
   } catch {
     attrs['telemetry.queued'] = undefined;
+  }
+  try {
+    // The JS engine's own heap. A Pixel process reached 3.5 GB on 2026-10-21 with nothing in the
+    // record saying which allocator grew; native/Java/RSS come from the `process.memory` span the
+    // Android runtime emits, and this is the part only JS can see. Hermes-only and undocumented,
+    // hence the shape checks — absent, the attributes are simply omitted.
+    const stats = (
+      globalThis as { HermesInternal?: { getInstrumentedStats?: () => Record<string, unknown> } }
+    ).HermesInternal?.getInstrumentedStats?.();
+    if (stats) {
+      if (typeof stats.js_heapSize === 'number') attrs['js.heap_bytes'] = stats.js_heapSize;
+      if (typeof stats.js_allocatedBytes === 'number')
+        attrs['js.allocated_bytes'] = stats.js_allocatedBytes;
+      if (typeof stats.js_numGCs === 'number') attrs['js.gc_count'] = stats.js_numGCs;
+    }
+  } catch {
+    // Not Hermes, or the stats call changed shape — omitted.
   }
   try {
     const armedAt = await loadReviveFenceArmedAt(kv);

@@ -743,6 +743,10 @@ external fun uniffi_iroh_location_checksum_func_node_host(
 ): Int
 external fun uniffi_iroh_location_checksum_func_record_location_runtime(
 ): Int
+external fun uniffi_iroh_location_checksum_func_record_network_health(
+): Int
+external fun uniffi_iroh_location_checksum_func_record_process_memory(
+): Int
 external fun uniffi_iroh_location_checksum_func_configure_telemetry(
 ): Int
 external fun uniffi_iroh_location_checksum_func_flush_telemetry(
@@ -1317,6 +1321,10 @@ external fun uniffi_iroh_location_fn_func_node_host(uniffi_out_err: UniffiRustCa
 ): Long
 external fun uniffi_iroh_location_fn_func_record_location_runtime(`event`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
+external fun uniffi_iroh_location_fn_func_record_network_health(`trigger`: RustBuffer.ByValue,`context`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
+external fun uniffi_iroh_location_fn_func_record_process_memory(`sample`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
 external fun uniffi_iroh_location_fn_func_configure_telemetry(`endpoint`: RustBuffer.ByValue,`instanceId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): Byte
 external fun uniffi_iroh_location_fn_func_flush_telemetry(
@@ -1495,6 +1503,12 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_iroh_location_checksum_func_record_location_runtime() != 22013) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_iroh_location_checksum_func_record_network_health() != 40417) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_iroh_location_checksum_func_record_process_memory() != 12906) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_iroh_location_checksum_func_configure_telemetry() != 42673) {
@@ -9352,6 +9366,86 @@ public object FfiConverterTypeMeshTag: FfiConverterRustBuffer<MeshTag> {
 
 
 /**
+ * The platform's view of the network the process is on. Every field is optional because each
+ * platform can read a different subset (and iOS currently sends none).
+ */
+data class NetworkContext (
+    /**
+     * `wifi`, `cellular`, `ethernet`, `bluetooth`, `none`, joined with `+` when several apply.
+     */
+    var `transport`: kotlin.String? = null 
+    , 
+    /**
+     * The OS has validated internet access on it.
+     */
+    var `validated`: kotlin.Boolean? = null 
+    , 
+    /**
+     * The OS saw a captive portal.
+     */
+    var `captivePortal`: kotlin.Boolean? = null 
+    , 
+    /**
+     * A VPN carries the default network.
+     */
+    var `vpn`: kotlin.Boolean? = null 
+    , 
+    /**
+     * `off`, `opportunistic`, or `strict:<server>` (Android private DNS).
+     */
+    var `privateDns`: kotlin.String? = null 
+    , 
+    /**
+     * The default network has a global IPv6 address.
+     */
+    var `hasIpv6`: kotlin.Boolean? = null 
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeNetworkContext: FfiConverterRustBuffer<NetworkContext> {
+    override fun read(buf: ByteBuffer): NetworkContext {
+        return NetworkContext(
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalBoolean.read(buf),
+            FfiConverterOptionalBoolean.read(buf),
+            FfiConverterOptionalBoolean.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalBoolean.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: NetworkContext) = (
+            FfiConverterOptionalString.allocationSize(value.`transport`) +
+            FfiConverterOptionalBoolean.allocationSize(value.`validated`) +
+            FfiConverterOptionalBoolean.allocationSize(value.`captivePortal`) +
+            FfiConverterOptionalBoolean.allocationSize(value.`vpn`) +
+            FfiConverterOptionalString.allocationSize(value.`privateDns`) +
+            FfiConverterOptionalBoolean.allocationSize(value.`hasIpv6`)
+    )
+
+    override fun write(value: NetworkContext, buf: ByteBuffer) {
+            FfiConverterOptionalString.write(value.`transport`, buf)
+            FfiConverterOptionalBoolean.write(value.`validated`, buf)
+            FfiConverterOptionalBoolean.write(value.`captivePortal`, buf)
+            FfiConverterOptionalBoolean.write(value.`vpn`, buf)
+            FfiConverterOptionalString.write(value.`privateDns`, buf)
+            FfiConverterOptionalBoolean.write(value.`hasIpv6`, buf)
+    }
+}
+
+
+
+/**
  * One published position, as the app's trail store wants it.
  */
 data class OwnPublished (
@@ -9833,6 +9927,172 @@ public object FfiConverterTypePeerTransportDiagnostic: FfiConverterRustBuffer<Pe
             FfiConverterByteArray.write(value.`endpointId`, buf)
             FfiConverterBoolean.write(value.`known`, buf)
             FfiConverterSequenceTypeTransportAddressDiagnostic.write(value.`addresses`, buf)
+    }
+}
+
+
+
+/**
+ * One sample. Every field is optional because each platform can read a different subset.
+ */
+data class ProcessMemorySample (
+    /**
+     * What took the sample (`pulse`, `started`, ...).
+     */
+    var `trigger`: kotlin.String
+    , 
+    /**
+     * `/proc/self/status` (Linux/Android).
+     */
+    var `rssBytes`: kotlin.ULong?
+    , 
+    var `rssAnonBytes`: kotlin.ULong?
+    , 
+    var `rssFileBytes`: kotlin.ULong?
+    , 
+    var `swapBytes`: kotlin.ULong?
+    , 
+    /**
+     * The platform's malloc heap, allocated (Android: `Debug.getNativeHeapAllocatedSize`).
+     */
+    var `nativeHeapBytes`: kotlin.ULong?
+    , 
+    /**
+     * The managed heap in use (Android: `Runtime.totalMemory - freeMemory`).
+     */
+    var `javaHeapBytes`: kotlin.ULong?
+    , 
+    /**
+     * Proportional set size, when the platform can afford to compute it.
+     */
+    var `pssBytes`: kotlin.ULong?
+    , 
+    var `threads`: kotlin.UInt?
+    , 
+    /**
+     * Open file descriptors (sockets included).
+     */
+    var `fds`: kotlin.UInt?
+    , 
+    /**
+     * Memory mappings (`/proc/self/maps` lines).
+     */
+    var `maps`: kotlin.UInt?
+    , 
+    /**
+     * Since the process started.
+     */
+    var `uptimeMs`: kotlin.ULong?
+    , 
+    /**
+     * Whether an app UI is mounted in this process right now.
+     */
+    var `appWired`: kotlin.Boolean?
+    , 
+    /**
+     * The malloc heap's mapped size and its free part (Android: `Debug.getNativeHeapSize` /
+     * `getNativeHeapFreeSize`). Free climbing with size is fragmentation, not a leak.
+     */
+    var `nativeHeapSizeBytes`: kotlin.ULong? = null 
+    , 
+    var `nativeHeapFreeBytes`: kotlin.ULong? = null 
+    , 
+    /**
+     * `Debug.MemoryInfo` summary stats (PSS), sampled less often than the rest. `graphics` is GPU
+     * and gralloc memory — where Skia's textures land.
+     */
+    var `graphicsBytes`: kotlin.ULong? = null 
+    , 
+    var `codeBytes`: kotlin.ULong? = null 
+    , 
+    var `stackBytes`: kotlin.ULong? = null 
+    , 
+    var `privateOtherBytes`: kotlin.ULong? = null 
+    , 
+    var `systemBytes`: kotlin.ULong? = null 
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeProcessMemorySample: FfiConverterRustBuffer<ProcessMemorySample> {
+    override fun read(buf: ByteBuffer): ProcessMemorySample {
+        return ProcessMemorySample(
+            FfiConverterString.read(buf),
+            FfiConverterOptionalULong.read(buf),
+            FfiConverterOptionalULong.read(buf),
+            FfiConverterOptionalULong.read(buf),
+            FfiConverterOptionalULong.read(buf),
+            FfiConverterOptionalULong.read(buf),
+            FfiConverterOptionalULong.read(buf),
+            FfiConverterOptionalULong.read(buf),
+            FfiConverterOptionalUInt.read(buf),
+            FfiConverterOptionalUInt.read(buf),
+            FfiConverterOptionalUInt.read(buf),
+            FfiConverterOptionalULong.read(buf),
+            FfiConverterOptionalBoolean.read(buf),
+            FfiConverterOptionalULong.read(buf),
+            FfiConverterOptionalULong.read(buf),
+            FfiConverterOptionalULong.read(buf),
+            FfiConverterOptionalULong.read(buf),
+            FfiConverterOptionalULong.read(buf),
+            FfiConverterOptionalULong.read(buf),
+            FfiConverterOptionalULong.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: ProcessMemorySample) = (
+            FfiConverterString.allocationSize(value.`trigger`) +
+            FfiConverterOptionalULong.allocationSize(value.`rssBytes`) +
+            FfiConverterOptionalULong.allocationSize(value.`rssAnonBytes`) +
+            FfiConverterOptionalULong.allocationSize(value.`rssFileBytes`) +
+            FfiConverterOptionalULong.allocationSize(value.`swapBytes`) +
+            FfiConverterOptionalULong.allocationSize(value.`nativeHeapBytes`) +
+            FfiConverterOptionalULong.allocationSize(value.`javaHeapBytes`) +
+            FfiConverterOptionalULong.allocationSize(value.`pssBytes`) +
+            FfiConverterOptionalUInt.allocationSize(value.`threads`) +
+            FfiConverterOptionalUInt.allocationSize(value.`fds`) +
+            FfiConverterOptionalUInt.allocationSize(value.`maps`) +
+            FfiConverterOptionalULong.allocationSize(value.`uptimeMs`) +
+            FfiConverterOptionalBoolean.allocationSize(value.`appWired`) +
+            FfiConverterOptionalULong.allocationSize(value.`nativeHeapSizeBytes`) +
+            FfiConverterOptionalULong.allocationSize(value.`nativeHeapFreeBytes`) +
+            FfiConverterOptionalULong.allocationSize(value.`graphicsBytes`) +
+            FfiConverterOptionalULong.allocationSize(value.`codeBytes`) +
+            FfiConverterOptionalULong.allocationSize(value.`stackBytes`) +
+            FfiConverterOptionalULong.allocationSize(value.`privateOtherBytes`) +
+            FfiConverterOptionalULong.allocationSize(value.`systemBytes`)
+    )
+
+    override fun write(value: ProcessMemorySample, buf: ByteBuffer) {
+            FfiConverterString.write(value.`trigger`, buf)
+            FfiConverterOptionalULong.write(value.`rssBytes`, buf)
+            FfiConverterOptionalULong.write(value.`rssAnonBytes`, buf)
+            FfiConverterOptionalULong.write(value.`rssFileBytes`, buf)
+            FfiConverterOptionalULong.write(value.`swapBytes`, buf)
+            FfiConverterOptionalULong.write(value.`nativeHeapBytes`, buf)
+            FfiConverterOptionalULong.write(value.`javaHeapBytes`, buf)
+            FfiConverterOptionalULong.write(value.`pssBytes`, buf)
+            FfiConverterOptionalUInt.write(value.`threads`, buf)
+            FfiConverterOptionalUInt.write(value.`fds`, buf)
+            FfiConverterOptionalUInt.write(value.`maps`, buf)
+            FfiConverterOptionalULong.write(value.`uptimeMs`, buf)
+            FfiConverterOptionalBoolean.write(value.`appWired`, buf)
+            FfiConverterOptionalULong.write(value.`nativeHeapSizeBytes`, buf)
+            FfiConverterOptionalULong.write(value.`nativeHeapFreeBytes`, buf)
+            FfiConverterOptionalULong.write(value.`graphicsBytes`, buf)
+            FfiConverterOptionalULong.write(value.`codeBytes`, buf)
+            FfiConverterOptionalULong.write(value.`stackBytes`, buf)
+            FfiConverterOptionalULong.write(value.`privateOtherBytes`, buf)
+            FfiConverterOptionalULong.write(value.`systemBytes`, buf)
     }
 }
 
@@ -11463,6 +11723,38 @@ public object FfiConverterOptionalTypeLocationFix: FfiConverterRustBuffer<Locati
 /**
  * @suppress
  */
+public object FfiConverterOptionalTypeNetworkContext: FfiConverterRustBuffer<NetworkContext?> {
+    override fun read(buf: ByteBuffer): NetworkContext? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypeNetworkContext.read(buf)
+    }
+
+    override fun allocationSize(value: NetworkContext?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypeNetworkContext.allocationSize(value)
+        }
+    }
+
+    override fun write(value: NetworkContext?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypeNetworkContext.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
 public object FfiConverterOptionalTypePairResult: FfiConverterRustBuffer<PairResult?> {
     override fun read(buf: ByteBuffer): PairResult? {
         if (buf.get().toInt() == 0) {
@@ -12517,6 +12809,33 @@ public object FfiConverterSequenceTypeTransportAddressDiagnostic: FfiConverterRu
     UniffiLib.uniffi_iroh_location_fn_func_record_location_runtime(
     
         FfiConverterTypeLocationRuntimeEvent.lower(`event`),_status)
+}
+    
+    
+
+        /**
+         * Record one `net.health` span: the tallies since the last call (which this resets) and the live
+         * endpoint's state. Sync and bounded: it reads the node with `try_lock`, and a node lock someone
+         * is holding is reported as `net.node = busy` rather than waited for — the pulse must never be
+         * the thing that queues behind a wedged call (see `tests/node_lock.rs`).
+         */ fun `recordNetworkHealth`(`trigger`: kotlin.String, `context`: NetworkContext?)
+        = 
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_iroh_location_fn_func_record_network_health(
+    
+        FfiConverterString.lower(`trigger`),FfiConverterOptionalTypeNetworkContext.lower(`context`),_status)
+}
+    
+    
+
+        /**
+         * Record one sample as a `process.memory` span. Cheap and synchronous, like `location.runtime`.
+         */ fun `recordProcessMemory`(`sample`: ProcessMemorySample)
+        = 
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_iroh_location_fn_func_record_process_memory(
+    
+        FfiConverterTypeProcessMemorySample.lower(`sample`),_status)
 }
     
     

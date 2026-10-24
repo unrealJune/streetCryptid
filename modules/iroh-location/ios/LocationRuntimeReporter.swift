@@ -173,6 +173,10 @@ final class LocationRuntimeReporter {
     }
     lock.unlock()
     recordLocationRuntime(event: event)
+    // Relay failures by host, the endpoint's counters and resolver outcomes since the last pulse
+    // (`net_health.rs`). Rust reads the node with `try_lock`, so this never waits on it. No
+    // platform network context yet: that half is Android's.
+    recordNetworkHealth(trigger: "pulse", context: nil)
   }
 
   /// Caller holds `lock`.
