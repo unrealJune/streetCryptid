@@ -147,7 +147,7 @@ export const AERODROME_STROKE_WIDTH = 1;
  * Base stroke width per aeroway line kind, region-logical px.
  *
  * The runway sits just above a primary road and below a motorway (`ROAD_WIDTHS`
- * is 3.8 and 5.0 in mask px): wide enough to be the airport's one legible
+ * is 3.42 and 4.5 in mask px): wide enough to be the airport's one legible
  * landmark, not so wide that it is the first thing the eye lands on.
  */
 export const AERO_LINE_WIDTHS: Record<AeroLineKind, number> = {
