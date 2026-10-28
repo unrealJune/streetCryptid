@@ -234,12 +234,13 @@ process, and these spans say who holds it and why it changed. They replace every
 reading ownership off the log — `node.start.claim_refused`, `node.handover`, the background
 runtime's claim backoff — none of which a host binary emits.
 
-| Span                | Says                                                                                                                                                                                |
-| ------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `node.host.acquire` | a holder (`holder=app` / `background`) took a lease: `outcome` is `adopted` (nothing built), `built`, `replaced` (app only: the live node had another identity) or `no-identity`    |
-| `node.host.release` | a lease returned: `outcome` is `still-held`, `shut-down`, `shutdown-failed`, `shutdown-timed-out`, `released` (no node left) or `not-held`; `waited_ms` is the shutdown's wait      |
-| `node.host.restart` | a settings change rebuilt the node in place, keeping every lease; `shutdown` is how the old one went                                                                                |
-| `subscribe.own`     | a caller asked for the own-topic subscription: `outcome` is `created`, `adopted` (joined its peers, and took its events if `listener=true`) or `recreated` (the old loop had ended) |
+| Span                | Says                                                                                                                                                                                          |
+| ------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `node.host.acquire` | a holder (`holder=app` / `background`) took a lease: `outcome` is `adopted` (nothing built), `built`, `replaced` (app only: the live node had another identity) or `no-identity`              |
+| `node.host.release` | a lease returned: `outcome` is `still-held`, `shut-down`, `shutdown-failed`, `shutdown-timed-out`, `released` (no node left) or `not-held`; `waited_ms` is the shutdown's wait                |
+| `node.host.restart` | a settings change rebuilt the node in place, keeping every lease; `shutdown` is how the old one went                                                                                          |
+| `node.host.heal`    | an isolated phone with no app holding the node rebuilt it from the stored settings (`outcome` = `healed` / `declined` / `failed`) — see [below](#is-this-phone-reaching-anyone-nodeisolation) |
+| `subscribe.own`     | a caller asked for the own-topic subscription: `outcome` is `created`, `adopted` (joined its peers, and took its events if `listener=true`) or `recreated` (the old loop had ended)           |
 
 Every one carries `generation`, `app_leases` and `background` after the change. `device.health`
 carries the same under `node.host.*`, plus counters since process start; `builds` outrunning
@@ -548,6 +549,41 @@ service re-applies it on `onCreate`. So for an Android phone, pulses continuing 
 
 # Android phones carried by the service alone (no JS wired).
 { name = "location.runtime" && resource.os.type = "android" && span.location.node_owner = "native" }
+```
+
+## Is this phone reaching anyone? (`node.isolation`)
+
+A friend's dot can be stale because THIS phone cannot reach anyone, and nothing on the map says
+so. On 2026-10-22 the field-soak iPhone SE showed a friend "parked here 12 hr" across the lake
+from where she was: from 14:06 UTC every dial it made — the stash's included — went unanswered
+(`trail.push.peer{peer.answered=false}` everywhere, `friend.pull` spending its whole budget with
+`ns_deadline` on every namespace), while its relay connections stayed up and `net.*` said Wi-Fi
+and internet were fine. The sender was publishing the whole time.
+
+`modules/iroh-location/rust/src/isolation.rs` counts it. A pass is **silent** when nobody answered
+and the stash was among the peers dialled (friends' phones are asleep most of the time; the stash
+is not). A pull answered = a namespace reached `ContentReady` or closed; `ns_idle` alone is not an
+answer. Any `peer.contact` is an answer.
+
+| `node.isolation` `event` | Says                                                                                                                           |
+| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------ |
+| `entered`                | 3+ consecutive silent passes spanning 10+ min (`silent_passes`, `silent_ms`, `source` = `pull` / `push`)                       |
+| `network_change`         | the node called `Endpoint::network_change()` on itself — on entry, then every 30 min while it lasts                            |
+| `rebuild`                | the node was rebuilt inside an episode (`trigger` = `heal`, native with no app; `restart`, the app's `rebindNode('isolated')`) |
+| `recovered`              | someone answered: `isolated_ms`, the steps taken, `last_step` and `since_last_step_ms`                                         |
+
+A rebuild is due 10 min after a network change that did not help, at most once an hour (any rebuild,
+a settings change included, starts the cooldown). With no app holding the node the core heals it
+itself (`node.host.heal`); a mounted app reads `isolationStatus().rebuildDue` on its heartbeat and
+calls `rebindNode('isolated')`, because only it can rewire its subscriptions. `device.health`
+carries the state as `isolation.*`.
+
+**Read `recovered{last_step}` before tuning anything.** `none` means it came back on its own (as it
+did twice on 2026-10-22), `network_change` / `rebuild` with a small `since_last_step_ms` means that
+step is what fixed it. That is the evidence for whether the rebuild is worth what it costs.
+
+```traceql
+{ name = "node.isolation" } | select(resource.service.instance.id, span.event, span.isolated_ms, span.last_step, span.since_last_step_ms)
 ```
 
 ## Is the background pull safe? (`friend.pull`)

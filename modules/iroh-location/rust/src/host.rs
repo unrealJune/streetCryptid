@@ -156,6 +156,8 @@ pub struct HostSnapshot {
     pub replacements: u64,
     /// Restarts (a settings change: shut down, rebuild, start with the new settings).
     pub restarts: u64,
+    /// Rebuilds from the stored settings because the phone could reach nobody (`isolation.rs`).
+    pub heals: u64,
     /// Shutdowns that finished cleanly inside their budget.
     pub shutdowns: u64,
     /// Shutdowns that finished with an error.
@@ -569,13 +571,95 @@ impl<F: NodeFactory> Host<F> {
         budget: Duration,
     ) -> Result<Arc<F::Node>, LocationError> {
         let _transition = self.transitions.lock().await;
+        let node = self
+            .rebuild_locked(budget, |stats| stats.restarts += 1)
+            .await?;
+        node.start(config).await?;
+        Ok(node)
+    }
+
+    /// Rebuild the node from the STORED settings, keeping every lease — how an isolated phone
+    /// heals when no app holds the node (`isolation.rs`). `allow` is asked under the transition
+    /// lock, against the host's own snapshot, so two heals that race do the work once and a heal
+    /// cannot land on top of an app that acquired the node in the meantime. `Ok(None)` when it
+    /// declined, or when there is no node to heal.
+    ///
+    /// Stored rather than explicit settings because nothing that heals holds any: the background
+    /// runtime starts every node it touches this way, and the app mirrors its settings into the
+    /// store on every launch, so these ARE the current ones.
+    pub async fn heal<A>(
+        &self,
+        allow: A,
+        budget: Duration,
+    ) -> Result<Option<Arc<F::Node>>, LocationError>
+    where
+        A: FnOnce(&HostSnapshot) -> bool + Send,
+    {
+        let span = tracing::info_span!(
+            "node.host.heal",
+            outcome = tracing::field::Empty,
+            shutdown = tracing::field::Empty,
+            generation = tracing::field::Empty,
+            app_leases = tracing::field::Empty,
+            background = tracing::field::Empty,
+            error = tracing::field::Empty,
+        );
+        async {
+            let result = self.heal_inner(allow, budget).await;
+            let current = tracing::Span::current();
+            match &result {
+                Ok(Some(_)) => {
+                    current.record("outcome", "healed");
+                }
+                Ok(None) => {
+                    current.record("outcome", "declined");
+                }
+                Err(err) => {
+                    current.record("outcome", "failed");
+                    current.record("error", tracing::field::display(err));
+                }
+            }
+            self.record_state();
+            result
+        }
+        .instrument(span)
+        .await
+    }
+
+    async fn heal_inner<A>(
+        &self,
+        allow: A,
+        budget: Duration,
+    ) -> Result<Option<Arc<F::Node>>, LocationError>
+    where
+        A: FnOnce(&HostSnapshot) -> bool + Send,
+    {
+        let _transition = self.transitions.lock().await;
+        let snapshot = self.snapshot();
+        if !snapshot.has_node || !allow(&snapshot) {
+            return Ok(None);
+        }
+        let node = self
+            .rebuild_locked(budget, |stats| stats.heals += 1)
+            .await?;
+        node.start_stored().await?;
+        Ok(Some(node))
+    }
+
+    /// Shut the live node down and build its replacement from the same keys and roots, keeping
+    /// every lease. Not started. The caller holds the transition lock.
+    async fn rebuild_locked(
+        &self,
+        budget: Duration,
+        count: impl FnOnce(&mut HostSnapshot),
+    ) -> Result<Arc<F::Node>, LocationError> {
         let old = {
             let mut state = self.state();
             let Some(slot) = state.slot.take() else {
                 return Err(LocationError::NotStarted);
             };
             state.stats.generation += 1;
-            state.stats.restarts += 1;
+            count(&mut state.stats);
             slot
         };
         let keys = NodeKeys {
@@ -585,15 +669,12 @@ impl<F: NodeFactory> Host<F> {
         let shutdown = self.shutdown_bounded(old.node, budget).await;
         tracing::Span::current().record("shutdown", shutdown.as_str());
         let node = self.factory.build(&keys, &old.roots)?;
-        {
-            let mut state = self.state();
-            state.set_slot(Some(Slot {
-                node: node.clone(),
-                roots: old.roots,
-            }));
-            state.stats.builds += 1;
-        }
-        node.start(config).await?;
+        let mut state = self.state();
+        state.set_slot(Some(Slot {
+            node: node.clone(),
+            roots: old.roots,
+        }));
+        state.stats.builds += 1;
         Ok(node)
     }
 
@@ -735,6 +816,9 @@ pub fn node_host() -> Arc<NodeHost> {
     HOST.get_or_init(NodeHost::isolated).clone()
 }
 
+/// How long a heal may wait for the isolated node to shut down.
+const HEAL_BUDGET: Duration = Duration::from_secs(5);
+
 impl NodeHost {
     /// A host of its own, NOT the process's. For tests, which run many in one process; the
     /// platforms must use [`node_host`].
@@ -742,6 +826,42 @@ impl NodeHost {
         Arc::new(Self {
             host: Host::new(LocationNodeFactory),
         })
+    }
+
+    /// Rebuild an isolated node that no app holds, from the stored settings. `node` is the
+    /// address of the node asking, so a node this host did not build (a test's) is never healed
+    /// in its place, and a heal that lost a race to another rebuild does nothing.
+    ///
+    /// Never with an app lease: the app's subscriptions, listeners and pairing sessions belong to
+    /// the node being replaced, and only the app can rewire them — it heals through `rebindNode`,
+    /// which reads the same [`crate::isolation::IsolationStatus::rebuild_due`].
+    pub(crate) async fn heal_isolated(&self, node: usize) -> bool {
+        let host = &self.host;
+        let healed = host
+            .heal(
+                |snapshot| {
+                    snapshot.app_leases == 0
+                        && host
+                            .current()
+                            .is_some_and(|current| Arc::as_ptr(&current) as usize == node)
+                        && crate::isolation::tracker().rebuild_due(crate::isolation::now_ms())
+                },
+                HEAL_BUDGET,
+            )
+            .await;
+        match healed {
+            Ok(Some(_)) => {
+                crate::isolation::note_rebuild("heal");
+                true
+            }
+            Ok(None) => false,
+            Err(err) => {
+                // The rebuild happened even if its start failed; the next wake retries the start.
+                crate::isolation::note_rebuild("heal");
+                tracing::warn!(error = %err, "node.isolation: heal rebuilt the node but its start failed");
+                true
+            }
+        }
     }
 }
 
@@ -810,9 +930,16 @@ impl NodeHost {
         config: TransportConfig,
         timeout_ms: u64,
     ) -> Result<Arc<LocationNode>, LocationError> {
-        self.host
+        let result = self
+            .host
             .restart(config, Duration::from_millis(timeout_ms))
-            .await
+            .await;
+        // A fresh endpoint, whatever asked for it: the app healing an isolated phone
+        // (`rebindNode('isolated')`) or a settings change. Either starts the heal cooldown.
+        if result.is_ok() {
+            crate::isolation::note_rebuild("restart");
+        }
+        result
     }
 
     pub fn current(&self) -> Option<Arc<LocationNode>> {

@@ -5826,6 +5826,10 @@ public struct HostSnapshot: Equatable, Hashable {
      */
     public var restarts: UInt64
     /**
+     * Rebuilds from the stored settings because the phone could reach nobody (`isolation.rs`).
+     */
+    public var heals: UInt64
+    /**
      * Shutdowns that finished cleanly inside their budget.
      */
     public var shutdowns: UInt64
@@ -5866,6 +5870,9 @@ public struct HostSnapshot: Equatable, Hashable {
          * Restarts (a settings change: shut down, rebuild, start with the new settings).
          */restarts: UInt64, 
         /**
+         * Rebuilds from the stored settings because the phone could reach nobody (`isolation.rs`).
+         */heals: UInt64, 
+        /**
          * Shutdowns that finished cleanly inside their budget.
          */shutdowns: UInt64, 
         /**
@@ -5882,6 +5889,7 @@ public struct HostSnapshot: Equatable, Hashable {
         self.adoptions = adoptions
         self.replacements = replacements
         self.restarts = restarts
+        self.heals = heals
         self.shutdowns = shutdowns
         self.shutdownFailures = shutdownFailures
         self.shutdownTimeouts = shutdownTimeouts
@@ -5911,6 +5919,7 @@ public struct FfiConverterTypeHostSnapshot: FfiConverterRustBuffer {
                 adoptions: FfiConverterUInt64.read(from: &buf), 
                 replacements: FfiConverterUInt64.read(from: &buf), 
                 restarts: FfiConverterUInt64.read(from: &buf), 
+                heals: FfiConverterUInt64.read(from: &buf), 
                 shutdowns: FfiConverterUInt64.read(from: &buf), 
                 shutdownFailures: FfiConverterUInt64.read(from: &buf), 
                 shutdownTimeouts: FfiConverterUInt64.read(from: &buf)
@@ -5926,6 +5935,7 @@ public struct FfiConverterTypeHostSnapshot: FfiConverterRustBuffer {
         FfiConverterUInt64.write(value.adoptions, into: &buf)
         FfiConverterUInt64.write(value.replacements, into: &buf)
         FfiConverterUInt64.write(value.restarts, into: &buf)
+        FfiConverterUInt64.write(value.heals, into: &buf)
         FfiConverterUInt64.write(value.shutdowns, into: &buf)
         FfiConverterUInt64.write(value.shutdownFailures, into: &buf)
         FfiConverterUInt64.write(value.shutdownTimeouts, into: &buf)
@@ -6157,6 +6167,145 @@ public func FfiConverterTypeIngestOutcome_lift(_ buf: RustBuffer) throws -> Inge
 #endif
 public func FfiConverterTypeIngestOutcome_lower(_ value: IngestOutcome) -> RustBuffer {
     return FfiConverterTypeIngestOutcome.lower(value)
+}
+
+
+/**
+ * The tracker's state, for `device.health`.
+ */
+public struct IsolationStatus: Equatable, Hashable {
+    /**
+     * Whether this phone currently counts as reaching nobody.
+     */
+    public var isolated: Bool
+    /**
+     * When the silent streak that made it isolated began (wall clock, ms).
+     */
+    public var isolatedSinceMs: UInt64?
+    /**
+     * Consecutive silent passes in the current streak.
+     */
+    public var silentPasses: UInt32
+    /**
+     * When anyone last answered (wall clock, ms). `None` until something has, this process.
+     */
+    public var lastAnswerMs: UInt64?
+    /**
+     * Recovery steps taken in the current episode.
+     */
+    public var networkChanges: UInt32
+    public var rebuilds: UInt32
+    /**
+     * A rebuild is due and has not been done. The mounted app acts on this (`rebindNode`); with
+     * no app holding the node, the node acts on it itself.
+     */
+    public var rebuildDue: Bool
+    /**
+     * The last rebuild of the node, for any reason, this process.
+     */
+    public var lastRebuildMs: UInt64?
+    /**
+     * Episodes this process has seen, and how many ended.
+     */
+    public var episodes: UInt32
+    public var recoveries: UInt32
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Whether this phone currently counts as reaching nobody.
+         */isolated: Bool, 
+        /**
+         * When the silent streak that made it isolated began (wall clock, ms).
+         */isolatedSinceMs: UInt64?, 
+        /**
+         * Consecutive silent passes in the current streak.
+         */silentPasses: UInt32, 
+        /**
+         * When anyone last answered (wall clock, ms). `None` until something has, this process.
+         */lastAnswerMs: UInt64?, 
+        /**
+         * Recovery steps taken in the current episode.
+         */networkChanges: UInt32, rebuilds: UInt32, 
+        /**
+         * A rebuild is due and has not been done. The mounted app acts on this (`rebindNode`); with
+         * no app holding the node, the node acts on it itself.
+         */rebuildDue: Bool, 
+        /**
+         * The last rebuild of the node, for any reason, this process.
+         */lastRebuildMs: UInt64?, 
+        /**
+         * Episodes this process has seen, and how many ended.
+         */episodes: UInt32, recoveries: UInt32) {
+        self.isolated = isolated
+        self.isolatedSinceMs = isolatedSinceMs
+        self.silentPasses = silentPasses
+        self.lastAnswerMs = lastAnswerMs
+        self.networkChanges = networkChanges
+        self.rebuilds = rebuilds
+        self.rebuildDue = rebuildDue
+        self.lastRebuildMs = lastRebuildMs
+        self.episodes = episodes
+        self.recoveries = recoveries
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension IsolationStatus: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeIsolationStatus: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> IsolationStatus {
+        return
+            try IsolationStatus(
+                isolated: FfiConverterBool.read(from: &buf), 
+                isolatedSinceMs: FfiConverterOptionUInt64.read(from: &buf), 
+                silentPasses: FfiConverterUInt32.read(from: &buf), 
+                lastAnswerMs: FfiConverterOptionUInt64.read(from: &buf), 
+                networkChanges: FfiConverterUInt32.read(from: &buf), 
+                rebuilds: FfiConverterUInt32.read(from: &buf), 
+                rebuildDue: FfiConverterBool.read(from: &buf), 
+                lastRebuildMs: FfiConverterOptionUInt64.read(from: &buf), 
+                episodes: FfiConverterUInt32.read(from: &buf), 
+                recoveries: FfiConverterUInt32.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: IsolationStatus, into buf: inout [UInt8]) {
+        FfiConverterBool.write(value.isolated, into: &buf)
+        FfiConverterOptionUInt64.write(value.isolatedSinceMs, into: &buf)
+        FfiConverterUInt32.write(value.silentPasses, into: &buf)
+        FfiConverterOptionUInt64.write(value.lastAnswerMs, into: &buf)
+        FfiConverterUInt32.write(value.networkChanges, into: &buf)
+        FfiConverterUInt32.write(value.rebuilds, into: &buf)
+        FfiConverterBool.write(value.rebuildDue, into: &buf)
+        FfiConverterOptionUInt64.write(value.lastRebuildMs, into: &buf)
+        FfiConverterUInt32.write(value.episodes, into: &buf)
+        FfiConverterUInt32.write(value.recoveries, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeIsolationStatus_lift(_ buf: RustBuffer) throws -> IsolationStatus {
+    return try FfiConverterTypeIsolationStatus.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeIsolationStatus_lower(_ value: IsolationStatus) -> RustBuffer {
+    return FfiConverterTypeIsolationStatus.lower(value)
 }
 
 
@@ -10649,6 +10798,15 @@ public func nodeHost() -> NodeHost  {
 })
 }
 /**
+ * The process tracker's status, for `device.health`.
+ */
+public func isolationStatus() -> IsolationStatus  {
+    return try!  FfiConverterTypeIsolationStatus_lift(try! rustCall() {
+    uniffi_iroh_location_fn_func_isolation_status($0
+    )
+})
+}
+/**
  * Record one runtime event as a `location.runtime` span.
  *
  * Synchronous and cheap: it opens and closes a span, and the batch exporter does the rest on its
@@ -10765,6 +10923,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_func_node_host() != 26497) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_iroh_location_checksum_func_isolation_status() != 43250) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_func_record_location_runtime() != 22013) {
