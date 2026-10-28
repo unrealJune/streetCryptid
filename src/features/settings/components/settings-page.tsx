@@ -47,7 +47,11 @@ export function SettingsPage({
   return (
     <ScrollView
       testID={testID}
-      style={{ backgroundColor: theme.background }}
+      style={{
+        backgroundColor: theme.background,
+        paddingLeft: insets.left,
+        paddingRight: insets.right,
+      }}
       contentContainerStyle={[
         styles.content,
         {

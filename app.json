@@ -130,7 +130,8 @@
     ],
     "experiments": {
       "typedRoutes": true,
-      "reactCompiler": true
+      "reactCompiler": true,
+      "noxcturnalTransformWorker": true
     },
     "extra": {
       "eas": {

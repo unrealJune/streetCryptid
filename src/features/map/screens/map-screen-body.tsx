@@ -35,6 +35,7 @@ import {
   type Rgb,
 } from '@/features/map';
 import { resolveMapBackAction } from '@/features/map/core/back-action';
+import { islandLayout } from '@/features/map/core/island-layout';
 import { sampleTrailForMap } from '@/features/map/core/trail-sampling';
 import { friendPlaceName } from '@/features/map/core/readout';
 import { FriendDetailIsland } from '@/features/social/components/friend-detail-island';
@@ -132,8 +133,14 @@ export default function MapScreenBody() {
   // Both tabs minimize the same way: the drawer's grip, down to `collapsed`. There is no separate
   // chevron and no separate piece of state — "minimized" IS the detent, which is what stops the
   // panel from having two ideas about how big it is.
-  const minimized = detent === 'collapsed';
   const [screenHeight, setScreenHeight] = useState(0);
+  const [screenWidth, setScreenWidth] = useState(0);
+  // A wide window (tablet, unfolded foldable) gets the island as an always-open leading column
+  // instead of the drawer; see `islandLayout`. The caller's `detent` is left alone underneath, so
+  // folding back to a phone-width window returns the drawer to where it was.
+  const island = islandLayout(screenWidth, insets.left, insets.right, Spacing.three);
+  const shownDetent: DrawerDetent = island.column ? 'full' : detent;
+  const minimized = shownDetent === 'collapsed';
   const [locateTarget, setLocateTarget] = useState<{
     requestId: number;
     location: MapFriendLocation['location'];
@@ -145,8 +152,10 @@ export default function MapScreenBody() {
   });
 
   const onScreenLayout = useCallback((event: LayoutChangeEvent) => {
-    const measured = Math.round(event.nativeEvent.layout.height);
-    setScreenHeight((current) => (current === measured ? current : measured));
+    const height = Math.round(event.nativeEvent.layout.height);
+    const width = Math.round(event.nativeEvent.layout.width);
+    setScreenHeight((current) => (current === height ? current : height));
+    setScreenWidth((current) => (current === width ? current : width));
   }, []);
 
   const onReadout = useCallback((next: MapReadout) => {
@@ -378,7 +387,14 @@ export default function MapScreenBody() {
     useCallback(() => {
       if (Platform.OS !== 'android') return;
       const subscription = BackHandler.addEventListener('hardwareBackPress', () => {
-        switch (resolveMapBackAction({ layersOpen, selectedEndpoint, detent })) {
+        switch (
+          resolveMapBackAction({
+            layersOpen,
+            selectedEndpoint,
+            detent,
+            column: island.column,
+          })
+        ) {
           case 'close-layers':
             closeLayers();
             return true;
@@ -393,7 +409,7 @@ export default function MapScreenBody() {
         }
       });
       return () => subscription.remove();
-    }, [closeDetail, closeLayers, detent, layersOpen, selectedEndpoint])
+    }, [closeDetail, closeLayers, detent, island.column, layersOpen, selectedEndpoint])
   );
   // `streetcryptid://dev?cmd=…&id=…` — the e2e harness driving a RUNNING app (see
   // `features/dev/commands`). Dispatch keys off the `id` nonce rather than the command name, so
@@ -502,6 +518,33 @@ export default function MapScreenBody() {
     ? (snapshot?.sharingWith ?? []).includes(detailPresence.friend.endpointId)
     : false;
 
+  // Chrome clears the horizontal insets too: landscape notches, iPadOS/Android split windows, and the
+  // vertical system rail iPhone Duo draws on either edge (84pt). Beside a column it starts after it.
+  const sides = { left: island.chromeLeft, right: insets.right + Spacing.three };
+  const controls = (
+    <View
+      pointerEvents="box-none"
+      style={[
+        styles.controls,
+        island.column && {
+          // Beside a column the map controls have the map's trailing corner to themselves.
+          bottom: Math.max(insets.bottom, Spacing.two),
+          position: 'absolute',
+          right: insets.right,
+        },
+      ]}
+    >
+      <MapLayersControl
+        expanded={layersOpen}
+        layers={layers}
+        onChange={setLayer}
+        onExpandedChange={setLayersOpen}
+        theme={theme}
+      />
+      <LocateMeControl busy={locating} onPress={locateSelf} theme={theme} />
+    </View>
+  );
+
   return (
     <View
       onLayout={onScreenLayout}
@@ -535,7 +578,10 @@ export default function MapScreenBody() {
       </View>
       {/* The app's only top chrome: attribution on the left, Settings on the right.
           `pointerEvents="box-none"` so the empty span between them still pans the map. */}
-      <View pointerEvents="box-none" style={[styles.topLayer, { top: insets.top + Spacing.three }]}>
+      <View
+        pointerEvents="box-none"
+        style={[styles.topLayer, sides, { top: insets.top + Spacing.three }]}
+      >
         <Text
           pointerEvents="none"
           style={[styles.attribution, { color: theme.chrome.steel }]}
@@ -557,27 +603,20 @@ export default function MapScreenBody() {
       {locationStatus === 'permission-denied' ? (
         <View
           pointerEvents="box-none"
-          style={[styles.bannerLayer, { top: insets.top + Spacing.five + Spacing.three }]}
+          style={[styles.bannerLayer, sides, { top: insets.top + Spacing.five + Spacing.three }]}
         >
           <SharingMutedBanner theme={theme} />
         </View>
       ) : null}
+      {island.column ? controls : null}
       {/* Only map affordances float: layers and locate. They ride above the drawer and are
           pushed off-screen as it docks, which is correct — a full sheet is not a map view. */}
-      <View pointerEvents="box-none" style={styles.islandLayer}>
-        <View pointerEvents="box-none" style={styles.controls}>
-          <MapLayersControl
-            expanded={layersOpen}
-            layers={layers}
-            onChange={setLayer}
-            onExpandedChange={setLayersOpen}
-            theme={theme}
-          />
-          <LocateMeControl busy={locating} onPress={locateSelf} theme={theme} />
-        </View>
+      <View pointerEvents="box-none" style={[styles.islandLayer, island.frame]}>
+        {island.column ? null : controls}
         <MapDrawer
           activeTab={islandTab}
-          detent={detent}
+          column={island.column}
+          detent={shownDetent}
           insetBottom={insets.bottom}
           insetTop={insets.top}
           maxDetent={drawerMax}
@@ -594,7 +633,7 @@ export default function MapScreenBody() {
           {detailPresence ? (
             <FriendDetailIsland
               key={detailPresence.friend.endpointId}
-              detent={detent}
+              detent={shownDetent}
               onBack={closeDetail}
               onRemove={async () => {
                 await removeFriend(detailPresence.friend.endpointId);
@@ -727,9 +766,7 @@ const styles = StyleSheet.create({
   },
   islandLayer: {
     bottom: 0,
-    left: 0,
     position: 'absolute',
-    right: 0,
   },
   controls: {
     alignItems: 'flex-end',
@@ -739,17 +776,13 @@ const styles = StyleSheet.create({
   },
   topLayer: {
     position: 'absolute',
-    left: Spacing.three,
-    right: Spacing.three,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
     gap: Spacing.three,
   },
   bannerLayer: {
-    left: Spacing.three,
     position: 'absolute',
-    right: Spacing.three,
   },
   attribution: {
     flexShrink: 1,

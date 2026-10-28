@@ -3,7 +3,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { useColorScheme } from '@/hooks/use-color-scheme';
 import { ThemedText } from '@/components/themed-text';
-import { CryptidThemes, Spacing } from '@/constants/theme';
+import { CryptidThemes, MaxContentWidth, Spacing } from '@/constants/theme';
 import { useTheme } from '@/hooks/use-theme';
 
 /**
@@ -36,7 +36,11 @@ export function BackgroundReliabilityScreen({
 
   return (
     <ScrollView
-      style={{ backgroundColor: theme.background }}
+      style={{
+        backgroundColor: theme.background,
+        paddingLeft: insets.left,
+        paddingRight: insets.right,
+      }}
       contentContainerStyle={[
         styles.content,
         { paddingTop: insets.top + Spacing.five, paddingBottom: insets.bottom + Spacing.four },
@@ -97,7 +101,14 @@ export function BackgroundReliabilityScreen({
 }
 
 const styles = StyleSheet.create({
-  content: { gap: Spacing.four, paddingHorizontal: Spacing.four },
+  // Capped and centred like `SettingsPage`, so a tablet reads a column rather than a banner.
+  content: {
+    alignSelf: 'center',
+    gap: Spacing.four,
+    maxWidth: MaxContentWidth,
+    paddingHorizontal: Spacing.four,
+    width: '100%',
+  },
   header: { gap: Spacing.three },
   title: { fontSize: 28, fontWeight: '700', lineHeight: 34 },
   card: {

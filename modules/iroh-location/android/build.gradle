@@ -19,6 +19,8 @@ android {
 
   defaultConfig {
     minSdk safeExtGet("minSdkVersion", 24)
+    // Applied to the app's R8 pass (on by default for release since Expo SDK 58).
+    consumerProguardFiles "consumer-rules.pro"
   }
 
   // Per-ABI libiroh_location.so produced by `cargo ndk`. Drop them under

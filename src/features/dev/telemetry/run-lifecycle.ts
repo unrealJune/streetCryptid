@@ -1,5 +1,7 @@
 import { AppState, type AppStateStatus } from 'react-native';
 
+import { currentAppState } from '@/hooks/current-app-state';
+
 import { lastEntryTimestamp, readMeta, writeMeta } from './event-log';
 import { getRunId } from './resource';
 import { getTelemetry } from './telemetry';
@@ -105,7 +107,7 @@ export async function beginTelemetryRun(now: () => number = Date.now): Promise<v
   await persist({
     runId,
     startedAt,
-    lastState: AppState.currentState,
+    lastState: currentAppState(),
     lastStateAt: startedAt,
   });
 

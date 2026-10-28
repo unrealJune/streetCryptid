@@ -775,7 +775,12 @@ export default function ActivePairingScreen() {
       : `field:${presentation.fieldMode}`;
 
   return (
-    <View style={[styles.screen, { backgroundColor: chrome.bg }]}>
+    <View
+      style={[
+        styles.screen,
+        { backgroundColor: chrome.bg, paddingLeft: insets.left, paddingRight: insets.right },
+      ]}
+    >
       <View style={[styles.header, { paddingTop: Math.max(insets.top, Spacing.three) }]}>
         <PressableAction
           accessibilityLabel="Close pairing"

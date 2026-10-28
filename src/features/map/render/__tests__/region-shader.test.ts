@@ -67,18 +67,21 @@ jest.mock('@shopify/react-native-skia', () => {
         };
       },
       Path: {
-        MakeFromSVGString: (svg: string) => ({ svg, setFillType: jest.fn() }),
-        // An assembled region path names the tile paths it was built from.
+        MakeFromSVGString: (svg: string) => ({ svg }),
+      },
+      // An assembled region path names the tile paths it was built from.
+      PathBuilder: {
         Make: () => {
           const parts: string[] = [];
-          return {
-            get svg() {
-              return parts.join(' ');
+          const builder = {
+            setFillType: () => builder,
+            addPath: (src: { svg: string }) => {
+              parts.push(src.svg);
+              return builder;
             },
-            setFillType: jest.fn(),
-            addPath: (src: { svg: string }) => parts.push(src.svg),
-            dispose: jest.fn(),
+            detach: () => ({ svg: parts.join(' '), dispose: jest.fn() }),
           };
+          return builder;
         },
       },
       Matrix: jest.fn(),

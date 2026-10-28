@@ -11,7 +11,13 @@ import {
   Skia,
 } from '@shopify/react-native-skia';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Platform, StyleSheet, View, type LayoutChangeEvent } from 'react-native';
+import {
+  Platform,
+  StyleSheet,
+  View,
+  type LayoutChangeEvent,
+  type ViewInstance,
+} from 'react-native';
 import { Gesture, GestureDetector } from 'react-native-gesture-handler';
 import {
   cancelAnimation,
@@ -908,7 +914,7 @@ export function MapView({
   // Desktop web: wheel / trackpad zoom at the cursor, like Google Maps. RN Web's
   // <View> doesn't forward an onWheel prop to the DOM node, so bind a non-passive
   // native 'wheel' listener to the container element directly.
-  const containerRef = useRef<View | null>(null);
+  const containerRef = useRef<ViewInstance | null>(null);
   const wheelCommitTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => {
     if (Platform.OS !== 'web' || !limits) return;
@@ -1208,10 +1214,10 @@ interface TrailScreenPoint {
 
 function buildTrail(points: readonly TrailScreenPoint[], color: string) {
   if (points.length === 0) return null;
-  const path = Skia.Path.Make();
-  path.moveTo(points[0].screen[0], points[0].screen[1]);
-  for (const { screen } of points.slice(1)) path.lineTo(screen[0], screen[1]);
-  return { color, path, points };
+  const builder = Skia.PathBuilder.Make();
+  builder.moveTo(points[0].screen[0], points[0].screen[1]);
+  for (const { screen } of points.slice(1)) builder.lineTo(screen[0], screen[1]);
+  return { color, path: builder.detach(), points };
 }
 
 const ZERO_RECT = { x: 0, y: 0, width: 0, height: 0 };

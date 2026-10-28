@@ -3,7 +3,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { useColorScheme } from '@/hooks/use-color-scheme';
 import { ThemedText } from '@/components/themed-text';
-import { CryptidThemes, Spacing } from '@/constants/theme';
+import { CryptidThemes, MaxContentWidth, Spacing } from '@/constants/theme';
 import { useTheme } from '@/hooks/use-theme';
 
 /**
@@ -25,7 +25,11 @@ export function LocationDisclosureScreen({ onChoice }: { onChoice: (accepted: bo
 
   return (
     <ScrollView
-      style={{ backgroundColor: theme.background }}
+      style={{
+        backgroundColor: theme.background,
+        paddingLeft: insets.left,
+        paddingRight: insets.right,
+      }}
       contentContainerStyle={[
         styles.content,
         { paddingTop: insets.top + Spacing.five, paddingBottom: insets.bottom + Spacing.four },
@@ -98,9 +102,13 @@ export function LocationDisclosureScreen({ onChoice }: { onChoice: (accepted: bo
 }
 
 const styles = StyleSheet.create({
+  // Capped and centred like `SettingsPage`, so a tablet reads a column rather than a banner.
   content: {
+    alignSelf: 'center',
     gap: Spacing.four,
+    maxWidth: MaxContentWidth,
     paddingHorizontal: Spacing.four,
+    width: '100%',
   },
   header: {
     gap: Spacing.two,

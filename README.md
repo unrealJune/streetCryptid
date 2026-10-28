@@ -103,7 +103,7 @@ signed tile data.
 
 | Piece            | Choice                                                                                                                      |
 | ---------------- | --------------------------------------------------------------------------------------------------------------------------- |
-| Framework        | [Expo](https://expo.dev) SDK **57**                                                                                         |
+| Framework        | [Expo](https://expo.dev) SDK **58**                                                                                         |
 | Native runtime   | React Native **0.86** (New Architecture, on)                                                                                |
 | UI runtime       | React **19.2** (React Compiler enabled)                                                                                     |
 | Routing          | [expo-router](https://docs.expo.dev/router/introduction) (file-based, typed routes)                                         |

@@ -9,6 +9,8 @@
 
 import { AppState, type AppStateStatus } from 'react-native';
 
+import { currentAppState } from '@/hooks/current-app-state';
+
 export interface LifecycleHandlers {
   /** App entered foreground / became active. */
   onForeground(): void | Promise<void>;
@@ -35,7 +37,7 @@ function runGuarded(fn: () => void | Promise<void>): void {
 export function createAppLifecycleController(handlers: LifecycleHandlers): AppLifecycleController {
   return {
     start(): () => void {
-      let previous: AppStateStatus = AppState.currentState;
+      let previous: AppStateStatus = currentAppState();
 
       const sub = AppState.addEventListener('change', (next: AppStateStatus) => {
         if (next === previous) {

@@ -1,5 +1,5 @@
 import { forwardRef } from 'react';
-import { TextInput, type TextInputProps } from 'react-native';
+import { TextInput, type TextInputInstance, type TextInputProps } from 'react-native';
 
 import { themedTextStyles, type ThemedTextProps } from '@/components/themed-text';
 import { ThemeColor } from '@/constants/theme';
@@ -10,18 +10,20 @@ export type ThemedTextInputProps = TextInputProps & {
   themeColor?: ThemeColor;
 };
 
-export const ThemedTextInput = forwardRef<TextInput, ThemedTextInputProps>(function ThemedTextInput(
-  { placeholderTextColor, style, type = 'default', themeColor, ...rest },
-  ref
-) {
-  const theme = useTheme();
+export const ThemedTextInput = forwardRef<TextInputInstance, ThemedTextInputProps>(
+  function ThemedTextInput(
+    { placeholderTextColor, style, type = 'default', themeColor, ...rest },
+    ref
+  ) {
+    const theme = useTheme();
 
-  return (
-    <TextInput
-      ref={ref}
-      placeholderTextColor={placeholderTextColor ?? theme.textSecondary}
-      style={[{ color: theme[themeColor ?? 'text'] }, themedTextStyles[type], style]}
-      {...rest}
-    />
-  );
-});
+    return (
+      <TextInput
+        ref={ref}
+        placeholderTextColor={placeholderTextColor ?? theme.textSecondary}
+        style={[{ color: theme[themeColor ?? 'text'] }, themedTextStyles[type], style]}
+        {...rest}
+      />
+    );
+  }
+);

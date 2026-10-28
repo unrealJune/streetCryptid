@@ -7,6 +7,7 @@ import {
   StyleSheet,
   TextInput,
   View,
+  type TextInputInstance,
 } from 'react-native';
 import { SymbolView } from 'expo-symbols';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -137,7 +138,7 @@ export function CryptidProfileEditor({
   // The hero preview doubles as navigation into the fields it previews: tapping
   // the @handle focuses the username input (always mounted, so a direct focus is
   // enough), tapping the icon opens the icon picker.
-  const handleInputRef = useRef<TextInput>(null);
+  const handleInputRef = useRef<TextInputInstance>(null);
   const focusHandle = useCallback(() => handleInputRef.current?.focus(), []);
   const openIconFromHero = useCallback(() => setActiveEditor('icon'), []);
 
@@ -214,7 +215,10 @@ export function CryptidProfileEditor({
   return (
     <KeyboardAvoidingView
       behavior={Platform.OS === 'ios' ? 'padding' : 'position'}
-      style={[styles.root, { backgroundColor: theme.background }]}
+      style={[
+        styles.root,
+        { backgroundColor: theme.background, paddingLeft: insets.left, paddingRight: insets.right },
+      ]}
     >
       <ScrollView
         contentContainerStyle={[
