@@ -826,6 +826,21 @@ class IrohLocationModule : Module() {
     /// Whether the background runtime is the one currently receiving locations.
     Function("nativeBackgroundRunning") { BackgroundLocationService.isRunning() }
 
+    /// Whether the app is exempt from battery optimisation — see [ServiceRecovery].
+    Function("batteryOptimizationExempt") {
+      val context = appContext.reactContext?.applicationContext ?: return@Function false
+      ServiceRecovery.isBatteryOptimizationExempt(context)
+    }
+
+    /// Show the system prompt for the exemption. Prefers the current activity, so the dialog opens
+    /// over the app rather than in a new task. Returns whether a prompt was shown.
+    Function("requestBatteryOptimizationExemption") {
+      val context =
+        appContext.currentActivity ?: appContext.reactContext?.applicationContext
+          ?: return@Function false
+      ServiceRecovery.requestBatteryOptimizationExemption(context)
+    }
+
     Function("stopNativeBackground") {
       sink = null
       BackgroundLocationService.stop(

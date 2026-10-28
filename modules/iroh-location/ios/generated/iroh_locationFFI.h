@@ -1078,6 +1078,16 @@ RustBuffer uniffi_iroh_location_fn_func_isolation_status(RustCallStatus *_Nonnul
 void uniffi_iroh_location_fn_func_record_location_runtime(RustBuffer event, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_FUNC_RECORD_NETWORK_HEALTH
+#define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_FUNC_RECORD_NETWORK_HEALTH
+void uniffi_iroh_location_fn_func_record_network_health(RustBuffer trigger, RustBuffer context, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_FUNC_RECORD_PROCESS_MEMORY
+#define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_FUNC_RECORD_PROCESS_MEMORY
+void uniffi_iroh_location_fn_func_record_process_memory(RustBuffer sample, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_FUNC_CONFIGURE_TELEMETRY
 #define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_FUNC_CONFIGURE_TELEMETRY
 int8_t uniffi_iroh_location_fn_func_configure_telemetry(RustBuffer endpoint, RustBuffer instance_id, RustCallStatus *_Nonnull out_status
@@ -1466,6 +1476,18 @@ uint16_t uniffi_iroh_location_checksum_func_isolation_status(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_FUNC_RECORD_LOCATION_RUNTIME
 #define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_FUNC_RECORD_LOCATION_RUNTIME
 uint16_t uniffi_iroh_location_checksum_func_record_location_runtime(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_FUNC_RECORD_NETWORK_HEALTH
+#define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_FUNC_RECORD_NETWORK_HEALTH
+uint16_t uniffi_iroh_location_checksum_func_record_network_health(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_FUNC_RECORD_PROCESS_MEMORY
+#define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_FUNC_RECORD_PROCESS_MEMORY
+uint16_t uniffi_iroh_location_checksum_func_record_process_memory(void
     
 );
 #endif

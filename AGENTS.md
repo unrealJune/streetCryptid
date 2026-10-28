@@ -577,6 +577,19 @@ Conventions when changing that code:
   dial (gossip bootstrap, push, pull, docs/profile ticket import) keeps only relays in this node's
   own relay map and leaves the rest to the N0 address lookup. Retiring a relay is a config change
   and nothing more. The wasm build leaves addresses alone (a browser can only use relays).
+- **`process.memory` and `net.health` ride the five-minute runtime pulse, and are counters.**
+  `memory.rust_live_bytes` comes from a counting `#[global_allocator]` (`alloc_stats.rs`, `otel`
+  only) and is what splits Bionic's native heap into Rust's share and everyone else's;
+  `memory.open_span_events` counts events recorded on spans that have not ended; the exporter is
+  handed at most 128 of them per span (`ledger::CapSpanEvents`, the SDK's own export limit),
+  because iroh's endpoint-lifetime `actor` span collected ~1,500 an hour that it held forever. The
+  OTLP reload slot is never an empty `Vec` (`idle_slot`): an empty one answers `Interest::never`
+  and switched off every span and event in the process until the first `configure`. `net.health` carries relay-actor failures by host and class
+  (counted by `RelayTap` from the `active-relay` span's `url`, because Loki drops that field),
+  home-relay state, iroh's socket counters as deltas, resolver outcomes and Android's network
+  context. It reads the node with `try_lock` and reports `busy` rather than wait. Do not turn
+  either into a span per event: a dead relay retries every 16 s for the life of the process. See
+  `infra/otel/README.md`.
 - Guard newly added native exports anyway (`typeof mod.configureTelemetry === 'function'`). Not
   because of bindgen now, but because a phone can be running an older binary than the JS bundle.
 

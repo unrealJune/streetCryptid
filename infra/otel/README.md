@@ -635,6 +635,69 @@ replica, recorded as `trail.refresh.native_pull` with `recovered`.
 { name = "friend.pull" && (span.pull.outcome =~ "expired|stranded" || span.pull.overrun_ms > 0) }
 ```
 
+## Where is the memory going? (`process.memory`)
+
+A Pixel 10 was killed by the low-memory killer at 3.5 GB on 2026-10-21, and nothing in the telemetry
+said so. The platform runtime now samples its own process on the five-minute `location.runtime`
+pulse (Android only so far; `process_memory.rs`, `ProcessMemorySampler.kt`). On the map-leak fix
+the Pixel stayed under 1 GB for 36 h, but `memory.native_heap_bytes` still climbed ~5 MB/h in the
+background. The fields below exist to say whose that growth is:
+
+| Field                                                                                                    | Says                                                                                                                                                                          |
+| -------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `memory.native_heap_bytes`                                                                               | Bionic's whole malloc heap: Rust, Hermes, Skia, React Native                                                                                                                  |
+| `memory.rust_live_bytes`                                                                                 | Rust's exact share (counting allocator, `alloc_stats.rs`). Climbing with the native heap: ours. Flat: someone else's                                                          |
+| `memory.rust_allocs_total` / `memory.rust_allocated_total_bytes`                                         | cumulative. Climbing fast with `rust_live_bytes` flat is churn (CPU), not a leak                                                                                              |
+| `memory.open_spans` / `memory.open_span_events`                                                          | spans that have not ended, and the events recorded on them. The exporter is handed at most 128 per span (`CapSpanEvents`), so past that this counts events, not buffered heap |
+| `memory.heaviest_open_span`                                                                              | `name=events` of the open span holding the most (once past 256). A never-ending span collecting events is a heap that only grows                                              |
+| `memory.native_heap_size_bytes` / `_free_bytes`                                                          | the heap's mapped size and free part. Free growing with size is fragmentation                                                                                                 |
+| `memory.pss_bytes`, `graphics_bytes`, `code_bytes`, `stack_bytes`, `private_other_bytes`, `system_bytes` | `Debug.MemoryInfo` summary (PSS). Taken on the first sample and every sixth (30 min), because it walks every mapping. `graphics` is GPU/gralloc, where Skia's textures land   |
+| `memory.rss_*`, `swap_bytes`, `java_heap_bytes`, `threads`, `fds`, `maps`                                | as before: RSS + swap is what the LMK weighs; climbing handles are a handle leak                                                                                              |
+
+`rust_live_bytes` and the ledger fields come from Rust and are absent from a build without the
+`otel` feature.
+
+The first day of these fields found two things (2026-10-24). iroh's socket `actor` span lives as
+long as the endpoint and every `iroh::socket` debug line lands on it, about 1,500 an hour, and
+`tracing-opentelemetry` kept every one until the span closed — which it never does — although the
+SDK keeps only 128 at export. `CapSpanEvents` now stops handing a span's events to the exporter at
+128; Loki still gets them all through the log bridge. And until the first `configure`, the empty
+OTLP reload slot switched every callsite in the process off (`telemetry::imp::idle_slot`), so a
+span opened before then — iroh's endpoint and relay actors on a JS launch — was invisible for its
+whole life, to the ledger and `RelayTap` too.
+
+```traceql
+# One phone's memory over time.
+{ name = "process.memory" && resource.service.instance.id = "cd736d206b" } | select(span.memory.uptime_ms, span.memory.native_heap_bytes, span.memory.rust_live_bytes, span.memory.open_span_events, span.memory.heaviest_open_span, span.memory.graphics_bytes)
+```
+
+## Is the network healthy? (`net.health`)
+
+From 2026-10-15 the same Pixel logged ~6,000 relay failures a day (`tls connection failed: received
+fatal alert: InternalError`) and no record said which relay: the URL is a field on iroh's
+`active-relay` span, and Loki drops fields. It was a retired relay that old tickets still named
+(`relay::scrub_addr`, which fixed it fleet-wide). `net.health` (`net_health.rs`) makes the next one
+a query: emitted on the same five-minute pulse (Android and iOS), it carries the counts since the
+previous record.
+
+| Field                                                                                                | Says                                                                                                                                                             |
+| ---------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `net.node`                                                                                           | `live`, `stopped`, `none`, or `busy` (the node lock was held at that instant; the pulse never waits on it)                                                       |
+| `relay.home` / `relay.home_down` / `relay.home_last_error`                                           | each home relay as `host=up`/`host=down`, and the last error of the first one down                                                                               |
+| `relay.errors` / `relay.error_classes` / `relay.error_sample`                                        | relay-actor warnings by host and class (`tls_alert:<alert>`, `tls_cert`, `dns`, `timeout`, `refused`, `lost`, …), plus one message                               |
+| `relay.foreign_errors`                                                                               | the part of `relay.errors` against relays outside this node's relay map. Should be 0 since `scrub_addr`                                                          |
+| `dns.ok` / `dns.failed` / `dns.failed_by_kind` / `dns.failure_sample`                                | system-resolver lookups; failures by record type and `relay`/`discovery`/`other`. A negative answer is not a failure                                             |
+| `ep.*`                                                                                               | iroh's socket counters as deltas: conns opened/closed, holepunch attempts, direct/relay paths, home-relay changes, link changes, bytes by transport, net reports |
+| `net.transport`, `net.validated`, `net.captive_portal`, `net.vpn`, `net.private_dns`, `net.has_ipv6` | Android's account of the default network. A failure class that follows `net.transport` or `net.private_dns` is the network, not the relay                        |
+
+```traceql
+# Which relays is a phone failing against, and on what network?
+{ name = "net.health" && resource.service.instance.id = "cd736d206b" && span.relay.errors > 0 } | select(span.relay.error_classes, span.relay.home, span.net.transport, span.net.private_dns)
+
+# Anyone still dialling a relay we don't run.
+{ name = "net.health" && span.relay.foreign_errors > 0 } | select(resource.service.instance.id, span.relay.error_classes)
+```
+
 ## Tuning the per-peer dial budget
 
 Every durable push now grants each peer its **own** deadline, predicted by
