@@ -10,6 +10,8 @@ export function sameRegionRenderInput(a: MapRegion, b: MapRegion): boolean {
     aSpec.cellRes !== bSpec.cellRes ||
     aSpec.maskWidth !== bSpec.maskWidth ||
     aSpec.maskHeight !== bSpec.maskHeight ||
+    aSpec.nominalSize?.width !== bSpec.nominalSize?.width ||
+    aSpec.nominalSize?.height !== bSpec.nominalSize?.height ||
     aSpec.rect.minX !== bSpec.rect.minX ||
     aSpec.rect.minY !== bSpec.rect.minY ||
     aSpec.rect.maxX !== bSpec.rect.maxX ||

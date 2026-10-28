@@ -27,8 +27,17 @@ export function renderPicture(
 ): SkImage | null {
   const surface = Skia.Surface.MakeOffscreen(width, height);
   if (!surface) return null;
-  surface.getCanvas().drawPicture(picture);
-  surface.flush();
-  const image = surface.makeImageSnapshot();
-  return consumer === 'same-thread' ? image : image.makeNonTextureImage();
+  try {
+    surface.getCanvas().drawPicture(picture);
+    surface.flush();
+    const image = surface.makeImageSnapshot();
+    if (consumer === 'same-thread') return image;
+    try {
+      return image.makeNonTextureImage();
+    } finally {
+      image.dispose();
+    }
+  } finally {
+    surface.dispose();
+  }
 }

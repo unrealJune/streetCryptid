@@ -62,15 +62,15 @@ import { clusterMarkers } from '../core/marker-clusters';
 import { PLACED_OCEAN_CRYPTIDS } from '../core/ocean-cryptids';
 import { useMapEngine } from '../hooks/use-map-engine';
 import { latLonToWorld } from '../core/mercator';
-import { HIGHWAY_CLASS } from '../core/road-lod';
 import { placeNameInRegion } from '../core/readout';
 import { useMapPerfRunner } from '../perf/use-map-perf-runner';
 import { FriendLocator } from './friend-locator';
 import { FriendClusterPuck } from './friend-cluster-puck';
 import { FriendLocatorStack } from './friend-locator-stack';
-import { MapLabelLayer } from './map-labels';
+import { MapLabelLayer, useStableMapLabels } from './map-labels';
 import { OceanCryptidLayer } from './ocean-cryptid-layer';
 import { makeLutImage } from './region-shader';
+import { regionImageLayout } from './shader-uniforms';
 import { getRevealMaskEffect } from './reveal-mask-shader';
 import { prevRectUniform, REVEAL_TARGET } from './reveal-mask';
 import { useRegionBundle, type RegionBundle } from './use-region-bundle';
@@ -314,9 +314,17 @@ export function MapView({
     sectorsVisible,
     placeName,
     hexLattice,
-    commit,
+    commit: commitCamera,
     prefetchAt,
   } = useMapEngine(viewport, initialCenter, selfFix, friendTargets);
+  const [labelCamera, setLabelCamera] = useState<CameraState | null>(null);
+  const commit = useCallback(
+    (t: ViewTransform) => {
+      if (viewport) setLabelCamera(applyViewTransform(anchor, viewport, t));
+      return commitCamera(t);
+    },
+    [commitCamera, viewport, anchor]
+  );
   // Your chosen signal, with the theme accent as the pre-profile fallback.
   const selfInk = selfColor ?? theme.canvas.accent;
 
@@ -333,6 +341,7 @@ export function MapView({
   const wasScaling = useSharedValue(false);
   /** UI-side backpressure: never enqueue a second JS prefetch behind a blocked build. */
   const prefetchInFlight = useSharedValue(false);
+  const cameraUpdateInFlight = useSharedValue(false);
   const trailStrokeWidth = useDerivedValue(() => 2.5 / Math.max(0.001, k.value));
   const trailDotRadius = useDerivedValue(() => 2.8 / Math.max(0.001, k.value));
 
@@ -347,18 +356,11 @@ export function MapView({
     structuresEnabled,
   });
 
-  // Highway name chips belong to highway geometry: hiding one hides the other.
-  const visibleLabels = useMemo(
-    () =>
-      (region?.labels ?? []).filter((label) => {
-        // A name belongs to the geometry it names: hiding a layer hides its
-        // chips too, or the map grows labels for things that are not drawn.
-        if (!highwaysEnabled && label.roadClass === HIGHWAY_CLASS) return false;
-        if (!transitEnabled && label.kind === 'transit') return false;
-        if (!peaksEnabled && label.kind === 'peak') return false;
-        return true;
-      }),
-    [region, highwaysEnabled, transitEnabled, peaksEnabled]
+  const visibleLabels = useStableMapLabels(
+    curBundle?.region.geometry ?? null,
+    labelCamera ?? anchor,
+    viewport,
+    { highwaysEnabled, transitEnabled, peaksEnabled }
   );
 
   const animateProfileCamera = useCallback(
@@ -475,8 +477,7 @@ export function MapView({
     () => (track.cur && viewport ? anchorRect(track.cur.region.spec.rect, anchor, viewport) : null),
     [track.cur, anchor, viewport]
   );
-  // SkRect twin of curRect for the reveal's ImageShaders — placed at the same
-  // rect as the settled <Image>, so the wipe and the plain draw are pixel-aligned.
+  // Cell state follows the data rect; the bitmap has its own pixel-aligned bounds.
   const curRectSk = useMemo(
     () => (curRect ? Skia.XYWHRect(curRect.x, curRect.y, curRect.width, curRect.height) : null),
     [curRect]
@@ -485,6 +486,27 @@ export function MapView({
     () =>
       track.prev && viewport ? anchorRect(track.prev.region.spec.rect, anchor, viewport) : null,
     [track.prev, anchor, viewport]
+  );
+  const curImageRect = useMemo(
+    () =>
+      track.cur && viewport
+        ? anchorRect(regionImageLayout(track.cur.region.spec).rect, anchor, viewport)
+        : null,
+    [track.cur, anchor, viewport]
+  );
+  const prevImageRect = useMemo(
+    () =>
+      track.prev && viewport
+        ? anchorRect(regionImageLayout(track.prev.region.spec).rect, anchor, viewport)
+        : null,
+    [track.prev, anchor, viewport]
+  );
+  const curImageRectSk = useMemo(
+    () =>
+      curImageRect
+        ? Skia.XYWHRect(curImageRect.x, curImageRect.y, curImageRect.width, curImageRect.height)
+        : null,
+    [curImageRect]
   );
   // The area the outgoing layer already covered — the reveal shader swaps these
   // pixels in instantly and only hex-loads the newly-exposed ground around them.
@@ -642,7 +664,7 @@ export function MapView({
     k.value = t.k;
     tx.value = t.tx;
     ty.value = t.ty;
-    commit(t);
+    commitCamera(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [viewport, anchor]);
 
@@ -684,7 +706,7 @@ export function MapView({
       easing: Easing.out(Easing.cubic),
     };
     // Start destination demand now, not after an animation callback crosses the bridge.
-    commit(to);
+    commitCamera(to);
     lastPrefetch.value = to;
     locateProgress.value = 0;
     k.value = withTiming(to.k, config);
@@ -755,13 +777,17 @@ export function MapView({
     [limits, commit, reducedMotion]
   );
 
+  // A pending download must not stop the displayed camera advancing for labels.
   const requestPrefetch = useCallback(
-    (t: ViewTransform) => {
-      void prefetchAt(t).finally(() => {
+    (future: ViewTransform | null, current: ViewTransform) => {
+      if (viewport) setLabelCamera(applyViewTransform(anchor, viewport, current));
+      cameraUpdateInFlight.value = false;
+      if (!future) return;
+      void prefetchAt(future).finally(() => {
         prefetchInFlight.value = false;
       });
     },
-    [prefetchAt, prefetchInFlight]
+    [prefetchAt, prefetchInFlight, cameraUpdateInFlight, viewport, anchor]
   );
 
   // Mid-pan/fling prefetch: request a region about one build latency ahead of
@@ -776,9 +802,11 @@ export function MapView({
         wasScaling.value = true;
         if (shouldPrefetchScaleMotion(t, prev, lastPrefetch.value)) {
           lastPrefetch.value = t;
-          if (!prefetchInFlight.value) {
-            prefetchInFlight.value = true;
-            runOnJS(requestPrefetch)(clampTranslation(t, limits));
+          if (!cameraUpdateInFlight.value) {
+            cameraUpdateInFlight.value = true;
+            const future = prefetchInFlight.value ? null : clampTranslation(t, limits);
+            if (future) prefetchInFlight.value = true;
+            runOnJS(requestPrefetch)(future, t);
           }
         } else if (t.k > prev.k) {
           // Zoom-in can never expose an outer edge; track it only to reset the
@@ -795,7 +823,12 @@ export function MapView({
       if (transformDistanceSq(t, lastPrefetch.value) < PREFETCH_STRIDE_PX * PREFETCH_STRIDE_PX)
         return;
       lastPrefetch.value = t;
-      if (prefetchInFlight.value) return;
+      if (cameraUpdateInFlight.value) return;
+      cameraUpdateInFlight.value = true;
+      if (prefetchInFlight.value) {
+        runOnJS(requestPrefetch)(null, t);
+        return;
+      }
       prefetchInFlight.value = true;
       let dx = (t.tx - prev.tx) * PREFETCH_LEAD_FRAMES;
       let dy = (t.ty - prev.ty) * PREFETCH_LEAD_FRAMES;
@@ -804,7 +837,10 @@ export function MapView({
         dx *= PREFETCH_LEAD_MAX_PX / lead;
         dy *= PREFETCH_LEAD_MAX_PX / lead;
       }
-      runOnJS(requestPrefetch)(clampTranslation({ k: t.k, tx: t.tx + dx, ty: t.ty + dy }, limits));
+      runOnJS(requestPrefetch)(
+        clampTranslation({ k: t.k, tx: t.tx + dx, ty: t.ty + dy }, limits),
+        t
+      );
     },
     [requestPrefetch, limits]
   );
@@ -1000,12 +1036,18 @@ export function MapView({
                   {/* Retained coverage layer — stays under the reveal now: the wipe
                     swaps its pixels in instantly where prev already covered
                     (uPrevRect), so only the newly-exposed ground hex-loads in. */}
-                  {prevImage && prevRect && (
-                    <HexClippedImage image={prevImage} rect={prevRect} lattice={prevClipLattice} />
+                  {prevImage && prevRect && prevImageRect && (
+                    <HexClippedImage
+                      image={prevImage}
+                      rect={prevRect}
+                      imageRect={prevImageRect}
+                      lattice={prevClipLattice}
+                    />
                   )}
                   {curImage &&
                     curRect &&
-                    (revealing && revealEffect && curCellImage && curRectSk ? (
+                    curImageRect &&
+                    (revealing && revealEffect && curCellImage && curRectSk && curImageRectSk ? (
                       // Hex load-in: paint the finished bitmap through the reveal
                       // wipe (one cheap GPU pass). Pixels prev already covered swap
                       // in instantly; only new ground animates. Bounded to curRect;
@@ -1017,7 +1059,7 @@ export function MapView({
                         height={curRect.height}
                       >
                         <Shader source={revealEffect} uniforms={revealUniforms}>
-                          <ImageShader image={curImage} rect={curRectSk} fit="fill" />
+                          <ImageShader image={curImage} rect={curImageRectSk} fit="fill" />
                           <ImageShader image={curCellImage} rect={curRectSk} fit="fill" />
                         </Shader>
                       </Rect>
@@ -1025,6 +1067,7 @@ export function MapView({
                       <HexClippedImage
                         image={curImage}
                         rect={curRect}
+                        imageRect={curImageRect}
                         lattice={curClipLattice}
                         opacity={curOpacityValue}
                       />

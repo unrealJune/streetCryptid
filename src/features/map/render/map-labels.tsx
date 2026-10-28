@@ -1,17 +1,59 @@
+import { useState } from 'react';
 import { StyleSheet, Text, View } from 'react-native';
 import Animated, { useAnimatedStyle, type SharedValue } from 'react-native-reanimated';
 
-import { worldToScreen } from '../core/camera';
+import { visibleWorldRect, worldToScreen } from '../core/camera';
 import {
   chipWidthPx,
   LABEL_FONT_SIZE,
   LABEL_HEIGHT_PX,
   LABEL_LETTER_SPACING,
   PEAK_MARKER_PX,
+  selectMapLabels,
+  type LabelOptions,
   type MapLabel,
   type MapLabelKind,
 } from '../core/map-labels';
 import type { CameraState, MapPalette, Viewport } from '../core/types';
+import type { PackedGeometry } from '../tiles/packed-geometry';
+
+/** A placement changes only at the existing throttled camera handoff or a data/layer change. */
+export function useStableMapLabels(
+  geometry: PackedGeometry | null,
+  camera: CameraState | null,
+  viewport: Viewport | null,
+  options: Omit<LabelOptions, 'previous'>
+): readonly MapLabel[] {
+  const layers = `${options.highwaysEnabled}/${options.transitEnabled}/${options.peaksEnabled}`;
+  const [placed, setPlaced] = useState<{
+    geometry: PackedGeometry | null;
+    camera: CameraState | null;
+    viewport: Viewport | null;
+    layers: string;
+    labels: readonly MapLabel[];
+  }>({ geometry: null, camera: null, viewport: null, layers: '', labels: [] });
+  if (
+    placed.geometry !== geometry ||
+    placed.camera !== camera ||
+    placed.viewport !== viewport ||
+    placed.layers !== layers
+  ) {
+    const labels =
+      geometry && camera && viewport
+        ? selectMapLabels(
+            geometry,
+            {
+              rect: visibleWorldRect(camera, viewport),
+              zoom: camera.zoom,
+            },
+            { ...options, previous: placed.labels }
+          )
+        : [];
+    setPlaced({ geometry, camera, viewport, layers, labels });
+    return labels;
+  }
+  return placed.labels;
+}
 
 interface MapLabelLayerProps {
   readonly labels: readonly MapLabel[];
@@ -32,7 +74,7 @@ interface MapLabelLayerProps {
  * They ride the live transform exactly like the locators do — positioned in
  * anchor space and only *translated* by the UI-thread transform — so a pinch
  * moves them with the map while the type itself stays a constant, legible size.
- * Which names appear at all is decided per region build in `core/map-labels.ts`.
+ * Names are selected for the displayed viewport, independently of region prefetch.
  *
  * Purely decorative: the island is the canvas's accessible text model
  * (PRODUCT.md P0), so this layer is hidden from screen readers and never takes

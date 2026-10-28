@@ -1,7 +1,7 @@
 import { CryptidThemes } from '@/constants/cryptid-theme';
 
 import { packGeometry } from '../../tiles/packed-geometry';
-import { visibleWorldRect, worldToScreen } from '../camera';
+import { scaleFor, visibleWorldRect, worldToScreen } from '../camera';
 import { buildFeatureMasks } from '../masks';
 import {
   LUT_WIDTH,
@@ -24,19 +24,24 @@ const camera: CameraState = { center: [0.1596, 0.3565], zoom: 15 };
 const dataZooms = { min: 12, max: 14 };
 
 describe('computeRegionSpec', () => {
-  it('pads the visible rect symmetrically', () => {
+  it('covers the symmetric pad, rounding outward by less than one mask pixel per edge', () => {
     const spec = computeRegionSpec(camera, viewport, { dataZooms, pad: 0.75 });
     const view = visibleWorldRect(camera, viewport);
     const vw = view.maxX - view.minX;
-    expect(spec.rect.maxX - spec.rect.minX).toBeCloseTo(vw * 2.5, 12);
-    expect((spec.rect.minX + spec.rect.maxX) / 2).toBeCloseTo(camera.center[0], 12);
+    const pixel = 1 / (scaleFor(camera.zoom) * 0.4);
+    expect(spec.rect.minX).toBeLessThanOrEqual(view.minX - vw * 0.75);
+    expect(spec.rect.maxX).toBeGreaterThanOrEqual(view.maxX + vw * 0.75);
+    expect(spec.rect.maxX - spec.rect.minX).toBeLessThan(vw * 2.5 + 2 * pixel);
+    expect(Math.abs((spec.rect.minX + spec.rect.maxX) / 2 - camera.center[0])).toBeLessThan(pixel);
     expect(spec.zoom).toBe(15);
   });
 
   it('sizes masks by viewport × factor, capped at maxDim', () => {
     const spec = computeRegionSpec(camera, viewport, { dataZooms, pad: 0.75, maskScale: 1 });
-    expect(spec.maskWidth).toBe(Math.round(390 * 2.5));
-    expect(spec.maskHeight).toBe(Math.round(780 * 2.5));
+    expect(spec.maskWidth).toBeGreaterThanOrEqual(390 * 2.5);
+    expect(spec.maskWidth).toBeLessThanOrEqual(390 * 2.5 + 2);
+    expect(spec.maskHeight).toBeGreaterThanOrEqual(780 * 2.5);
+    expect(spec.maskHeight).toBeLessThanOrEqual(780 * 2.5 + 2);
 
     const capped = computeRegionSpec(camera, viewport, {
       dataZooms,
@@ -47,6 +52,35 @@ describe('computeRegionSpec', () => {
     expect(Math.max(capped.maskWidth, capped.maskHeight)).toBeLessThanOrEqual(2048);
     // aspect preserved
     expect(capped.maskWidth / capped.maskHeight).toBeCloseTo(390 / 780, 2);
+  });
+
+  it('keeps the mask pixel grid and square pixels fixed across arbitrary pans', () => {
+    const first = computeRegionSpec(camera, viewport, { dataZooms });
+    const pixel = (first.rect.maxX - first.rect.minX) / first.maskWidth;
+    for (const dx of [-93.6, -0.2, 0.1, 80.75, 395]) {
+      const shifted = computeRegionSpec(
+        {
+          ...camera,
+          center: [camera.center[0] + dx / scaleFor(camera.zoom), camera.center[1]],
+        },
+        viewport,
+        { dataZooms }
+      );
+      const shift = (shifted.rect.minX - first.rect.minX) / pixel;
+      expect(shift).toBeCloseTo(Math.round(shift), 6);
+      expect((shifted.rect.maxX - shifted.rect.minX) / shifted.maskWidth).toBeCloseTo(pixel, 14);
+      expect((shifted.rect.maxY - shifted.rect.minY) / shifted.maskHeight).toBeCloseTo(pixel, 14);
+      expect(
+        coversView(
+          shifted,
+          {
+            ...camera,
+            center: [camera.center[0] + dx / scaleFor(camera.zoom), camera.center[1]],
+          },
+          viewport
+        )
+      ).toBe(true);
+    }
   });
 });
 
@@ -125,6 +159,28 @@ describe('shouldPrefetchRegion', () => {
 
   it('is false deep inside the region', () => {
     expect(shouldPrefetchRegion(spec, camera, viewport, dataZooms)).toBe(false);
+  });
+
+  it('never requests a replacement of a freshly centred region at any zoom or pad', () => {
+    const planet = { min: 0, max: 14 };
+    for (let zoom = 1; zoom <= 18; zoom += 0.25) {
+      const at = { ...camera, zoom };
+      for (const pad of [undefined, 0, 0.05, 0.2, 0.75, 1]) {
+        const built = computeRegionSpec(at, viewport, { dataZooms: planet, pad });
+        expect(shouldPrefetchRegion(built, at, viewport, planet)).toBe(false);
+      }
+    }
+  });
+
+  it('still prefetches before exhausting the small range-view pad', () => {
+    const at = { ...camera, zoom: 10 };
+    const built = computeRegionSpec(at, viewport, { dataZooms });
+    const near = {
+      ...at,
+      center: [at.center[0] + (viewport.width * 0.16) / scaleFor(at.zoom), at.center[1]] as const,
+    };
+    expect(shouldPrefetchRegion(built, near, viewport, dataZooms)).toBe(true);
+    expect(coversView(built, near, viewport)).toBe(true);
   });
 
   it('fires before the edge, while the view is still covered (compute-ahead)', () => {

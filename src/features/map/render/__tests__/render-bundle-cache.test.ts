@@ -48,7 +48,6 @@ const region: MapRegion = {
   geometry: EMPTY_PACKED,
   cellField: field,
   places: [],
-  labels: [],
   explorationVersion: 0,
   timing,
 };
@@ -116,6 +115,13 @@ describe('sameRegionRenderInput', () => {
     const elevation = { width: 1, height: 1, metres: new Float32Array(1), rect: region.spec.rect };
     expect(sameRegionRenderInput(region, { ...region, elevation })).toBe(false);
     expect(sameRegionRenderInput({ ...region, elevation }, { ...region, elevation })).toBe(true);
+  });
+
+  it('includes the nominal span that determines bitmap density', () => {
+    const a = { ...region, spec: { ...region.spec, nominalSize: { width: 800, height: 1600 } } };
+    const b = { ...region, spec: { ...region.spec, nominalSize: { width: 801, height: 1602 } } };
+    expect(sameRegionRenderInput(a, b)).toBe(false);
+    expect(sameRegionRenderInput(a, { ...a, spec: { ...a.spec } })).toBe(true);
   });
 
   // A z14 build's full tile adds only labels to its structure stage.

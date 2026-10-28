@@ -1,33 +1,4 @@
-/**
- * Terrain inputs for the dot field: the ground-cover texture's encoding and the
- * elevation → contour-band normalization behind `terrainTex.g`.
- *
- * Pure (no Skia): the render layer turns what this returns into textures, and
- * the shader (`render/dot-field-sksl.ts`) reads them back with the same
- * constants.
- *
- * ## Why bands, not the region's min/max
- *
- * The design note normalizes elevation to the visible min/max and draws a
- * contour every 1/9 of that range, so the Alps are not a wall of lines and a
- * floodplain is not empty. Normalizing to the REGION's exact range would make
- * every contour move each time a pan builds the next region — the lines would
- * swim. So the range only chooses an interval from {@link CONTOUR_INTERVALS_M}
- * (the smallest that spans it in {@link CONTOUR_BANDS} bands), and the bands
- * start on a multiple of it: contours sit at real, absolute elevations (every
- * 50 m, say), and two neighbouring regions with similar relief draw the same
- * lines. `fract(h · CONTOUR_BANDS)` in the shader crosses 0 exactly on them.
- *
- * ## Why the treeline is in metres
- *
- * The band value is relative by construction, so anything keyed to it moves
- * whenever the view's relief does. The treeline was: parkland turned alpine in
- * the top ~15% of each region's bands, so a lowland valley's 300 m hilltops went
- * grey at one zoom and green again once a pan or zoom-out brought a real summit
- * into the region. It is now absolute ({@link treelineMetres}), carried per DEM
- * pixel in `terrainTex.b` ({@link alpineWeight}), and a hill is alpine or not
- * wherever you look at it from.
- */
+/** World-anchored terrain inputs, shared by the renderer and host screenshotter. */
 
 import { worldToLatLon } from './mercator';
 import type { RegionSpec } from './region';
@@ -44,21 +15,9 @@ export function groundCode(kindIndex: number): number {
 /** Park-edge blur σ, region-logical px — the design note's "~9 px" boundary band. */
 export const PARK_EDGE_PX = 9;
 
-/** Contour bands across a region's relief — the design note's "every 1/9 of the range". */
-export const CONTOUR_BANDS = 9;
-
-/** Candidate contour intervals, metres, smallest first. */
-export const CONTOUR_INTERVALS_M = [5, 10, 20, 25, 50, 100, 200, 250, 500, 1000] as const;
-
-/**
- * Below this much relief (metres) a region is treated as flat: no hillshade or
- * contours to draw, so the park falls back to the canopy texture rather than
- * drawing one stray contour across a floodplain.
- */
-export const MIN_RELIEF_M = 15;
-
-/** Hillshade contrast per unit of band value (`uShadeGain`), tuned on Kyoto at z9.5–z12. */
-export const SHADE_GAIN = 6;
+/** Hillshade contrast per metre of rise per projected metre, independent of zoom/crop. */
+export const SHADE_GAIN = 1.5;
+export const MERCATOR_CIRCUMFERENCE_M = 40075016.68557849;
 
 /** Metres over which parkland fades from forest to alpine, centred on the treeline. */
 export const ALPINE_FADE_M = 300;
@@ -83,18 +42,10 @@ export function alpineWeight(metres: number, treeline: number): number {
   return c * c * (3 - 2 * c);
 }
 
-/** How a region's elevations map onto the 0–1 band value the shader reads. */
-export interface ElevationBands {
-  /** Elevation (m) of band value 0 — a multiple of {@link interval}. */
-  readonly base: number;
-  /** Metres between contours. */
-  readonly interval: number;
-}
-
 /**
  * Elevation in metres on a row-major grid covering `rect` edge to edge, at the
- * DEM's own resolution rather than the mask's: the render layer stretches it
- * over the mask with a bilinear filter ({@link rasterMaskRect}). Sea and
+ * DEM's own resolution rather than the mask's: the shader samples it directly
+ * with a bilinear filter. Sea and
  * bathymetry may be negative; they are drawn as sea level.
  */
 export interface ElevationRaster {
@@ -120,93 +71,40 @@ export function rasterMaskRect(
   };
 }
 
-/**
- * The contour interval and base for a region whose land spans `minM..maxM`, or
- * null when it is flatter than {@link MIN_RELIEF_M}. The chosen bands always
- * contain the whole range.
- */
-export function elevationBands(minM: number, maxM: number): ElevationBands | null {
-  const lo = Math.max(0, minM);
-  const hi = Math.max(0, maxM);
-  if (!(hi - lo >= MIN_RELIEF_M)) return null;
-  for (const interval of CONTOUR_INTERVALS_M) {
-    const base = Math.floor(lo / interval) * interval;
-    if (hi - base <= CONTOUR_BANDS * interval) return { base, interval };
-  }
-  const interval = CONTOUR_INTERVALS_M[CONTOUR_INTERVALS_M.length - 1];
-  return { base: Math.floor(lo / interval) * interval, interval };
-}
-
-/** Band value 0–1 for an elevation (clamped; sea level and below read as land at 0 m). */
-export function bandValue(metres: number, bands: ElevationBands): number {
-  const t = (Math.max(0, metres) - bands.base) / (CONTOUR_BANDS * bands.interval);
-  return t <= 0 ? 0 : t >= 1 ? 1 : t;
+/** Nested absolute contours: zooming adds intermediate lines, never moves existing ones. */
+export function contourLod(zoom: number): { interval: number; detail: number } {
+  return {
+    interval: Math.max(25, 100 * 2 ** (12 - Math.floor(zoom))),
+    detail: zoom >= 15 ? 1 : zoom - Math.floor(zoom),
+  };
 }
 
 /**
- * The range a region's relief is measured over: robust percentiles of its land
- * (above 0 m), so one bad DEM pixel or a single mast-tip spike cannot stretch
- * the bands. Null when there is too little land to say.
+ * R/G = unsigned 16-bit elevation in metres, B = alpine weight. Sample this
+ * image DIRECTLY with bilinear filtering, then decode R*65280 + G*255 in the
+ * shader. Drawing the two bytes through an intermediate RGBA8 surface rounds
+ * the high byte and introduces 256 m steps.
+ *
+ * No region statistics, sorting, or flat-region switch: a summit and a forest
+ * keep the same encoding when another mountain enters the crop. Latitude is
+ * measured per DEM row, not at the region centre, for the same reason.
  */
-export function reliefRange(metres: Float32Array): readonly [number, number] | null {
-  // A stride keeps the sort cheap and is plenty for two percentiles.
-  const stride = Math.max(1, Math.floor(metres.length / 20000));
-  const sampled = new Float32Array(Math.ceil(metres.length / stride));
-  let count = 0;
-  for (let i = 0; i < metres.length; i += stride) if (metres[i] > 0) sampled[count++] = metres[i];
-  if (count < 16) return null;
-  // A typed-array sort is numeric and native; a comparator sort calls back into JS per compare.
-  const land = sampled.subarray(0, count).sort();
-  return [land[Math.floor(count * 0.01)], land[Math.floor((count - 1) * 0.995)]];
-}
-
-/**
- * Encode a region's elevation as 8-bit band values (the `terrainTex.g` channel),
- * or null when the region is flat or has no land — the shader then draws the
- * canopy fallback.
- */
-export function encodeElevationBands(
-  raster: ElevationRaster
-): { readonly bytes: Uint8Array; readonly bands: ElevationBands } | null {
-  const range = reliefRange(raster.metres);
-  if (!range) return null;
-  const bands = elevationBands(range[0], range[1]);
-  if (!bands) return null;
-  const bytes = new Uint8Array(raster.width * raster.height);
-  for (let i = 0; i < bytes.length; i++) {
-    bytes[i] = Math.round(bandValue(raster.metres[i], bands) * 255);
-  }
-  return { bytes, bands };
-}
-
-/**
- * {@link encodeElevationBands} as the `terrainTex` pixels it becomes: opaque
- * RGBA at the raster's size with the band in G, the {@link alpineWeight} in B,
- * and R left 0 for the park edge. One treeline serves the whole raster, taken
- * at its centre's latitude (a region spans a degree or two at most where there
- * is relief to draw).
- */
-export function elevationBandsRgba(raster: ElevationRaster): Uint8Array | null {
-  const range = reliefRange(raster.metres);
-  if (!range) return null;
-  const bands = elevationBands(range[0], range[1]);
-  if (!bands) return null;
-  // `bandValue` inlined, in one pass: this runs on the JS thread for every region
-  // build, and a call per pixel is most of its cost under Hermes.
-  const { metres } = raster;
-  const span = CONTOUR_BANDS * bands.interval;
-  const { rect } = raster;
-  const { lat } = worldToLatLon([(rect.minX + rect.maxX) / 2, (rect.minY + rect.maxY) / 2]);
-  const alpineLo = treelineMetres(lat) - ALPINE_FADE_M / 2;
+export function elevationRgba(raster: ElevationRaster): Uint8Array {
+  const { metres, width, height, rect } = raster;
   const rgba = new Uint8Array(metres.length * 4);
-  for (let i = 0, p = 1; i < metres.length; i++, p += 4) {
-    const m = metres[i];
-    const v = (((m > 0 ? m : 0) - bands.base) / span) * 255;
-    rgba[p] = v <= 0 ? 0 : v >= 255 ? 255 : v + 0.5; // Uint8Array truncates: round half up
-    // alpineWeight, inlined for the same reason.
-    const t = (m - alpineLo) / ALPINE_FADE_M;
-    if (t > 0) rgba[p + 1] = t >= 1 ? 255 : t * t * (3 - 2 * t) * 255 + 0.5;
-    rgba[p + 2] = 255;
+  const dy = (rect.maxY - rect.minY) / height;
+  for (let y = 0; y < height; y++) {
+    const { lat } = worldToLatLon([0, rect.minY + (y + 0.5) * dy]);
+    const alpineLo = treelineMetres(lat) - ALPINE_FADE_M / 2;
+    for (let i = y * width, end = i + width; i < end; i++) {
+      const m = Math.max(0, Math.min(65535, Math.round(metres[i])));
+      const p = i * 4;
+      rgba[p] = m >> 8;
+      rgba[p + 1] = m & 255;
+      const t = (m - alpineLo) / ALPINE_FADE_M;
+      if (t > 0) rgba[p + 2] = t >= 1 ? 255 : t * t * (3 - 2 * t) * 255 + 0.5;
+      rgba[p + 3] = 255;
+    }
   }
   return rgba;
 }

@@ -1,4 +1,4 @@
-import { DOT_FIELD_SKSL } from '../../render/dot-field-sksl';
+import { DOT_MATERIAL_SKSL } from '../../render/dot-field-sksl';
 import { ROAD_WIDTHS } from '../masks';
 import {
   CLASS_MIN_ZOOM,
@@ -133,7 +133,7 @@ describe('the road brightness ladder', () => {
   it('is the same ladder the shader was compiled against', () => {
     // SkSL cannot import, so the constants are interpolated into the source.
     // This is the drift guard.
-    expect(DOT_FIELD_SKSL).toContain(`>= ${ROAD_DILATE_MIN}.0`);
-    expect(DOT_FIELD_SKSL).toContain(`sv > ${ROAD_MASK_FLOOR}.0`);
+    expect(DOT_MATERIAL_SKSL).toContain(`>= ${ROAD_DILATE_MIN}.0`);
+    expect(DOT_MATERIAL_SKSL).toContain(`sv > ${ROAD_MASK_FLOOR}.0`);
   });
 });

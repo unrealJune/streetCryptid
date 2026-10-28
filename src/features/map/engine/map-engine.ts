@@ -7,7 +7,6 @@ import { H3_DISPLAY_RES } from '../core/cell-ladder';
 import type { ExplorationIndex } from '../core/exploration-index';
 import { createExplorationRollup, type ExplorationRollup } from '../core/exploration-rollup';
 import type { H3Grid } from '../core/h3-grid';
-import { selectMapLabels, type MapLabel } from '../core/map-labels';
 import {
   computeRegionSpec,
   PREFETCH_ZOOM_DELTA,
@@ -63,13 +62,8 @@ export interface MapRegion {
   /** Named places inside the region (island headline lookup). */
   readonly places: readonly Place[];
   /**
-   * Street/park name chips chosen for this region's build zoom. Selected once
-   * per build (never per frame) — a region only rebuilds when the camera leaves
-   * its zoom band, which is exactly the granularity the label LOD needs.
-   */
-  readonly labels: readonly MapLabel[];
-  /**
-   * Elevation for every mask pixel, when a terrain source covers the region.
+   * Native-resolution elevation with its own rect; it may cover only the overlap
+   * with the previous region while the new DEM is loading.
    * Absent (or null) draws parkland with the canopy fallback instead of terrain.
    */
   readonly elevation?: ElevationRaster | null;
@@ -491,7 +485,7 @@ export class MapEngine {
                 { ...spec, tileZoom: stage.tileZoom },
                 geometry,
                 { tiles: tiles.length, coldStart: true, sourceMs: now() - t0, mergeMs: 0 },
-                elevationNow
+                elevationNow ?? previous?.elevation ?? null
               );
               if (detailLoaded) return;
               this.emitPreview(build, preview);
@@ -528,6 +522,7 @@ export class MapEngine {
 
     const geometry = mergeGeometry(parts);
     const t2 = now();
+    const freshElevation = elevationNow ?? (await withDeadline(elevation, ELEVATION_GRACE_MS));
     const assembled = await this.buildFromGeometry(
       request,
       spec,
@@ -538,15 +533,15 @@ export class MapEngine {
         sourceMs: t1 - t0,
         mergeMs: t2 - t1,
       },
-      elevationNow ?? (await withDeadline(elevation, ELEVATION_GRACE_MS)),
+      freshElevation ?? previous?.elevation ?? null,
       structureGeometry
     );
     const region = this.publish(build, assembled);
     if (!region) return null;
     this.onTiming?.(region.timing);
-    if (!region.elevation && wantsPreview()) {
-      // Relief that misses the grace window is an upgrade, not a loss: republish
-      // the same geometry with terrain, unless a newer region has replaced it.
+    if (!freshElevation && wantsPreview()) {
+      // A retained raster is only a fallback: new relief still upgrades it after
+      // the grace window, unless a newer region has replaced this one.
       void elevation.then(async (raster) => {
         if (!raster || this.last !== region) return;
         const upgraded = await this.buildFromGeometry(
@@ -641,7 +636,6 @@ export class MapEngine {
       ...(rasterGeometry ? { rasterGeometry } : {}),
       cellField,
       places: geometry.places,
-      labels: selectMapLabels(geometry, spec),
       elevation,
       explorationVersion: request.explorationVersion,
       timing,
