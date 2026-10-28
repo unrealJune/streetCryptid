@@ -1,4 +1,4 @@
-import { scaleFor } from '../camera';
+import { scaleFor, visibleWorldRect } from '../camera';
 import {
   AREA_LABEL_MIN_ZOOM,
   PLACE_LABEL_BANDS,
@@ -20,7 +20,7 @@ import {
 } from '../map-labels';
 import type { RegionSpec } from '../region';
 import type { AreaFeature, MapGeometry, MapPeak, RoadClass, StreetWay, WorldPoint } from '../types';
-import { packGeometry } from '../../tiles/packed-geometry';
+import { mergePacked, packGeometry } from '../../tiles/packed-geometry';
 
 function specAt(zoom: number): RegionSpec {
   return {
@@ -215,6 +215,90 @@ describe('selectMapLabels — collision', () => {
     });
 
     expect(found.map((l) => l.text).sort()).toEqual(['BROAD AVE', 'MINOR WAY']);
+  });
+});
+
+describe('selectMapLabels — visible duplicate candidates', () => {
+  const zoom = 18;
+  const here: WorldPoint = [0.5, 0.5];
+  const distant: WorldPoint = [0.5 + 600 / scaleFor(zoom), 0.5];
+  const view = {
+    rect: visibleWorldRect({ center: here, zoom }, { width: 400, height: 360 }),
+    zoom,
+  };
+  const cases: {
+    kind: string;
+    build: (points: readonly WorldPoint[]) => Partial<MapGeometry>;
+  }[] = [
+    {
+      kind: 'poi',
+      build: (points) => ({
+        pois: points.map((world) => ({
+          name: 'Clinic',
+          kind: 'hospital',
+          subclass: 'hospital',
+          rank: 1,
+          world,
+        })),
+      }),
+    },
+    {
+      kind: 'transit',
+      build: (points) => ({
+        pois: points.map((world) => ({
+          name: 'Station',
+          kind: 'transport',
+          subclass: 'bus_stop',
+          rank: 1,
+          world,
+        })),
+      }),
+    },
+    {
+      kind: 'peak',
+      build: (points) => ({
+        peaks: points.map((world) => ({
+          name: 'Summit',
+          kind: 'peak',
+          ele: 2700,
+          customaryFt: false,
+          rank: 1,
+          world,
+        })),
+      }),
+    },
+    {
+      kind: 'street',
+      build: (points) => ({
+        streets: points.map((world) => {
+          const lengthPx = world === here ? 200 : 400;
+          return street({
+            name: 'Stable Road',
+            roadClass: 2,
+            lengthPx,
+            zoom,
+            start: [world[0] - lengthPx / 2 / scaleFor(zoom), world[1]],
+          });
+        }),
+      }),
+    },
+    {
+      kind: 'area',
+      build: (points) => ({
+        parks: points.map((world) => park('Forest', world === here ? 150 : 300, zoom, world)),
+      }),
+    },
+  ];
+
+  it.each(cases)('culls offscreen $kind namesakes before deduplicating', ({ kind, build }) => {
+    const first = selectMapLabels(packGeometry(geometry(build([here]))), view);
+    const more = packGeometry(geometry(build([distant, here])));
+    const retained = selectMapLabels(more, view, { previous: first });
+    expect(retained).toHaveLength(1);
+    expect(retained[0].kind).toBe(kind);
+    expect(retained[0]).toBe(first[0]);
+    expect(selectMapLabels(more, view)).toEqual(first);
+    expect(selectMapLabels(packGeometry(geometry(build([here, distant]))), view)).toEqual(first);
   });
 });
 
@@ -511,6 +595,19 @@ describe('selectMapLabels — places (the region view: city nodes)', () => {
     expect(found).toHaveLength(1);
   });
 
+  it('does not let an offscreen namesake hide a visible place', () => {
+    const camera = { center: [0.5, 0.5] as const, zoom: 8 };
+    const view = { rect: visibleWorldRect(camera, { width: 400, height: 360 }), zoom: 8 };
+    const here = city('Springfield', camera.center);
+    const distant = city('Springfield', [0.5 + 600 / scaleFor(8), 0.5]);
+    const first = selectMapLabels(packGeometry(geometry({ places: [here] })), view);
+    const more = packGeometry(geometry({ places: [distant, here] }));
+    const after = selectMapLabels(more, view, { previous: first });
+    expect(after).toHaveLength(1);
+    expect(after[0]).toBe(first[0]);
+    expect(selectMapLabels(more, view)).toEqual(first);
+  });
+
   it('leaves the street-zoom map exactly as it was', () => {
     // Nothing in the place bands reaches the default opening zoom, so a view that was already
     // labelled does not grow a second set of names.
@@ -532,6 +629,155 @@ describe('selectMapLabels — peaks', () => {
     customaryFt: false,
     rank: 1,
     ...extra,
+  });
+
+  describe('viewport label stability', () => {
+    const zoom = 10;
+    const viewport = { width: 400, height: 360 };
+    const point = (x: number, y = 0): WorldPoint => [
+      0.5 + x / scaleFor(zoom),
+      0.5 + y / scaleFor(zoom),
+    ];
+    const view = (x = 0, atZoom = zoom) => ({
+      zoom: atZoom,
+      rect: visibleWorldRect({ center: point(x), zoom: atZoom }, viewport),
+    });
+    const peak = (name: string, x: number, y = 0): MapPeak => ({
+      name,
+      world: point(x, y),
+      kind: 'peak',
+      rank: 1,
+      customaryFt: false,
+    });
+
+    it('keeps Rainier and its visible neighbour when panning changes centre-distance order', () => {
+      const data = packGeometry(
+        geometry({
+          peaks: [
+            peak('Rainier', -10),
+            peak('Competing summit', 35),
+            peak('Western peak', -100, 80),
+          ],
+        })
+      );
+      const first = selectMapLabels(data, view());
+      expect(first.map((label) => label.text)).toEqual(['RAINIER', 'WESTERN PEAK']);
+      expect(selectMapLabels(data, view(40)).map((label) => label.text)).toContain(
+        'COMPETING SUMMIT'
+      );
+      const after = selectMapLabels(data, view(40), { previous: first });
+      expect(after).toEqual(first);
+      expect(after[0]).toBe(first[0]);
+    });
+
+    it('does not spend the cap on prefetch padding and releases labels past the edge', () => {
+      const data = packGeometry(
+        geometry({
+          peaks: [
+            peak('Rainier', 0),
+            ...Array.from({ length: 20 }, (_, i) => peak(`Prefetched ${i}`, 600 + i * 100)),
+          ],
+        })
+      );
+      const first = selectMapLabels(data, view());
+      expect(first.map((label) => label.text)).toEqual(['RAINIER']);
+      const after = selectMapLabels(data, view(600), { previous: first });
+      expect(after.map((label) => label.text)).not.toContain('RAINIER');
+      expect(after.map((label) => label.text)).toContain('PREFETCHED 0');
+    });
+
+    it('does not retain a peak below its zoom tier', () => {
+      const data = packGeometry(geometry({ peaks: [peak('Rainier', 0)] }));
+      const first = selectMapLabels(data, view());
+      expect(
+        selectMapLabels(data, view(0, PEAK_LABEL_MIN_ZOOM - 0.01), { previous: first })
+      ).toEqual([]);
+    });
+
+    it('places enabled labels into space previously reserved by a hidden peak', () => {
+      const data = packGeometry(
+        geometry({
+          peaks: [peak('Summit', 0)],
+          pois: [{ name: 'Shelter', world: point(0), kind: 'shelter', subclass: '', rank: 1 }],
+        })
+      );
+      const spec = view(0, 17);
+      const first = selectMapLabels(data, spec);
+      expect(first.map((label) => label.kind)).toEqual(['peak']);
+      expect(
+        selectMapLabels(data, spec, { previous: first, peaksEnabled: false }).map(
+          (label) => label.text
+        )
+      ).toEqual(['SHELTER']);
+    });
+
+    it('excludes hidden highways and transit stops before collision selection', () => {
+      const road = street({ name: 'Highway', roadClass: 4, lengthPx: 300, zoom: 17 });
+      const roadData = packGeometry(geometry({ streets: [road] }));
+      const [anchor] = selectMapLabels(roadData, specAt(17));
+      const data = mergePacked([
+        roadData,
+        packGeometry(
+          geometry({
+            pois: [{ name: 'Bus stop', world: anchor.world, kind: 'bus', subclass: 'bus_stop' }],
+            houseNumbers: [{ number: '12', world: anchor.world }],
+          })
+        ),
+      ]);
+      expect(selectMapLabels(data, specAt(17)).map((label) => label.kind)).toEqual(['street']);
+      expect(
+        selectMapLabels(data, specAt(17), { highwaysEnabled: false }).map((label) => label.kind)
+      ).toEqual(['transit']);
+      expect(
+        selectMapLabels(data, specAt(17), { highwaysEnabled: false, transitEnabled: false }).map(
+          (label) => label.kind
+        )
+      ).toEqual(['housenumber']);
+    });
+
+    it('is independent of tile arrival order', () => {
+      const a = packGeometry(geometry({ peaks: [peak('Rainier', -20)] }));
+      const b = packGeometry(geometry({ peaks: [peak('Neighbour', 20)] }));
+      expect(selectMapLabels(mergePacked([a, b]), view())).toEqual(
+        selectMapLabels(mergePacked([b, a]), view())
+      );
+    });
+
+    it('retains a visible road fragment when a longer fragment arrives', () => {
+      const at = 15;
+      const a = packGeometry(
+        geometry({
+          streets: [street({ name: 'Ridge Road', roadClass: 2, lengthPx: 200, zoom: at })],
+        })
+      );
+      const b = packGeometry(
+        geometry({
+          streets: [
+            street({
+              name: 'Ridge Road',
+              roadClass: 2,
+              lengthPx: 400,
+              zoom: at,
+              start: [0.51, 0.5],
+            }),
+          ],
+        })
+      );
+      const first = selectMapLabels(a, specAt(at));
+      const combined = mergePacked([a, b]);
+      expect(selectMapLabels(combined, specAt(at))[0].world).not.toEqual(first[0].world);
+      expect(selectMapLabels(combined, specAt(at), { previous: first })[0]).toBe(first[0]);
+    });
+
+    it('reuses extracted tile candidates while the viewport moves', () => {
+      const data = packGeometry(geometry({ peaks: [peak('Rainier', 0)] }));
+      const values = data.parts[0].peaks;
+      const read = jest.fn(() => values);
+      Object.defineProperty(data.parts[0], 'peaks', { get: read });
+      const first = selectMapLabels(data, view());
+      selectMapLabels(data, view(40), { previous: first });
+      expect(read).toHaveBeenCalledTimes(1);
+    });
   });
 
   it('names a summit with its elevation from the range view down', () => {

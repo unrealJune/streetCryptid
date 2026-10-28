@@ -481,7 +481,7 @@ describe('MapEngine.buildRegion', () => {
     expect(engine.lastRegion).toBe(builtThird);
   });
 
-  it('joins a live build whose region already covers the camera', async () => {
+  it.each([10, 15])('joins a live build covering the camera at z%s', async (zoom) => {
     const source = new FakeSource();
     source.auto = false;
     const timings: RegionTiming[] = [];
@@ -491,10 +491,11 @@ describe('MapEngine.buildRegion', () => {
       dataZooms,
       onTiming: (timing) => timings.push(timing),
     });
-    const spec = computeRegionSpec(camera, viewport, { dataZooms });
+    const at = { ...baseRequest, camera: { ...camera, zoom } };
+    const spec = computeRegionSpec(at.camera, viewport, { dataZooms });
 
-    const first = engine.buildRegion(baseRequest);
-    const coveredQueued = engine.buildRegion(baseRequest);
+    const first = engine.buildRegion(at);
+    const coveredQueued = engine.buildRegion(at);
     source.resolveAll();
 
     const built = await first;
@@ -730,6 +731,50 @@ describe('MapEngine.prefetchPoints', () => {
 });
 
 describe('MapEngine elevation', () => {
+  it('retains known relief on a pan and still upgrades when the new raster arrives', async () => {
+    jest.useFakeTimers({ doNotFake: ['requestAnimationFrame', 'performance'] });
+    try {
+      const old = { width: 1, height: 1, metres: new Float32Array([2000]), rect: UNIT_RECT };
+      const fresh = { ...old, metres: new Float32Array([2100]) };
+      let land!: (raster: ElevationRaster) => void;
+      let calls = 0;
+      const engine = new MapEngine({
+        source: new FakeSource(),
+        elevation: {
+          elevationFor: () =>
+            ++calls === 1
+              ? Promise.resolve(old)
+              : new Promise((resolve) => {
+                  land = resolve;
+                }),
+        },
+        grid,
+        dataZooms,
+      });
+      const initial = engine.buildRegion(baseRequest);
+      await jest.advanceTimersByTimeAsync(100);
+      await initial;
+      const previews: MapRegion[] = [];
+      const moved = engine.buildRegion(
+        {
+          ...baseRequest,
+          camera: { ...camera, center: [camera.center[0] + 0.001, camera.center[1]] },
+        },
+        undefined,
+        (region) => previews.push(region)
+      );
+      await jest.advanceTimersByTimeAsync(5000);
+      const region = (await moved)!;
+      expect(region.elevation).toBe(old);
+      land(fresh);
+      await jest.advanceTimersByTimeAsync(100);
+      expect(previews.at(-1)?.elevation).toBe(fresh);
+      expect(previews.at(-1)?.publication).toBeGreaterThan(region.publication);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
   it('carries the elevation for the built spec on the region', async () => {
     const raster = { width: 1, height: 1, metres: new Float32Array([420]), rect: UNIT_RECT };
     const elevationFor = jest.fn(async () => raster);

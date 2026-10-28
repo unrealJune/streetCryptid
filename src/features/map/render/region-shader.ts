@@ -33,7 +33,7 @@ import type { PackedGeometry } from '../tiles/packed-geometry';
 import { buildCellStateImage } from './cell-state-image';
 import { cellLatticePath, cellRimPath, exploredCellPath } from './cell-overlay-paths';
 import { GHOST_LATTICE_WIDTH } from '../core/hex-lattice';
-import { getDotFieldEffect } from './dot-field-shader';
+import { getDotFieldEffect, getDotMaterialEffect } from './dot-field-shader';
 import { buildMaskImage } from './mask-image';
 import { renderPicture } from './offscreen';
 import { buildGroundImage, buildTerrainImage } from './terrain-image';
@@ -64,15 +64,11 @@ import {
 } from '../core/structure-lod';
 import {
   DOT_FIELD_UNIFORM_FLOATS,
+  dotAtlasSize,
   lodForZoom,
   packDotFieldUniforms,
-  regionLogicalSize,
+  regionImageLayout,
 } from './shader-uniforms';
-
-/** Longest side (device px) a region bitmap may reach — bounds cost + memory. */
-const MAX_IMAGE_DIM = 2400;
-/** Device-pixel ceiling: 2× is indistinguishable for 1–2px dots, half the work of 3×. */
-const MAX_PIXEL_RATIO = 2;
 
 /** Ghost lattice / frontier rim styling (logical px + alphas from the old shader). */
 const LATTICE_ALPHA = 0.09;
@@ -104,9 +100,9 @@ function imageFromRgba(data: Uint8Array, width: number, height: number): SkImage
 export interface RegionTextures {
   /** R=street G=park B=water. */
   readonly mask: SkImage | null;
-  /** R=ground-cover code. */
+  /** R=ground-cover code, G=park interior/edge. */
   readonly ground: SkImage | null;
-  /** R=park edge G=elevation bands. */
+  /** R/G=absolute elevation, B=alpine weight, at DEM resolution. */
   readonly terrain: SkImage | null;
   readonly hasElevation: boolean;
 }
@@ -114,7 +110,7 @@ export interface RegionTextures {
 /** The three feature textures, drawn from each tile's cached paths (`tile-paths.ts`). */
 export function makeRegionTextures(region: MapRegion, layers?: RoadLayerOptions): RegionTextures {
   const geometry = drawnGeometry(region);
-  const terrain = buildTerrainImage(geometry, region.spec, region.elevation);
+  const terrain = buildTerrainImage(region.elevation);
   return {
     mask: buildMaskImage(geometry, region.spec, layers),
     ground: buildGroundImage(geometry, region.spec),
@@ -144,7 +140,7 @@ export interface RegionImageInput {
   readonly maskImage: SkImage;
   readonly groundImage: SkImage;
   readonly terrainImage: SkImage;
-  /** Whether `terrainImage` carries elevation bands (else the canopy fallback). */
+  /** Whether `terrainImage` carries elevation (else the canopy fallback). */
   readonly hasElevation?: boolean;
   readonly cellImage: SkImage;
   readonly lutImage: SkImage;
@@ -157,16 +153,14 @@ export interface RegionImageInput {
   /** Draw building footprints and aeroway surfaces over the dot field (default false). */
   readonly structuresEnabled?: boolean;
   /**
-   * Resolution multiplier (default 1). Intermediate reveal frames pass < 1 so the
-   * heavy 45-tap dot shader rasterizes fewer pixels during the ~320ms wipe; the
-   * final frame renders at full quality, so the settled bitmap stays crisp.
+   * Resolution multiplier (default 1) for the final dot-compositing pass.
    */
   readonly quality?: number;
 }
 
 /**
- * Rasterize the whole region rect into one static bitmap: the dot-field shader
- * pass (dots, fog, ramps — sampling the baked cell state texture), then the
+ * Rasterize the whole region rect into one static bitmap: shade a lattice-sized
+ * atlas, composite its dots at device resolution, then draw the
  * ghost lattice and amber frontier rim stroked on top as vector paths (H3
  * cells aren't an analytic lattice, so the crisp 1px line work moved from the
  * shader to paths — see cell-overlay-paths.ts). This runs the heavy per-pixel
@@ -179,6 +173,8 @@ export interface RegionImageInput {
  * instead of blank tiles until the camera leaves the region entirely. Rendered
  * at device resolution (capped) for crisp dots. Returns null if Skia can't
  * compile the effect or rasterize, letting the caller fall back to a flat fill.
+ * Place the result at `regionImageLayout(spec, quality).rect`; the input
+ * feature/cell textures still occupy `spec.rect`.
  */
 export function renderRegionImage({
   region,
@@ -196,15 +192,14 @@ export function renderRegionImage({
   quality = 1,
 }: RegionImageInput): SkImage | null {
   const effect = getDotFieldEffect();
-  if (!effect) {
-    if (__DEV__) console.warn('[map] dot-field shader failed to compile');
+  const materialEffect = getDotMaterialEffect();
+  if (!effect || !materialEffect) {
+    console.warn('[map] dot-field shader failed to compile');
     return null;
   }
 
-  const logical = regionLogicalSize(region);
-  const longest = Math.max(logical.width, logical.height);
-  const capped = Math.max(1, Math.min(MAX_PIXEL_RATIO, MAX_IMAGE_DIM / longest));
-  const pixelRatio = Math.max(0.5, capped * quality);
+  const layout = regionImageLayout(region.spec, quality);
+  const { width, height, pixelRatio } = layout;
 
   const uniforms = packDotFieldUniforms({
     region,
@@ -220,7 +215,7 @@ export function renderRegionImage({
     );
   }
 
-  const shader = effect.makeShaderWithChildren(uniforms, [
+  const inputs = [
     maskImage.makeShaderOptions(
       TileMode.Clamp,
       TileMode.Clamp,
@@ -237,7 +232,7 @@ export function renderRegionImage({
     groundImage.makeShaderOptions(
       TileMode.Clamp,
       TileMode.Clamp,
-      FilterMode.Nearest,
+      FilterMode.Linear,
       MipmapMode.None
     ),
     terrainImage.makeShaderOptions(
@@ -246,33 +241,74 @@ export function renderRegionImage({
       FilterMode.Linear,
       MipmapMode.None
     ),
-  ]);
+  ];
+  // Pictures and shaders also retain their input images. Release the entire
+  // temporary graph after readback, not just the atlas's JS handle.
+  const owned: { dispose(): void }[] = [...inputs];
+  const own = <T extends { dispose(): void }>(resource: T): T => {
+    owned.push(resource);
+    return resource;
+  };
+  try {
+    const atlasSize = dotAtlasSize(region.spec);
+    const materialShader = own(materialEffect.makeShaderWithChildren(uniforms, inputs));
+    const materialPaint = own(Skia.Paint());
+    materialPaint.setShader(materialShader);
+    const atlasPicture = own(Skia.PictureRecorder());
+    atlasPicture
+      .beginRecording(Skia.XYWHRect(0, 0, atlasSize.width, atlasSize.height))
+      .drawPaint(materialPaint);
+    const atlas = renderPicture(
+      atlasPicture.finishRecordingAsPicture(),
+      atlasSize.width,
+      atlasSize.height,
+      'same-thread'
+    );
+    if (!atlas) {
+      console.warn(`[map] dot atlas raster failed (${atlasSize.width}x${atlasSize.height})`);
+      return null;
+    }
+    own(atlas);
+    const shader = own(
+      effect.makeShaderWithChildren(uniforms, [
+        ...inputs.slice(0, 3),
+        own(
+          atlas.makeShaderOptions(
+            TileMode.Clamp,
+            TileMode.Clamp,
+            FilterMode.Nearest,
+            MipmapMode.None
+          )
+        ),
+      ])
+    );
 
-  const width = Math.max(1, Math.round(logical.width * pixelRatio));
-  const height = Math.max(1, Math.round(logical.height * pixelRatio));
+    const paint = own(Skia.Paint());
+    paint.setShader(shader);
+    const picture = own(Skia.PictureRecorder());
+    const canvas = picture.beginRecording(Skia.XYWHRect(0, 0, width, height));
+    canvas.translate(layout.offsetX, layout.offsetY);
+    canvas.drawPaint(paint);
+    // Structures sit directly on the dot field, under the exploration line work:
+    // the ghost lattice and the amber frontier rim are navigation, and must stay
+    // legible over a building footprint.
+    if (structuresEnabled) {
+      drawStructures(canvas, region, palette, pixelRatio, reveal, explorationEnabled);
+    }
+    if (explorationEnabled) {
+      drawCellOverlays(canvas, region, palette, pixelRatio, reveal);
+    }
+    if (transitEnabled) {
+      drawTransitLines(canvas, region, palette, pixelRatio, reveal);
+    }
+    const recorded = picture.finishRecordingAsPicture();
 
-  const paint = Skia.Paint();
-  paint.setShader(shader);
-  const picture = Skia.PictureRecorder();
-  const canvas = picture.beginRecording(Skia.XYWHRect(0, 0, width, height));
-  canvas.drawPaint(paint);
-  // Structures sit directly on the dot field, under the exploration line work:
-  // the ghost lattice and the amber frontier rim are navigation, and must stay
-  // legible over a building footprint.
-  if (structuresEnabled) {
-    drawStructures(canvas, region, palette, pixelRatio, reveal, explorationEnabled);
+    const image = renderPicture(recorded, width, height, 'ui');
+    if (!image) console.warn(`[map] region raster failed (${width}×${height})`);
+    return image;
+  } finally {
+    for (let i = owned.length - 1; i >= 0; i--) owned[i].dispose();
   }
-  if (explorationEnabled) {
-    drawCellOverlays(canvas, region, palette, pixelRatio, reveal);
-  }
-  if (transitEnabled) {
-    drawTransitLines(canvas, region, palette, pixelRatio, reveal);
-  }
-  const recorded = picture.finishRecordingAsPicture();
-
-  const image = renderPicture(recorded, width, height, 'ui');
-  if (!image && __DEV__) console.warn(`[map] region raster failed (${width}×${height})`);
-  return image;
 }
 
 /**

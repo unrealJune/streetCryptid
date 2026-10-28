@@ -102,7 +102,6 @@ function regionFor(request: RegionRequest, publication: number, tileZoom?: numbe
     geometry: EMPTY_GEOMETRY,
     cellField: { res: 9, cells: [] },
     places: [],
-    labels: [],
     explorationVersion: request.explorationVersion,
     timing: {
       tiles: 1,
@@ -362,13 +361,13 @@ describe('useMapEngine publication and recovery', () => {
     expect(calls[3].request.camera.zoom).toBe(18);
   });
 
-  it('does not auto-retry a complete z10 region whose small padding still invites prefetch', async () => {
+  it('does not prefetch or auto-retry a complete centred z10 region', async () => {
     await mount();
     await finish(0);
     commitZoom(10);
     const request = calls[1].request;
     const complete = regionFor(request, 2);
-    expect(shouldPrefetchRegion(complete.spec, request.camera, VIEWPORT, DATA_ZOOMS)).toBe(true);
+    expect(shouldPrefetchRegion(complete.spec, request.camera, VIEWPORT, DATA_ZOOMS)).toBe(false);
     expect(needsNewRegion(complete.spec, request.camera, VIEWPORT, DATA_ZOOMS)).toBe(false);
 
     await finish(1, complete);

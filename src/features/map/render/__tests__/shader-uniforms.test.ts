@@ -1,14 +1,18 @@
 import { scaleFor } from '../../core/camera';
-import { SHADE_GAIN } from '../../core/terrain';
+import { computeRegionSpec } from '../../core/region';
+import { MERCATOR_CIRCUMFERENCE_M, SHADE_GAIN } from '../../core/terrain';
 import type { MapPalette } from '../../core/types';
 import type { MapRegion } from '../../engine/map-engine';
 import { EMPTY_PACKED } from '../../tiles/packed-geometry';
 import {
   DOT_FIELD_UNIFORM_FLOATS,
   DOT_STEP,
+  dotAtlasSize,
   lodForZoom,
-  NOISE_ORIGIN_WRAP,
+  DOT_HASH_PERIOD,
+  NOISE_WORLD_SCALE,
   packDotFieldUniforms,
+  regionImageLayout,
   regionLogicalSize,
 } from '../shader-uniforms';
 
@@ -46,7 +50,6 @@ const region: MapRegion = {
   geometry: EMPTY_PACKED,
   cellField: { res: 9, cells: [] },
   places: [],
-  labels: [],
   explorationVersion: 0,
   timing: {
     tiles: 0,
@@ -86,18 +89,87 @@ describe('packDotFieldUniforms', () => {
     expect(u[12]).toBe(1); // uExploration defaults to visible
     expect(u.slice(13, 15)).toEqual([0, 0]); // renderer effects default off
     expect(u[17]).toBe(0); // uHasElev defaults off: canopy fallback
-    expect(u[18]).toBe(SHADE_GAIN); // uShadeGain
+    expect(u[18]).toBe(SHADE_GAIN / MERCATOR_CIRCUMFERENCE_M); // no DEM
   });
 
-  it('pins the noise to the map: rect.min in anchor px, wrapped exactly in f64', () => {
+  it('pins material noise to one world scale, not the build zoom', () => {
     const u = packDotFieldUniforms(base);
-    const scale = scaleFor(15);
-    expect(u[15]).toBeCloseTo((0.1 * scale) % NOISE_ORIGIN_WRAP, 6);
-    expect(u[16]).toBeCloseTo((0.2 * scale) % NOISE_ORIGIN_WRAP, 6);
-    for (const v of u.slice(15, 17)) {
-      expect(v).toBeGreaterThanOrEqual(0);
-      expect(v).toBeLessThan(NOISE_ORIGIN_WRAP);
+    expect(u[15]).toBeCloseTo(0.1 * NOISE_WORLD_SCALE, 6);
+    expect(u[16]).toBeCloseTo(0.2 * NOISE_WORLD_SCALE, 6);
+    const otherZoom = packDotFieldUniforms({
+      ...base,
+      region: { ...region, spec: { ...region.spec, zoom: 9.25 } },
+    });
+    expect(otherZoom.slice(15, 17)).toEqual(u.slice(15, 17));
+    expect(otherZoom[19] * scaleFor(9.25)).toBeCloseTo(u[19] * scaleFor(15), 6);
+  });
+
+  it('keeps each lattice fixed across pans, LOD handoffs and hash wraps', () => {
+    const point = [0.162, 0.35];
+    const gridSample = (zoom: number, dx: number, dy: number, coarse = false) => {
+      const spec = {
+        ...region.spec,
+        zoom,
+        rect: { minX: point[0] + dx, minY: point[1] + dy, maxX: 0.3, maxY: 0.5 },
+      };
+      const u = packDotFieldUniforms({ ...base, region: { spec } });
+      return [0, 1].map((axis) => {
+        const origin = axis === 0 ? spec.rect.minX : spec.rect.minY;
+        const local = (point[axis] - origin) * u[1];
+        const phase = coarse ? 42 : 22;
+        const originIndex = coarse ? 40 : 20;
+        const step = u[6] * (coarse ? 2 : 1);
+        const index = Math.round((local - u[phase + axis]) / step);
+        const key =
+          (((index + u[originIndex + axis]) % DOT_HASH_PERIOD) + DOT_HASH_PERIOD) % DOT_HASH_PERIOD;
+        const world = origin + (index * step + u[phase + axis]) / u[1];
+        return { key, world };
+      });
+    };
+    const first = gridSample(12.1, -0.0003, -0.0002);
+    for (const other of [
+      gridSample(12.1, -0.00021, 0.00013),
+      gridSample(12.7, -0.0004, -0.0001, true),
+      gridSample(12.7, -0.01, -0.02, true),
+    ]) {
+      other.forEach((dot, axis) => {
+        expect(dot.key).toBe(first[axis].key);
+        expect(dot.world).toBeCloseTo(first[axis].world, 12);
+      });
     }
+  });
+
+  it('maps DEM pixels directly and normalizes shade by their world spacing', () => {
+    const elevation = {
+      width: 256,
+      height: 128,
+      rect: { minX: 0.1, minY: 0.2, maxX: 0.2, maxY: 0.25 },
+      metres: new Float32Array(256 * 128),
+    };
+    const u = packDotFieldUniforms({
+      ...base,
+      region: { ...region, elevation },
+      hasElevation: true,
+    });
+    expect(u.slice(24, 26)).toEqual([0, 0]);
+    expect(u[26]).toBeCloseTo((0.1 / 256) * scaleFor(15));
+    expect(u[27]).toBeCloseTo((0.05 / 128) * scaleFor(15));
+    expect(u.slice(28, 30)).toEqual([256, 128]);
+    expect(u[18]).toBeCloseTo(SHADE_GAIN / ((0.1 / 256) * MERCATOR_CIRCUMFERENCE_M));
+  });
+
+  it('fades the last noise octave instead of normalizing it back to full contrast', () => {
+    const at = (zoom: number) =>
+      packDotFieldUniforms({ ...base, region: { spec: { ...region.spec, zoom } } });
+    const cutoff = 12 + Math.log2((DOT_STEP * 2 * 0.045) / 0.5);
+    expect(at(cutoff - 0.0001).slice(32, 36)).toEqual([0, 0, 0, 0]);
+    expect(at(cutoff + 0.0001)[32]).toBeGreaterThan(0);
+    expect(at(cutoff + 0.0001)[32]).toBeLessThan(0.000001);
+    expect(
+      at(18)
+        .slice(32, 36)
+        .reduce((sum, weight) => sum + weight, 0)
+    ).toBeCloseTo(1);
   });
 
   it('flags elevation when the terrain texture carries it', () => {
@@ -106,6 +178,18 @@ describe('packDotFieldUniforms', () => {
 
   it('honors a custom lattice step', () => {
     expect(packDotFieldUniforms({ ...base, step: 3 })[6]).toBe(3);
+  });
+
+  it('sizes both atlas levels from the same step and row split as the shader', () => {
+    const spec = { ...region.spec, zoom: 12.5 };
+    const input = { ...base, region: { spec }, step: 3 };
+    const u = packDotFieldUniforms(input);
+    const logical = regionLogicalSize(input.region);
+    const atlas = dotAtlasSize(spec, input.step);
+    expect(atlas.width).toBe((Math.ceil(logical.width / u[6]) + 3) * 2);
+    expect(atlas.height).toBe(u[44] + Math.ceil(logical.height / (u[6] * 2)) + 3);
+    expect(u[45]).toBeGreaterThan(0);
+    expect(u[45]).toBeLessThan(1);
   });
 
   it('passes the reveal fraction through', () => {
@@ -152,5 +236,39 @@ describe('regionLogicalSize', () => {
     const { width, height } = regionLogicalSize(region);
     expect(width).toBeCloseTo(0.2 * scaleFor(15), 6);
     expect(height).toBeCloseTo(0.3 * scaleFor(15), 6);
+  });
+
+  describe('regionImageLayout', () => {
+    it.each([1, 0.65])('keeps capped bitmap pixels world-aligned at quality %s', (quality) => {
+      const zoom = 13.16;
+      const scale = scaleFor(zoom);
+      const layouts = [0, 0.1, 2.5, 17.25, 63].map((pan) => {
+        const spec = computeRegionSpec(
+          { center: [0.162 + pan / scale, 0.35 + pan / 2 / scale], zoom },
+          { width: 390, height: 780 },
+          { dataZooms: { min: 0, max: 14 } }
+        );
+        const layout = regionImageLayout(spec, quality);
+        const pxPerWorld = scale * layout.pixelRatio;
+        expect(layout.rect.minX).toBeLessThanOrEqual(spec.rect.minX);
+        expect(layout.rect.minY).toBeLessThanOrEqual(spec.rect.minY);
+        expect(layout.rect.maxX).toBeGreaterThanOrEqual(spec.rect.maxX);
+        expect(layout.rect.maxY).toBeGreaterThanOrEqual(spec.rect.maxY);
+        expect((layout.rect.maxX - layout.rect.minX) * pxPerWorld).toBeCloseTo(layout.width, 6);
+        expect((layout.rect.maxY - layout.rect.minY) * pxPerWorld).toBeCloseTo(layout.height, 6);
+        expect(layout.offsetX).toBeGreaterThanOrEqual(0);
+        expect(layout.offsetX).toBeLessThan(1);
+        expect(layout.offsetY).toBeGreaterThanOrEqual(0);
+        expect(layout.offsetY).toBeLessThan(1);
+        return layout;
+      });
+      for (const layout of layouts) {
+        expect(layout.pixelRatio).toBe(layouts[0].pixelRatio);
+        const x = (layout.rect.minX - layouts[0].rect.minX) * scale * layout.pixelRatio;
+        const y = (layout.rect.minY - layouts[0].rect.minY) * scale * layout.pixelRatio;
+        expect(x).toBeCloseTo(Math.round(x), 6);
+        expect(y).toBeCloseTo(Math.round(y), 6);
+      }
+    });
   });
 });
