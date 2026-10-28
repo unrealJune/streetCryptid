@@ -117,6 +117,22 @@ const FRIEND_PREFETCH_MAX = 4;
 const DOUBLE_TAP_FACTOR = 2;
 const DOUBLE_TAP_MS = 260;
 /**
+ * One-finger zoom (iOS / Google Maps): tap, then touch again and drag — down zooms in, up zooms
+ * out, about the second touch. The second touch must land within this long and this close to the
+ * first tap, and the first must have been a tap (short).
+ */
+const QUICK_ZOOM_TAP_MS = 250;
+const QUICK_ZOOM_GAP_MS = 300;
+const QUICK_ZOOM_SLOP_PX = 40;
+/** Vertical drag that doubles (or halves) the scale. */
+const QUICK_ZOOM_DOUBLING_PX = 150;
+
+/** Wall clock for gesture worklets (touch events carry no timestamp). */
+function gestureNow(): number {
+  'worklet';
+  return Date.now();
+}
+/**
  * Screen-space distance (logical px) within which two locators are considered
  * overlapping. Converted into anchor-space before clustering — markers are drawn
  * at `x·k + tx`, so a fixed anchor-space budget silently stops working the moment
@@ -341,6 +357,14 @@ export function MapView({
   const locateProgress = useSharedValue(1);
   /** Outstanding fling decay animations (x + y); commit when the last ends. */
   const decaysLeft = useSharedValue(0);
+  // One-finger zoom bookkeeping: the last tap, and the touch that may turn into a zoom.
+  const lastTapAt = useSharedValue(0);
+  const lastTapX = useSharedValue(0);
+  const lastTapY = useSharedValue(0);
+  const touchDownAt = useSharedValue(0);
+  const quickZoomArmed = useSharedValue(false);
+  const quickZoomX = useSharedValue(0);
+  const quickZoomY = useSharedValue(0);
   /** Transform at the last prefetch check, to gate by movement. */
   const lastPrefetch = useSharedValue<ViewTransform>({ k: 1, tx: 0, ty: 0 });
   /** Resets the pan stride origin on the first frame after scale motion ends. */
@@ -943,7 +967,67 @@ export function MapView({
         });
       });
 
-    return Gesture.Race(doubleTap, Gesture.Simultaneous(pan, pinch));
+    // Tap, then touch-hold-drag. RNGH has no such gesture, so this one stays undecided while it
+    // watches: it records each short touch as a tap, arms when a touch lands right after one, and
+    // activates (beating the double tap and the pan in the race) only once that armed touch moves.
+    // Anything else fails it at once, so it never holds up an ordinary pan or pinch.
+    const quickZoom = Gesture.Pan()
+      .manualActivation(true)
+      .maxPointers(1)
+      .onTouchesDown((e, manager) => {
+        const touch = e.allTouches[0];
+        if (e.numberOfTouches !== 1 || !touch) {
+          manager.fail();
+          return;
+        }
+        const now = gestureNow();
+        touchDownAt.value = now;
+        quickZoomArmed.value =
+          now - lastTapAt.value < QUICK_ZOOM_GAP_MS &&
+          Math.hypot(touch.x - lastTapX.value, touch.y - lastTapY.value) < QUICK_ZOOM_SLOP_PX;
+        quickZoomX.value = touch.x;
+        quickZoomY.value = touch.y;
+        // A tap only ever arms the touch right after it.
+        if (quickZoomArmed.value) lastTapAt.value = 0;
+      })
+      .onTouchesMove((e, manager) => {
+        const touch = e.allTouches[0];
+        if (!quickZoomArmed.value || e.numberOfTouches !== 1 || !touch) {
+          manager.fail();
+          return;
+        }
+        if (Math.abs(touch.y - quickZoomY.value) > 6) manager.activate();
+      })
+      .onTouchesUp((e, manager) => {
+        const touch = e.changedTouches[0];
+        if (
+          !quickZoomArmed.value &&
+          touch &&
+          gestureNow() - touchDownAt.value < QUICK_ZOOM_TAP_MS
+        ) {
+          lastTapAt.value = gestureNow();
+          lastTapX.value = touch.x;
+          lastTapY.value = touch.y;
+        }
+        manager.end();
+      })
+      .onTouchesCancelled((_e, manager) => manager.fail())
+      .onStart(stopFling)
+      .onChange((e) => {
+        const t = applyPinch(
+          { k: k.value, tx: tx.value, ty: ty.value },
+          Math.pow(2, e.changeY / QUICK_ZOOM_DOUBLING_PX),
+          quickZoomX.value,
+          quickZoomY.value,
+          limits
+        );
+        k.value = t.k;
+        tx.value = t.tx;
+        ty.value = t.ty;
+      })
+      .onEnd(commitNow);
+
+    return Gesture.Race(quickZoom, doubleTap, Gesture.Simultaneous(pan, pinch));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [limits, commit, prefetchAt, onInteraction]);
 

@@ -62,6 +62,32 @@ export function LocationPrivacyIntro({
       title="Where your location goes"
       subtitle={LEDE}
       testID="privacy-onboarding"
+      footer={
+        <View style={styles.actions}>
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Back to profile"
+            onPress={onBack}
+            style={styles.back}
+          >
+            <ThemedText type="smallBold">Back</ThemedText>
+          </Pressable>
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Continue to delivery"
+            onPress={onContinue}
+            testID="onboarding-privacy-continue"
+            style={({ pressed }) => [
+              styles.continue,
+              { backgroundColor: chrome.green, opacity: pressed ? 0.65 : 1 },
+            ]}
+          >
+            <ThemedText type="smallBold" style={{ color: chrome.bg }}>
+              Continue
+            </ThemedText>
+          </Pressable>
+        </View>
+      }
     >
       <View style={styles.body}>
         {BODY.map((paragraph) => (
@@ -88,31 +114,6 @@ export function LocationPrivacyIntro({
       <ThemedText type="small" themeColor="textSecondary" style={styles.signoff}>
         {SIGNOFF}
       </ThemedText>
-
-      <View style={styles.actions}>
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel="Back to profile"
-          onPress={onBack}
-          style={styles.back}
-        >
-          <ThemedText type="smallBold">Back</ThemedText>
-        </Pressable>
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel="Continue to delivery"
-          onPress={onContinue}
-          testID="onboarding-privacy-continue"
-          style={({ pressed }) => [
-            styles.continue,
-            { backgroundColor: chrome.green, opacity: pressed ? 0.65 : 1 },
-          ]}
-        >
-          <ThemedText type="smallBold" style={{ color: chrome.bg }}>
-            Continue
-          </ThemedText>
-        </Pressable>
-      </View>
     </SettingsPage>
   );
 }

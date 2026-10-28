@@ -101,7 +101,43 @@ export function AccountOnboardingScreen({
   }
 
   return (
-    <SettingsPage kind="onboarding" title="Delivery" testID="delivery-onboarding">
+    <SettingsPage
+      kind="onboarding"
+      title="Delivery"
+      testID="delivery-onboarding"
+      footer={
+        <View style={styles.actions}>
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Back to privacy"
+            disabled={saving}
+            onPress={() => setStep('privacy')}
+            style={styles.back}
+          >
+            <ThemedText type="smallBold">Back</ThemedText>
+          </Pressable>
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Continue with selected delivery"
+            accessibilityState={{ disabled: !ready || saving, busy: saving }}
+            disabled={!ready || saving}
+            onPress={() => void finish()}
+            testID="onboarding-delivery-continue"
+            style={({ pressed }) => [
+              styles.continue,
+              {
+                backgroundColor: chrome.green,
+                opacity: !ready || saving ? 0.4 : pressed ? 0.65 : 1,
+              },
+            ]}
+          >
+            <ThemedText type="smallBold" style={{ color: chrome.bg }}>
+              {saving ? 'Saving…' : 'Continue'}
+            </ThemedText>
+          </Pressable>
+        </View>
+      }
+    >
       {ready ? (
         <DeliveryOptions
           selected={mode}
@@ -128,33 +164,6 @@ export function AccountOnboardingScreen({
           <ThemedText type="smallBold">Retry loading delivery preferences</ThemedText>
         </Pressable>
       ) : null}
-      <View style={styles.actions}>
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel="Back to privacy"
-          disabled={saving}
-          onPress={() => setStep('privacy')}
-          style={styles.back}
-        >
-          <ThemedText type="smallBold">Back</ThemedText>
-        </Pressable>
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel="Continue with selected delivery"
-          accessibilityState={{ disabled: !ready || saving, busy: saving }}
-          disabled={!ready || saving}
-          onPress={() => void finish()}
-          testID="onboarding-delivery-continue"
-          style={({ pressed }) => [
-            styles.continue,
-            { backgroundColor: chrome.green, opacity: !ready || saving ? 0.4 : pressed ? 0.65 : 1 },
-          ]}
-        >
-          <ThemedText type="smallBold" style={{ color: chrome.bg }}>
-            {saving ? 'Saving…' : 'Continue'}
-          </ThemedText>
-        </Pressable>
-      </View>
     </SettingsPage>
   );
 }

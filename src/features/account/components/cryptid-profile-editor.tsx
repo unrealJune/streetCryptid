@@ -17,6 +17,7 @@ import { ThemedText } from '@/components/themed-text';
 import { SIGNAL_COLOR_OPTIONS, signalColorInk } from '@/constants/signal-colors';
 import { CryptidThemes, Fonts, Spacing } from '@/constants/theme';
 import { useTheme } from '@/hooks/use-theme';
+import { PageFooter } from '@/features/settings/components/settings-page';
 import type { GeneratedCryptid } from '../core/cryptid-generator';
 import {
   createCryptidProfile,
@@ -87,6 +88,7 @@ export function CryptidProfileEditor({
   const scheme = useColorScheme();
   const chrome = CryptidThemes[scheme === 'dark' ? 'deepsea' : 'daybreak'].chrome;
   const insets = useSafeAreaInsets();
+  const pinnedContinue = mode === 'onboarding' && onDone !== undefined;
   const [initialDraft] = useState<CryptidProfileDraft>(() => startingDraft(initialProfile));
   const initialColor = initialDraft.color || DEFAULT_SIGNAL_COLOR;
 
@@ -215,17 +217,15 @@ export function CryptidProfileEditor({
   return (
     <KeyboardAvoidingView
       behavior={Platform.OS === 'ios' ? 'padding' : 'position'}
-      style={[
-        styles.root,
-        { backgroundColor: theme.background, paddingLeft: insets.left, paddingRight: insets.right },
-      ]}
+      style={[styles.root, { backgroundColor: theme.background }]}
     >
       <ScrollView
+        style={{ paddingLeft: insets.left, paddingRight: insets.right }}
         contentContainerStyle={[
           styles.content,
           {
             paddingTop: insets.top + Spacing.four,
-            paddingBottom: insets.bottom + Spacing.four,
+            paddingBottom: pinnedContinue ? Spacing.four : insets.bottom + Spacing.four,
           },
         ]}
         keyboardShouldPersistTaps="handled"
@@ -625,29 +625,33 @@ export function CryptidProfileEditor({
               </View>
             ) : null}
           </View>
-
-          {mode === 'onboarding' && onDone ? (
-            <Pressable
-              accessibilityRole="button"
-              testID="onboarding-continue"
-              accessibilityState={{ disabled: hasIssues || saving }}
-              disabled={hasIssues || saving}
-              onPress={() => void finish()}
-              style={({ pressed }) => [
-                styles.continueButton,
-                {
-                  backgroundColor: color,
-                  opacity: hasIssues || saving ? 0.38 : pressed ? 0.72 : 1,
-                },
-              ]}
-            >
-              <ThemedText style={[styles.continueButtonText, { color: signalColorInk(color) }]}>
-                {saving ? 'Saving...' : 'Continue'}
-              </ThemedText>
-            </Pressable>
-          ) : null}
         </View>
       </ScrollView>
+      {pinnedContinue ? (
+        // Pinned, not the end of the scroll: on a short window (a landscape foldable is ~670 pt)
+        // the scroll's end is below the fold, and Continue is the only way off this step.
+        // The shell's cap sits inside the scroll's padding; the footer's cap includes its own.
+        <PageFooter maxWidth={PROFILE_MAX_WIDTH + Spacing.four * 2}>
+          <Pressable
+            accessibilityRole="button"
+            testID="onboarding-continue"
+            accessibilityState={{ disabled: hasIssues || saving }}
+            disabled={hasIssues || saving}
+            onPress={() => void finish()}
+            style={({ pressed }) => [
+              styles.continueButton,
+              {
+                backgroundColor: color,
+                opacity: hasIssues || saving ? 0.38 : pressed ? 0.72 : 1,
+              },
+            ]}
+          >
+            <ThemedText style={[styles.continueButtonText, { color: signalColorInk(color) }]}>
+              {saving ? 'Saving...' : 'Continue'}
+            </ThemedText>
+          </Pressable>
+        </PageFooter>
+      ) : null}
       {Platform.OS !== 'ios' ? (
         <CryptidGeneratorDialog
           color={color}

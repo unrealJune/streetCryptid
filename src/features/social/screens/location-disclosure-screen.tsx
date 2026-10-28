@@ -5,6 +5,7 @@ import { useColorScheme } from '@/hooks/use-color-scheme';
 import { ThemedText } from '@/components/themed-text';
 import { CryptidThemes, MaxContentWidth, Spacing } from '@/constants/theme';
 import { useTheme } from '@/hooks/use-theme';
+import { PageFooter } from '@/features/settings/components/settings-page';
 
 /**
  * Prominent, in-app disclosure shown once, before the OS runtime permission prompt for
@@ -24,84 +25,90 @@ export function LocationDisclosureScreen({ onChoice }: { onChoice: (accepted: bo
   const insets = useSafeAreaInsets();
 
   return (
-    <ScrollView
-      style={{
-        backgroundColor: theme.background,
-        paddingLeft: insets.left,
-        paddingRight: insets.right,
-      }}
-      contentContainerStyle={[
-        styles.content,
-        { paddingTop: insets.top + Spacing.five, paddingBottom: insets.bottom + Spacing.four },
-      ]}
-    >
-      <View style={styles.header}>
-        <ThemedText style={styles.title}>Before we turn on location</ThemedText>
-        <ThemedText type="small" themeColor="textSecondary">
-          streetCryptid uses your location — including while the app is closed or in the background
-          — for two things. Here&apos;s exactly what and why.
-        </ThemedText>
-      </View>
-
-      <View style={[styles.card, { borderColor: theme.backgroundSelected }]}>
-        <ThemedText type="smallBold" style={{ color: chrome.amber }}>
-          TERRITORY EXPLORATION
-        </ThemedText>
-        <ThemedText type="small" themeColor="textSecondary" style={styles.cardBody}>
-          As you walk through your city, streetCryptid reveals the streets and hex-shaped sectors
-          you&apos;ve actually covered — building your personal explored map. This only works if the
-          app can sample your location occasionally in the background, since most of your walking
-          happens while the app is closed.
-        </ThemedText>
-      </View>
-
-      <View style={[styles.card, { borderColor: theme.backgroundSelected }]}>
-        <ThemedText type="smallBold" style={{ color: chrome.green }}>
-          FRIEND LOCATION SHARING
-        </ThemedText>
-        <ThemedText type="small" themeColor="textSecondary" style={styles.cardBody}>
-          If you pair with friends, your live location syncs directly to their devices — end-to-end
-          encrypted — so they can see you on the map, including while the app is in the background.
-          Only friends you&apos;ve explicitly paired with can see this.
-        </ThemedText>
-      </View>
-
-      <View style={styles.footerCopy}>
-        <ThemedText type="small" themeColor="textSecondary">
-          Next, your device will ask you to allow location access, including &quot;Allow all the
-          time.&quot; Choosing &quot;Not now&quot; keeps streetCryptid working, minus background
-          exploration and friend sharing — you can turn it on later from Settings.
-        </ThemedText>
-      </View>
-
-      <View style={styles.actions}>
-        <Pressable
-          accessibilityRole="button"
-          onPress={() => onChoice(true)}
-          style={({ pressed }) => [
-            styles.primaryButton,
-            { backgroundColor: chrome.amber, opacity: pressed ? 0.72 : 1 },
-          ]}
-        >
-          <ThemedText style={[styles.primaryButtonText, { color: chrome.panel }]}>
-            Turn on location
-          </ThemedText>
-        </Pressable>
-        <Pressable
-          accessibilityRole="button"
-          onPress={() => onChoice(false)}
-          style={({ pressed }) => [styles.secondaryButton, { opacity: pressed ? 0.58 : 1 }]}
-        >
+    <View style={[styles.screen, { backgroundColor: theme.background }]}>
+      <ScrollView
+        style={{
+          backgroundColor: theme.background,
+          paddingLeft: insets.left,
+          paddingRight: insets.right,
+        }}
+        contentContainerStyle={[
+          styles.content,
+          { paddingTop: insets.top + Spacing.five, paddingBottom: Spacing.four },
+        ]}
+      >
+        <View style={styles.header}>
+          <ThemedText style={styles.title}>Before we turn on location</ThemedText>
           <ThemedText type="small" themeColor="textSecondary">
-            Not now
+            streetCryptid uses your location — including while the app is closed or in the
+            background — for two things. Here&apos;s exactly what and why.
           </ThemedText>
-        </Pressable>
-      </View>
-    </ScrollView>
+        </View>
+
+        <View style={[styles.card, { borderColor: theme.backgroundSelected }]}>
+          <ThemedText type="smallBold" style={{ color: chrome.amber }}>
+            TERRITORY EXPLORATION
+          </ThemedText>
+          <ThemedText type="small" themeColor="textSecondary" style={styles.cardBody}>
+            As you walk through your city, streetCryptid reveals the streets and hex-shaped sectors
+            you&apos;ve actually covered — building your personal explored map. This only works if
+            the app can sample your location occasionally in the background, since most of your
+            walking happens while the app is closed.
+          </ThemedText>
+        </View>
+
+        <View style={[styles.card, { borderColor: theme.backgroundSelected }]}>
+          <ThemedText type="smallBold" style={{ color: chrome.green }}>
+            FRIEND LOCATION SHARING
+          </ThemedText>
+          <ThemedText type="small" themeColor="textSecondary" style={styles.cardBody}>
+            If you pair with friends, your live location syncs directly to their devices —
+            end-to-end encrypted — so they can see you on the map, including while the app is in the
+            background. Only friends you&apos;ve explicitly paired with can see this.
+          </ThemedText>
+        </View>
+
+        <View style={styles.footerCopy}>
+          <ThemedText type="small" themeColor="textSecondary">
+            Next, your device will ask you to allow location access, including &quot;Allow all the
+            time.&quot; Choosing &quot;Not now&quot; keeps streetCryptid working, minus background
+            exploration and friend sharing — you can turn it on later from Settings.
+          </ThemedText>
+        </View>
+      </ScrollView>
+      {/* Pinned: the choice this screen exists to ask for must not sit below the fold of a short
+          window (a landscape foldable is ~670 pt tall). */}
+      <PageFooter>
+        <View style={styles.actions}>
+          <Pressable
+            accessibilityRole="button"
+            onPress={() => onChoice(true)}
+            style={({ pressed }) => [
+              styles.primaryButton,
+              { backgroundColor: chrome.amber, opacity: pressed ? 0.72 : 1 },
+            ]}
+          >
+            <ThemedText style={[styles.primaryButtonText, { color: chrome.panel }]}>
+              Turn on location
+            </ThemedText>
+          </Pressable>
+          <Pressable
+            accessibilityRole="button"
+            onPress={() => onChoice(false)}
+            style={({ pressed }) => [styles.secondaryButton, { opacity: pressed ? 0.58 : 1 }]}
+          >
+            <ThemedText type="small" themeColor="textSecondary">
+              Not now
+            </ThemedText>
+          </Pressable>
+        </View>
+      </PageFooter>
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
+  screen: { flex: 1 },
   // Capped and centred like `SettingsPage`, so a tablet reads a column rather than a banner.
   content: {
     alignSelf: 'center',
@@ -131,8 +138,7 @@ const styles = StyleSheet.create({
     paddingTop: Spacing.one,
   },
   actions: {
-    gap: Spacing.three,
-    paddingTop: Spacing.two,
+    gap: Spacing.two,
   },
   primaryButton: {
     alignItems: 'center',

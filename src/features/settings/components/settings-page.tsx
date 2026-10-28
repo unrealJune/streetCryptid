@@ -18,6 +18,12 @@ interface SettingsPageProps {
    */
   readonly kind?: 'root' | 'sub' | 'onboarding';
   readonly backLabel?: string;
+  /**
+   * Actions pinned under the scroll, always on screen. Onboarding steps put Back / Continue here:
+   * at the end of the scroll they sat below the fold on any short window, and a landscape
+   * foldable is ~670 pt tall.
+   */
+  readonly footer?: ReactNode;
   readonly children: ReactNode;
 }
 
@@ -38,13 +44,14 @@ export function SettingsPage({
   subtitle,
   kind = 'sub',
   backLabel = 'Settings',
+  footer,
   children,
 }: SettingsPageProps) {
   const theme = useTheme();
   const insets = useSafeAreaInsets();
   const router = useRouter();
 
-  return (
+  const page = (
     <ScrollView
       testID={testID}
       style={{
@@ -56,7 +63,7 @@ export function SettingsPage({
         styles.content,
         {
           paddingTop: insets.top + Spacing.four,
-          paddingBottom: insets.bottom + Spacing.six,
+          paddingBottom: footer ? Spacing.four : insets.bottom + Spacing.six,
         },
       ]}
     >
@@ -111,6 +118,47 @@ export function SettingsPage({
       {children}
     </ScrollView>
   );
+
+  if (!footer) return page;
+  return (
+    <View style={[styles.screen, { backgroundColor: theme.background }]}>
+      {page}
+      <PageFooter>{footer}</PageFooter>
+    </View>
+  );
+}
+
+/**
+ * A full-screen page's actions, pinned under its scroll in the same centred column, above the
+ * bottom inset. The hairline is what says the text above continues behind it.
+ */
+export function PageFooter({
+  maxWidth = MaxContentWidth,
+  children,
+}: {
+  /** Match the column above when it is narrower than a settings page's. */
+  readonly maxWidth?: number;
+  readonly children: ReactNode;
+}) {
+  const theme = useTheme();
+  const insets = useSafeAreaInsets();
+
+  return (
+    <View
+      style={[
+        styles.footer,
+        {
+          backgroundColor: theme.background,
+          borderColor: theme.backgroundSelected,
+          paddingBottom: Math.max(insets.bottom, Spacing.three),
+          paddingLeft: insets.left,
+          paddingRight: insets.right,
+        },
+      ]}
+    >
+      <View style={[styles.footerColumn, { maxWidth }]}>{children}</View>
+    </View>
+  );
 }
 
 /** A labelled group of rows inside a {@link SettingsPage}. */
@@ -139,6 +187,16 @@ export function SettingsSection({
 }
 
 const styles = StyleSheet.create({
+  screen: { flex: 1 },
+  footer: {
+    borderTopWidth: StyleSheet.hairlineWidth,
+    paddingTop: Spacing.three,
+  },
+  footerColumn: {
+    alignSelf: 'center',
+    paddingHorizontal: Spacing.four,
+    width: '100%',
+  },
   content: {
     alignSelf: 'center',
     // Spacing.five was calibrated when the title and every menu row carried a

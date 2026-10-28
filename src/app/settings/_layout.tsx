@@ -1,4 +1,5 @@
 import { Stack } from 'expo-router';
+import { SafeAreaProvider } from 'react-native-safe-area-context';
 
 import { useTheme } from '@/hooks/use-theme';
 
@@ -14,16 +15,23 @@ import { useTheme } from '@/hooks/use-theme';
  * header anywhere, so each page draws its own ✕ / ‹ (see `SettingsPage`).
  * `contentStyle` paints the sheet background so the push animation never flashes
  * the default white underneath in dark mode.
+ *
+ * The sheet measures its OWN safe area. Without this provider every page read the window's insets,
+ * which describe edges a sheet never touches: on an unfolded iPhone Duo in landscape the page
+ * padded its right side by the status column (~84 pt) and its top by the status bar, so the column
+ * sat off-centre and clipped inside a sheet that has no inset at all.
  */
 export default function SettingsLayout() {
   const theme = useTheme();
 
   return (
-    <Stack
-      screenOptions={{
-        headerShown: false,
-        contentStyle: { backgroundColor: theme.background },
-      }}
-    />
+    <SafeAreaProvider>
+      <Stack
+        screenOptions={{
+          headerShown: false,
+          contentStyle: { backgroundColor: theme.background },
+        }}
+      />
+    </SafeAreaProvider>
   );
 }
