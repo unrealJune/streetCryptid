@@ -16,6 +16,7 @@ import { useCryptidProfile } from '@/features/account/hooks/use-cryptid-profile'
 import {
   CoverageIsland,
   FriendsIsland,
+  IslandColumn,
   hexToRgb,
   LocateMeControl,
   MapDrawer,
@@ -135,12 +136,11 @@ export default function MapScreenBody() {
   // panel from having two ideas about how big it is.
   const [screenHeight, setScreenHeight] = useState(0);
   const [screenWidth, setScreenWidth] = useState(0);
-  // A wide window (tablet, unfolded foldable) gets the island as an always-open leading column
-  // instead of the drawer; see `islandLayout`. The caller's `detent` is left alone underneath, so
+  // A wide window (tablet, unfolded foldable) gets the island as a leading column of cards instead
+  // of the drawer; see `islandLayout` and `IslandColumn`. `detent` is left alone underneath, so
   // folding back to a phone-width window returns the drawer to where it was.
   const island = islandLayout(screenWidth, insets.left, insets.right, Spacing.three);
-  const shownDetent: DrawerDetent = island.column ? 'full' : detent;
-  const minimized = shownDetent === 'collapsed';
+  const minimized = detent === 'collapsed';
   const [locateTarget, setLocateTarget] = useState<{
     requestId: number;
     location: MapFriendLocation['location'];
@@ -545,6 +545,56 @@ export default function MapScreenBody() {
     </View>
   );
 
+  // The bodies, shared by the drawer (one at a time, behind the tabs) and the wide column (both).
+  const meBody = (bodyMinimized: boolean) => (
+    <CoverageIsland
+      coverage={readout.coverage}
+      minimized={bodyMinimized}
+      placeName={readout.placeName}
+      sectorsVisible={readout.sectorsVisible}
+      signal={selfSignal}
+      theme={theme}
+    />
+  );
+  const friendsBody = (bodyDetent: DrawerDetent, bodyMinimized: boolean) =>
+    detailPresence ? (
+      <FriendDetailIsland
+        key={detailPresence.friend.endpointId}
+        detent={bodyDetent}
+        onBack={closeDetail}
+        onRemove={async () => {
+          await removeFriend(detailPresence.friend.endpointId);
+          closeDetail();
+        }}
+        onToggleShare={async (on) => {
+          await toggleShare(detailPresence.friend.endpointId, on);
+        }}
+        peers={snapshot?.friends}
+        placeName={friendPlaceName(
+          readout.friendPlace,
+          detailPresence.friend.endpointId,
+          detailPresence.fix
+        )}
+        presence={detailPresence}
+        ratchetActivity={snapshot?.ratchetActivity[detailPresence.friend.endpointId]}
+        sharing={detailSharing}
+        stashEndpointId={snapshot?.stash.endpointId ?? null}
+        theme={theme}
+      />
+    ) : (
+      <FriendsIsland
+        friends={rosterFriends}
+        minimized={bodyMinimized}
+        onOpenPairing={() => {
+          closeLayers();
+          router.push('/pairing' as Href);
+        }}
+        onOpenProfile={(friendId) => focusRosterFriend(friendId, 'mid')}
+        onSelect={focusRosterFriend}
+        theme={theme}
+      />
+    );
+
   return (
     <View
       onLayout={onScreenLayout}
@@ -563,6 +613,7 @@ export default function MapScreenBody() {
             onReadout={onReadout}
             initialCenter={initialCenter}
             locateTarget={locateTarget}
+            obscuredLeft={island.obscuredLeft}
             onSelectFriend={selectFriend}
             onSelectSelf={selectSelf}
             onInteraction={closeLayers}
@@ -608,76 +659,50 @@ export default function MapScreenBody() {
           <SharingMutedBanner theme={theme} />
         </View>
       ) : null}
-      {island.column ? controls : null}
-      {/* Only map affordances float: layers and locate. They ride above the drawer and are
-          pushed off-screen as it docks, which is correct — a full sheet is not a map view. */}
-      <View pointerEvents="box-none" style={[styles.islandLayer, island.frame]}>
-        {island.column ? null : controls}
-        <MapDrawer
-          activeTab={islandTab}
-          column={island.column}
-          detent={shownDetent}
-          insetBottom={insets.bottom}
-          insetTop={insets.top}
-          maxDetent={drawerMax}
-          minDetent={drawerMin}
-          onDetentChange={(next) => {
-            closeLayers();
-            setDetent(next);
-          }}
-          onSelectTab={selectIslandTab}
-          screenHeight={screenHeight}
-          signal={selfSignal}
-          theme={theme}
-        >
-          {detailPresence ? (
-            <FriendDetailIsland
-              key={detailPresence.friend.endpointId}
-              detent={shownDetent}
-              onBack={closeDetail}
-              onRemove={async () => {
-                await removeFriend(detailPresence.friend.endpointId);
-                closeDetail();
-              }}
-              onToggleShare={async (on) => {
-                await toggleShare(detailPresence.friend.endpointId, on);
-              }}
-              peers={snapshot?.friends}
-              placeName={friendPlaceName(
-                readout.friendPlace,
-                detailPresence.friend.endpointId,
-                detailPresence.fix
-              )}
-              presence={detailPresence}
-              ratchetActivity={snapshot?.ratchetActivity[detailPresence.friend.endpointId]}
-              sharing={detailSharing}
-              stashEndpointId={snapshot?.stash.endpointId ?? null}
-              theme={theme}
-            />
-          ) : rosterOpen ? (
-            <FriendsIsland
-              friends={rosterFriends}
-              minimized={minimized}
-              onOpenPairing={() => {
-                closeLayers();
-                router.push('/pairing' as Href);
-              }}
-              onOpenProfile={(friendId) => focusRosterFriend(friendId, 'mid')}
-              onSelect={focusRosterFriend}
-              theme={theme}
-            />
-          ) : (
-            <CoverageIsland
-              coverage={readout.coverage}
-              minimized={minimized}
-              placeName={readout.placeName}
-              sectorsVisible={readout.sectorsVisible}
-              signal={selfSignal}
-              theme={theme}
-            />
-          )}
-        </MapDrawer>
-      </View>
+      {island.column ? (
+        <>
+          {controls}
+          <View
+            pointerEvents="box-none"
+            style={[
+              styles.columnLayer,
+              island.frame,
+              {
+                top: insets.top + Spacing.three,
+                bottom: Math.max(insets.bottom, Spacing.three),
+              },
+            ]}
+          >
+            <IslandColumn me={meBody(false)} theme={theme}>
+              {friendsBody('mid', false)}
+            </IslandColumn>
+          </View>
+        </>
+      ) : (
+        // Only map affordances float: layers and locate. They ride above the drawer and are
+        // pushed off-screen as it docks, which is correct — a full sheet is not a map view.
+        <View pointerEvents="box-none" style={[styles.islandLayer, island.frame]}>
+          {controls}
+          <MapDrawer
+            activeTab={islandTab}
+            detent={detent}
+            insetBottom={insets.bottom}
+            insetTop={insets.top}
+            maxDetent={drawerMax}
+            minDetent={drawerMin}
+            onDetentChange={(next) => {
+              closeLayers();
+              setDetent(next);
+            }}
+            onSelectTab={selectIslandTab}
+            screenHeight={screenHeight}
+            signal={selfSignal}
+            theme={theme}
+          >
+            {detailPresence || rosterOpen ? friendsBody(detent, minimized) : meBody(minimized)}
+          </MapDrawer>
+        </View>
+      )}
     </View>
   );
 }
@@ -686,6 +711,7 @@ function MapSession({
   accessibilityLabel,
   initialCenter,
   locateTarget,
+  obscuredLeft,
   selfLocation,
   selfFix,
   friends,
@@ -706,6 +732,7 @@ function MapSession({
   accessibilityLabel: string;
   initialCenter: MapFriendLocation['location'] | null;
   locateTarget: { requestId: number; location: MapFriendLocation['location'] } | null;
+  obscuredLeft: number;
   selfLocation: MapFriendLocation['location'] | null;
   selfFix: LocationFix | null;
   friends: readonly MapFriendLocation[];
@@ -736,6 +763,7 @@ function MapSession({
       onReadout={onReadout}
       initialCenter={sessionCenter}
       locateTarget={locateTarget}
+      obscuredLeft={obscuredLeft}
       onSelectFriend={onSelectFriend}
       onSelectSelf={onSelectSelf}
       onInteraction={onInteraction}
@@ -766,6 +794,9 @@ const styles = StyleSheet.create({
   },
   islandLayer: {
     bottom: 0,
+    position: 'absolute',
+  },
+  columnLayer: {
     position: 'absolute',
   },
   controls: {

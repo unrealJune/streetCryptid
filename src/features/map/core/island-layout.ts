@@ -1,9 +1,9 @@
 /**
  * Width past which the island stops being a bottom drawer: tablets, unfolded foldables (Android
  * book-style phones, iPhone Duo), desktop windows and landscape phones. A full-width bottom sheet
- * there is a long, shallow strip with three rows of friends in it, so the island becomes a
- * full-height column on the leading edge, always open — Find My's tablet layout — and the map keeps
- * the rest of the window.
+ * there is a long, shallow strip with three rows of friends in it, so the island becomes a column
+ * of cards on the leading edge (`IslandColumn`), ME and FRIENDS both open and each as tall as its
+ * content, and the map keeps the rest of the window.
  */
 const WIDE_LAYOUT_MIN_WIDTH = 600;
 /** The column's own width; a phone's width, so its rows read the same as they do in the drawer. */
@@ -19,6 +19,12 @@ export interface IslandLayout {
   readonly frame: { readonly left: number; readonly right?: number; readonly width?: number };
   /** Where chrome that shares the top row with the column may start (its trailing gutter). */
   readonly chromeLeft: number;
+  /**
+   * How much of the map, from the leading edge, the island hides. Whatever the map centres on (a
+   * friend, your own position, the opening camera) is centred in the rest. 0 for the drawer, which
+   * covers the bottom and moves.
+   */
+  readonly obscuredLeft: number;
 }
 
 /**
@@ -36,6 +42,7 @@ export function islandLayout(
       column: false,
       frame: { left: insetLeft, right: insetRight },
       chromeLeft: insetLeft + gutter,
+      obscuredLeft: 0,
     };
   }
   const frameWidth = Math.min(ISLAND_COLUMN_WIDTH + gutter * 2, width - insetLeft - insetRight);
@@ -43,5 +50,6 @@ export function islandLayout(
     column: true,
     frame: { left: insetLeft, width: frameWidth },
     chromeLeft: insetLeft + frameWidth,
+    obscuredLeft: insetLeft + frameWidth - gutter,
   };
 }

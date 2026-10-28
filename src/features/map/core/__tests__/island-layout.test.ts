@@ -8,6 +8,7 @@ describe('islandLayout', () => {
       column: false,
       frame: { left: 0, right: 0 },
       chromeLeft: GUTTER,
+      obscuredLeft: 0,
     });
     // iPhone Duo's rail, or a landscape notch, on either edge.
     expect(islandLayout(430, 84, 0, GUTTER).frame).toEqual({ left: 84, right: 0 });
@@ -23,6 +24,8 @@ describe('islandLayout', () => {
     // 420 of column plus the drawer's own gutter on each side.
     expect(layout.frame).toEqual({ left: 0, width: 420 + GUTTER * 2 });
     expect(layout.chromeLeft).toBe(420 + GUTTER * 2);
+    // The map is centred beside the column's cards, which end one gutter before the frame does.
+    expect(layout.obscuredLeft).toBe(420 + GUTTER);
     expect(islandLayout(1024, 84, 0, GUTTER).frame.left).toBe(84);
   });
 

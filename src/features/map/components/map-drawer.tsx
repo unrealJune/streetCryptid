@@ -78,12 +78,6 @@ interface MapDrawerProps {
    */
   readonly maxDetent?: DrawerDetent;
   readonly minDetent?: DrawerDetent;
-  /**
-   * The always-open leading column a wide window gets (see `islandLayout`): one stop, the full
-   * height of the window below the top chrome, no grip and no drag, every corner rounded. The
-   * caller's `detent` is pushed to `full`, so the body renders as the list it is at the top stop.
-   */
-  readonly column?: boolean;
   readonly detent: DrawerDetent;
   onDetentChange(detent: DrawerDetent): void;
   onSelectTab(tab: IslandTab): void;
@@ -119,7 +113,6 @@ export function MapDrawer({
   screenHeight,
   maxDetent = 'full',
   minDetent = 'peek',
-  column = false,
   detent,
   onDetentChange,
   onSelectTab,
@@ -140,10 +133,7 @@ export function MapDrawer({
   const startHeight = useSharedValue(0);
   const gestureActive = useSharedValue(false);
 
-  const detents = useMemo(
-    () => (column ? COLUMN_DETENTS : allowedDetents(maxDetent, minDetent)),
-    [column, maxDetent, minDetent]
-  );
+  const detents = useMemo(() => allowedDetents(maxDetent, minDetent), [maxDetent, minDetent]);
   const topDetent = detents[detents.length - 1];
   // A body with a single detent gets no grip: there is nothing to drag it to, and the strip would
   // be a handle on a surface that cannot move. Minimized, that is also what turns the drawer back
@@ -182,9 +172,7 @@ export function MapDrawer({
    * under it. Resolve it in ONE place and push the correction back to the caller below.
    */
   const effective = clampDetent(detent, detents);
-  // A column keeps its rest margin underneath (a single stop never docks), so `full` — which is
-  // measured for a docked sheet with no margin — would push its top edge past the top chrome.
-  const resolved = column ? Math.max(0, heights.full - restMargin) : heights[effective];
+  const resolved = heights[effective];
   /**
    * Whether the body is a list to be read rather than a summary to be glanced at, and whether that
    * list has anywhere to scroll where the drawer is now.
@@ -425,8 +413,6 @@ export function MapDrawer({
     </Animated.View>
   );
 }
-
-const COLUMN_DETENTS: readonly DrawerDetent[] = ['full'];
 
 const DETENT_LABEL: Record<DrawerDetent, string> = {
   collapsed: 'Minimized',

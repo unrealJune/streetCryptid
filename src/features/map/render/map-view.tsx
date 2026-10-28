@@ -34,6 +34,7 @@ import {
 
 import {
   applyViewTransform,
+  centerBeside,
   scaleFor,
   viewTransformFor,
   visibleWorldRect,
@@ -247,6 +248,7 @@ export function MapView({
   onSelectFriend,
   onInteraction = noInteraction,
   locateTarget = null,
+  obscuredLeft = 0,
 }: {
   /** Surfaces the coverage/place readout to the surrounding chrome. */
   onReadout?: (readout: MapReadout) => void;
@@ -285,6 +287,12 @@ export function MapView({
    */
   onInteraction?: () => void;
   locateTarget?: { readonly requestId: number; readonly location: LatLon } | null;
+  /**
+   * Screen px on the leading edge that chrome covers (a wide window's island column). Anything the
+   * map centres on is centred in the rest, and when this changes the map pans by half the change,
+   * so the point in the middle of what you can see stays there.
+   */
+  obscuredLeft?: number;
 }) {
   const [viewport, setViewport] = useState<Viewport | null>(null);
   const reducedMotion = useReducedMotion();
@@ -652,6 +660,31 @@ export function MapView({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [viewport, anchor]);
 
+  // What the camera is framed beside. Starts at 0, so the opening camera — centred on the whole
+  // viewport by the engine — is moved into the uncovered part on the first viewport. A locate reads
+  // it rather than depending on `obscuredLeft`: a change in what is obscured is a pan of its own,
+  // never a reason to fly to the last locate target again. This effect is declared first, so in a
+  // render that changes both, the locate already sees the new value.
+  const framedBesideRef = useRef(0);
+  useEffect(() => {
+    if (!viewport) return;
+    const delta = obscuredLeft - framedBesideRef.current;
+    if (delta === 0) return;
+    framedBesideRef.current = obscuredLeft;
+    const current = applyViewTransform(anchor, viewport, {
+      k: k.value,
+      tx: tx.value,
+      ty: ty.value,
+    });
+    const moved = viewTransformFor(anchor, viewport, centerBeside(current, delta));
+    const t = limits ? clampTranslation(moved, limits) : moved;
+    k.value = t.k;
+    tx.value = t.tx;
+    ty.value = t.ty;
+    commit(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [obscuredLeft, viewport, anchor]);
+
   useEffect(() => {
     if (!viewport || !limits || !locateTarget) return;
     cancelAnimation(k);
@@ -674,13 +707,16 @@ export function MapView({
       viewTransformFor(
         anchor,
         viewport,
-        locateCamera(
-          current,
-          latLonToWorld(locateTarget.location),
-          viewport,
-          region?.spec ?? null,
-          zoomFloor,
-          Math.max(zoomCeiling, zoomFloor)
+        centerBeside(
+          locateCamera(
+            current,
+            latLonToWorld(locateTarget.location),
+            viewport,
+            region?.spec ?? null,
+            zoomFloor,
+            Math.max(zoomCeiling, zoomFloor)
+          ),
+          framedBesideRef.current
         )
       ),
       limits
