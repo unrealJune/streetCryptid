@@ -25,6 +25,7 @@ import {
   installConsoleTelemetryBridge,
   startUiLivenessProbe,
 } from '@/features/dev/telemetry';
+import { BackgroundReliabilityGate } from '@/features/social/components/background-reliability-gate';
 import { LocationDisclosureGate } from '@/features/social/components/location-disclosure-gate';
 import { PairingOverlays } from '@/features/social/components/pairing-overlays';
 import { LocationSharingProvider } from '@/features/social/hooks/use-location-sharing';
@@ -65,19 +66,21 @@ export default function RootLayout() {
           <CryptidAccountGate>
             <LocationSharingProvider>
               <LocationDisclosureGate>
-                {/* No tab bar, no header: the map is the app, and everything else
+                <BackgroundReliabilityGate>
+                  {/* No tab bar, no header: the map is the app, and everything else
                     is a floating island or a sheet pushed over it. */}
-                <Stack screenOptions={{ headerShown: false }}>
-                  <Stack.Screen name="index" />
-                  <Stack.Screen
-                    name="pairing"
-                    options={{ animation: 'fade', gestureEnabled: false }}
-                  />
-                  <Stack.Screen name="settings" options={{ presentation: 'modal' }} />
-                </Stack>
-                {/* Pairing interrupts are global: a verification challenge or a
+                  <Stack screenOptions={{ headerShown: false }}>
+                    <Stack.Screen name="index" />
+                    <Stack.Screen
+                      name="pairing"
+                      options={{ animation: 'fade', gestureEnabled: false }}
+                    />
+                    <Stack.Screen name="settings" options={{ presentation: 'modal' }} />
+                  </Stack>
+                  {/* Pairing interrupts are global: a verification challenge or a
                     discovery can land while you are anywhere in the app. */}
-                <PairingOverlays />
+                  <PairingOverlays />
+                </BackgroundReliabilityGate>
               </LocationDisclosureGate>
             </LocationSharingProvider>
           </CryptidAccountGate>

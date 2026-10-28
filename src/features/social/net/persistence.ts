@@ -500,6 +500,21 @@ export async function saveLocationDisclosureChoice(
   await kv.set(LOCATION_DISCLOSURE_KEY, choice);
 }
 
+const BACKGROUND_RELIABILITY_KEY = 'sc.social.backgroundReliabilityAsked';
+
+/**
+ * Whether the Android background-reliability step (`BackgroundReliabilityScreen`) has been answered
+ * on this install. Stores only that it was asked, not the answer: the answer is the OS setting, read
+ * live, and a user who flips it in Settings later must not be contradicted by a stale record here.
+ */
+export async function loadBackgroundReliabilityAsked(kv: PersistentKV): Promise<boolean> {
+  return (await kv.get(BACKGROUND_RELIABILITY_KEY)) === '1';
+}
+
+export async function saveBackgroundReliabilityAsked(kv: PersistentKV): Promise<void> {
+  await kv.set(BACKGROUND_RELIABILITY_KEY, '1');
+}
+
 /**
  * Where a user-chosen publish cadence used to be stored. The setting is gone — the cadence is fixed
  * at `SHARE_INTERVAL_MS` — and the key is only named so {@link clearLegacyShareInterval} can remove

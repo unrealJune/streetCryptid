@@ -82,6 +82,11 @@ impl PeerRoles {
         Self { friends, stash }
     }
 
+    /// The stash's endpoint id, when the stash is configured and opted into.
+    pub fn stash(&self) -> Option<&[u8; 32]> {
+        self.stash.as_ref()
+    }
+
     /// `friend` | `stash` | `other`. `other` is honest rather than a guess: a pool member we hold no
     /// recipient record for, or a peer from before the config was written.
     pub fn role(&self, peer: &[u8; 32]) -> &'static str {
@@ -124,6 +129,11 @@ pub fn record(contact: Contact<'_>) {
         span.record("contact.from_author", from_author);
     }
     span.in_scope(|| {});
+    // Any exchange with a named peer proves this phone is reachable, whatever the pass was for.
+    crate::isolation::observe(
+        crate::isolation::Observation::Answered,
+        crate::isolation::Source::Contact,
+    );
 }
 
 /// One peer's share of a docs pull: how many entries it delivered, and whether any of them was its

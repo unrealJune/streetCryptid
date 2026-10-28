@@ -84,6 +84,28 @@ export interface NodeHostSnapshot {
   shutdowns: number;
   shutdownFailures: number;
   shutdownTimeouts: number;
+  /** Rebuilds because the phone reached nobody. Absent on binaries from before `isolation.rs`. */
+  heals?: number;
+}
+
+/**
+ * Whether this phone currently reaches nobody — every dial, the stash's included, unanswered — and
+ * what has been done about it. Mirrors `IsolationStatus` in `modules/iroh-location/rust/src/isolation.rs`.
+ */
+export interface IsolationStatus {
+  isolated: boolean;
+  /** When the silent streak that made it isolated began (epoch ms). */
+  isolatedSinceMs?: number;
+  silentPasses: number;
+  /** When anyone last answered (epoch ms), this process. */
+  lastAnswerMs?: number;
+  networkChanges: number;
+  rebuilds: number;
+  /** The mounted app should heal now, through `rebindNode('isolated')`. */
+  rebuildDue: boolean;
+  lastRebuildMs?: number;
+  episodes: number;
+  recoveries: number;
 }
 
 export interface TransportConfig {
@@ -686,6 +708,16 @@ export interface IrohLocationApi {
    */
   nativeBackgroundRunning?(): boolean;
   /**
+   * Android: whether the app is exempt from battery optimisation ("Unrestricted"), the state in
+   * which the foreground service may be restarted from the background. ANDROID ONLY, OPTIONAL.
+   */
+  batteryOptimizationExempt?(): boolean;
+  /**
+   * Android: show the system prompt for that exemption. Returns whether a prompt was shown.
+   * ANDROID ONLY, OPTIONAL.
+   */
+  requestBatteryOptimizationExemption?(): boolean;
+  /**
    * What the native runtime is doing and why — `{ running, state, wake_reason, auth_status,
    * precise, anchor_armed, fence_registered, slc_available, candidate_pending,
    * candidate_fence_armed, moving_fence_armed, last_wake_age_ms?, candidate_age_ms?, anchor_age_ms?,
@@ -743,6 +775,8 @@ export interface IrohLocationApi {
   restartNode?(config?: TransportConfig): Promise<void>;
   /** The node host's view of who holds the node, for `device.health`. OPTIONAL. */
   nodeHostSnapshot?(): NodeHostSnapshot | null;
+  /** Whether this phone reaches nobody, for `device.health` and the heal. OPTIONAL. */
+  isolationStatus?(): IsolationStatus | null;
   startNativeBackground?(): void;
   stopNativeBackground?(): void;
   /**

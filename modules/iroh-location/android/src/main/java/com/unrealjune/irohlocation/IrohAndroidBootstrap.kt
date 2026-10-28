@@ -22,6 +22,7 @@ internal object IrohAndroidBootstrap {
     }
     BleCentralManager.init(context.applicationContext)
     BlePeripheralManager.init(context.applicationContext)
+    NetworkHealthSampler.init(context.applicationContext)
     uniffiEnsureInitialized()
     installed = true
   }

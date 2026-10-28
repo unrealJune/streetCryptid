@@ -1018,6 +1018,46 @@ export class LocationSharingService {
   }
 
   /**
+   * Rebuild the node when the native core says this phone has been reaching NOBODY — every dial,
+   * the stash's included, unanswered — and a cheaper network change has already had its chance.
+   *
+   * The core decides (`isolation.rs`): on 2026-10-22 the field-soak iPhone SE spent hours unable
+   * to complete a single connection while its relays and Wi-Fi looked fine, and showed a friend
+   * "parked here 12 hr" across the lake from where she was. With no app holding the node the core
+   * rebuilds it itself; with one mounted, only this side can, because every subscription,
+   * listener and pairing session it built belongs to the node being replaced — so it goes through
+   * {@link rebindNode}, which rewires all of them. The core rate-limits the rebuild (once an hour,
+   * counting this one), so asking on every heartbeat is cheap.
+   *
+   * Never over a pairing: tearing down a handshake a human is in the middle of is worse than
+   * waiting one more tick.
+   */
+  async healIfIsolated(): Promise<boolean> {
+    const mod = this.mod;
+    if (!mod || !this.isReady() || typeof mod.isolationStatus !== 'function') return false;
+    if (this.rebindInFlight || this.pairingOperations > 0 || this.hasActivePairingSession()) {
+      return false;
+    }
+    let status;
+    try {
+      status = mod.isolationStatus();
+    } catch {
+      return false;
+    }
+    if (!status?.rebuildDue) return false;
+    this.rebindInFlight = true;
+    try {
+      await this.rebindNode('isolated');
+      return true;
+    } catch {
+      // Recorded on the `node.rebind` span; the next heartbeat asks again once the core allows it.
+      return false;
+    } finally {
+      this.rebindInFlight = false;
+    }
+  }
+
+  /**
    * Choose how sealed envelopes leave this phone. Persists the choice; when the choice resolves
    * to the stash, grants it replication of our own + friends' trail namespaces and folds its
    * ticket into our subscription.
@@ -3695,6 +3735,9 @@ export class LocationSharingService {
     if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
     this.heartbeatTimer = setInterval(() => {
       void this.engine?.heartbeat();
+      // The heartbeat is the one timer a mounted app keeps in a pocket, which is where an
+      // isolated phone needs healing most. See `healIfIsolated`.
+      void this.healIfIsolated();
     }, intervalMs);
     (this.heartbeatTimer as unknown as { unref?: () => void }).unref?.();
   }

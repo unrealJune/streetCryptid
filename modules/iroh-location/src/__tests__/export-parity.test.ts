@@ -69,7 +69,11 @@ const IOS_ONLY: Record<string, string> = {
 };
 
 /** Exported by Android only, on purpose. */
-const ANDROID_ONLY: Record<string, string> = {};
+const ANDROID_ONLY: Record<string, string> = {
+  batteryOptimizationExempt:
+    'the Android battery-optimisation exemption that lets the foreground service restart itself; iOS has no equivalent',
+  requestBatteryOptimizationExemption: 'the prompt for batteryOptimizationExempt',
+};
 
 /** Declared for OLDER binaries a newer JS bundle may still meet; no current binary exports them. */
 const LEGACY: Record<string, string> = {

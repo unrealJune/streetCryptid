@@ -234,12 +234,13 @@ process, and these spans say who holds it and why it changed. They replace every
 reading ownership off the log — `node.start.claim_refused`, `node.handover`, the background
 runtime's claim backoff — none of which a host binary emits.
 
-| Span                | Says                                                                                                                                                                                |
-| ------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `node.host.acquire` | a holder (`holder=app` / `background`) took a lease: `outcome` is `adopted` (nothing built), `built`, `replaced` (app only: the live node had another identity) or `no-identity`    |
-| `node.host.release` | a lease returned: `outcome` is `still-held`, `shut-down`, `shutdown-failed`, `shutdown-timed-out`, `released` (no node left) or `not-held`; `waited_ms` is the shutdown's wait      |
-| `node.host.restart` | a settings change rebuilt the node in place, keeping every lease; `shutdown` is how the old one went                                                                                |
-| `subscribe.own`     | a caller asked for the own-topic subscription: `outcome` is `created`, `adopted` (joined its peers, and took its events if `listener=true`) or `recreated` (the old loop had ended) |
+| Span                | Says                                                                                                                                                                                          |
+| ------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `node.host.acquire` | a holder (`holder=app` / `background`) took a lease: `outcome` is `adopted` (nothing built), `built`, `replaced` (app only: the live node had another identity) or `no-identity`              |
+| `node.host.release` | a lease returned: `outcome` is `still-held`, `shut-down`, `shutdown-failed`, `shutdown-timed-out`, `released` (no node left) or `not-held`; `waited_ms` is the shutdown's wait                |
+| `node.host.restart` | a settings change rebuilt the node in place, keeping every lease; `shutdown` is how the old one went                                                                                          |
+| `node.host.heal`    | an isolated phone with no app holding the node rebuilt it from the stored settings (`outcome` = `healed` / `declined` / `failed`) — see [below](#is-this-phone-reaching-anyone-nodeisolation) |
+| `subscribe.own`     | a caller asked for the own-topic subscription: `outcome` is `created`, `adopted` (joined its peers, and took its events if `listener=true`) or `recreated` (the old loop had ended)           |
 
 Every one carries `generation`, `app_leases` and `background` after the change. `device.health`
 carries the same under `node.host.*`, plus counters since process start; `builds` outrunning
@@ -550,6 +551,41 @@ service re-applies it on `onCreate`. So for an Android phone, pulses continuing 
 { name = "location.runtime" && resource.os.type = "android" && span.location.node_owner = "native" }
 ```
 
+## Is this phone reaching anyone? (`node.isolation`)
+
+A friend's dot can be stale because THIS phone cannot reach anyone, and nothing on the map says
+so. On 2026-10-22 the field-soak iPhone SE showed a friend "parked here 12 hr" across the lake
+from where she was: from 14:06 UTC every dial it made — the stash's included — went unanswered
+(`trail.push.peer{peer.answered=false}` everywhere, `friend.pull` spending its whole budget with
+`ns_deadline` on every namespace), while its relay connections stayed up and `net.*` said Wi-Fi
+and internet were fine. The sender was publishing the whole time.
+
+`modules/iroh-location/rust/src/isolation.rs` counts it. A pass is **silent** when nobody answered
+and the stash was among the peers dialled (friends' phones are asleep most of the time; the stash
+is not). A pull answered = a namespace reached `ContentReady` or closed; `ns_idle` alone is not an
+answer. Any `peer.contact` is an answer.
+
+| `node.isolation` `event` | Says                                                                                                                           |
+| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------ |
+| `entered`                | 3+ consecutive silent passes spanning 10+ min (`silent_passes`, `silent_ms`, `source` = `pull` / `push`)                       |
+| `network_change`         | the node called `Endpoint::network_change()` on itself — on entry, then every 30 min while it lasts                            |
+| `rebuild`                | the node was rebuilt inside an episode (`trigger` = `heal`, native with no app; `restart`, the app's `rebindNode('isolated')`) |
+| `recovered`              | someone answered: `isolated_ms`, the steps taken, `last_step` and `since_last_step_ms`                                         |
+
+A rebuild is due 10 min after a network change that did not help, at most once an hour (any rebuild,
+a settings change included, starts the cooldown). With no app holding the node the core heals it
+itself (`node.host.heal`); a mounted app reads `isolationStatus().rebuildDue` on its heartbeat and
+calls `rebindNode('isolated')`, because only it can rewire its subscriptions. `device.health`
+carries the state as `isolation.*`.
+
+**Read `recovered{last_step}` before tuning anything.** `none` means it came back on its own (as it
+did twice on 2026-10-22), `network_change` / `rebuild` with a small `since_last_step_ms` means that
+step is what fixed it. That is the evidence for whether the rebuild is worth what it costs.
+
+```traceql
+{ name = "node.isolation" } | select(resource.service.instance.id, span.event, span.isolated_ms, span.last_step, span.since_last_step_ms)
+```
+
 ## Is the background pull safe? (`friend.pull`)
 
 Until 2026-10-09 a pocketed iPhone whose app had been opened pulled friends on none of its wakes —
@@ -597,6 +633,69 @@ replica, recorded as `trail.refresh.native_pull` with `recovered`.
 
 # Pulls that ran into the OS: cut off, stranded, or frozen past their budget.
 { name = "friend.pull" && (span.pull.outcome =~ "expired|stranded" || span.pull.overrun_ms > 0) }
+```
+
+## Where is the memory going? (`process.memory`)
+
+A Pixel 10 was killed by the low-memory killer at 3.5 GB on 2026-10-21, and nothing in the telemetry
+said so. The platform runtime now samples its own process on the five-minute `location.runtime`
+pulse (Android only so far; `process_memory.rs`, `ProcessMemorySampler.kt`). On the map-leak fix
+the Pixel stayed under 1 GB for 36 h, but `memory.native_heap_bytes` still climbed ~5 MB/h in the
+background. The fields below exist to say whose that growth is:
+
+| Field                                                                                                    | Says                                                                                                                                                                          |
+| -------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `memory.native_heap_bytes`                                                                               | Bionic's whole malloc heap: Rust, Hermes, Skia, React Native                                                                                                                  |
+| `memory.rust_live_bytes`                                                                                 | Rust's exact share (counting allocator, `alloc_stats.rs`). Climbing with the native heap: ours. Flat: someone else's                                                          |
+| `memory.rust_allocs_total` / `memory.rust_allocated_total_bytes`                                         | cumulative. Climbing fast with `rust_live_bytes` flat is churn (CPU), not a leak                                                                                              |
+| `memory.open_spans` / `memory.open_span_events`                                                          | spans that have not ended, and the events recorded on them. The exporter is handed at most 128 per span (`CapSpanEvents`), so past that this counts events, not buffered heap |
+| `memory.heaviest_open_span`                                                                              | `name=events` of the open span holding the most (once past 256). A never-ending span collecting events is a heap that only grows                                              |
+| `memory.native_heap_size_bytes` / `_free_bytes`                                                          | the heap's mapped size and free part. Free growing with size is fragmentation                                                                                                 |
+| `memory.pss_bytes`, `graphics_bytes`, `code_bytes`, `stack_bytes`, `private_other_bytes`, `system_bytes` | `Debug.MemoryInfo` summary (PSS). Taken on the first sample and every sixth (30 min), because it walks every mapping. `graphics` is GPU/gralloc, where Skia's textures land   |
+| `memory.rss_*`, `swap_bytes`, `java_heap_bytes`, `threads`, `fds`, `maps`                                | as before: RSS + swap is what the LMK weighs; climbing handles are a handle leak                                                                                              |
+
+`rust_live_bytes` and the ledger fields come from Rust and are absent from a build without the
+`otel` feature.
+
+The first day of these fields found two things (2026-10-24). iroh's socket `actor` span lives as
+long as the endpoint and every `iroh::socket` debug line lands on it, about 1,500 an hour, and
+`tracing-opentelemetry` kept every one until the span closed — which it never does — although the
+SDK keeps only 128 at export. `CapSpanEvents` now stops handing a span's events to the exporter at
+128; Loki still gets them all through the log bridge. And until the first `configure`, the empty
+OTLP reload slot switched every callsite in the process off (`telemetry::imp::idle_slot`), so a
+span opened before then — iroh's endpoint and relay actors on a JS launch — was invisible for its
+whole life, to the ledger and `RelayTap` too.
+
+```traceql
+# One phone's memory over time.
+{ name = "process.memory" && resource.service.instance.id = "cd736d206b" } | select(span.memory.uptime_ms, span.memory.native_heap_bytes, span.memory.rust_live_bytes, span.memory.open_span_events, span.memory.heaviest_open_span, span.memory.graphics_bytes)
+```
+
+## Is the network healthy? (`net.health`)
+
+From 2026-10-15 the same Pixel logged ~6,000 relay failures a day (`tls connection failed: received
+fatal alert: InternalError`) and no record said which relay: the URL is a field on iroh's
+`active-relay` span, and Loki drops fields. It was a retired relay that old tickets still named
+(`relay::scrub_addr`, which fixed it fleet-wide). `net.health` (`net_health.rs`) makes the next one
+a query: emitted on the same five-minute pulse (Android and iOS), it carries the counts since the
+previous record.
+
+| Field                                                                                                | Says                                                                                                                                                             |
+| ---------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `net.node`                                                                                           | `live`, `stopped`, `none`, or `busy` (the node lock was held at that instant; the pulse never waits on it)                                                       |
+| `relay.home` / `relay.home_down` / `relay.home_last_error`                                           | each home relay as `host=up`/`host=down`, and the last error of the first one down                                                                               |
+| `relay.errors` / `relay.error_classes` / `relay.error_sample`                                        | relay-actor warnings by host and class (`tls_alert:<alert>`, `tls_cert`, `dns`, `timeout`, `refused`, `lost`, …), plus one message                               |
+| `relay.foreign_errors`                                                                               | the part of `relay.errors` against relays outside this node's relay map. Should be 0 since `scrub_addr`                                                          |
+| `dns.ok` / `dns.failed` / `dns.failed_by_kind` / `dns.failure_sample`                                | system-resolver lookups; failures by record type and `relay`/`discovery`/`other`. A negative answer is not a failure                                             |
+| `ep.*`                                                                                               | iroh's socket counters as deltas: conns opened/closed, holepunch attempts, direct/relay paths, home-relay changes, link changes, bytes by transport, net reports |
+| `net.transport`, `net.validated`, `net.captive_portal`, `net.vpn`, `net.private_dns`, `net.has_ipv6` | Android's account of the default network. A failure class that follows `net.transport` or `net.private_dns` is the network, not the relay                        |
+
+```traceql
+# Which relays is a phone failing against, and on what network?
+{ name = "net.health" && resource.service.instance.id = "cd736d206b" && span.relay.errors > 0 } | select(span.relay.error_classes, span.relay.home, span.net.transport, span.net.private_dns)
+
+# Anyone still dialling a relay we don't run.
+{ name = "net.health" && span.relay.foreign_errors > 0 } | select(resource.service.instance.id, span.relay.error_classes)
 ```
 
 ## Tuning the per-peer dial budget

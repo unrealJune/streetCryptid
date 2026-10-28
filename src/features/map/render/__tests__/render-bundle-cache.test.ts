@@ -64,10 +64,11 @@ describe('sameRegionRenderInput', () => {
       const second = { ...region, spec: { ...region.spec, zoom: 14 } };
       const third = { ...region, spec: { ...region.spec, zoom: 13 } };
 
-      cache.set(region, theme, 'xh-', 'first');
-      cache.set(second, theme, 'xh-', 'second');
+      expect(cache.set(region, theme, 'xh-', 'first')).toBeUndefined();
+      expect(cache.set(second, theme, 'xh-', 'second')).toBeUndefined();
       expect(cache.get(region, theme, 'xh-')).toBe('first');
-      cache.set(third, theme, 'xh-', 'third');
+      // The evicted value is handed back: its owner has native bitmaps to release.
+      expect(cache.set(third, theme, 'xh-', 'third')).toBe('second');
 
       expect(cache.get(second, theme, 'xh-')).toBeUndefined();
       expect(cache.get(region, theme, 'xh-')).toBe('first');

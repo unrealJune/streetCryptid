@@ -12,6 +12,7 @@ import type {
   NativeControlMsg,
   NativeRatchetEvent,
   NativeLocationFix,
+  IsolationStatus,
   NodeHostSnapshot,
   NodeKeys,
   PairEvent,
@@ -154,6 +155,16 @@ export declare class IrohLocationNativeModule
    */
   nativeBackgroundRunning?(): boolean;
   /**
+   * Android: whether the app is exempt from battery optimisation ("Unrestricted"), the state in
+   * which the foreground service may be restarted from the background. ANDROID ONLY, OPTIONAL.
+   */
+  batteryOptimizationExempt?(): boolean;
+  /**
+   * Android: show the system prompt for that exemption. Returns whether a prompt was shown.
+   * ANDROID ONLY, OPTIONAL.
+   */
+  requestBatteryOptimizationExemption?(): boolean;
+  /**
    * What the native runtime is doing and why — `{ running, state, wake_reason, auth_status,
    * precise, anchor_armed, fence_registered, slc_available, candidate_pending,
    * candidate_fence_armed, moving_fence_armed, last_wake_age_ms?, candidate_age_ms?, anchor_age_ms?,
@@ -178,6 +189,7 @@ export declare class IrohLocationNativeModule
   nativeNodeOwner?(): string;
   restartNode?(config?: TransportConfig): Promise<void>;
   nodeHostSnapshot?(): NodeHostSnapshot | null;
+  isolationStatus?(): IsolationStatus | null;
   startNativeBackground?(): void;
   stopNativeBackground?(): void;
   /**

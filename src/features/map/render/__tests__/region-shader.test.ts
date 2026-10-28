@@ -35,12 +35,19 @@ jest.mock('../dot-field-shader', () => ({
 
 // The "image" is the recording canvas, so a test can read back what was drawn.
 jest.mock('../offscreen', () => ({
-  renderPicture: (_picture: unknown, _width: number, _height: number, consumer: string) =>
-    consumer === 'same-thread'
+  renderPicture: (
+    picture: { dispose(): void },
+    _width: number,
+    _height: number,
+    consumer: string
+  ) => {
+    picture.dispose();
+    return consumer === 'same-thread'
       ? mockAtlasFails
         ? null
         : mockResource({ makeShaderOptions: () => mockResource({}) })
-      : jest.requireMock('@shopify/react-native-skia').drawAsImageFromPicture(),
+      : jest.requireMock('@shopify/react-native-skia').drawAsImageFromPicture();
+  },
 }));
 
 jest.mock('@shopify/react-native-skia', () => {

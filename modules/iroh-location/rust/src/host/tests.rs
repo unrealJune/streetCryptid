@@ -942,6 +942,95 @@ async fn the_background_runtime_cannot_start_a_restarted_node_with_the_old_setti
     assert_eq!(restarted.started().as_deref(), Some("explicit:new"));
 }
 
+// ── Heal (isolation.rs) ──────────────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn a_heal_rebuilds_the_same_identity_from_the_stored_settings_and_keeps_the_lease() {
+    let rig = rig();
+    let (old, _) = rig.background("alice").await.unwrap();
+    let generation = rig.host.generation();
+
+    let healed = rig
+        .host
+        .heal(|snapshot| snapshot.app_leases == 0, BUDGET)
+        .await
+        .unwrap()
+        .expect("allowed, so healed");
+    assert!(old.is_shut());
+    assert!(!Arc::ptr_eq(&old, &healed));
+    assert_eq!(healed.identity, old.identity);
+    assert_eq!(healed.started().as_deref(), Some("stored"));
+    assert!(rig.host.generation() > generation);
+    let snapshot = rig.host.snapshot();
+    assert!(snapshot.background, "the background lease survives");
+    assert_eq!((snapshot.heals, snapshot.restarts), (1, 0));
+    assert_eq!(rig.ledger.max_live(), 1);
+
+    // The background runtime's next wake simply adopts the healed node.
+    let (adopted, outcome) = rig.background("alice").await.unwrap();
+    assert!(Arc::ptr_eq(&adopted, &healed));
+    assert_eq!(outcome, AcquireOutcome::Adopted);
+}
+
+#[tokio::test]
+async fn a_declined_heal_changes_nothing() {
+    let rig = rig();
+    let (node, _) = rig.app("alice").await;
+    let generation = rig.host.generation();
+    let healed = rig
+        .host
+        .heal(|snapshot| snapshot.app_leases == 0, BUDGET)
+        .await
+        .unwrap();
+    assert!(healed.is_none(), "an app holds the node");
+    assert!(!node.is_shut());
+    assert_eq!(rig.host.generation(), generation);
+    assert_eq!(rig.host.snapshot().heals, 0);
+}
+
+#[tokio::test]
+async fn a_heal_with_no_node_does_nothing_and_never_asks() {
+    let rig = rig();
+    let healed = rig
+        .host
+        .heal(|_| panic!("nothing to decide about"), BUDGET)
+        .await
+        .unwrap();
+    assert!(healed.is_none());
+    assert_eq!(rig.ledger.events(), Vec::<String>::new());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn two_racing_heals_rebuild_once() {
+    // Both see the same isolated node; the second decides after the first has replaced it, against
+    // the host's state at that moment — which is what `heal_isolated`'s pointer check relies on.
+    let rig = rig();
+    rig.behaviour.set_shutdown(ShutdownMode::Slow(50));
+    let (first, _) = rig.background("alice").await.unwrap();
+    let target = Arc::as_ptr(&first) as usize;
+    let heal = move |host: Arc<Host<FakeFactory>>| async move {
+        let probe = host.clone();
+        host.heal(
+            move |_| {
+                probe
+                    .current()
+                    .is_some_and(|current| Arc::as_ptr(&current) as usize == target)
+            },
+            BUDGET,
+        )
+        .await
+        .unwrap()
+    };
+    let (a, b) = tokio::join!(
+        tokio::spawn(heal(rig.host.clone())),
+        tokio::spawn(heal(rig.host.clone()))
+    );
+    let healed = [a.unwrap(), b.unwrap()];
+    assert_eq!(healed.iter().filter(|h| h.is_some()).count(), 1);
+    assert_eq!(rig.host.snapshot().heals, 1);
+    assert_eq!(rig.ledger.max_live(), 1);
+}
+
 // ── Rule 7: generation ───────────────────────────────────────────────────────────────────────────
 
 #[tokio::test]

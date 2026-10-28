@@ -28,6 +28,19 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
+    <!-- ServiceRecovery. A redelivered restart is refused the foreground on Android 12+ (Pixel,
+         2026-10-21: crash, then restartDelay=+218d), so the service needs its own way back.
+         SCHEDULE_EXACT_ALARM makes the watchdog exact, and an exact alarm is one of the states in
+         which Android lets a foreground service start from the background. It is not granted by
+         default on Android 14+; without it the watchdog is inexact and falls back to asking the
+         user. RECEIVE_BOOT_COMPLETED: the service's own boot path, not expo-task-manager's. -->
+    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <!-- The one-tap "Unrestricted" prompt from the background-reliability onboarding step. Google
+         Play restricts which apps may use it; continuous location sharing is the core function
+         here, which is the case the policy allows, but the declaration has to say so. -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+
     <application>
         <!-- `location` is one of the few FGS types Android 15 still lets a boot receiver start,
              which is what keeps sharing alive across a reboot without a user tap. -->
@@ -35,5 +48,13 @@
             android:name="com.unrealjune.irohlocation.BackgroundLocationService"
             android:exported="false"
             android:foregroundServiceType="location" />
+        <receiver
+            android:name="com.unrealjune.irohlocation.ServiceRecoveryReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
     </application>
 </manifest>

@@ -92,14 +92,19 @@ export interface TerrainImage {
   readonly hasElevation: boolean;
 }
 
-const elevationImages = new WeakMap<ElevationRaster, SkImage>();
+// Cache GC-visible pixels, not a native image that its region will dispose.
+const elevationPixels = new WeakMap<ElevationRaster, Uint8Array>();
 
 export function buildTerrainImage(elevation: ElevationRaster | null | undefined): TerrainImage {
   if (!elevation) return { image: emptyImage(), hasElevation: false };
-  let image = elevationImages.get(elevation);
-  if (!image) {
-    const data = Skia.Data.fromBytes(elevationRgba(elevation));
-    const made = Skia.Image.MakeImage(
+  let pixels = elevationPixels.get(elevation);
+  if (!pixels) {
+    pixels = elevationRgba(elevation);
+    elevationPixels.set(elevation, pixels);
+  }
+  const data = Skia.Data.fromBytes(pixels);
+  try {
+    const image = Skia.Image.MakeImage(
       {
         width: elevation.width,
         height: elevation.height,
@@ -109,13 +114,12 @@ export function buildTerrainImage(elevation: ElevationRaster | null | undefined)
       data,
       elevation.width * 4
     );
-    data.dispose();
-    if (!made) {
+    if (!image) {
       console.warn(`[map] DEM image allocation failed (${elevation.width}x${elevation.height})`);
       return { image: null, hasElevation: false };
     }
-    image = made;
-    elevationImages.set(elevation, image);
+    return { image, hasElevation: true };
+  } finally {
+    data.dispose();
   }
-  return { image, hasElevation: true };
 }

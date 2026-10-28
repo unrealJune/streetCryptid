@@ -6,8 +6,9 @@ Baseline: `0f84053` (v2.25.0). These changes replace crop-dependent terrain
 inputs and padded-region label placement; they do not change the tile transport.
 
 Elevation textures now encode absolute metres in R/G and alpine weight in B,
-with latitude evaluated per DEM row. They stay at native DEM resolution and are
-cached by raster identity. Decode height **after** shader interpolation:
+with latitude evaluated per DEM row. They stay at native DEM resolution; their
+pixel encoding is cached by raster identity, while each region owns its image.
+Decode height **after** shader interpolation:
 resampling the encoded bytes into another RGBA8 image rounds the high byte and
 invents 256-metre steps. Hillshade uses the DEM's projected pixel spacing,
 not a zoom-dependent screen-pixel offset. Contours use nested absolute elevation
@@ -48,6 +49,9 @@ for every covered pixel. Both the app and `map-shot` use the same shaders,
 uniform packing and atlas layout. The atlas stays on the rendering thread;
 only the completed UI bitmap is read back. Temporary shaders, pictures, paints,
 atlas handles and native offscreen surfaces are explicitly released after use.
+`renderPicture` consumes its picture on both native and web, including failure
+paths; callers must not dispose it again. DEM reuse caches only JS pixel buffers,
+so a later region cannot inherit a native image its predecessor already released.
 
 This trades transient texture memory for less repeated shading. Across zooms
 1–19 sampled at 0.01 increments, the largest RGBA8 atlas was 33.8 MiB at a

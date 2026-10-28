@@ -259,7 +259,7 @@ export function renderRegionImage({
       .beginRecording(Skia.XYWHRect(0, 0, atlasSize.width, atlasSize.height))
       .drawPaint(materialPaint);
     const atlas = renderPicture(
-      own(atlasPicture.finishRecordingAsPicture()),
+      atlasPicture.finishRecordingAsPicture(),
       atlasSize.width,
       atlasSize.height,
       'same-thread'
@@ -301,7 +301,7 @@ export function renderRegionImage({
     if (transitEnabled) {
       drawTransitLines(canvas, region, palette, pixelRatio, reveal);
     }
-    const recorded = own(picture.finishRecordingAsPicture());
+    const recorded = picture.finishRecordingAsPicture();
 
     const image = renderPicture(recorded, width, height, 'ui');
     if (!image) console.warn(`[map] region raster failed (${width}×${height})`);

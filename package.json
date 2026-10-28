@@ -1,7 +1,7 @@
 {
   "name": "streetcryptid",
   "main": "expo-router/entry",
-  "version": "2.25.0",
+  "version": "2.26.0",
   "license": "AGPL-3.0-or-later",
   "dependencies": {
     "@expo-google-fonts/ibm-plex-mono": "^0.4.1",
@@ -113,7 +113,8 @@
   "patchedDependencies": {
     "expo-modules-jsi@57.0.3": "patches/expo-modules-jsi@57.0.3.patch",
     "h3-js@4.5.0": "patches/h3-js@4.5.0.patch",
-    "pbf@5.1.2": "patches/pbf@5.1.2.patch"
+    "pbf@5.1.2": "patches/pbf@5.1.2.patch",
+    "@shopify/react-native-skia@2.6.2": "patches/@shopify%2Freact-native-skia@2.6.2.patch"
   },
   "expo": {
     "install": {

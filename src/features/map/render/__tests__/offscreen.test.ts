@@ -7,7 +7,14 @@ jest.mock('@shopify/react-native-skia', () => ({
 }));
 
 describe('offscreen image ownership', () => {
-  const picture = {} as SkPicture;
+  const disposePicture = jest.fn();
+  const picture: SkPicture = {
+    __typename__: 'Picture',
+    makeShader: jest.fn(),
+    serialize: jest.fn(),
+    dispose: disposePicture,
+    [Symbol.dispose]: disposePicture,
+  };
   const cpuImage = { dispose: jest.fn() };
   const texture = {
     makeNonTextureImage: jest.fn(() => cpuImage),
@@ -26,6 +33,10 @@ describe('offscreen image ownership', () => {
     jest
       .requireMock('@shopify/react-native-skia')
       .Skia.Surface.MakeOffscreen.mockReturnValue(surface);
+  });
+
+  afterEach(() => {
+    expect(picture.dispose).toHaveBeenCalledTimes(1);
   });
 
   it('releases a surface but keeps the texture returned to its same-thread consumer', () => {
@@ -58,5 +69,32 @@ describe('offscreen image ownership', () => {
     expect(() => renderPicture(picture, 100, 80, 'ui')).toThrow('readback failed');
     expect(surface.dispose).toHaveBeenCalledTimes(1);
     expect(texture.dispose).toHaveBeenCalledTimes(1);
+  });
+
+  it('releases the picture when a surface cannot be allocated', () => {
+    jest
+      .requireMock('@shopify/react-native-skia')
+      .Skia.Surface.MakeOffscreen.mockReturnValueOnce(null);
+    expect(renderPicture(picture, 100, 80, 'same-thread')).toBeNull();
+    expect(surface.dispose).not.toHaveBeenCalled();
+  });
+
+  it('releases the picture when surface allocation throws', () => {
+    jest
+      .requireMock('@shopify/react-native-skia')
+      .Skia.Surface.MakeOffscreen.mockImplementationOnce(() => {
+        throw new Error('allocation failed');
+      });
+    expect(() => renderPicture(picture, 100, 80, 'same-thread')).toThrow('allocation failed');
+    expect(surface.dispose).not.toHaveBeenCalled();
+  });
+
+  it('releases the picture and surface when snapshotting throws', () => {
+    surface.makeImageSnapshot.mockImplementationOnce(() => {
+      throw new Error('snapshot failed');
+    });
+    expect(() => renderPicture(picture, 100, 80, 'same-thread')).toThrow('snapshot failed');
+    expect(surface.dispose).toHaveBeenCalledTimes(1);
+    expect(texture.dispose).not.toHaveBeenCalled();
   });
 });
