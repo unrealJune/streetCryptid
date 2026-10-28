@@ -113,7 +113,8 @@
         "expo-build-properties",
         {
           "android": {
-            "minSdkVersion": 26
+            "minSdkVersion": 26,
+            "extraProguardRules": "# Room 2.6 (WorkManager 2.9, via expo-background-task) instantiates WorkDatabase_Impl by\n# reflection but its consumer rules keep the class without its constructor, so R8 full mode\n# strips it and every launch dies in WorkManagerInitializer. Room 2.7 ships this rule itself.\n-keep class * extends androidx.room.RoomDatabase { <init>(); }"
           }
         }
       ],
