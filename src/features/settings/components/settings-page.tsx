@@ -198,6 +198,8 @@ export interface RailAction {
   readonly label: string;
   readonly accessibilityLabel?: string;
   readonly icon: SymbolViewProps['name'];
+  /** A shorter label for the rail, where each letter takes a line. Eight letters fit. */
+  readonly railLabel?: string;
   readonly onPress: () => void;
   readonly disabled?: boolean;
   readonly busy?: boolean;
@@ -213,14 +215,15 @@ export interface FooterRail {
 }
 
 /**
- * The primary action as a tall pill that fills the rail, its label running down it like a book
- * spine: the rail is too narrow to set "Continue" across, and a round button with a caption under
- * it read as an afterthought next to the page it finishes.
+ * The primary action as a tall pill that fills the rail, its label set as a column of letters in
+ * the display face: the rail is too narrow to set "Continue" across, a label turned on its side
+ * made you tilt your head to read it, and a round button with a caption read as an afterthought.
  */
 function RailPrimary({ action }: { action: RailAction }) {
   const theme = useTheme();
   const fill = action.color ?? theme.text;
   const ink = action.ink ?? theme.background;
+  const letters = (action.railLabel ?? action.label).replace(/…|\.\.\./g, '').toUpperCase();
   return (
     <Pressable
       accessibilityLabel={action.accessibilityLabel ?? action.label}
@@ -234,14 +237,18 @@ function RailPrimary({ action }: { action: RailAction }) {
       ]}
       testID={action.testID}
     >
-      {/* Laid out horizontally at the pill's height, then turned; a rotated view keeps its
-          unrotated layout box, so the box is sized and centred by hand. */}
-      <View pointerEvents="none" style={styles.railSpine}>
-        <ThemedText numberOfLines={1} style={[styles.railSpineLabel, { color: ink }]}>
-          {action.label}
-        </ThemedText>
+      <View style={styles.railLetters}>
+        {[...letters].map((letter, index) =>
+          letter === ' ' ? (
+            <View key={index} style={styles.railLetterGap} />
+          ) : (
+            <ThemedText key={index} style={[styles.railLetter, { color: ink }]}>
+              {letter}
+            </ThemedText>
+          )
+        )}
       </View>
-      <SymbolView name={action.icon} size={22} tintColor={ink} />
+      <SymbolView name={action.icon} size={28} tintColor={ink} weight="bold" />
     </Pressable>
   );
 }
@@ -279,10 +286,7 @@ function RailButton({ action }: { action: RailAction }) {
 }
 
 const RAIL_PRIMARY_WIDTH = 60;
-const RAIL_PRIMARY_HEIGHT = 240;
-const RAIL_SPINE_LINE = 20;
-/** The pill's height less the arrow at its foot and the padding at both ends. */
-const RAIL_SPINE_LENGTH = RAIL_PRIMARY_HEIGHT - 22 - Spacing.three * 3;
+const RAIL_PRIMARY_HEIGHT = 264;
 
 /** After the push animation, or the flash plays under it. */
 const FLASH_SCROLL_DELAY_MS = 450;
@@ -339,26 +343,26 @@ const styles = StyleSheet.create({
   railPrimary: {
     alignItems: 'center',
     borderRadius: RAIL_PRIMARY_WIDTH / 2,
+    gap: Spacing.three,
     height: RAIL_PRIMARY_HEIGHT,
-    justifyContent: 'flex-end',
-    paddingBottom: Spacing.three,
+    justifyContent: 'space-between',
+    paddingBottom: Spacing.four,
+    paddingTop: Spacing.four,
     width: RAIL_PRIMARY_WIDTH,
   },
-  railSpine: {
+  railLetters: {
     alignItems: 'center',
-    height: RAIL_SPINE_LINE,
+    flex: 1,
     justifyContent: 'center',
-    left: (RAIL_PRIMARY_WIDTH - RAIL_SPINE_LENGTH) / 2,
-    position: 'absolute',
-    top: (RAIL_SPINE_LENGTH - RAIL_SPINE_LINE) / 2 + Spacing.three,
-    transform: [{ rotate: '90deg' }],
-    width: RAIL_SPINE_LENGTH,
   },
-  railSpineLabel: {
-    fontSize: 15,
+  railLetter: {
+    fontFamily: BrandFonts.display,
+    fontSize: 19,
     fontWeight: '700',
-    letterSpacing: 0.4,
-    lineHeight: RAIL_SPINE_LINE,
+    lineHeight: 20,
+  },
+  railLetterGap: {
+    height: Spacing.two,
   },
   railLabel: {
     fontSize: 11,

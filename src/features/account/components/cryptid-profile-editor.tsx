@@ -661,6 +661,7 @@ export function CryptidProfileEditor({
           rail={{
             primary: {
               label: saving ? 'Saving…' : 'Continue',
+              railLabel: 'Next',
               icon: { ios: 'chevron.right', android: 'arrow_forward', web: 'arrow_forward' },
               disabled: hasIssues || saving,
               busy: saving,

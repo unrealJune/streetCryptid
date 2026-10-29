@@ -115,6 +115,7 @@ export function AccountOnboardingScreen({
         },
         primary: {
           label: saving ? 'Saving…' : 'Continue',
+          railLabel: 'Next',
           accessibilityLabel: 'Continue with selected delivery',
           icon: { ios: 'checkmark', android: 'check', web: 'check' },
           disabled: !ready || saving,

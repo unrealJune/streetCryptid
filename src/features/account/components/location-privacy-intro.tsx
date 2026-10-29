@@ -71,6 +71,7 @@ export function LocationPrivacyIntro({
         },
         primary: {
           label: 'Continue',
+          railLabel: 'Next',
           accessibilityLabel: 'Continue to delivery',
           icon: { ios: 'chevron.right', android: 'arrow_forward', web: 'arrow_forward' },
           color: chrome.green,
