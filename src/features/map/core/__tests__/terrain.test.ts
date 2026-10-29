@@ -2,23 +2,26 @@ import { latLonToWorld } from '../mercator';
 import {
   ALPINE_FADE_M,
   alpineWeight,
-  bandValue,
-  CONTOUR_BANDS,
-  elevationBands,
-  elevationBandsRgba,
-  encodeElevationBands,
+  contourLod,
+  elevationRgba,
   GROUND_CODE_STEP,
   groundCode,
-  MIN_RELIEF_M,
   rasterMaskRect,
-  reliefRange,
   treelineMetres,
+  type ElevationRaster,
 } from '../terrain';
 import { GROUND_KINDS } from '../types';
+
 const UNIT_RECT = { minX: 0, minY: 0, maxX: 1, maxY: 1 };
+const raster = (metres: readonly number[]): ElevationRaster => ({
+  width: metres.length,
+  height: 1,
+  metres: new Float32Array(metres),
+  rect: UNIT_RECT,
+});
 
 describe('groundCode', () => {
-  it('gives every ground kind a distinct non-zero code that fits a byte', () => {
+  it('gives every ground kind a distinct non-zero byte', () => {
     const codes = GROUND_KINDS.map((_, i) => groundCode(i));
     expect(new Set(codes).size).toBe(GROUND_KINDS.length);
     expect(Math.min(...codes)).toBe(GROUND_CODE_STEP);
@@ -26,101 +29,67 @@ describe('groundCode', () => {
   });
 });
 
-describe('elevationBands', () => {
-  it('treats a floodplain as flat', () => {
-    expect(elevationBands(3, 3 + MIN_RELIEF_M - 1)).toBeNull();
+describe('absolute elevation', () => {
+  it('encodes metres in R/G without changing the range or clipping summits', () => {
+    const rgba = elevationRgba(raster([-40, 0, 255, 256, 450, 4392, 8848]));
+    const decoded = Array.from({ length: 7 }, (_, i) => rgba[i * 4] * 256 + rgba[i * 4 + 1]);
+    expect(decoded).toEqual([0, 0, 255, 256, 450, 4392, 8848]);
+    expect(Array.from(rgba).filter((_, i) => i % 4 === 3)).toEqual(Array(7).fill(255));
   });
 
-  it('picks the smallest interval whose bands span the range, on a multiple of it', () => {
-    // Kyoto's basin and hills: ~40..850 m wants 100 m contours from 0 m.
-    expect(elevationBands(40, 850)).toEqual({ base: 0, interval: 100 });
-    // A single hillside: 120..230 m fits 9 × 20 m from 120 m.
-    expect(elevationBands(120, 230)).toEqual({ base: 120, interval: 20 });
+  it('interpolates continuously across high-byte carries', () => {
+    const rgba = elevationRgba(raster([255, 256]));
+    const bilinearHeight = ((rgba[0] + rgba[4]) / 2) * 256 + (rgba[1] + rgba[5]) / 2;
+    expect(bilinearHeight).toBe(255.5);
   });
 
-  it('always contains the whole range', () => {
-    for (const [lo, hi] of [
-      [0, 20],
-      [999, 1100],
-      [1234, 4321],
-      [0, 8848],
-    ] as const) {
-      const bands = elevationBands(lo, hi)!;
-      expect(bands.base).toBeLessThanOrEqual(lo);
-      expect(bands.base % bands.interval).toBe(0);
-      expect(hi - bands.base).toBeLessThanOrEqual(CONTOUR_BANDS * bands.interval);
+  it('does not change a mountain when other relief enters or leaves the crop', () => {
+    const wide = elevationRgba(raster([0, 250, 1800, 2300, 9000]));
+    const narrow = elevationRgba(raster([1800, 2300]));
+    expect(wide.slice(8, 16)).toEqual(narrow);
+    // Flat high ground is still high ground, not a canopy fallback.
+    expect(elevationRgba(raster([2300])).slice(0, 4)).toEqual(narrow.slice(4, 8));
+  });
+
+  it('uses each DEM row latitude, not the crop centre, for the alpine transition', () => {
+    const [x, y] = latLonToWorld({ lat: 47.8, lon: -123.7 });
+    const whole: ElevationRaster = {
+      width: 4,
+      height: 4,
+      metres: new Float32Array(16).fill(1800),
+      rect: { minX: x, minY: y, maxX: x + 0.002, maxY: y + 0.002 },
+    };
+    const crop = {
+      ...whole,
+      height: 2,
+      metres: whole.metres.slice(4, 12),
+      rect: { ...whole.rect, minY: y + 0.0005, maxY: y + 0.0015 },
+    };
+    expect(elevationRgba(crop)).toEqual(elevationRgba(whole).slice(16, 48));
+  });
+});
+
+describe('contour detail', () => {
+  it('keeps intervals nested and transitions continuous at integer zooms', () => {
+    for (let zoom = 2; zoom <= 14; zoom++) {
+      const before = contourLod(zoom - 1e-6);
+      const after = contourLod(zoom);
+      expect(before.detail).toBeCloseTo(1, 5);
+      expect(after.detail).toBe(0);
+      expect(before.interval).toBe(after.interval * 2);
     }
+    expect(contourLod(15)).toEqual({ interval: 25, detail: 1 });
+    expect(contourLod(18)).toEqual(contourLod(15));
   });
 
-  it('puts contours at absolute elevations, so overlapping regions agree', () => {
-    // Two regions over the same hills with slightly different extents choose
-    // the same interval, and a contour (band value × 9 an integer) is the same
-    // elevation in both.
-    const a = elevationBands(60, 820)!;
-    const b = elevationBands(45, 790)!;
-    expect(a.interval).toBe(b.interval);
-    const contourA = (k: number) => a.base + k * a.interval;
-    const contourB = (k: number) => b.base + k * b.interval;
-    expect(contourA(3) % a.interval).toBe(contourB(3) % b.interval);
-    expect(bandValue(300, a) * CONTOUR_BANDS).toBeCloseTo((300 - a.base) / a.interval, 9);
-  });
-});
-
-describe('bandValue', () => {
-  it('clamps and reads the sea as 0 m', () => {
-    const bands = { base: 0, interval: 100 };
-    expect(bandValue(-40, bands)).toBe(0);
-    expect(bandValue(450, bands)).toBeCloseTo(0.5, 9);
-    expect(bandValue(5000, bands)).toBe(1);
-  });
-});
-
-describe('reliefRange / encodeElevationBands', () => {
-  it('ignores the sea and a single spike', () => {
-    const metres = new Float32Array(10000);
-    for (let i = 0; i < metres.length; i++) metres[i] = i < 3000 ? -12 : 100 + (i % 500);
-    metres[9999] = 9000; // one bad pixel
-    const [lo, hi] = reliefRange(metres)!;
-    expect(lo).toBeGreaterThanOrEqual(100);
-    expect(hi).toBeLessThan(700);
-  });
-
-  it('returns null for an all-sea or flat region', () => {
-    expect(reliefRange(new Float32Array(400).fill(-5))).toBeNull();
-    expect(
-      encodeElevationBands({
-        width: 20,
-        height: 20,
-        metres: new Float32Array(400).fill(8),
-        rect: UNIT_RECT,
-      })
-    ).toBeNull();
-  });
-
-  it('encodes band values as bytes', () => {
-    const metres = new Float32Array(400);
-    for (let i = 0; i < metres.length; i++) metres[i] = i * 2; // 0..798 m
-    const encoded = encodeElevationBands({ width: 20, height: 20, metres, rect: UNIT_RECT })!;
-    expect(encoded.bands.interval).toBe(100);
-    expect(encoded.bytes[0]).toBe(0);
-    expect(encoded.bytes[225]).toBe(Math.round((450 / 900) * 255));
-  });
-
-  it('lays the bands into G of opaque RGBA, leaving R for the park edge', () => {
-    const metres = new Float32Array(400);
-    for (let i = 0; i < metres.length; i++) metres[i] = i * 2;
-    const rgba = elevationBandsRgba({ width: 20, height: 20, metres, rect: UNIT_RECT })!;
-    expect(Array.from(rgba.slice(225 * 4, 226 * 4))).toEqual([
-      0,
-      Math.round((450 / 900) * 255),
-      0,
-      255,
-    ]);
+  it('never chooses an interval or a contour origin from the visible relief', () => {
+    expect(contourLod(10.25)).toEqual({ interval: 400, detail: 0.25 });
+    expect(contourLod(12.5)).toEqual({ interval: 100, detail: 0.5 });
   });
 });
 
 describe('treeline', () => {
-  it('falls poleward from the subtropics and never goes below sea level', () => {
+  it('falls poleward from the subtropics and never below sea level', () => {
     expect(treelineMetres(10)).toBe(treelineMetres(-25));
     expect(treelineMetres(47)).toBeGreaterThan(1500);
     expect(treelineMetres(47)).toBeLessThan(2500);
@@ -128,44 +97,24 @@ describe('treeline', () => {
     expect(treelineMetres(80)).toBe(0);
   });
 
-  it('fades from forest to alpine across the band around it', () => {
+  it('fades from forest to alpine around the treeline', () => {
     expect(alpineWeight(1000 - ALPINE_FADE_M / 2, 1000)).toBe(0);
     expect(alpineWeight(1000, 1000)).toBeCloseTo(0.5);
     expect(alpineWeight(1000 + ALPINE_FADE_M / 2, 1000)).toBe(1);
   });
-
-  it('writes the alpine weight into B by absolute elevation, whatever the relief', () => {
-    // The same 2600 m summit is alpine in a raster spanning 0–2600 m and in one
-    // spanning 2400–2600 m; the 300 m valley floor never is. A treeline keyed to
-    // the band would flip the low raster's hilltops to alpine.
-    const [x, y] = latLonToWorld({ lat: 47.8, lon: -123.7 });
-    const rect = { minX: x - 0.001, minY: y - 0.001, maxX: x + 0.001, maxY: y + 0.001 };
-    const blue = (metres: Float32Array, i: number) =>
-      elevationBandsRgba({ width: 20, height: 20, metres, rect })![i * 4 + 2];
-    const wide = new Float32Array(400).map((_, i) => (i / 399) * 2600);
-    const high = new Float32Array(400).map((_, i) => 2400 + (i / 399) * 200);
-    const low = new Float32Array(400).map((_, i) => (i / 399) * 300);
-    expect(blue(wide, 399)).toBe(255);
-    expect(blue(high, 399)).toBe(255);
-    expect(blue(wide, 0)).toBe(0);
-    expect(blue(low, 399)).toBe(0);
-  });
 });
 
 describe('rasterMaskRect', () => {
-  it('maps the raster rect into mask pixels, overhang included', () => {
+  it('maps the native DEM rect into mask pixels, overhang included', () => {
     const spec = {
       rect: { minX: 0.5, minY: 0.25, maxX: 0.75, maxY: 0.5 },
       maskWidth: 100,
       maskHeight: 50,
     };
-    const raster = {
-      width: 2,
-      height: 2,
-      metres: new Float32Array(4),
-      rect: { minX: 0.49, minY: 0.25, maxX: 0.76, maxY: 0.5 },
-    };
-    const r = rasterMaskRect(raster, spec);
+    const r = rasterMaskRect(
+      { ...raster([0, 1]), rect: { minX: 0.49, minY: 0.25, maxX: 0.76, maxY: 0.5 } },
+      spec
+    );
     expect(r.x).toBeCloseTo(-4, 9);
     expect(r.y).toBeCloseTo(0, 9);
     expect(r.width).toBeCloseTo(108, 9);

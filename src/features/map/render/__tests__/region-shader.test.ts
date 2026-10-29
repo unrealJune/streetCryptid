@@ -20,19 +20,40 @@ import { renderRegionImage } from '../region-shader';
 import { buildHatchPath } from '../structure-paths';
 import { linesSvg, TILE_PATH_UNITS } from '../tile-path-svg';
 
+const mockResources: { dispose: jest.Mock }[] = [];
+let mockAtlasFails = false;
+function mockResource<T extends object>(value: T) {
+  const resource = { ...value, dispose: jest.fn() };
+  mockResources.push(resource);
+  return resource;
+}
+
 jest.mock('../dot-field-shader', () => {
-  const effect = {
-    makeShaderWithChildren: jest.fn((_uniforms: number[], children: unknown[]) => ({
-      children,
-      dispose: jest.fn(),
-    })),
-  };
-  return { getDotFieldEffect: () => effect };
+  const makeEffect = () => ({
+    makeShaderWithChildren: jest.fn((_uniforms: number[], children: unknown[]) =>
+      mockResource({ children })
+    ),
+  });
+  const effect = makeEffect();
+  const materialEffect = makeEffect();
+  return { getDotFieldEffect: () => effect, getDotMaterialEffect: () => materialEffect };
 });
 
 // The "image" is the recording canvas, so a test can read back what was drawn.
 jest.mock('../offscreen', () => ({
-  renderPicture: () => jest.requireMock('@shopify/react-native-skia').drawAsImageFromPicture(),
+  renderPicture: (
+    picture: { dispose(): void },
+    _width: number,
+    _height: number,
+    consumer: string
+  ) => {
+    picture.dispose();
+    return consumer === 'same-thread'
+      ? mockAtlasFails
+        ? null
+        : mockResource({ makeShaderOptions: () => mockResource({}) })
+      : jest.requireMock('@shopify/react-native-skia').drawAsImageFromPicture();
+  },
 }));
 
 jest.mock('@shopify/react-native-skia', () => {
@@ -60,7 +81,7 @@ jest.mock('@shopify/react-native-skia', () => {
       XYWHRect: jest.fn(),
       Paint: () => {
         const state: Record<string, unknown> = {};
-        return {
+        return mockResource({
           state,
           setShader: jest.fn(),
           setAntiAlias: jest.fn(),
@@ -71,7 +92,7 @@ jest.mock('@shopify/react-native-skia', () => {
           setStrokeCap: (value: string) => (state.cap = value),
           setStrokeJoin: (value: string) => (state.join = value),
           setPathEffect: (value: number[]) => (state.intervals = value),
-        };
+        });
       },
       Path: {
         MakeFromSVGString: (svg: string) => ({ svg }),
@@ -93,10 +114,11 @@ jest.mock('@shopify/react-native-skia', () => {
       },
       Matrix: jest.fn(),
       PathEffect: { MakeDash: jest.fn((intervals: number[]) => intervals) },
-      PictureRecorder: () => ({
-        beginRecording: () => canvas,
-        finishRecordingAsPicture: jest.fn(),
-      }),
+      PictureRecorder: () =>
+        mockResource({
+          beginRecording: () => canvas,
+          finishRecordingAsPicture: () => mockResource({}),
+        }),
     },
   };
 });
@@ -148,7 +170,6 @@ const region: MapRegion = {
   geometry,
   cellField: { res: 9, cells: [] },
   places: [],
-  labels: [],
   explorationVersion: 0,
   timing: {
     tiles: 0,
@@ -166,7 +187,7 @@ const region: MapRegion = {
     buildMs: 0,
   },
 };
-const image = { makeShaderOptions: () => ({ dispose: jest.fn() }) } as unknown as SkImage;
+const image = { makeShaderOptions: () => mockResource({}) } as unknown as SkImage;
 interface Draw {
   svg: string;
   style: string;
@@ -190,7 +211,41 @@ function draw(transitEnabled = true, structuresEnabled = true, at: MapRegion = r
   return canvas.drawPath.mock.calls.map(([path, paint]) => ({ svg: path.svg, ...paint.state }));
 }
 
-beforeEach(() => jest.clearAllMocks());
+beforeEach(() => {
+  jest.clearAllMocks();
+  mockResources.length = 0;
+  mockAtlasFails = false;
+});
+
+describe('temporary shader resources', () => {
+  it('releases the atlas and every picture/shader holding it after the final readback', () => {
+    draw(false, false);
+    expect(mockResources.length).toBeGreaterThan(10);
+    for (const resource of mockResources) expect(resource.dispose).toHaveBeenCalledTimes(1);
+  });
+
+  it('reports allocation failure and releases the material pass even without an atlas', () => {
+    mockAtlasFails = true;
+    const warning = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      expect(
+        renderRegionImage({
+          region,
+          palette: CryptidThemes.daybreak.canvas,
+          maskImage: image,
+          groundImage: image,
+          terrainImage: image,
+          cellImage: image,
+          lutImage: image,
+        })
+      ).toBeNull();
+      expect(warning).toHaveBeenCalledWith(expect.stringContaining('dot atlas raster failed'));
+      for (const resource of mockResources) expect(resource.dispose).toHaveBeenCalledTimes(1);
+    } finally {
+      warning.mockRestore();
+    }
+  });
+});
 
 /** Canvas units per tile-path unit: what every width and interval is divided by. */
 const k = scaleFor(spec.zoom) / TILE_PATH_UNITS;
@@ -288,11 +343,16 @@ it('releases the dot-field shader, its image children and its paint on the calli
     explorationEnabled: false,
   }) as unknown as { drawPaint: jest.Mock };
   const effect = jest.requireMock('../dot-field-shader').getDotFieldEffect();
+  const materialEffect = jest.requireMock('../dot-field-shader').getDotMaterialEffect();
   const shader = effect.makeShaderWithChildren.mock.results[0].value;
-  expect(shader.children).toHaveLength(5);
-  for (const child of shader.children) expect(child.dispose).toHaveBeenCalledTimes(1);
-  expect(shader.dispose).toHaveBeenCalledTimes(1);
-  const [paint] = canvas.drawPaint.mock.calls[0];
-  expect(paint.setShader).toHaveBeenCalledWith(shader);
-  expect(paint.dispose).toHaveBeenCalledTimes(1);
+  const materialShader = materialEffect.makeShaderWithChildren.mock.results[0].value;
+  expect(shader.children).toHaveLength(4);
+  expect(materialShader.children).toHaveLength(5);
+  for (const [index, pass] of [materialShader, shader].entries()) {
+    for (const child of pass.children) expect(child.dispose).toHaveBeenCalledTimes(1);
+    expect(pass.dispose).toHaveBeenCalledTimes(1);
+    const [paint] = canvas.drawPaint.mock.calls[index];
+    expect(paint.setShader).toHaveBeenCalledWith(pass);
+    expect(paint.dispose).toHaveBeenCalledTimes(1);
+  }
 });

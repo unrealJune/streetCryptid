@@ -47,20 +47,28 @@ export function renderPicture(
   height: number,
   consumer: ImageConsumer
 ): SkImage | null {
-  const ctx = context();
-  if (!ctx) return fallback(picture, width, height);
-  const surface = ctx.ck.MakeRenderTarget(ctx.gr, width, height);
-  if (!surface) return null;
-  surface.getCanvas().drawPicture((picture as any).ref);
-  surface.flush();
-  const texture = surface.makeImageSnapshot();
-  surface.delete();
-  const image = new ctx.Image(ctx.ck, texture);
-  if (consumer === 'same-thread') return image;
-  // The on-screen canvas is another WebGL context: hand it pixels, not a texture.
-  const pixels = image.makeNonTextureImage();
-  texture.delete();
-  return pixels;
+  try {
+    const ctx = context();
+    if (!ctx) return fallback(picture, width, height);
+    const surface = ctx.ck.MakeRenderTarget(ctx.gr, width, height);
+    if (!surface) return null;
+    try {
+      surface.getCanvas().drawPicture((picture as any).ref);
+      surface.flush();
+      const image = new ctx.Image(ctx.ck, surface.makeImageSnapshot());
+      if (consumer === 'same-thread') return image;
+      // The on-screen canvas is another WebGL context: hand it pixels, not a texture.
+      try {
+        return image.makeNonTextureImage();
+      } finally {
+        image.dispose();
+      }
+    } finally {
+      surface.delete();
+    }
+  } finally {
+    picture.dispose();
+  }
 }
 
 /** No WebGL (a headless test browser): RN Skia's own path, one context per call. */

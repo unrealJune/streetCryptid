@@ -45,9 +45,10 @@
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { dirname, join, resolve } from 'node:path';
+import type { RuntimeEffect } from 'canvaskit-wasm';
 
 import { scaleFor, visibleWorldRect } from '../src/features/map/core/camera';
-import { DOT_STEP, lineDotIntervals } from '../src/features/map/core/dot-style';
+import { lineDotIntervals } from '../src/features/map/core/dot-style';
 import { latLonToWorld } from '../src/features/map/core/mercator';
 import {
   buildPaletteLut,
@@ -95,7 +96,7 @@ import {
   cellStateFills,
   exploredCellPath,
 } from '../src/features/map/render/cell-overlay-paths';
-import { DOT_FIELD_SKSL } from '../src/features/map/render/dot-field-sksl';
+import { DOT_FIELD_SKSL, DOT_MATERIAL_SKSL } from '../src/features/map/render/dot-field-sksl';
 import { buildMaskPaths } from '../src/features/map/render/mask-paths';
 import { buildHatchPath, buildStructurePaths } from '../src/features/map/render/structure-paths';
 import { buildingBinSvgs, TILE_PATH_UNITS } from '../src/features/map/render/tile-path-svg';
@@ -119,13 +120,16 @@ import {
   buildingStyleFor,
   buildingsFromTileZoom,
 } from '../src/features/map/core/structure-lod';
-import { lodForZoom, NOISE_ORIGIN_WRAP } from '../src/features/map/render/shader-uniforms';
 import {
-  elevationBandsRgba,
+  dotAtlasSize,
+  lodForZoom,
+  packDotFieldUniforms,
+  regionImageLayout,
+} from '../src/features/map/render/shader-uniforms';
+import {
+  elevationRgba,
   groundCode,
   PARK_EDGE_PX,
-  rasterMaskRect,
-  SHADE_GAIN,
   type ElevationRaster,
 } from '../src/features/map/core/terrain';
 import type { MaskPaths } from '../src/features/map/render/mask-paths';
@@ -183,6 +187,8 @@ const PLACES: readonly Place[] = [
   // Rainforest, glaciers and peaks in a national park ringed by a national forest:
   // where greenery and ground cover cut over between data zooms.
   { id: 'olympics', label: 'Olympic Peninsula — Forks / Mount Olympus', lat: 47.85, lon: -123.75 },
+  { id: 'rainier', label: 'Mount Rainier', lat: 46.8523, lon: -121.7603 },
+  { id: 'olympic-coast', label: 'Northwest Olympic Peninsula', lat: 48.1, lon: -124.58 },
   // Open water at globe zoom: what `--cryptids` exists to show, and the one view
   // where the exploration ladder has deliberately gone dark.
   { id: 'pacific', label: 'North Pacific — open water', lat: 25, lon: -150 },
@@ -230,6 +236,8 @@ async function main(): Promise<void> {
     locateFile: (file: string) => join(canvasKitDir, file),
   });
   const effect = CanvasKit.RuntimeEffect.Make(DOT_FIELD_SKSL);
+  const materialEffect = CanvasKit.RuntimeEffect.Make(DOT_MATERIAL_SKSL);
+  if (!materialEffect) throw new Error('dot material shader failed to compile');
   if (!effect) throw new Error('dot-field shader failed to compile under CanvasKit');
 
   const outDir = resolve(args.out ?? '/tmp/map-shots');
@@ -309,6 +317,7 @@ async function main(): Promise<void> {
       const png = renderShot({
         CanvasKit,
         effect,
+        materialEffect,
         lut,
         geometry,
         spec,
@@ -322,8 +331,13 @@ async function main(): Promise<void> {
         // The real selectors, called exactly as the app calls them.
         // Mirrors `map-view.tsx`: a stop name hides with the lines it belongs to.
         labels: args.labels
-          ? selectMapLabels(geometry, spec).filter(
-              (label) => args.transit || label.kind !== 'transit'
+          ? selectMapLabels(
+              geometry,
+              {
+                zoom: camera.zoom,
+                rect: visibleWorldRect(camera, VIEWPORT),
+              },
+              { highwaysEnabled: layers.highways, transitEnabled: args.transit }
             )
           : null,
         cryptids: args.cryptids ? visibleOceanCryptids(camera, VIEWPORT) : null,
@@ -409,7 +423,8 @@ async function loadGeometry(source: GeometrySource, spec: RegionSpec): Promise<P
 
 interface ShotInput {
   CanvasKit: any;
-  effect: any;
+  effect: RuntimeEffect;
+  materialEffect: RuntimeEffect;
   lut: any;
   geometry: PackedGeometry;
   spec: RegionSpec;
@@ -418,7 +433,7 @@ interface ShotInput {
   layers: RoadLayerOptions;
   /** Baked exploration cells for this region, or null for a plain city render. */
   cellField: ReturnType<typeof buildCellField> | null;
-  /** Elevation for the region's mask pixels, or null for the canopy fallback. */
+  /** Native-resolution DEM coverage, or null for the canopy fallback. */
   elevation: ElevationRaster | null;
   typeface: any;
   boldTypeface: any;
@@ -432,6 +447,7 @@ interface ShotInput {
 function renderShot({
   CanvasKit,
   effect,
+  materialEffect,
   lut,
   geometry,
   spec,
@@ -449,7 +465,7 @@ function renderShot({
   const mask = buildMask(CanvasKit, geometry, spec, layers);
   const maskPaths = buildMaskPaths(geometry, spec, layers);
   const ground = buildGround(CanvasKit, maskPaths, spec);
-  const terrain = buildTerrain(CanvasKit, maskPaths, spec, elevation);
+  const terrain = buildTerrain(CanvasKit, elevation);
   // Without --exploration an all-black cell texture is exactly what the shader
   // wants: explored is ignored (uExploration=0) and reveal order 0 means "fully
   // revealed" at uReveal=1. With it, the real baked cell state goes in instead.
@@ -464,32 +480,16 @@ function renderShot({
       );
 
   const scale = scaleFor(spec.zoom);
-  const rectW = spec.rect.maxX - spec.rect.minX;
-  const rectH = spec.rect.maxY - spec.rect.minY;
-  const uniforms = [
-    PIXEL_RATIO,
-    scale,
-    rectW,
-    rectH,
-    spec.maskWidth,
-    spec.maskHeight,
-    DOT_STEP,
-    palette.bg[0] / 255,
-    palette.bg[1] / 255,
-    palette.bg[2] / 255,
-    1, // uReveal
-    lodForZoom(spec.zoom), // uLod
-    cellField ? 1 : 0, // uExploration — fog of war only with --exploration
-    palette.effects?.neonGlow ?? 0,
-    palette.effects?.scanlines ?? 0,
-    // uNoiseOrigin, wrapped exactly as `packDotFieldUniforms` wraps it.
-    (((spec.rect.minX * scale) % NOISE_ORIGIN_WRAP) + NOISE_ORIGIN_WRAP) % NOISE_ORIGIN_WRAP,
-    (((spec.rect.minY * scale) % NOISE_ORIGIN_WRAP) + NOISE_ORIGIN_WRAP) % NOISE_ORIGIN_WRAP,
-    terrain.hasElevation ? 1 : 0, // uHasElev
-    SHADE_GAIN, // uShadeGain
-  ];
+  const layout = regionImageLayout(spec);
+  const uniforms = packDotFieldUniforms({
+    region: { spec, elevation },
+    palette,
+    pixelRatio: layout.pixelRatio,
+    explorationEnabled: cellField !== null,
+    hasElevation: terrain.hasElevation,
+  });
 
-  const shader = effect.makeShaderWithChildren(uniforms, [
+  const inputs = [
     mask.makeShaderOptions(
       CanvasKit.TileMode.Clamp,
       CanvasKit.TileMode.Clamp,
@@ -511,7 +511,7 @@ function renderShot({
     ground.makeShaderOptions(
       CanvasKit.TileMode.Clamp,
       CanvasKit.TileMode.Clamp,
-      CanvasKit.FilterMode.Nearest,
+      CanvasKit.FilterMode.Linear,
       CanvasKit.MipmapMode.None
     ),
     terrain.image.makeShaderOptions(
@@ -520,10 +520,39 @@ function renderShot({
       CanvasKit.FilterMode.Linear,
       CanvasKit.MipmapMode.None
     ),
-  ]);
+  ];
+  const atlasSize = dotAtlasSize(spec);
+  const atlasSurface = CanvasKit.MakeSurface(atlasSize.width, atlasSize.height);
+  if (!atlasSurface) throw new Error('dot atlas surface failed');
+  const atlasPaint = new CanvasKit.Paint();
+  const materialShader = materialEffect.makeShaderWithChildren(uniforms, inputs);
+  atlasPaint.setShader(materialShader);
+  atlasSurface.getCanvas().drawPaint(atlasPaint);
+  const atlas = atlasSurface.makeImageSnapshot();
+  const atlasShader = atlas.makeShaderOptions(
+    CanvasKit.TileMode.Clamp,
+    CanvasKit.TileMode.Clamp,
+    CanvasKit.FilterMode.Nearest,
+    CanvasKit.MipmapMode.None
+  );
+  const shader = effect.makeShaderWithChildren(uniforms, [...inputs.slice(0, 3), atlasShader]);
+  const rasterSurface = CanvasKit.MakeSurface(layout.width, layout.height);
+  if (!rasterSurface) throw new Error('region raster surface failed');
+  const rasterCanvas = rasterSurface.getCanvas();
+  const paint = new CanvasKit.Paint();
+  paint.setShader(shader);
+  rasterCanvas.translate(layout.offsetX, layout.offsetY);
+  rasterCanvas.drawPaint(paint);
+  if (!args.noStructures)
+    drawStructures(CanvasKit, rasterCanvas, geometry, spec, palette, cellField, layout.pixelRatio);
+  if (cellField)
+    drawCellOverlays(CanvasKit, rasterCanvas, cellField, spec, palette, layout.pixelRatio);
+  if (args.transit)
+    drawTransitLines(CanvasKit, rasterCanvas, geometry, spec, palette, layout.pixelRatio);
+  const regionImage = rasterSurface.makeImageSnapshot();
 
-  // The region bitmap covers the whole padded rect at anchor zoom; the shot is
-  // the viewport window out of it (region-logical px are screen px at anchor).
+  // Photograph the same padded bitmap and pixel grid the app displays, not a
+  // viewport-only shader draw that hides region-replacement sampling errors.
   const view = visibleWorldRect(camera, VIEWPORT);
   const offX = (view.minX - spec.rect.minX) * scale;
   const offY = (view.minY - spec.rect.minY) * scale;
@@ -534,17 +563,20 @@ function renderShot({
   );
   if (!surface) throw new Error('CanvasKit.MakeSurface failed');
   const canvas = surface.getCanvas();
-  const paint = new CanvasKit.Paint();
-  paint.setShader(shader);
   canvas.save();
-  canvas.translate(-offX * PIXEL_RATIO, -offY * PIXEL_RATIO);
-  canvas.drawRect(
-    CanvasKit.XYWHRect(0, 0, rectW * scale * PIXEL_RATIO, rectH * scale * PIXEL_RATIO),
-    paint
+  canvas.scale(PIXEL_RATIO, PIXEL_RATIO);
+  canvas.translate(
+    -(view.minX - layout.rect.minX) * scale,
+    -(view.minY - layout.rect.minY) * scale
   );
-  if (!args.noStructures) drawStructures(CanvasKit, canvas, geometry, spec, palette, cellField);
-  if (cellField) drawCellOverlays(CanvasKit, canvas, cellField, spec, palette);
-  if (args.transit) drawTransitLines(CanvasKit, canvas, geometry, spec, palette);
+  canvas.scale(1 / layout.pixelRatio, 1 / layout.pixelRatio);
+  canvas.drawImageOptions(
+    regionImage,
+    0,
+    0,
+    CanvasKit.FilterMode.Linear,
+    CanvasKit.MipmapMode.None
+  );
   canvas.restore();
 
   // The React overlays sit in SCREEN space, not region space — so they are drawn
@@ -562,6 +594,15 @@ function renderShot({
   snapshot.delete();
   paint.delete();
   surface.delete();
+  regionImage.delete();
+  rasterSurface.delete();
+  shader.delete();
+  atlasShader.delete();
+  materialShader.delete();
+  atlasPaint.delete();
+  atlas.delete();
+  atlasSurface.delete();
+  for (const input of inputs) input.delete();
   mask.delete();
   ground.delete();
   terrain.image.delete();
@@ -580,7 +621,8 @@ function drawStructures(
   geometry: PackedGeometry,
   spec: RegionSpec,
   palette: MapPalette,
-  field: ReturnType<typeof buildCellField> | null
+  field: ReturnType<typeof buildCellField> | null,
+  pixelRatio: number
 ): void {
   const paths = { ...buildStructurePaths(geometry, spec) };
   // Buildings the way the app draws them: each tile's binned paths, assembled
@@ -647,7 +689,7 @@ function drawStructures(
   };
 
   canvas.save();
-  canvas.scale(PIXEL_RATIO, PIXEL_RATIO);
+  canvas.scale(pixelRatio, pixelRatio);
 
   // Same painter's order as `drawStructures` in render/region-shader.ts.
   for (const kind of ['apron', 'aerodrome'] as const satisfies readonly AeroAreaKind[]) {
@@ -728,12 +770,13 @@ function drawTransitLines(
   canvas: any,
   geometry: PackedGeometry,
   spec: RegionSpec,
-  palette: MapPalette
+  palette: MapPalette,
+  pixelRatio: number
 ): void {
   const paths = buildTransitPaths(geometry, spec);
 
   canvas.save();
-  canvas.scale(PIXEL_RATIO, PIXEL_RATIO);
+  canvas.scale(pixelRatio, pixelRatio);
   for (const [mode, svg] of Object.entries(paths) as [TransitMode, string][]) {
     const width = transitWidthFor(mode, spec.zoom);
     if (width === null || !svg) continue;
@@ -962,14 +1005,15 @@ function drawCellOverlays(
   canvas: any,
   field: ReturnType<typeof buildCellField>,
   spec: RegionSpec,
-  palette: MapPalette
+  palette: MapPalette,
+  pixelRatio: number
 ): void {
   const lod = lodForZoom(spec.zoom);
   const latticeAlpha = 0.09 * (1 - lod * 0.7);
   const rimAlpha = 0.42;
 
   canvas.save();
-  canvas.scale(PIXEL_RATIO, PIXEL_RATIO);
+  canvas.scale(pixelRatio, pixelRatio);
   const stroke = (svg: string, rgb: readonly number[], width: number, alpha: number) => {
     if (!svg || alpha <= 0) return;
     const path = CanvasKit.Path.MakeFromSVGString(svg);
@@ -1066,36 +1110,6 @@ function buildGround(CanvasKit: any, paths: MaskPaths, spec: RegionSpec) {
     paint.delete();
     path.delete();
   });
-  const image = surface.makeImageSnapshot();
-  surface.delete();
-  return image;
-}
-
-/** CanvasKit twin of `buildTerrainImage` in `render/terrain-image.ts`. */
-function buildTerrain(
-  CanvasKit: any,
-  paths: MaskPaths,
-  spec: RegionSpec,
-  elevation: ElevationRaster | null
-): { image: any; hasElevation: boolean } {
-  const rgba = elevation ? elevationBandsRgba(elevation) : null;
-  const surface = CanvasKit.MakeSurface(spec.maskWidth, spec.maskHeight);
-  if (!surface) throw new Error('terrain surface failed');
-  const canvas = surface.getCanvas();
-  canvas.clear(CanvasKit.BLACK);
-  if (elevation && rgba) {
-    const bands = imageFrom(CanvasKit, rgba, elevation.width, elevation.height);
-    const dst = rasterMaskRect(elevation, spec);
-    canvas.drawImageRectOptions(
-      bands,
-      CanvasKit.XYWHRect(0, 0, elevation.width, elevation.height),
-      CanvasKit.XYWHRect(dst.x, dst.y, dst.width, dst.height),
-      CanvasKit.FilterMode.Linear,
-      CanvasKit.MipmapMode.None,
-      null
-    );
-    bands.delete();
-  }
   if (paths.park) {
     const path = CanvasKit.Path.MakeFromSVGString(paths.park);
     if (path) {
@@ -1103,7 +1117,7 @@ function buildTerrain(
       const logicalPerMask =
         ((spec.rect.maxX - spec.rect.minX) * scaleFor(spec.zoom)) / spec.maskWidth;
       const paint = new CanvasKit.Paint();
-      paint.setColor(CanvasKit.Color(255, 0, 0, 1));
+      paint.setColor(CanvasKit.Color(0, 255, 0, 1));
       paint.setAntiAlias(true);
       paint.setBlendMode(CanvasKit.BlendMode.Lighten);
       paint.setMaskFilter(
@@ -1120,7 +1134,20 @@ function buildTerrain(
   }
   const image = surface.makeImageSnapshot();
   surface.delete();
-  return { image, hasElevation: rgba !== null };
+  return image;
+}
+
+/** CanvasKit twin of `buildTerrainImage` in `render/terrain-image.ts`. */
+function buildTerrain(
+  CanvasKit: any,
+  elevation: ElevationRaster | null
+): { image: any; hasElevation: boolean } {
+  return {
+    image: elevation
+      ? imageFrom(CanvasKit, elevationRgba(elevation), elevation.width, elevation.height)
+      : imageFrom(CanvasKit, new Uint8Array([0, 0, 0, 255]), 1, 1),
+    hasElevation: elevation !== null,
+  };
 }
 
 function imageFrom(CanvasKit: any, data: Uint8Array, width: number, height: number) {

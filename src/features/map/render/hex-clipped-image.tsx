@@ -36,12 +36,15 @@ function getEffect() {
 export function HexClippedImage({
   image,
   rect,
+  imageRect = rect,
   lattice,
   opacity,
 }: {
   image: SkImage;
-  /** Anchor-space rect the bitmap is drawn at. */
+  /** Anchor-space bounds of the data region / hex clip. */
   rect: Box;
+  /** Pixel-aligned bitmap bounds, which may extend slightly beyond the data region. */
+  imageRect?: Box;
   lattice: ScreenHexLattice | null;
   opacity?: SharedValue<number> | number;
 }) {
@@ -57,7 +60,11 @@ export function HexClippedImage({
     }));
   }, [compiled, rect, inner]);
   const uniforms = useMemo(() => hexClipUniforms(rect, lattice), [rect, lattice]);
-  const imageRect = useMemo(() => Skia.XYWHRect(rect.x, rect.y, rect.width, rect.height), [rect]);
+  const imageSkRect = useMemo(
+    () => Skia.XYWHRect(imageRect.x, imageRect.y, imageRect.width, imageRect.height),
+    [imageRect]
+  );
+  const bounds = useMemo(() => Skia.XYWHRect(rect.x, rect.y, rect.width, rect.height), [rect]);
   const innerClip = useMemo(
     () => (inner ? Skia.XYWHRect(inner.x, inner.y, inner.width, inner.height) : null),
     [inner]
@@ -65,29 +72,31 @@ export function HexClippedImage({
 
   if (!compiled) {
     return (
-      <SkiaImage
-        image={image}
-        x={rect.x}
-        y={rect.y}
-        width={rect.width}
-        height={rect.height}
-        fit="fill"
-        opacity={opacity}
-      />
+      <Group clip={bounds}>
+        <SkiaImage
+          image={image}
+          x={imageRect.x}
+          y={imageRect.y}
+          width={imageRect.width}
+          height={imageRect.height}
+          fit="fill"
+          opacity={opacity}
+        />
+      </Group>
     );
   }
 
   return (
     <Group opacity={opacity}>
       {innerClip && (
-        // The source rect is the same `rect`, so the interior lines up with the band exactly.
+        // The interior and edge shader sample exactly the same pixel-aligned image rect.
         <Group clip={innerClip}>
           <SkiaImage
             image={image}
-            x={rect.x}
-            y={rect.y}
-            width={rect.width}
-            height={rect.height}
+            x={imageRect.x}
+            y={imageRect.y}
+            width={imageRect.width}
+            height={imageRect.height}
             fit="fill"
           />
         </Group>
@@ -95,7 +104,7 @@ export function HexClippedImage({
       {band.map((piece, index) => (
         <Rect key={index} x={piece.x} y={piece.y} width={piece.width} height={piece.height}>
           <Shader source={compiled} uniforms={uniforms}>
-            <ImageShader image={image} rect={imageRect} fit="fill" />
+            <ImageShader image={image} rect={imageSkRect} fit="fill" />
           </Shader>
         </Rect>
       ))}

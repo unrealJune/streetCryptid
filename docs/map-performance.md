@@ -1,5 +1,107 @@
 # Map renderer performance over time
 
+## World-anchored terrain and viewport labels
+
+Baseline: `0f84053` (v2.25.0). These changes replace crop-dependent terrain
+inputs and padded-region label placement; they do not change the tile transport.
+
+Elevation textures now encode absolute metres in R/G and alpine weight in B,
+with latitude evaluated per DEM row. They stay at native DEM resolution; their
+pixel encoding is cached by raster identity, while each region owns its image.
+Decode height **after** shader interpolation:
+resampling the encoded bytes into another RGBA8 image rounds the high byte and
+invents 256-metre steps. Hillshade uses the DEM's projected pixel spacing,
+not a zoom-dependent screen-pixel offset. Contours use nested absolute elevation
+intervals rather than each crop's minimum, maximum or flatness.
+
+Dot identities, canopy noise, water waves and ground-cover rows are world
+anchored. Adjacent dot-detail lattices crossfade instead of replacing every dot
+at a zoom boundary. Unresolved noise octaves fade toward their mean; normalizing
+the remaining weights would turn the last octave abruptly on or off. Polygon
+masks also align to a global pixel grid so a pan does not shift their coverage
+samples.
+
+The final bitmap needs a fixed pixel grid as well. Its capped density comes
+from the unrounded padded span (`RegionSpec.nominalSize`), not the mask-rounded
+extent, and `regionImageLayout` aligns its bounds independently. The settled
+image, hex-clipped edges, reveal shader and screenshotter all use those image
+bounds; the cell texture still uses the data bounds. Without this last step,
+even world-anchored dots shimmered when a fractional-density bitmap was replaced.
+
+Labels are placed against the displayed viewport and displayed geometry, not
+the engine's future prefetch camera. Visibility and layer flags are applied
+before deduplication, collision checks and per-kind caps. Eligible existing
+labels keep their positions; an offscreen namesake or newly loaded longer road
+fragment cannot evict them. Per-tile candidates are cached. Placement follows
+the existing throttled camera handoff and gesture completion, with no new
+per-frame JS loop or timer.
+
+Region rebuilding keeps preceding DEM coverage while fresh elevation is pending,
+without stretching it over uncovered ground. Prefetch margins are bounded by
+the actual padding: the old fixed 0.35-view margin marked even a newly centred
+0.2-pad region as stale.
+
+### Rendering work and memory
+
+The material pass evaluates noise, terrain and ink into a lattice-sized atlas;
+the output pass composites neighbouring dots without recomputing their material
+for every covered pixel. Both the app and `map-shot` use the same shaders,
+uniform packing and atlas layout. The atlas stays on the rendering thread;
+only the completed UI bitmap is read back. Temporary shaders, pictures, paints,
+atlas handles and native offscreen surfaces are explicitly released after use.
+`renderPicture` consumes its picture on both native and web, including failure
+paths; callers must not dispose it again. DEM reuse caches only JS pixel buffers,
+so a later region cannot inherit a native image its predecessor already released.
+
+This trades transient texture memory for less repeated shading. Across zooms
+1–19 sampled at 0.01 increments, the largest RGBA8 atlas was 33.8 MiB at a
+430 × 932 logical phone viewport, and 119.4 MiB at a 1032 × 1376 tablet viewport.
+Both tablet orientations stayed below 8192 texels on each axis. These are atlas
+storage sizes, **not measured process-memory peaks**; driver caches and the
+final bitmaps are additional. Tablet peak memory and physical-phone energy use
+still require native profiling.
+
+### Host terrain-only comparison
+
+Chrome 156 / CanvasKit 0.41 WebGL, **SwiftShader software renderer**, 390 × 780
+logical viewport. Seven interleaved before/after samples per case, after warm-up.
+The probe uses each revision's shaders, uniform packing and terrain encoding,
+with a fixed synthetic mountain fed through the real Terrarium tile/crop path.
+Timings include the entire padded region, the new material pass and final
+readback; they exclude input creation, CPU encoding, geometry, React and network.
+No CPU throttle or concurrent build/test workload was used.
+
+Pan delta is mean absolute RGB-channel difference (0–255) at the **same displayed
+geography**, after rebuilding with an offset region centre. It includes final
+bitmap resampling, not just the material shader.
+
+| Material / zoom    | Before ms | After ms | Pan delta before | Pan delta after |
+| ------------------ | --------: | -------: | ---------------: | --------------: |
+| Canopy / 12.25     |    6904.7 |   2042.8 |            1.623 |           0.089 |
+| Water / 12.25      |    6369.5 |   2026.3 |            2.641 |           0.077 |
+| Mountain / 10.25   |    5961.2 |   1294.0 |           11.913 |           0.053 |
+| Summit / 12.25     |    7602.9 |   2146.1 |           21.028 |           0.218 |
+| Rock / 12.25       |    6714.2 |   2002.9 |           32.739 |           0.375 |
+| Street / 15        |    6003.4 |   1055.2 |            3.843 |           0.169 |
+| Canopy / 13.16     |    6867.5 |   2707.9 |            5.097 |           0.194 |
+| Street / 13.16     |    5978.2 |   2712.7 |            3.843 |           0.098 |
+| Background / 13.16 |    6032.8 |   2642.3 |           14.103 |           0.222 |
+
+All nine render medians improved (2.2–5.7× in this software-rendered component
+probe). A +0.4 build-zoom comparison at the same displayed camera also reduced
+mountain/summit/rock deltas from 15.115/22.025/33.351 to 8.554/13.926/17.311;
+unlike panning, zooming intentionally changes detail. Real CanvasKit regression
+tests cover pan stability, fractional bitmap density and integer-zoom continuity.
+The screenshotter also ran against the committed Seattle MVT fixture with
+labels, transit and exploration enabled.
+
+Full-app `just map-bench` attempts here produced no completed map scenario and
+are not accepted performance evidence. Live tile origins and the public
+Terrarium fallback could not resolve in this environment. Consequently, the
+specific Rainier/Olympic Peninsula views and physical-phone thermals remain
+unverified; offline rendering measurements do not establish phone FPS or
+battery consumption.
+
 ## Cold destinations and progressive transport
 
 Uncovered friend/locate jumps now cap at camera z15; nearby covered destinations

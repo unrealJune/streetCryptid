@@ -22,9 +22,14 @@
 
 import { scaleFor } from './camera';
 import type { RegionSpec } from './region';
-import { CLASS_MIN_ZOOM } from './road-lod';
+import { CLASS_MIN_ZOOM, HIGHWAY_CLASS } from './road-lod';
 import type { WorldPoint } from './types';
-import type { PackedAreas, PackedGeometry, PackedStreets } from '../tiles/packed-geometry';
+import type {
+  PackedAreas,
+  PackedGeometry,
+  PackedStreets,
+  PackedTile,
+} from '../tiles/packed-geometry';
 
 export type MapLabelKind = 'street' | 'area' | 'poi' | 'transit' | 'housenumber' | 'place' | 'peak';
 
@@ -272,7 +277,43 @@ interface Candidate {
   readonly angle: number;
   /** Sort weight within a kind — road class for streets, on-screen area for parks. */
   readonly priority: number;
+  readonly lengthWorld?: number;
 }
+
+type LabelView = Pick<RegionSpec, 'rect' | 'zoom'>;
+
+export interface LabelOptions {
+  readonly previous?: readonly MapLabel[];
+  readonly highwaysEnabled?: boolean;
+  readonly transitEnabled?: boolean;
+  readonly peaksEnabled?: boolean;
+}
+
+const LIMITS: Record<MapLabelKind, number> = {
+  place: MAX_PLACE_LABELS,
+  area: MAX_AREA_LABELS,
+  peak: MAX_PEAK_LABELS,
+  poi: MAX_POI_LABELS,
+  street: MAX_STREET_LABELS,
+  transit: MAX_TRANSIT_STOP_LABELS,
+  housenumber: MAX_HOUSENUMBER_LABELS,
+};
+const KIND_ORDER: readonly MapLabelKind[] = [
+  'place',
+  'area',
+  'peak',
+  'poi',
+  'street',
+  'transit',
+  'housenumber',
+];
+const candidatesByTile = new WeakMap<
+  PackedTile,
+  {
+    zoom: number;
+    candidates: readonly Candidate[];
+  }
+>();
 
 interface PlacedBox {
   readonly cx: number;
@@ -282,88 +323,142 @@ interface PlacedBox {
 }
 
 /**
- * Choose the labels for one built region. Area (park) names are placed first —
- * there are few of them and they anchor the map — then street names by class and
- * length, each rejected if it would collide with anything already placed.
+ * Place against the DISPLAYED viewport, never the padded/prefetched region.
+ * Keep eligible visible labels first; newcomers cannot evict them just by
+ * becoming closer to the centre. Caps and collisions only see enabled layers.
  */
-export function selectMapLabels(geometry: PackedGeometry, spec: RegionSpec): MapLabel[] {
+export function selectMapLabels(
+  geometry: PackedGeometry,
+  spec: LabelView,
+  options: LabelOptions = {}
+): MapLabel[] {
   const pxPerWorld = scaleFor(spec.zoom);
-  const places = placeCandidates(geometry, spec);
-  const areas = areaCandidates(geometry, spec, pxPerWorld).slice(0, MAX_AREA_LABELS);
-  const streets = streetCandidates(geometry, spec, pxPerWorld);
-  const pois = poiCandidates(geometry, spec);
-  const transitStops = transitStopCandidates(geometry, spec);
-  const houseNumbers = houseNumberCandidates(geometry, spec);
-  const peaks = peakCandidates(geometry, spec);
-
+  const width = (spec.rect.maxX - spec.rect.minX) * pxPerWorld;
+  const height = (spec.rect.maxY - spec.rect.minY) * pxPerWorld;
+  const candidates = candidatesFor(geometry, spec, pxPerWorld)
+    .filter(
+      (c) =>
+        !(
+          options.highwaysEnabled === false &&
+          c.kind === 'street' &&
+          c.priority === HIGHWAY_CLASS
+        ) &&
+        !(options.transitEnabled === false && c.kind === 'transit') &&
+        !(options.peaksEnabled === false && c.kind === 'peak')
+    )
+    .map((candidate) => ({ candidate, box: boxFor(candidate, spec, pxPerWorld) }))
+    .filter(
+      ({ box }) =>
+        box.cx + box.halfW >= 0 &&
+        box.cy + box.halfH >= 0 &&
+        box.cx - box.halfW <= width &&
+        box.cy - box.halfH <= height
+    );
+  type Entry = (typeof candidates)[number];
+  const byId = new Map<string, Entry[]>();
+  for (const entry of candidates) {
+    const group = byId.get(entry.candidate.id);
+    if (group) group.push(entry);
+    else byId.set(entry.candidate.id, [entry]);
+  }
   const placed: PlacedBox[] = [];
+  const seen = new Set<string>();
+  const counts = new Map<MapLabelKind, number>();
   const out: MapLabel[] = [];
 
-  const tryPlace = (candidate: Candidate): boolean => {
-    const box = boxFor(candidate, spec, pxPerWorld);
+  const tryPlace = ({ candidate, box }: Entry, previous?: MapLabel): boolean => {
+    const count = counts.get(candidate.kind) ?? 0;
+    if (seen.has(candidate.id) || count >= LIMITS[candidate.kind]) return false;
     for (const other of placed) if (overlaps(box, other)) return false;
     placed.push(box);
-    out.push({
-      id: candidate.id,
-      kind: candidate.kind,
-      text: candidate.text,
-      world: candidate.world,
-      angle: candidate.angle,
-      ...(candidate.kind === 'street' ? { roadClass: candidate.priority } : {}),
-    });
+    seen.add(candidate.id);
+    counts.set(candidate.kind, count + 1);
+    const unchanged =
+      previous &&
+      previous.text === candidate.text &&
+      previous.world[0] === candidate.world[0] &&
+      previous.world[1] === candidate.world[1] &&
+      previous.angle === candidate.angle &&
+      previous.roadClass === (candidate.kind === 'street' ? candidate.priority : undefined);
+    out.push(
+      unchanged
+        ? previous
+        : {
+            id: candidate.id,
+            kind: candidate.kind,
+            text: candidate.text,
+            world: candidate.world,
+            angle: candidate.angle,
+            ...(candidate.kind === 'street' ? { roadClass: candidate.priority } : {}),
+          }
+    );
     return true;
   };
 
-  // Places before everything: in the band where they appear at all, the name of the city IS the
-  // map's headline, and a park inside it must not be allowed to suppress it.
-  let placeCount = 0;
-  for (const candidate of places) {
-    if (placeCount >= MAX_PLACE_LABELS) break;
-    if (tryPlace(candidate)) placeCount++;
+  for (const previous of options.previous ?? []) {
+    const matches = byId.get(previous.id);
+    if (!matches) continue;
+    // A street can have several tile fragments. Keep the one already labelled
+    // while it is present, rather than jumping to a newly loaded longer fragment.
+    const closest = matches.reduce((a, b) =>
+      distanceSq(a.candidate.world, previous.world) <= distanceSq(b.candidate.world, previous.world)
+        ? a
+        : b
+    );
+    tryPlace(closest, previous);
   }
 
-  for (const candidate of areas) tryPlace(candidate);
+  const centre: WorldPoint = [
+    (spec.rect.minX + spec.rect.maxX) / 2,
+    (spec.rect.minY + spec.rect.maxY) / 2,
+  ];
+  candidates.sort(({ candidate: a }, { candidate: b }) => {
+    const kind = KIND_ORDER.indexOf(a.kind) - KIND_ORDER.indexOf(b.kind);
+    if (kind) return kind;
+    const priority = b.priority - a.priority;
+    const distance = distanceSq(a.world, centre) - distanceSq(b.world, centre);
+    const order =
+      a.kind === 'street'
+        ? priority || (b.lengthWorld ?? 0) - (a.lengthWorld ?? 0)
+        : a.kind === 'area' || a.kind === 'place'
+          ? priority || distance
+          : distance || priority;
+    return (
+      order ||
+      (a.id < b.id ? -1 : a.id > b.id ? 1 : 0) ||
+      a.world[0] - b.world[0] ||
+      a.world[1] - b.world[1]
+    );
+  });
+  for (const entry of candidates) tryPlace(entry);
+  return out;
+}
 
-  // Peaks after parks and before POIs: in the range views where they appear the
-  // POI tier has not started, and in the street views a summit is still the thing
-  // the hillside around you is named by.
-  let peakCount = 0;
-  for (const candidate of peaks) {
-    if (peakCount >= MAX_PEAK_LABELS) break;
-    if (tryPlace(candidate)) peakCount++;
+function distanceSq(a: WorldPoint, b: WorldPoint): number {
+  return (a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2;
+}
+
+function candidatesFor(geometry: PackedGeometry, spec: LabelView, scale: number): Candidate[] {
+  const out = placeCandidates(geometry, spec);
+  for (const tile of geometry.parts) {
+    let cached = candidatesByTile.get(tile);
+    if (!cached || cached.zoom !== spec.zoom) {
+      const part = { parts: [tile], places: [] };
+      cached = {
+        zoom: spec.zoom,
+        candidates: [
+          ...areaCandidates(part, spec, scale),
+          ...streetCandidates(part, spec, scale),
+          ...poiCandidates(part, spec),
+          ...transitStopCandidates(part, spec),
+          ...houseNumberCandidates(part, spec),
+          ...peakCandidates(part, spec),
+        ],
+      };
+      candidatesByTile.set(tile, cached);
+    }
+    out.push(...cached.candidates);
   }
-
-  // POIs before streets: past `POI_LABEL_MIN_ZOOM` a named landmark is what a
-  // person is actually looking for, and a service road's name is not worth
-  // suppressing "Harborview Medical Center" for. Both still lose to a park.
-  let poiCount = 0;
-  for (const candidate of pois) {
-    if (poiCount >= MAX_POI_LABELS) break;
-    if (tryPlace(candidate)) poiCount++;
-  }
-
-  let streetCount = 0;
-  for (const candidate of streets) {
-    if (streetCount >= MAX_STREET_LABELS) break;
-    if (tryPlace(candidate)) streetCount++;
-  }
-
-  // Transit stops after the streets they stand on: useful, but a stop name is
-  // navigation furniture and must not outrank the road or the building.
-  let transitCount = 0;
-  for (const candidate of transitStops) {
-    if (transitCount >= MAX_TRANSIT_STOP_LABELS) break;
-    if (tryPlace(candidate)) transitCount++;
-  }
-
-  // House numbers last, filling whatever gaps are left — they are the least
-  // important thing on the map and must never displace a name.
-  let numberCount = 0;
-  for (const candidate of houseNumbers) {
-    if (numberCount >= MAX_HOUSENUMBER_LABELS) break;
-    if (tryPlace(candidate)) numberCount++;
-  }
-
   return out;
 }
 
@@ -379,12 +474,12 @@ export function selectMapLabels(geometry: PackedGeometry, spec: RegionSpec): Map
  * length to measure a name against — so what keeps the field clean is the class band, the rank
  * budget and the shared collision pass.
  */
-function placeCandidates(geometry: PackedGeometry, spec: RegionSpec): Candidate[] {
+function placeCandidates(geometry: PackedGeometry, spec: LabelView): Candidate[] {
   const budget = placeRankBudget(spec.zoom);
 
-  // One chip per name: a place on a tile seam arrives from both tiles, and at these zooms a name
-  // can also repeat across a region (two Springfields) — the nearer wins, as it should.
-  const best = new Map<string, Candidate>();
+  // Deduplicate at placement, after viewport filtering: a distant namesake in
+  // prefetch padding must not hide the visible place or move its existing chip.
+  const out: Candidate[] = [];
   for (const place of geometry.places) {
     if (!place.name) continue;
     const band = PLACE_LABEL_BANDS[place.kind];
@@ -395,9 +490,7 @@ function placeCandidates(geometry: PackedGeometry, spec: RegionSpec): Candidate[
     if ((place.rank ?? budget) > budget) continue;
     const text = place.name.toUpperCase();
     const priority = -PLACE_CLASS_ORDER.indexOf(place.kind);
-    const existing = best.get(text);
-    if (existing && existing.priority >= priority) continue;
-    best.set(text, {
+    out.push({
       id: `place:${text}`,
       kind: 'place',
       text,
@@ -407,13 +500,7 @@ function placeCandidates(geometry: PackedGeometry, spec: RegionSpec): Candidate[
     });
   }
 
-  // Coarser class first, then nearest the camera — the same argument `poiCandidates` makes about
-  // a region being nine times the view, with the class tier standing in for the rank sort a point
-  // that is merely CLOSE would otherwise win.
-  const cx = (spec.rect.minX + spec.rect.maxX) / 2;
-  const cy = (spec.rect.minY + spec.rect.maxY) / 2;
-  const distSq = (c: Candidate) => (c.world[0] - cx) ** 2 + (c.world[1] - cy) ** 2;
-  return [...best.values()].sort((a, b) => b.priority - a.priority || distSq(a) - distSq(b));
+  return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -428,12 +515,11 @@ function placeCandidates(geometry: PackedGeometry, spec: RegionSpec): Candidate[
  * sit upright on their anchor and rely purely on the rank budget, the cap, and
  * the shared collision pass.
  */
-function poiCandidates(geometry: PackedGeometry, spec: RegionSpec): Candidate[] {
+function poiCandidates(geometry: PackedGeometry, spec: LabelView): Candidate[] {
   if (spec.zoom < POI_LABEL_MIN_ZOOM) return [];
   const budget = poiRankBudget(spec.zoom);
 
-  // One chip per name: a POI on a tile seam arrives from both tiles.
-  const best = new Map<string, Candidate>();
+  const out: Candidate[] = [];
   for (const part of geometry.parts) {
     for (const poi of part.pois) {
       if (!poi.name) continue;
@@ -444,9 +530,7 @@ function poiCandidates(geometry: PackedGeometry, spec: RegionSpec): Candidate[] 
       const rank = poi.rank ?? budget;
       if (rank > budget) continue;
       const text = poi.name.toUpperCase();
-      const existing = best.get(text);
-      if (existing && existing.priority >= -rank) continue;
-      best.set(text, {
+      out.push({
         id: `poi:${text}`,
         kind: 'poi',
         text,
@@ -459,22 +543,7 @@ function poiCandidates(geometry: PackedGeometry, spec: RegionSpec): Candidate[] 
     }
   }
 
-  // Nearest the camera first, rank only breaking ties.
-  //
-  // This ordering is load-bearing, not cosmetic. A region is 3x the viewport on
-  // each axis (see `padFor`), so the view is about a ninth of its area — and a
-  // POI is a POINT, so unlike a street it has no length to reach into frame with.
-  // Ranking these by importance alone spends the whole cap on padding the user
-  // cannot see: measured downtown at z17, 1275 candidates were under budget, 14
-  // were placed, and ZERO of them landed on screen. `computeRegionSpec` builds
-  // the rect symmetrically around the camera, so distance from the region centre
-  // IS distance from what the user is looking at.
-  const cx = (spec.rect.minX + spec.rect.maxX) / 2;
-  const cy = (spec.rect.minY + spec.rect.maxY) / 2;
-  const distSq = (c: Candidate) => (c.world[0] - cx) ** 2 + (c.world[1] - cy) ** 2;
-  return [...best.values()].sort(
-    (a, b) => distSq(a) - distSq(b) || b.priority - a.priority || a.text.length - b.text.length
-  );
+  return out;
 }
 
 /**
@@ -483,18 +552,15 @@ function poiCandidates(geometry: PackedGeometry, spec: RegionSpec): Candidate[] 
  * documents; the render layer hides these with the transit layer toggle, exactly
  * as highway chips hide with their roads.
  */
-function transitStopCandidates(geometry: PackedGeometry, spec: RegionSpec): Candidate[] {
+function transitStopCandidates(geometry: PackedGeometry, spec: LabelView): Candidate[] {
   if (spec.zoom < TRANSIT_STOP_MIN_ZOOM) return [];
 
-  // One chip per name: a route's stops repeat the same intersection name on both
-  // sides of the street, and a stop on a tile seam arrives twice.
-  const best = new Map<string, Candidate>();
+  const out: Candidate[] = [];
   for (const part of geometry.parts) {
     for (const poi of part.pois) {
       if (!poi.name || !isTransitStop(poi)) continue;
       const text = poi.name.toUpperCase();
-      if (best.has(text)) continue;
-      best.set(text, {
+      out.push({
         id: `transit:${text}`,
         kind: 'transit',
         text,
@@ -505,10 +571,7 @@ function transitStopCandidates(geometry: PackedGeometry, spec: RegionSpec): Cand
     }
   }
 
-  const cx = (spec.rect.minX + spec.rect.maxX) / 2;
-  const cy = (spec.rect.minY + spec.rect.maxY) / 2;
-  const distSq = (c: Candidate) => (c.world[0] - cx) ** 2 + (c.world[1] - cy) ** 2;
-  return [...best.values()].sort((a, b) => distSq(a) - distSq(b) || b.priority - a.priority);
+  return out;
 }
 
 /**
@@ -516,21 +579,19 @@ function transitStopCandidates(geometry: PackedGeometry, spec: RegionSpec): Cand
  * Ordered like POIs — nearest the camera first, because a region is nine times
  * the view — with the higher summit winning ties.
  */
-function peakCandidates(geometry: PackedGeometry, spec: RegionSpec): Candidate[] {
+function peakCandidates(geometry: PackedGeometry, spec: LabelView): Candidate[] {
   if (spec.zoom < PEAK_LABEL_MIN_ZOOM) return [];
   const budget = peakRankBudget(spec.zoom);
 
-  // One chip per name: a summit on a tile seam arrives from both tiles.
-  const best = new Map<string, Candidate>();
+  const out: Candidate[] = [];
   for (const part of geometry.parts) {
     for (const peak of part.peaks) {
       if (!peak.name || !PEAK_CLASSES.has(peak.kind)) continue;
       if ((peak.rank ?? budget) > budget) continue;
       const name = peak.name.toUpperCase();
-      if (best.has(name)) continue;
       const elevation = peakElevationText(peak);
       const text = elevation ? `${name} · ${elevation}` : name;
-      best.set(name, {
+      out.push({
         id: `peak:${name}`,
         kind: 'peak',
         text,
@@ -541,25 +602,19 @@ function peakCandidates(geometry: PackedGeometry, spec: RegionSpec): Candidate[]
     }
   }
 
-  const cx = (spec.rect.minX + spec.rect.maxX) / 2;
-  const cy = (spec.rect.minY + spec.rect.maxY) / 2;
-  const distSq = (c: Candidate) => (c.world[0] - cx) ** 2 + (c.world[1] - cy) ** 2;
-  return [...best.values()].sort((a, b) => distSq(a) - distSq(b) || b.priority - a.priority);
+  return out;
 }
 
 /** Street numbers, drawn only at the deepest zoom and only where nothing else is. */
-function houseNumberCandidates(geometry: PackedGeometry, spec: RegionSpec): Candidate[] {
+function houseNumberCandidates(geometry: PackedGeometry, spec: LabelView): Candidate[] {
   if (spec.zoom < HOUSENUMBER_MIN_ZOOM) return [];
   const out: Candidate[] = [];
-  const seen = new Set<string>();
   for (const part of geometry.parts) {
     for (const entry of part.houseNumbers) {
       if (!entry.number) continue;
       // Numbers repeat constantly; key on position so two different buildings
       // sharing "1200" both survive, but a seam duplicate does not.
       const id = `housenumber:${entry.number}@${entry.world[0].toFixed(6)},${entry.world[1].toFixed(6)}`;
-      if (seen.has(id)) continue;
-      seen.add(id);
       out.push({
         id,
         kind: 'housenumber',
@@ -570,40 +625,19 @@ function houseNumberCandidates(geometry: PackedGeometry, spec: RegionSpec): Cand
       });
     }
   }
-  // Nearest the camera first, for the reason `poiCandidates` documents — with
-  // ~1100 numbers per z14 tile this is the difference between numbering the
-  // block on screen and numbering one two viewports away.
-  const cx = (spec.rect.minX + spec.rect.maxX) / 2;
-  const cy = (spec.rect.minY + spec.rect.maxY) / 2;
-  return out.sort(
-    (a, b) =>
-      (a.world[0] - cx) ** 2 +
-      (a.world[1] - cy) ** 2 -
-      ((b.world[0] - cx) ** 2 + (b.world[1] - cy) ** 2)
-  );
+  return out;
 }
 
 // ---------------------------------------------------------------------------
 // Streets
 // ---------------------------------------------------------------------------
 
-interface StreetPick {
-  readonly text: string;
-  readonly roadClass: number;
-  readonly lengthWorld: number;
-  readonly world: WorldPoint;
-  readonly angle: number;
-}
-
 function streetCandidates(
   geometry: PackedGeometry,
-  spec: RegionSpec,
+  spec: LabelView,
   pxPerWorld: number
 ): Candidate[] {
-  // One label per unique NAME, not per way: a road crossing four tiles arrives as
-  // four unrelated features, and the mock's rule — keep the longest, highest-class
-  // way for each name — collapses them back into the single street a human sees.
-  const best = new Map<string, StreetPick>();
+  const candidates: Candidate[] = [];
 
   for (const part of geometry.parts) {
     for (const s of [part.streets, part.labelStreets] satisfies readonly PackedStreets[]) {
@@ -621,17 +655,14 @@ function streetCandidates(
         if (measured === null) continue;
 
         const text = raw.toUpperCase();
-        const current = best.get(text);
-        if (
-          current &&
-          (current.roadClass > roadClass ||
-            (current.roadClass === roadClass && current.lengthWorld >= measured.lengthWorld))
-        ) {
-          continue;
-        }
-        best.set(text, {
+        // A chip must fit its fragment; which visible fragment wins belongs to
+        // the shared placement pass, not extraction from the padded tile.
+        if (measured.lengthWorld * pxPerWorld < labelWidthPx(text)) continue;
+        candidates.push({
+          id: `street:${text}`,
+          kind: 'street',
           text,
-          roadClass,
+          priority: roadClass,
           lengthWorld: measured.lengthWorld,
           world: measured.mid,
           angle: measured.angle,
@@ -640,25 +671,7 @@ function streetCandidates(
     }
   }
 
-  const candidates: Candidate[] = [];
-  for (const pick of best.values()) {
-    const lengthPx = pick.lengthWorld * pxPerWorld;
-    // The fit gate: no chip may claim more road than the road actually has on
-    // screen. This is what silently sheds names as the map zooms out.
-    if (lengthPx < labelWidthPx(pick.text)) continue;
-    candidates.push({
-      id: `street:${pick.text}`,
-      kind: 'street',
-      text: pick.text,
-      world: pick.world,
-      angle: pick.angle,
-      priority: pick.roadClass,
-    });
-  }
-
-  // Biggest roads first, then the longest of each class — the greedy collision
-  // pass below keeps whichever it reaches first, so this ordering IS the ranking.
-  return candidates.sort((a, b) => b.priority - a.priority || b.text.length - a.text.length);
+  return candidates;
 }
 
 /** The label tier for a class, never earlier than the zoom the class draws at. */
@@ -730,12 +743,12 @@ function normalizeAngle(angle: number): number {
 
 function areaCandidates(
   geometry: PackedGeometry,
-  spec: RegionSpec,
+  spec: LabelView,
   pxPerWorld: number
 ): Candidate[] {
   if (spec.zoom < AREA_LABEL_MIN_ZOOM) return [];
   const pxPerWorldSq = pxPerWorld * pxPerWorld;
-  const best = new Map<string, { areaPx: number; world: WorldPoint }>();
+  const out: Candidate[] = [];
 
   for (const part of geometry.parts) {
     const areas: PackedAreas = part.parks;
@@ -758,22 +771,18 @@ function areaCandidates(
       if (areaPx < MIN_AREA_PX) continue;
 
       const text = raw.toUpperCase();
-      const current = best.get(text);
-      if (current && current.areaPx >= areaPx) continue;
-      best.set(text, { areaPx, world: shape.centroid });
+      out.push({
+        id: `area:${text}`,
+        kind: 'area',
+        text,
+        world: shape.centroid,
+        angle: 0,
+        priority: areaPx,
+      });
     }
   }
 
-  return [...best.entries()]
-    .map(([text, pick]) => ({
-      id: `area:${text}`,
-      kind: 'area' as const,
-      text,
-      world: pick.world,
-      angle: 0,
-      priority: pick.areaPx,
-    }))
-    .sort((a, b) => b.priority - a.priority);
+  return out;
 }
 
 /** Shoelace area + centroid of one ring. Null when the ring is degenerate. */
@@ -818,7 +827,7 @@ function measureRing(
  * (w·|cos| + h·|sin|) × (w·|sin| + h·|cos|) — cheap, and slightly conservative,
  * which is the right way to err for label spacing.
  */
-function boxFor(candidate: Candidate, spec: RegionSpec, pxPerWorld: number): PlacedBox {
+function boxFor(candidate: Candidate, spec: LabelView, pxPerWorld: number): PlacedBox {
   const halfW = chipWidthPx(candidate.kind, candidate.text) / 2;
   const halfH = LABEL_HEIGHT_PX / 2;
   const cos = Math.abs(Math.cos(candidate.angle));

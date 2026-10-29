@@ -23,6 +23,8 @@ export interface RegionSpec {
   readonly maskHeight: number;
   /** Camera zoom the mask resolution was anchored to. */
   readonly zoom: number;
+  /** Unrounded padded size: raster density must not change with mask-grid rounding during a pan. */
+  readonly nominalSize?: Viewport;
   /** (Overzoomed) tile zoom the geometry was fetched at — see `dataZoomFor`. */
   readonly tileZoom: number;
   /** Fixed H3 exploration resolution, or null when the layer is disabled. */
@@ -69,7 +71,7 @@ export function computeRegionSpec(
   const view = visibleWorldRect(camera, viewport);
   const w = view.maxX - view.minX;
   const h = view.maxY - view.minY;
-  const rect: WorldRect = {
+  let rect: WorldRect = {
     minX: view.minX - w * padValue,
     minY: view.minY - h * padValue,
     maxX: view.maxX + w * padValue,
@@ -78,14 +80,35 @@ export function computeRegionSpec(
   const factor = (1 + 2 * padValue) * maskScale;
   const shrink = Math.min(
     1,
-    maxDim / (viewport.width * factor),
-    maxDim / (viewport.height * factor)
+    Math.max(1, maxDim - 2) / (viewport.width * factor),
+    Math.max(1, maxDim - 2) / (viewport.height * factor)
   );
+  let maskWidth = Math.max(1, Math.round(viewport.width * factor * shrink));
+  let maskHeight = Math.max(1, Math.round(viewport.height * factor * shrink));
+  if (maxDim >= 3) {
+    // One global pixel grid: a region replacement must not shift polygon edges
+    // through a different set of coverage samples. Reserve two pixels for rounding.
+    const pixelsPerWorld = scaleFor(camera.zoom) * maskScale * shrink;
+    const x0 = Math.floor(rect.minX * pixelsPerWorld);
+    const y0 = Math.floor(rect.minY * pixelsPerWorld);
+    maskWidth = Math.max(1, Math.ceil(rect.maxX * pixelsPerWorld) - x0);
+    maskHeight = Math.max(1, Math.ceil(rect.maxY * pixelsPerWorld) - y0);
+    rect = {
+      minX: x0 / pixelsPerWorld,
+      minY: y0 / pixelsPerWorld,
+      maxX: (x0 + maskWidth) / pixelsPerWorld,
+      maxY: (y0 + maskHeight) / pixelsPerWorld,
+    };
+  }
   return {
     rect,
-    maskWidth: Math.max(1, Math.round(viewport.width * factor * shrink)),
-    maskHeight: Math.max(1, Math.round(viewport.height * factor * shrink)),
+    maskWidth,
+    maskHeight,
     zoom: camera.zoom,
+    nominalSize: {
+      width: viewport.width * (1 + 2 * padValue),
+      height: viewport.height * (1 + 2 * padValue),
+    },
     tileZoom: dataZoomFor(camera.zoom, dataZooms),
     cellRes: resForZoom(camera.zoom),
   };
@@ -179,13 +202,25 @@ export function shouldPrefetchRegion(
   const view = visibleWorldRect(camera, viewport);
   const vw = view.maxX - view.minX;
   const vh = view.maxY - view.minY;
-  const margin = Math.min(
-    (view.minX - spec.rect.minX) / vw,
-    (spec.rect.maxX - view.maxX) / vw,
-    (view.minY - spec.rect.minY) / vh,
-    (spec.rect.maxY - view.maxY) / vh
+  const scale = scaleFor(spec.zoom);
+  // At range zoom the entire pad is only 0.2 views. A fixed 0.35 threshold
+  // marked even a just-built, centred region stale and defeated request joining.
+  const rw = spec.rect.maxX - spec.rect.minX;
+  const rh = spec.rect.maxY - spec.rect.minY;
+  const mx = Math.min(
+    PREFETCH_MARGIN * vw,
+    Math.max(0, (rw - viewport.width / scale - (2 * rw) / spec.maskWidth) / 4)
   );
-  return margin < PREFETCH_MARGIN;
+  const my = Math.min(
+    PREFETCH_MARGIN * vh,
+    Math.max(0, (rh - viewport.height / scale - (2 * rh) / spec.maskHeight) / 4)
+  );
+  return (
+    view.minX - spec.rect.minX < mx ||
+    spec.rect.maxX - view.maxX < mx ||
+    view.minY - spec.rect.minY < my ||
+    spec.rect.maxY - view.maxY < my
+  );
 }
 
 /** Pack the three coverage masks into one RGBA texture: R=street G=park B=water. */
