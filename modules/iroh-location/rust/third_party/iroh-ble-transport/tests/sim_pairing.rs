@@ -107,7 +107,7 @@ fn init_tracing() {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "iroh_ble_transport=info".into()),
+                .unwrap_or_else(|_| "iroh_ble_transport=debug,iroh::_events=debug".into()),
         )
         .with_test_writer()
         .try_init();

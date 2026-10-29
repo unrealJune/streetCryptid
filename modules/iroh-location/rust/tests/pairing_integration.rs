@@ -734,6 +734,9 @@ async fn a_refused_hello_fails_fast_and_says_so() {
     let mut invite = a.create_invite(300).await.expect("A create invite");
     // A wrong secret: A answers the Hello with a refusal.
     invite.secret[0] ^= 0xff;
+    // Pay B's one-time relay wait (`our_endpoint_ticket`, 10 s against the unreachable test relay)
+    // up front, so the clock below measures the dial and nothing else.
+    b.create_invite(300).await.expect("B warms its endpoint ticket");
 
     let started = std::time::Instant::now();
     let err = tokio::time::timeout(std::time::Duration::from_secs(20), b.initiate_pair(invite))
