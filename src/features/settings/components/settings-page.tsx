@@ -1,5 +1,13 @@
 import { type ReactNode, useEffect, useRef } from 'react';
-import { Pressable, ScrollView, StyleSheet, View, type ScrollViewInstance } from 'react-native';
+import {
+  Pressable,
+  ScrollView,
+  StyleSheet,
+  View,
+  type ScrollViewInstance,
+  type StyleProp,
+  type ViewStyle,
+} from 'react-native';
 import { useRouter } from 'expo-router';
 import { SymbolView, type SymbolViewProps } from 'expo-symbols';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -53,7 +61,8 @@ export function SettingsPage({
 }: SettingsPageProps) {
   const theme = useTheme();
   const insets = useSafeAreaInsets();
-  const railed = useSystemRail() > 0 && footerRail !== undefined;
+  const railWidth = useSystemRail();
+  const railed = railWidth > 0 && footerRail !== undefined;
   const router = useRouter();
   const scroll = useRef<ScrollViewInstance>(null);
 
@@ -67,6 +76,8 @@ export function SettingsPage({
   const page = (
     <ScrollView
       ref={scroll}
+      // Beside the rail's tabs the scroll bar runs down the page's edge, not across them.
+      scrollIndicatorInsets={railed ? { right: railWidth } : undefined}
       testID={testID}
       style={{
         backgroundColor: theme.background,
@@ -215,9 +226,9 @@ export interface FooterRail {
 }
 
 /**
- * The primary action as a tall pill that fills the rail, its label set as a column of letters in
- * the display face: the rail is too narrow to set "Continue" across, a label turned on its side
- * made you tilt your head to read it, and a round button with a caption read as an afterthought.
+ * The primary action as a tall tab against the screen's right edge, its label set as a column of
+ * letters in the display face: the rail is too narrow to set "Continue" across, and a label turned
+ * on its side made you tilt your head to read it.
  */
 function RailPrimary({ action }: { action: RailAction }) {
   const theme = useTheme();
@@ -231,32 +242,29 @@ function RailPrimary({ action }: { action: RailAction }) {
       accessibilityState={{ disabled: action.disabled, busy: action.busy }}
       disabled={action.disabled}
       onPress={action.onPress}
-      style={({ pressed }) => [
-        styles.railPrimary,
-        { backgroundColor: fill, opacity: action.disabled ? 0.4 : pressed ? 0.65 : 1 },
-      ]}
+      style={({ pressed }) => ({ opacity: action.disabled ? 0.4 : pressed ? 0.65 : 1 })}
       testID={action.testID}
     >
-      <View style={styles.railLetters}>
-        {[...letters].map((letter, index) =>
-          letter === ' ' ? (
-            <View key={index} style={styles.railLetterGap} />
-          ) : (
-            <ThemedText key={index} style={[styles.railLetter, { color: ink }]}>
-              {letter}
-            </ThemedText>
-          )
-        )}
-      </View>
-      <SymbolView name={action.icon} size={28} tintColor={ink} weight="bold" />
+      <HexTab fill={fill} height={RAIL_PRIMARY_HEIGHT} style={styles.railPrimary}>
+        <View style={styles.railLetters}>
+          {[...letters].map((letter, index) =>
+            letter === ' ' ? (
+              <View key={index} style={styles.railLetterGap} />
+            ) : (
+              <ThemedText key={index} style={[styles.railLetter, { color: ink }]}>
+                {letter}
+              </ThemedText>
+            )
+          )}
+        </View>
+        <SymbolView name={action.icon} size={28} tintColor={ink} weight="bold" />
+      </HexTab>
     </Pressable>
   );
 }
 
 function RailButton({ action }: { action: RailAction }) {
   const theme = useTheme();
-  const fill = 'transparent';
-  const ink = theme.text;
   return (
     <Pressable
       accessibilityLabel={action.accessibilityLabel ?? action.label}
@@ -264,29 +272,60 @@ function RailButton({ action }: { action: RailAction }) {
       accessibilityState={{ disabled: action.disabled, busy: action.busy }}
       disabled={action.disabled}
       onPress={action.onPress}
-      style={({ pressed }) => [
-        styles.railAction,
-        { opacity: action.disabled ? 0.4 : pressed ? 0.65 : 1 },
-      ]}
+      style={({ pressed }) => ({ opacity: action.disabled ? 0.4 : pressed ? 0.65 : 1 })}
       testID={action.testID}
     >
-      <View
-        style={[
-          styles.railButton,
-          { backgroundColor: fill, borderColor: theme.backgroundSelected },
-        ]}
-      >
-        <SymbolView name={action.icon} size={22} tintColor={ink} />
-      </View>
-      <ThemedText type="smallBold" style={styles.railLabel} numberOfLines={2}>
-        {action.label}
-      </ThemedText>
+      <HexTab fill={theme.backgroundSelected} height={RAIL_BUTTON_HEIGHT} style={styles.railButton}>
+        <SymbolView name={action.icon} size={20} tintColor={theme.text} weight="semibold" />
+        <ThemedText numberOfLines={1} style={[styles.railButtonLabel, { color: theme.text }]}>
+          {(action.railLabel ?? action.label).toUpperCase()}
+        </ThemedText>
+      </HexTab>
     </Pressable>
   );
 }
 
-const RAIL_PRIMARY_WIDTH = 60;
+/**
+ * A tab with hex-cut corners on its leading side and a square trailing side, for sitting flush
+ * against the screen edge. Drawn from plain views, so it needs no SVG or Skia: two border-trick
+ * trapezoids for the cut ends and a rectangle between them.
+ */
+function HexTab({
+  fill,
+  height,
+  style,
+  children,
+}: {
+  fill: string;
+  height: number;
+  style?: StyleProp<ViewStyle>;
+  children: ReactNode;
+}) {
+  return (
+    <View style={{ height, width: RAIL_TAB_WIDTH }}>
+      <View
+        style={[
+          styles.hexCut,
+          { borderBottomColor: fill, borderBottomWidth: RAIL_TAB_CUT, top: 0 },
+        ]}
+      />
+      <View
+        style={[styles.hexBody, { backgroundColor: fill, bottom: RAIL_TAB_CUT, top: RAIL_TAB_CUT }]}
+      />
+      <View
+        style={[styles.hexCut, { borderTopColor: fill, borderTopWidth: RAIL_TAB_CUT, bottom: 0 }]}
+      />
+      <View style={[StyleSheet.absoluteFill, style]}>{children}</View>
+    </View>
+  );
+}
+
+/** The tabs' width: the rail less a gutter on the page side, since they sit flush on the other. */
+const RAIL_TAB_WIDTH = 64;
+/** How far each hex cut reaches in, both across and along the tab. */
+const RAIL_TAB_CUT = 18;
 const RAIL_PRIMARY_HEIGHT = 264;
+const RAIL_BUTTON_HEIGHT = 92;
 
 /** After the push animation, or the flash plays under it. */
 const FLASH_SCROLL_DELAY_MS = 450;
@@ -323,32 +362,18 @@ const styles = StyleSheet.create({
     paddingTop: Spacing.three,
   },
   rail: {
-    alignItems: 'center',
+    alignItems: 'flex-end',
     gap: Spacing.three,
     position: 'absolute',
     right: 0,
   },
-  railAction: {
-    alignItems: 'center',
-    gap: Spacing.one,
-  },
-  railButton: {
-    alignItems: 'center',
-    borderRadius: 26,
-    borderWidth: StyleSheet.hairlineWidth,
-    height: 52,
-    justifyContent: 'center',
-    width: 52,
-  },
   railPrimary: {
     alignItems: 'center',
-    borderRadius: RAIL_PRIMARY_WIDTH / 2,
     gap: Spacing.three,
-    height: RAIL_PRIMARY_HEIGHT,
     justifyContent: 'space-between',
-    paddingBottom: Spacing.four,
-    paddingTop: Spacing.four,
-    width: RAIL_PRIMARY_WIDTH,
+    // Optical centre: the cut takes the leading edge's corners, so the content leans trailing.
+    paddingLeft: Spacing.one,
+    paddingVertical: RAIL_TAB_CUT + Spacing.two,
   },
   railLetters: {
     alignItems: 'center',
@@ -364,10 +389,31 @@ const styles = StyleSheet.create({
   railLetterGap: {
     height: Spacing.two,
   },
-  railLabel: {
-    fontSize: 11,
+  railButton: {
+    alignItems: 'center',
+    gap: Spacing.one,
+    justifyContent: 'center',
+    paddingLeft: Spacing.one,
+  },
+  railButtonLabel: {
+    fontFamily: BrandFonts.display,
+    fontSize: 13,
+    fontWeight: '700',
+    letterSpacing: 0.6,
     lineHeight: 14,
-    textAlign: 'center',
+  },
+  hexCut: {
+    borderLeftColor: 'transparent',
+    borderLeftWidth: RAIL_TAB_CUT,
+    height: 0,
+    position: 'absolute',
+    right: 0,
+    width: RAIL_TAB_WIDTH,
+  },
+  hexBody: {
+    left: 0,
+    position: 'absolute',
+    right: 0,
   },
   footerColumn: {
     alignSelf: 'center',

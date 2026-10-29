@@ -97,7 +97,8 @@ export function CryptidProfileEditor({
   const insets = useSafeAreaInsets();
   const pinnedContinue = mode === 'onboarding' && onDone !== undefined;
   // Beside a system rail Continue moves into it, and the scroll keeps its own bottom inset.
-  const railed = useSystemRail() > 0;
+  const railWidth = useSystemRail();
+  const railed = railWidth > 0;
   // Measured, not the window: in edit mode this is inside the Settings sheet.
   const [frameWidth, setFrameWidth] = useState(0);
   const twoPane = frameWidth - insets.left - insets.right >= TWO_PANE_MIN_WIDTH;
@@ -577,6 +578,7 @@ export function CryptidProfileEditor({
       style={[styles.root, { backgroundColor: theme.background }]}
     >
       <ScrollView
+        scrollIndicatorInsets={railed && pinnedContinue ? { right: railWidth } : undefined}
         style={{ paddingLeft: insets.left, paddingRight: insets.right }}
         contentContainerStyle={[
           styles.content,

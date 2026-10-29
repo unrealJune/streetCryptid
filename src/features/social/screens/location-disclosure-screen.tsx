@@ -4,6 +4,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useColorScheme } from '@/hooks/use-color-scheme';
 import { ThemedText } from '@/components/themed-text';
 import { CryptidThemes, MaxContentWidth, Spacing } from '@/constants/theme';
+import { useSystemRail } from '@/hooks/use-system-rail';
 import { useTheme } from '@/hooks/use-theme';
 import { PageFooter } from '@/features/settings/components/settings-page';
 
@@ -23,10 +24,13 @@ export function LocationDisclosureScreen({ onChoice }: { onChoice: (accepted: bo
   const scheme = useColorScheme();
   const chrome = CryptidThemes[scheme === 'dark' ? 'deepsea' : 'daybreak'].chrome;
   const insets = useSafeAreaInsets();
+  const railWidth = useSystemRail();
 
   return (
     <View style={[styles.screen, { backgroundColor: theme.background }]}>
       <ScrollView
+        // Beside the rail's tabs the scroll bar runs down the page's edge, not across them.
+        scrollIndicatorInsets={railWidth > 0 ? { right: railWidth } : undefined}
         style={{
           backgroundColor: theme.background,
           paddingLeft: insets.left,
