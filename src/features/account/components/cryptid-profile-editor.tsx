@@ -574,6 +574,9 @@ export function CryptidProfileEditor({
   return (
     <KeyboardAvoidingView
       behavior={Platform.OS === 'ios' ? 'padding' : 'position'}
+      // 'position' wraps the children in a view of its own, and without a height that view grew
+      // with the scroll: opening the icon editor pushed the pinned Continue off the screen.
+      contentContainerStyle={styles.root}
       onLayout={({ nativeEvent }) => setFrameWidth(nativeEvent.layout.width)}
       style={[styles.root, { backgroundColor: theme.background }]}
     >
