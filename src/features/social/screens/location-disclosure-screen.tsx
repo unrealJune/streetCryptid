@@ -91,7 +91,7 @@ export function LocationDisclosureScreen({ onChoice }: { onChoice: (accepted: bo
           },
           primary: {
             label: 'Turn on location',
-            railLabel: 'Turn on',
+            railLabel: 'OK',
             icon: { ios: 'location.fill', android: 'my_location', web: 'my_location' },
             color: chrome.amber,
             ink: chrome.panel,

@@ -3,6 +3,7 @@ import { Platform, StyleSheet, useWindowDimensions, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { useColorScheme } from '@/hooks/use-color-scheme';
+import { useSystemRail } from '@/hooks/use-system-rail';
 import { ThemedText } from '@/components/themed-text';
 import { CryptidThemes, Spacing } from '@/constants/theme';
 import {
@@ -49,12 +50,20 @@ export function DeliveryOptions({
   // the choice below the fold.
   const window = useWindowDimensions();
   const insets = useSafeAreaInsets();
+  // Beside a system rail the page's Back / Continue live in the rail, so there is no footer bar
+  // to leave room for and the preview takes that height too.
+  const railed = useSystemRail() > 0;
   const stackedPreviewHeight = Math.round(
     Math.min(
       STACKED_PREVIEW_MAX,
       Math.max(
         STACKED_PREVIEW_MIN,
-        window.height - insets.top - insets.bottom - STACKED_PAGE_CHROME - copyMinHeight
+        window.height -
+          insets.top -
+          insets.bottom -
+          STACKED_PAGE_CHROME +
+          (railed ? FOOTER_BAR_HEIGHT : 0) -
+          copyMinHeight
       )
     )
   );
@@ -171,6 +180,8 @@ const STACKED_PREVIEW_MIN = 150;
  * on the iPhone Duo's cover screen (678 pt), where it has to fit with no scroll.
  */
 const STACKED_PAGE_CHROME = 300;
+/** The pinned Back / Continue bar's share of that, which a rail takes off the page. */
+const FOOTER_BAR_HEIGHT = 96;
 
 const styles = StyleSheet.create({
   hero: { gap: Spacing.three },
