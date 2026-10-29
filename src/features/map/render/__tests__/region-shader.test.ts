@@ -16,6 +16,7 @@ import {
 import type { MapRegion } from '../../engine/map-engine';
 import { packGeometry } from '../../tiles/packed-geometry';
 import { buildMaskPaths } from '../mask-paths';
+import { getDotFieldEffect, getDotMaterialEffect } from '../dot-field-shader';
 import { renderRegionImage } from '../region-shader';
 import { buildHatchPath } from '../structure-paths';
 import { linesSvg, TILE_PATH_UNITS } from '../tile-path-svg';
@@ -29,8 +30,8 @@ function mockResource<T extends object>(value: T) {
 }
 
 jest.mock('../dot-field-shader', () => ({
-  getDotFieldEffect: () => ({ makeShaderWithChildren: () => mockResource({}) }),
-  getDotMaterialEffect: () => ({ makeShaderWithChildren: () => mockResource({}) }),
+  getDotFieldEffect: jest.fn(() => ({ makeShaderWithChildren: () => mockResource({}) })),
+  getDotMaterialEffect: jest.fn(() => ({ makeShaderWithChildren: () => mockResource({}) })),
 }));
 
 // The "image" is the recording canvas, so a test can read back what was drawn.
@@ -212,6 +213,41 @@ describe('temporary shader resources', () => {
     draw(false, false);
     expect(mockResources.length).toBeGreaterThan(10);
     for (const resource of mockResources) expect(resource.dispose).toHaveBeenCalledTimes(1);
+  });
+
+  describe('region shader specialization', () => {
+    it.each(['parks', 'water', 'rivers'] as const)('selects filtering for %s', (kind) => {
+      const areas = packGeometry({
+        ...base,
+        parks: kind === 'parks' ? [{ rings: [ring] }] : [],
+        water: kind === 'water' ? [{ rings: [ring] }] : [],
+        rivers: kind === 'rivers' ? [{ points: line(250) }] : [],
+      });
+      draw(false, false, { ...region, geometry: areas });
+      expect(getDotFieldEffect).toHaveBeenLastCalledWith({
+        filteredAreas: true,
+        blendLevels: false,
+      });
+      expect(getDotMaterialEffect).toHaveBeenLastCalledWith(true);
+    });
+
+    it('selects from raster geometry, not a later labels-only publication', () => {
+      const areas = packGeometry({ ...base, parks: [{ rings: [ring] }] });
+      draw(false, false, { ...region, geometry: areas, rasterGeometry: geometry });
+      expect(getDotFieldEffect).toHaveBeenLastCalledWith({
+        filteredAreas: false,
+        blendLevels: false,
+      });
+      expect(getDotMaterialEffect).toHaveBeenLastCalledWith(false);
+    });
+
+    it('uses a blended compositor only while both detail levels contribute', () => {
+      draw(false, false, { ...region, spec: { ...spec, zoom: 13.16 } });
+      expect(getDotFieldEffect).toHaveBeenLastCalledWith({
+        filteredAreas: false,
+        blendLevels: true,
+      });
+    });
   });
 
   it('reports allocation failure and releases the material pass even without an atlas', () => {

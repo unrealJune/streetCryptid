@@ -3,11 +3,13 @@ import { computeRegionSpec } from '../../core/region';
 import { MERCATOR_CIRCUMFERENCE_M, SHADE_GAIN } from '../../core/terrain';
 import type { MapPalette } from '../../core/types';
 import type { MapRegion } from '../../engine/map-engine';
-import { EMPTY_PACKED } from '../../tiles/packed-geometry';
+import { EMPTY_PACKED, packGeometry } from '../../tiles/packed-geometry';
 import {
+  DOT_ATLAS_HALO,
   DOT_FIELD_UNIFORM_FLOATS,
   DOT_STEP,
   dotAtlasSize,
+  dotFieldMode,
   lodForZoom,
   DOT_HASH_PERIOD,
   NOISE_WORLD_SCALE,
@@ -180,21 +182,114 @@ describe('packDotFieldUniforms', () => {
     expect(packDotFieldUniforms({ ...base, step: 3 })[6]).toBe(3);
   });
 
-  it('sizes both atlas levels from the same step and row split as the shader', () => {
-    const spec = { ...region.spec, zoom: 12.5 };
-    const input = { ...base, region: { spec }, step: 3 };
-    const u = packDotFieldUniforms(input);
-    const logical = regionLogicalSize(input.region);
-    const atlas = dotAtlasSize(spec, input.step);
-    expect(atlas.width).toBe((Math.ceil(logical.width / u[6]) + 3) * 2);
-    expect(atlas.height).toBe(u[44] + Math.ceil(logical.height / (u[6] * 2)) + 3);
-    expect(u[45]).toBeGreaterThan(0);
-    expect(u[45]).toBeLessThan(1);
+  it.each([false, true])(
+    'sizes both atlas levels consistently, filteredAreas=%s',
+    (filteredAreas) => {
+      const spec = { ...region.spec, zoom: 12.5 };
+      const input = { ...base, region: { spec }, step: 3, filteredAreas };
+      const u = packDotFieldUniforms(input);
+      const logical = regionLogicalSize(input.region);
+      const atlas = dotAtlasSize(spec, input.step, filteredAreas);
+      const halo = filteredAreas ? DOT_ATLAS_HALO : 1;
+      expect(atlas.width).toBe((Math.ceil(logical.width / u[6]) + 2 * halo + 1) * 2);
+      expect(atlas.height).toBe(u[44] + Math.ceil(logical.height / (u[6] * 2)) + 2 * halo + 1);
+      expect(u[45]).toBeGreaterThan(0);
+      expect(u[45]).toBeLessThan(1);
+    }
+  );
+
+  it('covers sparse interpolation neighbours outside the aligned bitmap at minimum density', () => {
+    for (const zoom of [12.151, 13.16, 13.5, 14, 15.85])
+      for (const pan of [0, 0.1, 1.75, 17.25]) {
+        const scale = scaleFor(zoom);
+        const spec = computeRegionSpec(
+          { center: [0.162 + pan / scale, 0.35 + pan / 2 / scale], zoom },
+          { width: 390, height: 780 },
+          { dataZooms: { min: 0, max: 14 } }
+        );
+        const layout = regionImageLayout(spec, 0.25);
+        const u = packDotFieldUniforms({
+          ...base,
+          region: { spec },
+          pixelRatio: layout.pixelRatio,
+        });
+        const atlas = dotAtlasSize(spec);
+        for (const coarse of u[45] < 1 ? [false, true] : [false]) {
+          const step = u[6] * (coarse ? 2 : 1);
+          for (const stride of [1, 2])
+            for (const axis of [0, 1]) {
+              const phase = u[(coarse ? 42 : 22) + axis];
+              const parity = u[(coarse ? 40 : 20) + axis] % stride;
+              const offset = axis === 0 ? layout.offsetX : layout.offsetY;
+              const extent = axis === 0 ? layout.width : layout.height;
+              for (const edge of [0, extent]) {
+                const frag = (edge - offset) / layout.pixelRatio;
+                const lo = Math.floor(((frag - phase) / step + parity) / stride) * stride - parity;
+                for (const index of [lo, lo + stride]) {
+                  const pixel =
+                    axis === 0
+                      ? (index + DOT_ATLAS_HALO) * 2 + 1.5
+                      : index + DOT_ATLAS_HALO + 0.5 + (coarse ? u[44] : 0);
+                  expect(pixel).toBeGreaterThanOrEqual(axis === 1 && coarse ? u[44] : 0);
+                  expect(pixel).toBeLessThan(
+                    axis === 0 ? atlas.width : coarse ? atlas.height : u[44]
+                  );
+                }
+              }
+            }
+        }
+      }
   });
 
   it('passes the reveal fraction through', () => {
     expect(packDotFieldUniforms({ ...base, reveal: 0.4 })[10]).toBe(0.4);
     expect(packDotFieldUniforms({ ...base, reveal: 0.4 })).toHaveLength(DOT_FIELD_UNIFORM_FLOATS);
+  });
+
+  describe('dotFieldMode', () => {
+    it.each(['parks', 'water', 'rivers'] as const)('filters geometry containing %s', (kind) => {
+      const points = [
+        [0.1, 0.2],
+        [0.2, 0.2],
+        [0.2, 0.3],
+        [0.1, 0.2],
+      ] as const;
+      const geometry = packGeometry({
+        streets: [],
+        transit: [],
+        places: [],
+        parks: kind === 'parks' ? [{ rings: [points] }] : [],
+        water: kind === 'water' ? [{ rings: [points] }] : [],
+        rivers: kind === 'rivers' ? [{ points }] : [],
+      });
+      expect(dotFieldMode(15, geometry)).toEqual({ filteredAreas: true, blendLevels: false });
+      expect(dotFieldMode(13.16, geometry)).toEqual({ filteredAreas: true, blendLevels: true });
+    });
+
+    it('omits area work without area features and only blends at intermediate detail weights', () => {
+      for (const zoom of [10, 12.1, 12.85, 13.85, 13.9, 15, 15.85]) {
+        expect(dotFieldMode(zoom, EMPTY_PACKED)).toEqual({
+          filteredAreas: false,
+          blendLevels: false,
+        });
+      }
+      for (const zoom of [10.2, 12.5, 13.84]) {
+        expect(dotFieldMode(zoom, EMPTY_PACKED)).toEqual({
+          filteredAreas: false,
+          blendLevels: true,
+        });
+      }
+    });
+
+    it('does not shade or allocate an unused level when the GPU weight rounds to one', () => {
+      for (const zoom of [12.85, 13.85, 15.85]) {
+        const spec = { ...region.spec, zoom };
+        const u = packDotFieldUniforms({ ...base, region: { spec } });
+        expect(u[45]).toBe(1);
+        expect(dotFieldMode(zoom, EMPTY_PACKED).blendLevels).toBe(false);
+        expect(dotAtlasSize(spec).height).toBe(u[44]);
+      }
+    });
   });
 
   it('derives uLod from the region build zoom, overridable', () => {

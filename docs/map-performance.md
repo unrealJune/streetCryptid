@@ -1,5 +1,111 @@
 # Map renderer performance over time
 
+## Removing the screen-door pattern
+
+Baseline: `829cdd2`, after the world-anchoring changes below. Anchoring stopped
+the texture moving, but did not remove its periodic carrier: unexplored areas
+used a repeating one-in-four dot lattice, and even explored circles had
+periodic gaps/overlaps. Fractional bitmap sampling and live scaling turned that
+regular coverage into a grid or moire pattern, especially over green.
+
+Park and water interiors now reconstruct **mean ink coverage**, not overlapping
+circles. The material atlas stores the integrated coverage of the existing
+antialiased footprint; four surrounding retained sites interpolate it into a
+continuous field. Sparse interpolation follows the same world-anchored parity.
+An area with zero ink still has a nonzero type code, so alpine thinning does
+not accidentally reactivate the circle renderer. Roads, other point features,
+and mixed feature edges retain their original circle coverage. Terrain heights,
+hillshade, contours, geographic noise, exploration, and label placement are
+unchanged. This is not a blur of the finished map.
+
+Coverage is the mean of the original alpha composite, not mean optical density,
+which would darken the greenery. A constant-cost polynomial approximates the
+dense footprint's overlap integrals; a real CanvasKit test compares it with
+numerical integration to within one RGBA8 level. Sparse circles barely overlap.
+In the full-size comparison, canopy/water mean RGB shifted by less than 0.14/255.
+Spatially varying alpine stipple is reconstructed rather than preserved
+pixel-for-pixel: the explored synthetic mountain was 4.7/255 brighter on average,
+with its contours and broad shading retained.
+
+The initial filtering prototype regressed city views. The fix also specializes
+the compositor **before compilation**: one detail level or two blended levels,
+with area filtering omitted when the raster geometry has no parks, water or
+rivers. This removes unused branches from the compiled program, rather than
+depending on per-pixel uniform branches. There are at most four cached field
+effects and two material effects, not a shader per zoom. Selection follows
+`rasterGeometry`, and the app and screenshotter share `dotFieldMode`, the shader
+sources, uniforms and atlas sizing. Detail weights use float32 precision before
+selecting the mode or allocating the atlas: at zooms such as 13.85, a JavaScript
+weight just below one otherwise selects two levels while the GPU sees exactly
+one. No extra render pass, readback, timer or per-frame JS work was added.
+
+The area atlas needs a four-site halo for sparse interpolation and the aligned
+bitmap's overhang at minimum density. Point-only atlases retain their old halo;
+both variants omit the unused level at the float32 detail endpoint.
+Across the same 0.01-zoom sweep below, the maximum area atlas is 34.1 MiB on the
+430 x 932 phone viewport and 119.9 MiB on the tablet (both orientations):
+approximately 0.3/0.5 MiB more **temporary texture storage**, not additional
+persistent bitmaps. The largest axis remains below 8192 texels.
+
+### Repeated full-size rendering comparison
+
+Chrome 156 / CanvasKit 0.41 WebGL on **SwiftShader**, 390 x 780 logical viewport,
+actual capped bitmap density, seven interleaved samples after three warm-up
+renders per revision/case. Both revisions render the entire padded region and
+perform the final readback. Input creation, photography, encoding, React and
+network are excluded; no CPU throttle or concurrent build/test workload was
+used. These are component timings, **not native-phone frame rates or energy
+measurements**.
+
+| Scene / zoom                  | Explored | Before ms | After ms | Change |
+| ----------------------------- | -------- | --------: | -------: | -----: |
+| Canopy / 10.25                | no       |    1177.9 |    914.8 | -22.3% |
+| Canopy / 12.25                | no       |    2030.8 |   1703.7 | -16.1% |
+| Canopy / 13.16                | no       |    2667.3 |   2388.1 | -10.5% |
+| Canopy / 12.25                | yes      |    2024.4 |   1720.4 | -15.0% |
+| Canopy / 13.16                | yes      |    2718.6 |   2458.8 |  -9.6% |
+| Water / 12.25                 | no       |    1928.7 |   1624.3 | -15.8% |
+| Mountain / 12.25              | no       |    2041.4 |   1739.7 | -14.8% |
+| Mountain / 12.25              | yes      |    2165.6 |   1823.9 | -15.8% |
+| Street / 15                   | yes      |    1027.5 |    902.4 | -12.2% |
+| Street / 13.16                | yes      |    2663.5 |   2611.6 |  -1.9% |
+| Background / 13.16            | yes      |    2635.1 |   2619.6 |  -0.6% |
+| Sparse parks / 15             | yes      |    1025.8 |    911.4 | -11.2% |
+| Dense parks / 15              | yes      |    1029.9 |    877.5 | -14.8% |
+| Sparse parks / 13.16          | yes      |    2739.9 |   2654.6 |  -3.1% |
+| Dense parks / 13.16           | yes      |    2743.2 |   2600.3 |  -5.2% |
+| Street / 15                   | no       |    1002.1 |    873.6 | -12.8% |
+| Sparse parks / 15             | no       |     995.6 |    908.1 |  -8.8% |
+| Sparse parks / 13.16          | no       |    2625.4 |   2564.5 |  -2.3% |
+| Dense parks / 13.16           | no       |    2661.2 |   2540.3 |  -4.5% |
+| Area-capable fallback / 13.16 | no       |    2618.9 |   2548.6 |  -2.7% |
+| Area-capable fallback / 13.16 | yes      |    2655.2 |   2617.8 |  -1.4% |
+| Canopy / 13.85                | no       |    1285.3 |    878.4 | -31.7% |
+| Street / 13.85                | yes      |    1342.4 |    982.5 | -26.8% |
+
+Sparse/dense park scenes cover about 10%/49% of a repeating block, with roads
+and background dots retained. The two fallback cases force the area-capable
+shader with no visible park at all: a tile can contain an area outside the
+rendered crop. The 13.85 cases cover the float32 endpoint; they also shed an
+unused half-height atlas level. No median regressed across these 23 cases;
+the smallest differences are within normal timing noise, not evidence of a
+meaningful speedup.
+
+In the same photographs, the strongest coherent row/column carrier over
+canopy/water fell from 0.74-11.91 RGB levels to less than 0.014, a reduction above
+98%. Broad mountain shading has low-frequency energy of its own and is not
+classified as moire. Image regressions additionally cover live scaling,
+fractional bitmap density, region replacement, exploration boundaries,
+water precedence, road edges and the minimum-density bitmap border.
+The real screenshotter also rendered the committed Seattle MVT at zooms
+12.25, 13.16 and 15, with labels, transit and exploration enabled.
+
+Both before/after `just map-bench` attempts exported the real web app but
+produced no completed scenario; the after run reported zero region renders.
+The live tile host still fails DNS resolution here. These incomplete runs are
+not performance evidence, and live Rainier/Olympic Peninsula views and
+physical-phone thermals remain unverified.
+
 ## World-anchored terrain and viewport labels
 
 Baseline: `0f84053` (v2.25.0). These changes replace crop-dependent terrain

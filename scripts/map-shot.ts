@@ -96,7 +96,11 @@ import {
   cellStateFills,
   exploredCellPath,
 } from '../src/features/map/render/cell-overlay-paths';
-import { DOT_FIELD_SKSL, DOT_MATERIAL_SKSL } from '../src/features/map/render/dot-field-sksl';
+import {
+  dotFieldSksl,
+  DOT_MATERIAL_SKSL,
+  DOT_POINT_MATERIAL_SKSL,
+} from '../src/features/map/render/dot-field-sksl';
 import { buildMaskPaths } from '../src/features/map/render/mask-paths';
 import { buildHatchPath, buildStructurePaths } from '../src/features/map/render/structure-paths';
 import { buildingBinSvgs, TILE_PATH_UNITS } from '../src/features/map/render/tile-path-svg';
@@ -122,9 +126,11 @@ import {
 } from '../src/features/map/core/structure-lod';
 import {
   dotAtlasSize,
+  dotFieldMode,
   lodForZoom,
   packDotFieldUniforms,
   regionImageLayout,
+  type DotFieldMode,
 } from '../src/features/map/render/shader-uniforms';
 import {
   elevationRgba,
@@ -235,10 +241,15 @@ async function main(): Promise<void> {
   const CanvasKit = await CanvasKitInit({
     locateFile: (file: string) => join(canvasKitDir, file),
   });
-  const effect = CanvasKit.RuntimeEffect.Make(DOT_FIELD_SKSL);
-  const materialEffect = CanvasKit.RuntimeEffect.Make(DOT_MATERIAL_SKSL);
-  if (!materialEffect) throw new Error('dot material shader failed to compile');
-  if (!effect) throw new Error('dot-field shader failed to compile under CanvasKit');
+  const effects = new Map<string, RuntimeEffect>();
+  const compile = (source: string): RuntimeEffect => {
+    const cached = effects.get(source);
+    if (cached) return cached;
+    const effect = CanvasKit.RuntimeEffect.Make(source);
+    if (!effect) throw new Error('map shader failed to compile under CanvasKit');
+    effects.set(source, effect);
+    return effect;
+  };
 
   const outDir = resolve(args.out ?? '/tmp/map-shots');
   await mkdir(outDir, { recursive: true });
@@ -307,6 +318,7 @@ async function main(): Promise<void> {
         ? { ...baseSpec, tileZoom: Number(process.env.SC_SHOT_TILE_ZOOM) }
         : baseSpec;
       const geometry = await loadGeometry(source, spec);
+      const mode = dotFieldMode(spec.zoom, geometry);
       // The ladder decides the resolution; `spec.cellRes` is null once the
       // camera drops below its coarsest rung, which is exactly when the layer
       // should vanish from the shot too.
@@ -316,8 +328,9 @@ async function main(): Promise<void> {
           : null;
       const png = renderShot({
         CanvasKit,
-        effect,
-        materialEffect,
+        effect: compile(dotFieldSksl(mode)),
+        materialEffect: compile(mode.filteredAreas ? DOT_MATERIAL_SKSL : DOT_POINT_MATERIAL_SKSL),
+        mode,
         lut,
         geometry,
         spec,
@@ -354,6 +367,7 @@ async function main(): Promise<void> {
       );
     }
   }
+  for (const effect of effects.values()) effect.delete();
 }
 
 // ─── geometry ────────────────────────────────────────────────────────────────
@@ -425,6 +439,7 @@ interface ShotInput {
   CanvasKit: any;
   effect: RuntimeEffect;
   materialEffect: RuntimeEffect;
+  mode: DotFieldMode;
   lut: any;
   geometry: PackedGeometry;
   spec: RegionSpec;
@@ -448,6 +463,7 @@ function renderShot({
   CanvasKit,
   effect,
   materialEffect,
+  mode,
   lut,
   geometry,
   spec,
@@ -487,6 +503,7 @@ function renderShot({
     pixelRatio: layout.pixelRatio,
     explorationEnabled: cellField !== null,
     hasElevation: terrain.hasElevation,
+    filteredAreas: mode.filteredAreas,
   });
 
   const inputs = [
@@ -521,7 +538,7 @@ function renderShot({
       CanvasKit.MipmapMode.None
     ),
   ];
-  const atlasSize = dotAtlasSize(spec);
+  const atlasSize = dotAtlasSize(spec, undefined, mode.filteredAreas);
   const atlasSurface = CanvasKit.MakeSurface(atlasSize.width, atlasSize.height);
   if (!atlasSurface) throw new Error('dot atlas surface failed');
   const atlasPaint = new CanvasKit.Paint();

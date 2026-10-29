@@ -1,12 +1,12 @@
 import { ROAD_DILATE_MIN, ROAD_MASK_FLOOR } from '../core/road-lod';
 import { GROUND_CODE_STEP } from '../core/terrain';
 import { DOT_STEP } from '../core/dot-style';
-import { DOT_HASH_PERIOD } from './shader-uniforms';
+import { DOT_ATLAS_HALO, DOT_HASH_PERIOD, type DotFieldMode } from './shader-uniforms';
 
 /**
  * Material is evaluated at lattice points into a small atlas; the final pass
- * only composites the neighbouring dots. Terrain/noise must not be recalculated
- * for every output pixel touched by the same dot.
+ * reconstructs area ink or composites neighbouring point features. Terrain/noise
+ * must not be recalculated for every output pixel touched by the same dot.
  *
  * It is **camera-independent**: it renders the whole region rect into a bitmap
  * once, in region-local logical coordinates (0 at rect.min). The map view then
@@ -97,7 +97,34 @@ float3 rampLut(float t, float row) {
 }
 `;
 
-export const DOT_MATERIAL_SKSL = `${UNIFORMS}${SAMPLING}
+/**
+ * Mean coverage of the existing linear-AA circles, not their optical density
+ * (averaging density darkens canopy). The dense case integrates
+ * 1 - product(1 - alpha * coverage) over a lattice cell. These degree-six fits
+ * approximate the alpha^2, alpha^3 and alpha^4 overlap coefficients for
+ * radius/step in [0.25, 0.851]; the numerical-integration render test
+ * bounds the error below one RGBA8 level. At the shipped sparse opacities,
+ * ignoring their tiny overlaps costs less than 0.05/255.
+ */
+export const DOT_AREA_COVERAGE_SKSL = `
+float areaCoverage(float r, float alpha, bool sparse) {
+  float area = 3.14159265 * (r * r + 1.0 / 48.0);
+  if (sparse) return alpha * area * 0.25;
+  float t = (r - 0.25) / 0.6;
+  float3 overlap = float3(0.3116777, -3.9312626, 0.1535741);
+  overlap = overlap * t + float3(-2.4392213, 12.2483635, 0.1919365);
+  overlap = overlap * t + float3(4.7311483, -11.7692370, -0.5361927);
+  overlap = overlap * t + float3(-1.0278164, 4.8993563, 0.3394671);
+  overlap = overlap * t + float3(0.3071636, -0.9153937, -0.0832372);
+  overlap = overlap * t + float3(-0.0247104, 0.0655773, 0.0073383);
+  overlap = max(float3(0.0), overlap * t + float3(0.0003902, -0.0009902, -0.0001330));
+  return clamp(alpha * (area - alpha * (overlap.x - alpha * (overlap.y - alpha * overlap.z))), 0.0, 1.0);
+}
+`;
+
+function materialSksl(filteredAreas: boolean): string {
+  const halo = filteredAreas ? DOT_ATLAS_HALO : 1;
+  return `${UNIFORMS}${SAMPLING}${filteredAreas ? DOT_AREA_COVERAGE_SKSL : ''}
 uniform shader groundTex;
 uniform shader terrainTex;
 
@@ -174,7 +201,7 @@ float3 applyFog(float3 color, float fog, float isArea) {
   return mix(mix(color, float3(l), fg * FOG_DESAT), uBg, fg * FOG_DIM);
 }
 
-// Two opaque texels per dot: RGB ink, then radius/step + opacity.
+// Two opaque texels per dot: RGB ink, then radius/step, opacity and area coverage.
 float4 materialAt(float ix, float iy, bool metrics, bool coarseGrid) {
   float step = coarseGrid ? uStep * 2.0 : uStep;
   float2 id = (coarseGrid ? uCoarseGridOrigin : uGridOrigin) + float2(ix, iy);
@@ -323,21 +350,43 @@ float4 materialAt(float ix, float iy, bool metrics, bool coarseGrid) {
   // filled terrain instead of a stipple of separate dots.
   if (isArea > 0.5) radius = mix(radius, max(radius, ${DOT_STEP}.0 * 0.85), uLod);
   radius *= dotScale;
-  return metrics ? float4(radius / step, alpha, 0.0, 1.0) : float4(fogged, 1.0);
+  ${
+    filteredAreas
+      ? `if (!metrics) return float4(fogged, 1.0);
+  float r = radius / step;
+  // Match the quantized radius/opacity the point compositor reads from this atlas.
+  float areaCode = 0.0;
+  if (isArea > 0.5) {
+    float2 footprint = floor(float2(r, alpha) * 255.0 + 0.5) / 255.0;
+    float coverage = areaCoverage(footprint.x, footprint.y, coarse > 0.5);
+    areaCode = (1.0 + coverage * 254.0) / 255.0;
+  }
+  return float4(r, alpha, areaCode, 1.0);`
+      : 'return metrics ? float4(radius / step, alpha, 0.0, 1.0) : float4(fogged, 1.0);'
+  }
 }
 
 half4 main(float2 p) {
   bool coarse = p.y >= uAtlasSplit;
   if ((coarse && uDetailBlend >= 1.0) || (!coarse && uDetailBlend <= 0.0)) return half4(0.0);
-  float x = floor(p.x * 0.5) - 1.0;
-  if (coarse && x > ceil(uRectSize.x * uScale / (uStep * 2.0)) + 1.0) return half4(0.0);
-  float y = floor(p.y - (coarse ? uAtlasSplit : 0.0)) - 1.0;
+  float x = floor(p.x * 0.5) - ${halo}.0;
+  if (coarse && x > ceil(uRectSize.x * uScale / (uStep * 2.0)) + ${halo}.0) return half4(0.0);
+  float y = floor(p.y - (coarse ? uAtlasSplit : 0.0)) - ${halo}.0;
   return half4(materialAt(x, y, mod(floor(p.x), 2.0) > 0.5, coarse));
 }
 `;
+}
 
-export const DOT_FIELD_SKSL = `${UNIFORMS}${SAMPLING}
+export function dotFieldSksl({ filteredAreas, blendLevels }: DotFieldMode): string {
+  const halo = filteredAreas ? DOT_ATLAS_HALO : 1;
+  return `${UNIFORMS}${SAMPLING}
 uniform shader dotTex;
+const bool FILTER_AREAS = ${filteredAreas};
+
+float2 dotPixel(float2 index, bool coarse) {
+  return float2((index.x + ${halo}.0) * 2.0 + 0.5,
+    index.y + ${halo}.5 + (coarse ? uAtlasSplit : 0.0));
+}
 
 float4 dotAt(float ix, float iy, float2 frag, bool coarse) {
   float step = coarse ? uStep * 2.0 : uStep;
@@ -345,7 +394,7 @@ float4 dotAt(float ix, float iy, float2 frag, bool coarse) {
   float dotScale = step / ${DOT_STEP}.0;
   float dist = distance(frag, center);
   if (dist > 2.5 * dotScale) return float4(0.0);
-  float2 p = float2((ix + 1.0) * 2.0 + 0.5, iy + 1.5 + (coarse ? uAtlasSplit : 0.0));
+  float2 p = dotPixel(float2(ix, iy), coarse);
   float2 metrics = dotTex.eval(p + float2(1.0, 0.0)).rg;
   float cov = clamp((metrics.r * step - dist) / dotScale + 0.5, 0.0, 1.0);
   float alpha = cov * metrics.g;
@@ -353,13 +402,47 @@ float4 dotAt(float ix, float iy, float2 frag, bool coarse) {
   return float4(dotTex.eval(p).rgb, alpha);
 }
 
-float3 dotsAt(float2 frag, bool coarse) {
+float4 areaAt(float2 frag, bool coarse, bool unexplored) {
+  float step = coarse ? uStep * 2.0 : uStep;
+  float2 phase = coarse ? uCoarseGridPhase : uGridPhase;
+  float stride = unexplored ? 2.0 : 1.0;
+  float2 parity = mod(coarse ? uCoarseGridOrigin : uGridOrigin, stride);
+  float2 q = ((frag - phase) / step + parity) / stride;
+  float2 lo = floor(q) * stride - parity;
+  float2 t = fract(q);
+  float3 col = uBg;
+  for (float y = 0.0; y <= 1.0; y += 1.0) {
+    for (float x = 0.0; x <= 1.0; x += 1.0) {
+      float2 p = dotPixel(lo + float2(x, y) * stride, coarse);
+      float code = dotTex.eval(p + float2(1.0, 0.0)).b;
+      // Mixed feature edges retain the original dot coverage.
+      if (code == 0.0) return float4(0.0);
+      float alpha = (code * 255.0 - 1.0) / 254.0;
+      float weight = (x == 0.0 ? 1.0 - t.x : t.x) * (y == 0.0 ? 1.0 - t.y : t.y);
+      col += (dotTex.eval(p).rgb - uBg) * (alpha * weight);
+    }
+  }
+  return float4(col, 1.0);
+}
+
+float3 fieldAt(float2 frag, bool coarse, bool unexplored) {
   float3 col = uBg;
 
   float step = coarse ? uStep * 2.0 : uStep;
   float2 phase = coarse ? uCoarseGridPhase : uGridPhase;
   float baseIx = floor((frag.x - phase.x) / step + 0.5);
   float baseIy = floor((frag.y - phase.y) / step + 0.5);
+  if (FILTER_AREAS) {
+    float2 probe = float2(baseIx, baseIy);
+    if (unexplored) {
+      float2 origin = coarse ? uCoarseGridOrigin : uGridOrigin;
+      probe -= mod(probe + origin, 2.0);
+    }
+    if (dotTex.eval(dotPixel(probe, coarse) + float2(1.0, 0.0)).b > 0.0) {
+      float4 ink = areaAt(frag, coarse, unexplored);
+      if (ink.a > 0.0) return ink.rgb;
+    }
+  }
   for (float dy = -1.0; dy <= 1.0; dy += 1.0) {
     for (float dx = -1.0; dx <= 1.0; dx += 1.0) {
       float4 d = dotAt(baseIx + dx, baseIy + dy, frag, coarse);
@@ -371,10 +454,12 @@ float3 dotsAt(float2 frag, bool coarse) {
 
 half4 main(float2 fragCoord) {
   float2 frag = fragCoord / uPixelRatio;
-  float3 col;
-  if (uDetailBlend <= 0.0) col = dotsAt(frag, true);
-  else if (uDetailBlend >= 1.0) col = dotsAt(frag, false);
-  else col = mix(dotsAt(frag, true), dotsAt(frag, false), uDetailBlend);
+  bool unexplored = FILTER_AREAS && uExploration > 0.5 && cellAt(frag).r < 0.5;
+  float3 col = ${
+    blendLevels
+      ? 'mix(fieldAt(frag, true, unexplored), fieldAt(frag, false, unexplored), uDetailBlend)'
+      : 'fieldAt(frag, false, unexplored)'
+  };
 
   if (uNeonGlow > 0.001) {
     float street = maskAt(frag).r;
@@ -408,3 +493,8 @@ half4 main(float2 fragCoord) {
   return half4(col.r * revealA, col.g * revealA, col.b * revealA, revealA);
 }
 `;
+}
+
+export const DOT_FIELD_SKSL = dotFieldSksl({ filteredAreas: true, blendLevels: true });
+export const DOT_MATERIAL_SKSL = materialSksl(true);
+export const DOT_POINT_MATERIAL_SKSL = materialSksl(false);
