@@ -73,9 +73,10 @@ export interface DeliveryStageProps {
   readonly loopSeconds?: number;
   readonly height?: number;
   /**
-   * Lay the scene out at this height and scale it down to `height`, rather than laying it out
-   * at `height`. The layout fills whatever box it is given, so a short box squashed the phones
-   * into wide slabs that no longer read as phones; scaling keeps their proportions.
+   * Lay the scene out at this height and scale it to `height`, rather than laying it out at
+   * `height`. The layout fills whatever box it is given, so a short box squashed the phones into
+   * wide slabs that no longer read as phones, and a tall one stretched them; scaling keeps their
+   * proportions.
    */
   readonly designHeight?: number;
 }
@@ -382,7 +383,7 @@ export default function DeliveryStage({
   // each mode rests on.
   const t = reduceMotion ? REDUCED_MOTION_FRAME[mode] : tick;
 
-  const scale = designHeight && designHeight > height ? height / designHeight : 1;
+  const scale = designHeight ? height / designHeight : 1;
 
   const picture = useMemo(() => {
     if (width <= 0) return null;

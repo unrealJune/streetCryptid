@@ -67,6 +67,21 @@ export function DeliveryOptions({
       )
     )
   );
+  // Side by side the copy sits beside the preview, not under it, so the preview takes the page's
+  // height less its title: a fixed 300 pt left an unfolded foldable's lower third empty.
+  const sidePreviewHeight = Math.round(
+    Math.min(
+      SIDE_PREVIEW_MAX,
+      Math.max(
+        SIDE_PREVIEW_MIN,
+        window.height -
+          insets.top -
+          insets.bottom -
+          SIDE_PAGE_CHROME -
+          (railed ? 0 : FOOTER_BAR_HEIGHT)
+      )
+    )
+  );
   const stagePalette: DeliveryStagePalette = useMemo(
     () => ({
       accent: chrome.green,
@@ -90,8 +105,8 @@ export function DeliveryOptions({
       ]}
     >
       <DeliveryPreview
-        designHeight={twoColumn ? undefined : STACKED_PREVIEW_MAX}
-        height={twoColumn ? 300 : stackedPreviewHeight}
+        designHeight={DESIGN_PREVIEW_HEIGHT}
+        height={twoColumn ? sidePreviewHeight : stackedPreviewHeight}
         mode={selected}
         palette={stagePalette}
       />
@@ -172,7 +187,13 @@ function DeliveryCopy({ mode }: { mode: DeliveryMode }) {
 
 /** Content width at which the preview and the choice sit side by side. */
 const TWO_COLUMN_MIN_WIDTH = 600;
-const STACKED_PREVIEW_MAX = 340;
+/** The height the scene is laid out at; other heights draw it scaled, in proportion. */
+const DESIGN_PREVIEW_HEIGHT = 340;
+const STACKED_PREVIEW_MAX = DESIGN_PREVIEW_HEIGHT;
+const SIDE_PREVIEW_MIN = 300;
+const SIDE_PREVIEW_MAX = 520;
+/** A side-by-side page's title block and scroll padding, above and below the preview. */
+const SIDE_PAGE_CHROME = 150;
 const STACKED_PREVIEW_MIN = 150;
 /**
  * Everything on a stacked page that is not the preview or the explanation: the page title, the
