@@ -81,6 +81,7 @@ export function DeliveryOptions({
       ]}
     >
       <DeliveryPreview
+        designHeight={twoColumn ? undefined : STACKED_PREVIEW_MAX}
         height={twoColumn ? 300 : stackedPreviewHeight}
         mode={selected}
         palette={stagePalette}

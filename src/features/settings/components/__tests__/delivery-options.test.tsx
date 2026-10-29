@@ -5,6 +5,9 @@ import { DeliveryOptions } from '../delivery-options';
 
 jest.mock('@/global.css', () => ({}));
 jest.mock('../delivery-preview', () => ({ DeliveryPreview: () => null }));
+jest.mock('react-native-safe-area-context', () => ({
+  useSafeAreaInsets: () => ({ top: 0, bottom: 0, left: 0, right: 0 }),
+}));
 
 describe('DeliveryOptions', () => {
   let renderer: ReactTestRenderer;
