@@ -99,6 +99,10 @@ export function CryptidProfileEditor({
   const [frameWidth, setFrameWidth] = useState(0);
   const twoPane = frameWidth - insets.left - insets.right >= TWO_PANE_MIN_WIDTH;
   const maxWidth = twoPane ? TWO_PANE_MAX_WIDTH : PROFILE_MAX_WIDTH;
+  const cardColors = {
+    backgroundColor: theme.backgroundElement,
+    borderColor: theme.backgroundSelected,
+  };
   const [initialDraft] = useState<CryptidProfileDraft>(() => startingDraft(initialProfile));
   const initialColor = initialDraft.color || DEFAULT_SIGNAL_COLOR;
 
@@ -629,27 +633,20 @@ export function CryptidProfileEditor({
             </View>
           ) : null}
 
-          <View
-            style={[
-              styles.overview,
-              twoPane && styles.overviewRow,
-              { backgroundColor: theme.backgroundElement, borderColor: theme.backgroundSelected },
-            ]}
-          >
-            {twoPane ? (
-              <>
-                <View style={styles.fieldsPane}>{fields}</View>
-                <View style={[styles.paneDivider, { backgroundColor: theme.backgroundSelected }]} />
-                <View style={styles.previewPane}>{preview}</View>
-              </>
-            ) : (
-              <>
-                {preview}
-                <View style={[styles.divider, { backgroundColor: theme.backgroundSelected }]} />
-                {fields}
-              </>
-            )}
-          </View>
+          {twoPane ? (
+            // Two cards with a gutter between, not one card split by a hairline: split, the
+            // preview read as pressed against the fields.
+            <View style={styles.overviewRow}>
+              <View style={[styles.overview, styles.fieldsPane, cardColors]}>{fields}</View>
+              <View style={[styles.overview, styles.previewPane, cardColors]}>{preview}</View>
+            </View>
+          ) : (
+            <View style={[styles.overview, cardColors]}>
+              {preview}
+              <View style={[styles.divider, { backgroundColor: theme.backgroundSelected }]} />
+              {fields}
+            </View>
+          )}
         </View>
       </ScrollView>
       {pinnedContinue ? (
@@ -803,13 +800,12 @@ const styles = StyleSheet.create({
     overflow: 'hidden',
   },
   overviewRow: {
+    alignItems: 'flex-start',
     flexDirection: 'row',
+    gap: Spacing.three,
   },
   fieldsPane: {
     flex: 1,
-  },
-  paneDivider: {
-    width: StyleSheet.hairlineWidth,
   },
   previewPane: {
     width: PREVIEW_PANE_WIDTH,
