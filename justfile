@@ -346,7 +346,7 @@ test-rust:
 # radio (tests/sim_pairing.rs). Not part of `test-rust`: the app crate only builds BLE for
 # Android/Apple, while this crate's tests build `blew`'s Linux backend (needs libdbus-1-dev).
 test-ble-transport:
-    cd modules/iroh-location/rust/third_party/iroh-ble-transport && cargo test --features testing
+    cd modules/iroh-location/rust/third_party/iroh-ble-transport && cargo test --features testing --no-fail-fast
 
 # Benchmark Rust protobuf parsing + SCG1 encoding with committed fixtures.
 profile-mvt:
