@@ -27,7 +27,7 @@ jobs:
     name: Build and upload iOS Release
     if: >-
       ${{github.event.pull_request.head.repo.full_name == github.repository}}
-    runs-on: macos-latest
+    runs-on: xcode-27
     timeout-minutes: 90
     environment: development-builds
     permissions:

@@ -60,7 +60,12 @@ export function DeliveryModePicker({
             ]}
             testID={`delivery-mode-${option.id}`}
           >
+            {/* One line, shrunk to fit: wrapped, "MUTUAL FRIENDS" overflowed its pill in a
+                narrow column and pushed the selection off centre. */}
             <ThemedText
+              adjustsFontSizeToFit
+              minimumFontScale={0.7}
+              numberOfLines={1}
               type="code"
               style={[styles.label, active ? { color: accent } : undefined]}
               themeColor={active ? 'text' : 'textSecondary'}
@@ -89,8 +94,10 @@ const styles = StyleSheet.create({
     flex: 1,
     justifyContent: 'center',
     minHeight: 44,
+    paddingHorizontal: Spacing.two,
   },
   label: {
     letterSpacing: 1.4,
+    textAlign: 'center',
   },
 });

@@ -18,7 +18,8 @@ import { EXPLORATION_BACKUP_FILE_PREFIX, explorationBackupFileName } from './exp
 type FileHandle = {
   readonly uri: string;
   create(options?: { overwrite?: boolean }): void;
-  write(content: string): void;
+  /** Async since SDK 58; the sync form is `writeSync`. */
+  write(content: string): Promise<void>;
   text(): Promise<string>;
   delete(): void;
 };
@@ -85,7 +86,8 @@ export async function shareExplorationBackup(
 
   const file = new fs.File(fs.Paths.cache, explorationBackupFileName(now));
   file.create({ overwrite: true });
-  file.write(text);
+  // Awaited: since SDK 58 `write` is async, and sharing before it lands hands over an empty file.
+  await file.write(text);
   await sharing.shareAsync(file.uri, {
     mimeType: MIME_TYPE,
     UTI: 'public.json',

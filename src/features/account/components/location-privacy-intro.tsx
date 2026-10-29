@@ -62,6 +62,50 @@ export function LocationPrivacyIntro({
       title="Where your location goes"
       subtitle={LEDE}
       testID="privacy-onboarding"
+      footerRail={{
+        back: {
+          label: 'Back',
+          accessibilityLabel: 'Back to profile',
+          icon: { ios: 'chevron.left', android: 'arrow_back', web: 'arrow_back' },
+          onPress: onBack,
+        },
+        primary: {
+          label: 'Continue',
+          railLabel: 'Next',
+          accessibilityLabel: 'Continue to delivery',
+          icon: { ios: 'chevron.right', android: 'arrow_forward', web: 'arrow_forward' },
+          color: chrome.green,
+          ink: chrome.bg,
+          testID: 'onboarding-privacy-continue',
+          onPress: onContinue,
+        },
+      }}
+      footer={
+        <View style={styles.actions}>
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Back to profile"
+            onPress={onBack}
+            style={styles.back}
+          >
+            <ThemedText type="smallBold">Back</ThemedText>
+          </Pressable>
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Continue to delivery"
+            onPress={onContinue}
+            testID="onboarding-privacy-continue"
+            style={({ pressed }) => [
+              styles.continue,
+              { backgroundColor: chrome.green, opacity: pressed ? 0.65 : 1 },
+            ]}
+          >
+            <ThemedText type="smallBold" style={{ color: chrome.bg }}>
+              Continue
+            </ThemedText>
+          </Pressable>
+        </View>
+      }
     >
       <View style={styles.body}>
         {BODY.map((paragraph) => (
@@ -88,31 +132,6 @@ export function LocationPrivacyIntro({
       <ThemedText type="small" themeColor="textSecondary" style={styles.signoff}>
         {SIGNOFF}
       </ThemedText>
-
-      <View style={styles.actions}>
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel="Back to profile"
-          onPress={onBack}
-          style={styles.back}
-        >
-          <ThemedText type="smallBold">Back</ThemedText>
-        </Pressable>
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel="Continue to delivery"
-          onPress={onContinue}
-          testID="onboarding-privacy-continue"
-          style={({ pressed }) => [
-            styles.continue,
-            { backgroundColor: chrome.green, opacity: pressed ? 0.65 : 1 },
-          ]}
-        >
-          <ThemedText type="smallBold" style={{ color: chrome.bg }}>
-            Continue
-          </ThemedText>
-        </Pressable>
-      </View>
     </SettingsPage>
   );
 }

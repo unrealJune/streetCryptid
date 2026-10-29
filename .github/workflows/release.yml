@@ -180,7 +180,7 @@ jobs:
     name: Build and submit iOS to TestFlight
     needs: version
     if: needs.version.outputs.release == 'true'
-    runs-on: macos-latest
+    runs-on: xcode-27
     timeout-minutes: 120
     environment: production-release
     permissions:

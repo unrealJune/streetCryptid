@@ -85,6 +85,17 @@ export function applyViewTransform(
   };
 }
 
+/**
+ * The camera that shows `camera.center` at the centre of the part of the viewport right of the
+ * first `obscuredLeft` px, rather than at the centre of the whole viewport. A negative value moves
+ * it back, which is how a change in what is obscured keeps the same point in the middle.
+ */
+export function centerBeside(camera: CameraState, obscuredLeft: number): CameraState {
+  if (obscuredLeft === 0) return camera;
+  const s = scaleFor(camera.zoom);
+  return { ...camera, center: [camera.center[0] - obscuredLeft / 2 / s, camera.center[1]] };
+}
+
 /** Inverse of {@link applyViewTransform}: the transform that shows `camera` over `base`. */
 export function viewTransformFor(
   base: CameraState,

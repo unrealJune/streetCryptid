@@ -61,7 +61,7 @@ describe('SettingsScreen', () => {
     // friends receive, everything below it changes nothing outside this install.
     expect(rows().map((row) => row.href)).toEqual([
       '/settings/delivery',
-      '/pairing',
+      '/settings/pairing',
       '/settings/appearance',
       '/settings/advanced',
       '/settings/app-data',
@@ -77,7 +77,7 @@ describe('SettingsScreen', () => {
     // Transports moved behind Advanced, so Advanced is where their state has to surface:
     // a row that reports nothing is what made this menu look unfinished.
     expect(byHref.get('/settings/advanced')).toBe('Relay · Direct · BLE');
-    expect(byHref.get('/pairing')).toBe('Nobody paired yet');
+    expect(byHref.get('/settings/pairing')).toBe('Nobody paired yet');
   });
 
   it('names only the transports that are permitted, and says so when none are', () => {
@@ -95,11 +95,11 @@ describe('SettingsScreen', () => {
 
   it('counts the friends behind the pairing entry', () => {
     snapshot.friends = [{ id: 'a' }];
-    expect(rows().find((row) => row.href === '/pairing')?.value).toBe('1 friend');
+    expect(rows().find((row) => row.href === '/settings/pairing')?.value).toBe('1 friend');
 
     act(() => renderer.unmount());
     snapshot.friends = [{ id: 'a' }, { id: 'b' }];
-    expect(rows().find((row) => row.href === '/pairing')?.value).toBe('2 friends');
+    expect(rows().find((row) => row.href === '/settings/pairing')?.value).toBe('2 friends');
 
     snapshot.friends = [];
   });

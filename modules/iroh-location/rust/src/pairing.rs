@@ -69,6 +69,7 @@ use rand::rngs::OsRng;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
+use tracing::Instrument;
 use x25519_dalek::{PublicKey as XPublicKey, StaticSecret as XStaticSecret};
 
 use crate::docs::TrailDocs;
@@ -2118,7 +2119,6 @@ impl PairCore {
             ms = tracing::field::Empty,
             outcome = tracing::field::Empty,
         );
-        let _guard = span.enter();
         let handshake_started = Instant::now();
         let outcome = async {
             let endpoint = self.runtime_endpoint().await?;
@@ -2144,6 +2144,7 @@ impl PairCore {
                 .await?;
             Ok(())
         }
+        .instrument(span.clone())
         .await;
 
         span.record("ms", handshake_started.elapsed().as_millis() as u64);
@@ -2332,33 +2333,37 @@ impl PairCore {
             complete_after_dial = tracing::field::Empty,
             ms = tracing::field::Empty,
         );
-        let _guard = span.enter();
         let started = Instant::now();
-        let msg = self
-            .build_session_msg(Decision::Accept, &s, Vec::new())
-            .await?;
-        // Bilateral already? Then the friendship is real now, not once the dial returns.
-        let bilateral = self.session_is_complete(session_id).await;
-        span.record("bilateral_before_dial", bilateral);
-        if bilateral {
-            self.finalize(session_id, s.peer_endpoint).await?;
+        async {
+            let msg = self
+                .build_session_msg(Decision::Accept, &s, Vec::new())
+                .await?;
+            // Bilateral already? Then the friendship is real now, not once the dial returns.
+            let bilateral = self.session_is_complete(session_id).await;
+            span.record("bilateral_before_dial", bilateral);
+            if bilateral {
+                self.finalize(session_id, s.peer_endpoint).await?;
+            }
+            self.best_effort_notify(
+                s.peer_endpoint,
+                s.peer_endpoint_ticket,
+                msg,
+                session_id,
+                s.nearby,
+            )
+            .await;
+            // Idempotent via `result_emitted`, so this is a no-op when the branch above already
+            // ran.
+            let complete = self.session_is_complete(session_id).await;
+            span.record("complete_after_dial", complete);
+            if complete {
+                self.finalize(session_id, s.peer_endpoint).await?;
+            }
+            span.record("ms", started.elapsed().as_millis() as u64);
+            Ok::<(), anyhow::Error>(())
         }
-        self.best_effort_notify(
-            s.peer_endpoint,
-            s.peer_endpoint_ticket,
-            msg,
-            session_id,
-            s.nearby,
-        )
-        .await;
-        // Idempotent via `result_emitted`, so this is a no-op when the branch above already ran.
-        let complete = self.session_is_complete(session_id).await;
-        span.record("complete_after_dial", complete);
-        if complete {
-            self.finalize(session_id, s.peer_endpoint).await?;
-        }
-        span.record("ms", started.elapsed().as_millis() as u64);
-        Ok(())
+        .instrument(span.clone())
+        .await
     }
 
     /// Whether `session_id` currently reads as a bilateral, non-terminal pair.
@@ -2618,43 +2623,46 @@ impl PairCore {
             ratchet = ratchet_installed,
             ms = tracing::field::Empty,
         );
-        let _guard = span.enter();
         let started = Instant::now();
-        if let Ok((trail, profile, sink)) = self.runtime_docs().await {
-            // BEFORE the ticket import and before `Ready`, so the persona is already readable by
-            // the time the app asks for the pair result. This is the whole point of carrying it:
-            // the import below is now only how we follow LATER edits, and how a peer who had
-            // published nothing yet eventually catches up.
-            if let Some(bytes) = profile_record.as_deref() {
-                match profile.ingest_handed_record(bytes, &peer_endpoint).await {
-                    Ok(Some(rec)) => sink.on_profile_update(rec),
-                    Ok(None) => {}
-                    Err(err) => tracing::warn!(
-                        error = %err,
-                        sc.peer = %crate::telemetry::short_hex(&peer_endpoint),
-                        "pair Accept carried a profile record that did not verify; ignoring it"
-                    ),
+        async {
+            if let Ok((trail, profile, sink)) = self.runtime_docs().await {
+                // BEFORE the ticket import and before `Ready`, so the persona is already readable by
+                // the time the app asks for the pair result. This is the whole point of carrying it:
+                // the import below is now only how we follow LATER edits, and how a peer who had
+                // published nothing yet eventually catches up.
+                if let Some(bytes) = profile_record.as_deref() {
+                    match profile.ingest_handed_record(bytes, &peer_endpoint).await {
+                        Ok(Some(rec)) => sink.on_profile_update(rec),
+                        Ok(None) => {}
+                        Err(err) => tracing::warn!(
+                            error = %err,
+                            sc.peer = %crate::telemetry::short_hex(&peer_endpoint),
+                            "pair Accept carried a profile record that did not verify; ignoring it"
+                        ),
+                    }
+                }
+                // BOUNDED. Both imports are how LATER edits arrive; the persona itself came in on the
+                // Accept above. On the inbound path this runs inside the peer's dial, so an import
+                // that hangs here is a peer left waiting on a pair we have already completed — the
+                // worst possible place to spend an unbounded await.
+                if let Some(pt) = profile_ticket.as_deref() {
+                    if let Ok(Ok(ns)) =
+                        tokio::time::timeout(PAIR_DOCS_TIMEOUT, profile.import_ticket(pt)).await
+                    {
+                        profile.watch(ns, sink);
+                    }
+                }
+                if let Some(tt) = trail_ticket.as_deref() {
+                    let _ = tokio::time::timeout(PAIR_DOCS_TIMEOUT, trail.import_ticket(tt)).await;
                 }
             }
-            // BOUNDED. Both imports are how LATER edits arrive; the persona itself came in on the
-            // Accept above. On the inbound path this runs inside the peer's dial, so an import
-            // that hangs here is a peer left waiting on a pair we have already completed — the
-            // worst possible place to spend an unbounded await.
-            if let Some(pt) = profile_ticket.as_deref() {
-                if let Ok(Ok(ns)) =
-                    tokio::time::timeout(PAIR_DOCS_TIMEOUT, profile.import_ticket(pt)).await
-                {
-                    profile.watch(ns, sink);
-                }
-            }
-            if let Some(tt) = trail_ticket.as_deref() {
-                let _ = tokio::time::timeout(PAIR_DOCS_TIMEOUT, trail.import_ticket(tt)).await;
-            }
-        }
 
-        span.record("ms", started.elapsed().as_millis() as u64);
-        self.publish_ready(session_id, nonce).await;
-        Ok(())
+            span.record("ms", started.elapsed().as_millis() as u64);
+            self.publish_ready(session_id, nonce).await;
+            Ok::<(), anyhow::Error>(())
+        }
+        .instrument(span.clone())
+        .await
     }
 
     async fn publish_ready(&self, session_id: &[u8; SESSION_ID_LEN], nonce: [u8; SAS_NONCE_LEN]) {
@@ -3023,8 +3031,18 @@ async fn dial_exchange(endpoint: &Endpoint, addr: EndpointAddr, msg: &PairMsg) -
         exchange_ms = tracing::field::Empty,
         outcome = tracing::field::Empty,
     );
-    let _guard = span.enter();
+    dial_exchange_in(endpoint, addr, msg, &span)
+        .instrument(span.clone())
+        .await
+}
 
+/// The body of [`dial_exchange`], run inside its `pair.dial` span.
+async fn dial_exchange_in(
+    endpoint: &Endpoint,
+    addr: EndpointAddr,
+    msg: &PairMsg,
+    span: &tracing::Span,
+) -> Result<PairMsg> {
     // Split into connect vs round-trip on purpose. `connect` is where hole punching and relay
     // fallback live, and the round-trip is where the PEER's own build_msg runs -- so a slow
     // round-trip here means the other phone is waiting on ITS relay, not that the link is slow.
@@ -3145,7 +3163,6 @@ impl ProtocolHandler for PairProtocol {
             Ok::<_, AcceptError>(())
         })
         .await;
-        let _guard = span.enter();
         span.record("ms", started.elapsed().as_millis() as u64);
         match served {
             Ok(Ok(())) => {

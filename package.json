@@ -6,63 +6,65 @@
   "dependencies": {
     "@expo-google-fonts/ibm-plex-mono": "^0.4.1",
     "@expo-google-fonts/rajdhani": "^0.4.1",
-    "@expo/ui": "~57.0.6",
+    "@expo/ui": "~58.0.25",
     "@mapbox/vector-tile": "^3.0.0",
-    "@shopify/react-native-skia": "2.6.2",
-    "expo": "~57.0.6",
-    "expo-application": "~57.0.2",
-    "expo-background-task": "~57.0.4",
-    "expo-battery": "~57.0.1",
+    "@shopify/react-native-skia": "2.14.0",
+    "expo": "~58.0.21",
+    "expo-application": "~58.1.2",
+    "expo-background-task": "~58.0.11",
+    "expo-battery": "~58.0.3",
     "expo-better-haptics": "^1.0.2",
-    "expo-build-properties": "~57.0.5",
-    "expo-clipboard": "~57.0.1",
-    "expo-constants": "~57.0.5",
-    "expo-crypto": "~57.0.1",
-    "expo-dev-client": "~57.0.6",
-    "expo-device": "~57.0.1",
-    "expo-font": "~57.0.1",
-    "expo-glass-effect": "~57.0.1",
-    "expo-haptics": "~57.0.1",
-    "expo-image": "~57.0.1",
-    "expo-linking": "~57.0.3",
-    "expo-location": "~57.0.4",
-    "expo-network": "~57.0.1",
-    "expo-router": "~57.0.6",
-    "expo-secure-store": "~57.0.1",
-    "expo-sensors": "~57.0.2",
-    "expo-sharing": "~57.0.6",
-    "expo-splash-screen": "~57.0.4",
-    "expo-sqlite": "~57.0.1",
-    "expo-status-bar": "~57.0.1",
-    "expo-symbols": "~57.0.1",
-    "expo-system-ui": "~57.0.1",
-    "expo-task-manager": "~57.0.4",
-    "expo-web-browser": "~57.0.1",
+    "expo-build-properties": "~58.0.11",
+    "expo-clipboard": "~58.0.4",
+    "expo-constants": "~58.0.14",
+    "expo-crypto": "~58.0.7",
+    "expo-dev-client": "~58.0.17",
+    "expo-device": "~58.0.5",
+    "expo-font": "~58.0.11",
+    "expo-glass-effect": "~58.0.5",
+    "expo-haptics": "~58.0.7",
+    "expo-image": "~58.0.18",
+    "expo-linking": "~58.0.15",
+    "expo-location": "~58.0.20",
+    "expo-network": "~58.0.4",
+    "expo-router": "~58.0.28",
+    "expo-secure-store": "~58.0.2",
+    "expo-sensors": "~58.0.4",
+    "expo-sharing": "~58.0.21",
+    "expo-splash-screen": "~58.0.12",
+    "expo-sqlite": "~58.0.14",
+    "expo-status-bar": "~58.0.4",
+    "expo-symbols": "~58.0.4",
+    "expo-system-ui": "~58.0.7",
+    "expo-task-manager": "~58.0.12",
+    "expo-web-browser": "~58.0.7",
     "fflate": "^0.8.2",
     "h3-js": "4.5.0",
     "pbf": "^5.1.0",
-    "react": "19.2.3",
-    "react-dom": "19.2.3",
-    "react-native": "0.86.0",
-    "react-native-gesture-handler": "~2.32.0",
-    "react-native-reanimated": "4.5.0",
-    "react-native-safe-area-context": "~5.7.0",
-    "react-native-screens": "4.25.2",
-    "react-native-web": "~0.21.0",
-    "react-native-worklets": "0.10.4",
+    "react": "19.3.0",
+    "react-dom": "19.3.0",
+    "react-native": "0.88.1",
+    "react-native-gesture-handler": "~3.3.0",
+    "react-native-reanimated": "4.7.1",
+    "react-native-safe-area-context": "~5.10.1",
+    "react-native-screens": "~4.30.0",
+    "react-native-web": "^0.21.4",
+    "react-native-worklets": "0.13.0",
     "toqr": "^0.1.1"
   },
   "devDependencies": {
+    "@react-native/jest-preset": "^0.88.1",
     "@types/geojson": "^7946.0.16",
-    "@types/jest": "^29.5.14",
-    "@types/react": "~19.2.2",
+    "@types/jest": "30.0.0",
+    "@types/react": "~19.3.0",
     "eslint": "^9",
-    "eslint-config-expo": "~57.0.0",
+    "eslint-config-expo": "~58.0.4",
     "eslint-config-prettier": "^10.1.8",
     "geojson-vt": "^4.0.3",
-    "jest": "~29.7.0",
-    "jest-expo": "~57.0.2",
+    "jest": "~30.5.2",
+    "jest-expo": "~58.0.13",
     "prettier": "^3.9.4",
+    "react-test-renderer": "19.3.0",
     "typescript": "~6.0.3",
     "vt-pbf": "^3.1.3"
   },
@@ -82,44 +84,26 @@
     "test": "jest",
     "reset-project": "node ./scripts/reset-project.js"
   },
-  "jest": {
-    "preset": "jest-expo",
-    "//testTimeout": "Jest charges a suite's module evaluation to its FIRST test, and on CI the babel transform cache is always cold — so the first test of a heavy suite pays for transforming its entire graph. cryptid-profile-editor sat at 4.7s of the 5s default with a cold cache and failed the moment anything was added to its imports. This budget is for a genuinely hung test, not for a cold transform.",
-    "testTimeout": 20000,
-    "setupFiles": [
-      "@shopify/react-native-skia/jestSetup.js",
-      "<rootDir>/jest.setup.js"
-    ],
-    "testPathIgnorePatterns": [
-      "/node_modules/",
-      "/.expo/",
-      "/docs/",
-      "/.claude/"
-    ],
-    "modulePathIgnorePatterns": [
-      "<rootDir>/.claude/"
-    ],
-    "transformIgnorePatterns": [
-      "node_modules/(?!(.pnpm|react-native|@react-native|@react-native-community|expo|@expo|@expo-google-fonts|react-navigation|@react-navigation|@sentry/react-native|native-base|standard-navigation|@mapbox|pbf|geojson-vt))",
-      "/node_modules/react-native-reanimated/plugin/",
-      "/node_modules/@react-native/babel-preset/"
-    ]
-  },
   "private": true,
   "trustedDependencies": [
     "@shopify/react-native-skia",
     "unrs-resolver"
   ],
   "patchedDependencies": {
-    "expo-modules-jsi@57.0.3": "patches/expo-modules-jsi@57.0.3.patch",
     "h3-js@4.5.0": "patches/h3-js@4.5.0.patch",
     "pbf@5.1.2": "patches/pbf@5.1.2.patch",
-    "@shopify/react-native-skia@2.6.2": "patches/@shopify%2Freact-native-skia@2.6.2.patch"
+    "@shopify/react-native-skia@2.14.0": "patches/@shopify%2Freact-native-skia@2.14.0.patch"
   },
   "expo": {
     "install": {
       "exclude": [
-        "react-native-worklets"
+        "react-native"
+      ]
+    },
+    "autolinking": {
+      "exclude": [
+        "expo-app-metrics",
+        "expo-observe"
       ]
     }
   }
