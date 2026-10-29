@@ -62,6 +62,14 @@ fractional and max zoom, live scaling, real bundled Capitol Hill streets and
 the committed SeaTac MVT. A continuous synthetic DEM across forest, rock and
 ice isolates material-boundary behaviour; it is not a photograph of Rainier.
 
+Lossless comparison sheets at z13.16 with exploration off:
+[Capitol Hill streets](media/map-moire-roads.webp),
+[canopy](media/map-moire-canopy.webp), and
+[forest-to-rock-to-snow](media/map-moire-terrain.webp).
+Each shows **original / rejected / corrected** left to right, with unscaled
+captures; view at full size to avoid preview-resampling artifacts.
+Street geometry: [OpenStreetMap contributors (ODbL)](https://www.openstreetmap.org/copyright).
+
 The pixel regressions exercise finite-width roads built with the production
 mask rasterizer, class widths and visibility gates, rather than a solid red
 texture. They require continuous centreline ink, visible local grain, and no
