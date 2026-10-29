@@ -232,7 +232,7 @@ export function CryptidProfileEditor({
   // is wide enough that stacking left the fields below the fold.
   const preview = (
     <>
-      <View style={styles.preview}>
+      <View style={[styles.preview, twoPane && styles.previewFill]}>
         <Pressable
           accessibilityHint="Replaces the cryptid, its title, and your signal color"
           accessibilityLabel="Randomize profile"
@@ -799,8 +799,8 @@ const styles = StyleSheet.create({
     borderWidth: StyleSheet.hairlineWidth,
     overflow: 'hidden',
   },
+  // Stretched, so the two cards are always the same height.
   overviewRow: {
-    alignItems: 'flex-start',
     flexDirection: 'row',
     gap: Spacing.three,
   },
@@ -809,6 +809,11 @@ const styles = StyleSheet.create({
   },
   previewPane: {
     width: PREVIEW_PANE_WIDTH,
+  },
+  // Fills the stretched card, so the dice stay in its corner and the avatar centres in it.
+  previewFill: {
+    flex: 1,
+    justifyContent: 'center',
   },
   preview: {
     alignItems: 'center',
