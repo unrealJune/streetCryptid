@@ -80,6 +80,14 @@ The largest axis is 4144 texels, below 8192. These are texture sizes, not
 process-memory peaks; final bitmaps, driver caches and other map resources
 are additional.
 
+The SDK 58 app comparison also exposed a bitmap-lifetime race: a retired
+image's JS wrapper could be deleted while Skia web still had a queued draw
+using it. Web retirement now goes through the renderer's UI queue, after
+pending draws and mapper shutdown. Native recordings own their image
+references and keep immediate wrapper release. A regression test holds a
+draw across cache eviction and checks both ordering and exactly-once release;
+the cache capacity and current/outgoing-layer retention are unchanged.
+
 ### Measured rendering cost
 
 Seven-sample medians in milliseconds, using the same SDK 57 dependency tree
@@ -116,6 +124,23 @@ whole-app smoothness result: both revisions timed out in `pan-new` and
 `pan-cached`, and jank counts rose from 123/114 to 135/123. The component
 comparison isolates the rendering change; this single app comparison does
 not establish a frame-rate improvement.
+
+After integrating SDK 58, a separate like-for-like app comparison against
+main `7c815eb` produced the following results at the same 4x CPU throttle:
+
+| Run  | Main renders | Corrected renders | Main render ms | Corrected render ms | Change |
+| ---- | -----------: | ----------------: | -------------: | ------------------: | -----: |
+| Cold |           15 |                13 |         35,598 |              25,372 | -28.7% |
+| Warm |           15 |                15 |         35,478 |              29,457 | -17.0% |
+
+The cold total includes two fewer region builds, so it is not a pure
+per-render speed comparison. Both final runs were free of app runtime
+errors after the web retirement fix. Long-task totals fell from
+84,993/86,186 to 76,598/78,180 ms and jank counts from 166/175 to 162/164.
+However, both revisions still timed out in the same two pan scenarios, and
+the worst warm frame rose from 2750 to 3067 ms. This single software-rendered
+comparison supports lower aggregate rendering cost, not a blanket claim
+about frame pacing or native-phone performance.
 
 ### Measurement method and limits
 
