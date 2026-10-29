@@ -897,7 +897,13 @@ impl CustomSender for BleSender {
         let (device_id, target_endpoint) = if let Some(d) = self.routing.device_for_pipe(stable_id)
         {
             (d, None)
-        } else if let Some((endpoint, prefix)) = self.routing.reservation_target(stable_id) {
+        } else if let Some((endpoint, prefix)) = self
+            .routing
+            .reservation_target(stable_id)
+            // A gone pipe's id that iroh is still dialling its peer on: reserve it again, so
+            // this send opens the next pipe instead of being dropped.
+            .or_else(|| self.routing.resurrect_for_send(stable_id))
+        {
             // Reservation path: poll_send is iroh's *trigger* to start
             // the dial. scan_hint tells us which `DeviceId` is nearby
             // under this prefix right now; hand that to the registry

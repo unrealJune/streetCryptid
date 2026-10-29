@@ -88,6 +88,11 @@ standalone / path dependency:
          was about to use.
       - The connection tracking moved to the transport, so every hook it hands out shares it.
 
+  * src/transport/registry.rs
+      - A peer that is `Dead { Forgotten }` (its pipe idled out or drained) is dialled again on
+         the next send or advertisement instead of being refused until garbage collection.
+         `MaxRetries` and `ProtocolMismatch` stay dead.
+
   * src/transport/transport.rs
       - Split the registry/driver/hook/watchdog wiring out of `construct` into `assemble`, which
          takes any `BleInterface`, so the simulator runs the same code as a phone.
