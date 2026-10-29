@@ -37,6 +37,7 @@ import {
 } from '@/features/map';
 import { resolveMapBackAction } from '@/features/map/core/back-action';
 import { islandLayout } from '@/features/map/core/island-layout';
+import { useSystemRail } from '@/hooks/use-system-rail';
 import { sampleTrailForMap } from '@/features/map/core/trail-sampling';
 import { friendPlaceName } from '@/features/map/core/readout';
 import { FriendDetailIsland } from '@/features/social/components/friend-detail-island';
@@ -59,8 +60,6 @@ import { SELF_AUTHOR, type TrailPoint } from '@/features/social/net/background/t
  */
 const MAP_ANCHOR_WAIT_MS = 1500;
 
-/** A trailing inset at least this wide is a system rail (iPhone Duo's 84pt), not a notch. */
-const SYSTEM_RAIL_MIN_INSET = 64;
 /** The map FABs' diameter (`islandStyles.fab`), for centring them in a rail. */
 const FAB_SIZE = 48;
 /** A live fix this far from the stored one the map opened on moves the camera to it. */
@@ -529,7 +528,7 @@ export default function MapScreenBody() {
   // A rail that wide is empty below the status items, so the FABs live in it, centred, rather
   // than spending another column of map beside it. Settings joins them: alone at the top it would
   // sit under the clock.
-  const rail = insets.right >= SYSTEM_RAIL_MIN_INSET;
+  const rail = useSystemRail() > 0;
   const openSettings = () => {
     closeLayers();
     router.push('/settings');

@@ -16,6 +16,7 @@ import { useColorScheme } from '@/hooks/use-color-scheme';
 import { ThemedText } from '@/components/themed-text';
 import { SIGNAL_COLOR_OPTIONS, signalColorInk } from '@/constants/signal-colors';
 import { CryptidThemes, Fonts, Spacing } from '@/constants/theme';
+import { useSystemRail } from '@/hooks/use-system-rail';
 import { useTheme } from '@/hooks/use-theme';
 import { PageFooter } from '@/features/settings/components/settings-page';
 import type { GeneratedCryptid } from '../core/cryptid-generator';
@@ -95,6 +96,8 @@ export function CryptidProfileEditor({
   const chrome = CryptidThemes[scheme === 'dark' ? 'deepsea' : 'daybreak'].chrome;
   const insets = useSafeAreaInsets();
   const pinnedContinue = mode === 'onboarding' && onDone !== undefined;
+  // Beside a system rail Continue moves into it, and the scroll keeps its own bottom inset.
+  const railed = useSystemRail() > 0;
   // Measured, not the window: in edit mode this is inside the Settings sheet.
   const [frameWidth, setFrameWidth] = useState(0);
   const twoPane = frameWidth - insets.left - insets.right >= TWO_PANE_MIN_WIDTH;
@@ -581,7 +584,7 @@ export function CryptidProfileEditor({
           twoPane && styles.contentCentered,
           {
             paddingTop: insets.top + Spacing.four,
-            paddingBottom: pinnedContinue ? Spacing.four : insets.bottom + Spacing.four,
+            paddingBottom: pinnedContinue && !railed ? Spacing.four : insets.bottom + Spacing.four,
           },
         ]}
         keyboardShouldPersistTaps="handled"
@@ -653,7 +656,21 @@ export function CryptidProfileEditor({
         // Pinned, not the end of the scroll: on a short window (a landscape foldable is ~670 pt)
         // the scroll's end is below the fold, and Continue is the only way off this step.
         // The shell's cap sits inside the scroll's padding; the footer's cap includes its own.
-        <PageFooter maxWidth={maxWidth + Spacing.four * 2}>
+        <PageFooter
+          maxWidth={maxWidth + Spacing.four * 2}
+          rail={{
+            primary: {
+              label: saving ? 'Saving…' : 'Continue',
+              icon: { ios: 'chevron.right', android: 'arrow_forward', web: 'arrow_forward' },
+              disabled: hasIssues || saving,
+              busy: saving,
+              color,
+              ink: signalColorInk(color),
+              testID: 'onboarding-continue',
+              onPress: () => void finish(),
+            },
+          }}
+        >
           <Pressable
             accessibilityRole="button"
             testID="onboarding-continue"

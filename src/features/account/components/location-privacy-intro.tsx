@@ -62,6 +62,23 @@ export function LocationPrivacyIntro({
       title="Where your location goes"
       subtitle={LEDE}
       testID="privacy-onboarding"
+      footerRail={{
+        back: {
+          label: 'Back',
+          accessibilityLabel: 'Back to profile',
+          icon: { ios: 'chevron.left', android: 'arrow_back', web: 'arrow_back' },
+          onPress: onBack,
+        },
+        primary: {
+          label: 'Continue',
+          accessibilityLabel: 'Continue to delivery',
+          icon: { ios: 'chevron.right', android: 'arrow_forward', web: 'arrow_forward' },
+          color: chrome.green,
+          ink: chrome.bg,
+          testID: 'onboarding-privacy-continue',
+          onPress: onContinue,
+        },
+      }}
       footer={
         <View style={styles.actions}>
           <Pressable

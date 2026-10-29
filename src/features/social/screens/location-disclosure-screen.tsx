@@ -78,7 +78,22 @@ export function LocationDisclosureScreen({ onChoice }: { onChoice: (accepted: bo
       </ScrollView>
       {/* Pinned: the choice this screen exists to ask for must not sit below the fold of a short
           window (a landscape foldable is ~670 pt tall). */}
-      <PageFooter>
+      <PageFooter
+        rail={{
+          back: {
+            label: 'Not now',
+            icon: { ios: 'xmark', android: 'close', web: 'close' },
+            onPress: () => onChoice(false),
+          },
+          primary: {
+            label: 'Turn on location',
+            icon: { ios: 'location.fill', android: 'my_location', web: 'my_location' },
+            color: chrome.amber,
+            ink: chrome.panel,
+            onPress: () => onChoice(true),
+          },
+        }}
+      >
         <View style={styles.actions}>
           <Pressable
             accessibilityRole="button"

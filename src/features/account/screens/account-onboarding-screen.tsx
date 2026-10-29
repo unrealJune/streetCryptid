@@ -105,6 +105,26 @@ export function AccountOnboardingScreen({
       kind="onboarding"
       title="Delivery"
       testID="delivery-onboarding"
+      footerRail={{
+        back: {
+          label: 'Back',
+          accessibilityLabel: 'Back to privacy',
+          icon: { ios: 'chevron.left', android: 'arrow_back', web: 'arrow_back' },
+          disabled: saving,
+          onPress: () => setStep('privacy'),
+        },
+        primary: {
+          label: saving ? 'Saving…' : 'Continue',
+          accessibilityLabel: 'Continue with selected delivery',
+          icon: { ios: 'checkmark', android: 'check', web: 'check' },
+          disabled: !ready || saving,
+          busy: saving,
+          color: chrome.green,
+          ink: chrome.bg,
+          testID: 'onboarding-delivery-continue',
+          onPress: () => void finish(),
+        },
+      }}
       footer={
         <View style={styles.actions}>
           <Pressable
