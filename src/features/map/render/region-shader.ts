@@ -220,7 +220,7 @@ export function renderRegionImage({
     );
   }
 
-  const shader = effect.makeShaderWithChildren(uniforms, [
+  const children = [
     maskImage.makeShaderOptions(
       TileMode.Clamp,
       TileMode.Clamp,
@@ -246,7 +246,8 @@ export function renderRegionImage({
       FilterMode.Linear,
       MipmapMode.None
     ),
-  ]);
+  ];
+  const shader = effect.makeShaderWithChildren(uniforms, children);
 
   const width = Math.max(1, Math.round(logical.width * pixelRatio));
   const height = Math.max(1, Math.round(logical.height * pixelRatio));
@@ -271,6 +272,15 @@ export function renderRegionImage({
   const recorded = picture.finishRecordingAsPicture();
 
   const image = renderPicture(recorded, width, height, 'ui');
+  // The mask, ground and terrain inputs are GPU textures of this thread's Skia context, and these
+  // wrappers hold them. RN Skia defers a garbage-collected image's release to its own thread but
+  // not a shader's or a paint's, and Hermes may finalize them on its GC thread: the texture's last
+  // unref then edits the JS thread's GrResourceCache from another thread. Zooming out fast over
+  // uncached ground builds a region a frame, and on 2026-10-28 that crashed the app inside
+  // `GrResourceCache::purgeAsNeeded`. Released here, every unref happens on this thread.
+  paint.dispose();
+  shader.dispose();
+  for (const child of children) child.dispose();
   if (!image && __DEV__) console.warn(`[map] region raster failed (${width}×${height})`);
   return image;
 }

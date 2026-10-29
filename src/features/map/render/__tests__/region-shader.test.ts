@@ -20,9 +20,15 @@ import { renderRegionImage } from '../region-shader';
 import { buildHatchPath } from '../structure-paths';
 import { linesSvg, TILE_PATH_UNITS } from '../tile-path-svg';
 
-jest.mock('../dot-field-shader', () => ({
-  getDotFieldEffect: () => ({ makeShaderWithChildren: () => ({}) }),
-}));
+jest.mock('../dot-field-shader', () => {
+  const effect = {
+    makeShaderWithChildren: jest.fn((_uniforms: number[], children: unknown[]) => ({
+      children,
+      dispose: jest.fn(),
+    })),
+  };
+  return { getDotFieldEffect: () => effect };
+});
 
 // The "image" is the recording canvas, so a test can read back what was drawn.
 jest.mock('../offscreen', () => ({
@@ -58,6 +64,7 @@ jest.mock('@shopify/react-native-skia', () => {
           state,
           setShader: jest.fn(),
           setAntiAlias: jest.fn(),
+          dispose: jest.fn(),
           setColor: (value: string) => (state.color = value),
           setStyle: (value: string) => (state.style = value),
           setStrokeWidth: (value: number) => (state.width = value),
@@ -159,7 +166,7 @@ const region: MapRegion = {
     buildMs: 0,
   },
 };
-const image = { makeShaderOptions: () => ({}) } as unknown as SkImage;
+const image = { makeShaderOptions: () => ({ dispose: jest.fn() }) } as unknown as SkImage;
 interface Draw {
   svg: string;
   style: string;
@@ -264,4 +271,28 @@ describe('dotted region overlays', () => {
   it('keeps transit and runways out of the street, park and water feature masks', () => {
     expect(buildMaskPaths(geometry, spec)).toEqual(buildMaskPaths(packGeometry(base), spec));
   });
+});
+
+// The inputs are GPU textures of the JS thread's Skia context, held by these wrappers. Left to the
+// garbage collector, Hermes may finalize them on its own thread, and the texture's last unref then
+// races the JS thread inside GrResourceCache: zooming out fast over uncached ground crashed there.
+it('releases the dot-field shader, its image children and its paint on the calling thread', () => {
+  const canvas = renderRegionImage({
+    region,
+    palette: CryptidThemes.daybreak.canvas,
+    maskImage: image,
+    groundImage: image,
+    terrainImage: image,
+    cellImage: image,
+    lutImage: image,
+    explorationEnabled: false,
+  }) as unknown as { drawPaint: jest.Mock };
+  const effect = jest.requireMock('../dot-field-shader').getDotFieldEffect();
+  const shader = effect.makeShaderWithChildren.mock.results[0].value;
+  expect(shader.children).toHaveLength(5);
+  for (const child of shader.children) expect(child.dispose).toHaveBeenCalledTimes(1);
+  expect(shader.dispose).toHaveBeenCalledTimes(1);
+  const [paint] = canvas.drawPaint.mock.calls[0];
+  expect(paint.setShader).toHaveBeenCalledWith(shader);
+  expect(paint.dispose).toHaveBeenCalledTimes(1);
 });
