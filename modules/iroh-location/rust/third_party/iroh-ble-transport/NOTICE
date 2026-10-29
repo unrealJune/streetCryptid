@@ -88,10 +88,17 @@ standalone / path dependency:
          was about to use.
       - The connection tracking moved to the transport, so every hook it hands out shares it.
 
+  * src/transport/routing.rs and src/transport/transport.rs (`poll_send`)
+      - A peer keeps its `StableConnId` across pipes: once a pipe to it is gone, the next pipe to
+         the same peer opens under the same id (from the resolver, or from a send iroh makes on
+         the old id), because iroh keeps dialling a peer on the id it was first given. An id stays
+         dead while its peer has a live route under another id, or is out of scan range.
+
   * src/transport/registry.rs
-      - A peer that is `Dead { Forgotten }` (its pipe idled out or drained) is dialled again on
-         the next send or advertisement instead of being refused until garbage collection.
-         `MaxRetries` and `ProtocolMismatch` stay dead.
+      - A send that asks for a new pipe redials a `Dead { Forgotten }` peer (its pipe idled out or
+         drained) instead of being refused until garbage collection, and one that arrives while
+         the old pipe drains is held and dialled when the drain ends. `MaxRetries` and
+         `ProtocolMismatch` stay dead.
 
   * src/transport/transport.rs
       - Split the registry/driver/hook/watchdog wiring out of `construct` into `assemble`, which

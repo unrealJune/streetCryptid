@@ -2116,12 +2116,17 @@ mod tests {
                     }
                     TargetLifecycleCommand::SendReserved { endpoint_seed } => {
                         let endpoint = iroh_base::SecretKey::from_bytes(&[endpoint_seed; 32]).public();
-                        if !matches!(
-                            phase_before,
-                            Some(PeerPhase::Connected { .. })
-                                | Some(PeerPhase::Draining { .. })
-                                | Some(PeerPhase::Dead { .. })
-                        ) {
+                        // A send asking for a new pipe is taken everywhere but a live pipe and a
+                        // peer that failed for good: a draining peer holds it for the redial, and
+                        // a forgotten one is dialled again.
+                        let takes_target = match phase_before {
+                            Some(PeerPhase::Connected { .. }) => false,
+                            Some(PeerPhase::Dead { reason, .. }) => {
+                                *reason == crate::transport::peer::DeadReason::Forgotten
+                            }
+                            _ => true,
+                        };
+                        if takes_target {
                             expected_target = Some(endpoint);
                         }
                         reg.handle(PeerCommand::SendDatagram {
@@ -2276,10 +2281,15 @@ mod tests {
                     MultiPeerCommand::SendReserved { device_idx, endpoint_seed } => {
                         let device_id = device_ids[usize::from(device_idx)].clone();
                         let endpoint = endpoint_from_seed(endpoint_seed);
-                        if !matches!(
-                            phase_before,
-                            Some(PhaseKind::Connected) | Some(PhaseKind::Draining) | Some(PhaseKind::Dead)
-                        ) {
+                        // Same rule as the single-peer model above.
+                        let takes_target = reg.peer(&device_id).is_none_or(|entry| match &entry.phase {
+                            PeerPhase::Connected { .. } => false,
+                            PeerPhase::Dead { reason, .. } => {
+                                *reason == crate::transport::peer::DeadReason::Forgotten
+                            }
+                            _ => true,
+                        });
+                        if takes_target {
                             expected_targets.insert(device_id.clone(), Some(endpoint));
                         }
                         reg.handle(PeerCommand::SendDatagram {
