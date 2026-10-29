@@ -124,6 +124,13 @@ const DOUBLE_TAP_MS = 260;
 const QUICK_ZOOM_TAP_MS = 250;
 const QUICK_ZOOM_GAP_MS = 300;
 const QUICK_ZOOM_SLOP_PX = 40;
+/**
+ * How far the first touch may wander and still count as a tap. Android reports a move for a
+ * resting finger's jitter, so "any move is not a tap" never recorded one there.
+ */
+const QUICK_ZOOM_TAP_DRIFT_PX = 12;
+/** Vertical travel of the second touch that commits to zooming. */
+const QUICK_ZOOM_ACTIVATE_PX = 6;
 /** Vertical drag that doubles (or halves) the scale. */
 const QUICK_ZOOM_DOUBLING_PX = 150;
 
@@ -373,6 +380,8 @@ export function MapView({
   const quickZoomArmed = useSharedValue(false);
   const quickZoomX = useSharedValue(0);
   const quickZoomY = useSharedValue(0);
+  const quickZoomFrom = useSharedValue<ViewTransform>({ k: 1, tx: 0, ty: 0 });
+  const quickZooming = useSharedValue(false);
   /** Transform at the last prefetch check, to gate by movement. */
   const lastPrefetch = useSharedValue<ViewTransform>({ k: 1, tx: 0, ty: 0 });
   /** Resets the pan stride origin on the first frame after scale motion ends. */
@@ -1006,7 +1015,11 @@ export function MapView({
     // Tap, then touch-hold-drag. RNGH has no such gesture, so this one stays undecided while it
     // watches: it records each short touch as a tap, arms when a touch lands right after one, and
     // activates (beating the double tap and the pan in the race) only once that armed touch moves.
-    // Anything else fails it at once, so it never holds up an ordinary pan or pinch.
+    // Undecided, it never holds up an ordinary pan or pinch: whichever activates first cancels it.
+    //
+    // The scale is driven from the touch's own view-relative position against a snapshot taken
+    // when it landed, not from the pan's accumulated translation: one source of coordinates for
+    // the anchor and the drag, and the zoom is a pure function of where the finger is.
     const quickZoom = Gesture.Pan()
       .manualActivation(true)
       .maxPointers(1)
@@ -1018,41 +1031,40 @@ export function MapView({
         }
         const now = gestureNow();
         touchDownAt.value = now;
+        quickZooming.value = false;
         quickZoomArmed.value =
           now - lastTapAt.value < QUICK_ZOOM_GAP_MS &&
           Math.hypot(touch.x - lastTapX.value, touch.y - lastTapY.value) < QUICK_ZOOM_SLOP_PX;
         quickZoomX.value = touch.x;
         quickZoomY.value = touch.y;
         // A tap only ever arms the touch right after it.
-        if (quickZoomArmed.value) lastTapAt.value = 0;
+        if (quickZoomArmed.value) {
+          lastTapAt.value = 0;
+          stopFling();
+          quickZoomFrom.value = { k: k.value, tx: tx.value, ty: ty.value };
+        }
       })
       .onTouchesMove((e, manager) => {
         const touch = e.allTouches[0];
-        if (!quickZoomArmed.value || e.numberOfTouches !== 1 || !touch) {
+        if (e.numberOfTouches !== 1 || !touch) {
           manager.fail();
           return;
         }
-        if (Math.abs(touch.y - quickZoomY.value) > 6) manager.activate();
-      })
-      .onTouchesUp((e, manager) => {
-        const touch = e.changedTouches[0];
-        if (
-          !quickZoomArmed.value &&
-          touch &&
-          gestureNow() - touchDownAt.value < QUICK_ZOOM_TAP_MS
-        ) {
-          lastTapAt.value = gestureNow();
-          lastTapX.value = touch.x;
-          lastTapY.value = touch.y;
+        const dy = touch.y - quickZoomY.value;
+        if (!quickZoomArmed.value) {
+          // Still possibly the first tap; fail only once it is clearly a drag.
+          if (Math.hypot(touch.x - quickZoomX.value, dy) > QUICK_ZOOM_TAP_DRIFT_PX) manager.fail();
+          return;
         }
-        manager.end();
-      })
-      .onTouchesCancelled((_e, manager) => manager.fail())
-      .onStart(stopFling)
-      .onChange((e) => {
+        if (!quickZooming.value) {
+          if (Math.abs(dy) <= QUICK_ZOOM_ACTIVATE_PX) return;
+          quickZooming.value = true;
+          manager.activate();
+        }
+        // Down zooms in, up zooms out, about where the second touch landed.
         const t = applyPinch(
-          { k: k.value, tx: tx.value, ty: ty.value },
-          Math.pow(2, e.changeY / QUICK_ZOOM_DOUBLING_PX),
+          quickZoomFrom.value,
+          Math.pow(2, dy / QUICK_ZOOM_DOUBLING_PX),
           quickZoomX.value,
           quickZoomY.value,
           limits
@@ -1061,6 +1073,22 @@ export function MapView({
         tx.value = t.tx;
         ty.value = t.ty;
       })
+      .onTouchesUp((e, manager) => {
+        const touch = e.changedTouches[0];
+        if (
+          !quickZoomArmed.value &&
+          touch &&
+          gestureNow() - touchDownAt.value < QUICK_ZOOM_TAP_MS &&
+          Math.hypot(touch.x - quickZoomX.value, touch.y - quickZoomY.value) <
+            QUICK_ZOOM_TAP_DRIFT_PX
+        ) {
+          lastTapAt.value = gestureNow();
+          lastTapX.value = touch.x;
+          lastTapY.value = touch.y;
+        }
+        manager.end();
+      })
+      .onTouchesCancelled((_e, manager) => manager.fail())
       .onEnd(commitNow);
 
     return Gesture.Race(quickZoom, doubleTap, Gesture.Simultaneous(pan, pinch));
