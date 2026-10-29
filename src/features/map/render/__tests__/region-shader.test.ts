@@ -215,39 +215,12 @@ describe('temporary shader resources', () => {
     for (const resource of mockResources) expect(resource.dispose).toHaveBeenCalledTimes(1);
   });
 
-  describe('region shader specialization', () => {
-    it.each(['parks', 'water', 'rivers'] as const)('selects filtering for %s', (kind) => {
-      const areas = packGeometry({
-        ...base,
-        parks: kind === 'parks' ? [{ rings: [ring] }] : [],
-        water: kind === 'water' ? [{ rings: [ring] }] : [],
-        rivers: kind === 'rivers' ? [{ points: line(250) }] : [],
-      });
-      draw(false, false, { ...region, geometry: areas });
-      expect(getDotFieldEffect).toHaveBeenLastCalledWith({
-        filteredAreas: true,
-        blendLevels: false,
-      });
-      expect(getDotMaterialEffect).toHaveBeenLastCalledWith(true);
-    });
-
-    it('selects from raster geometry, not a later labels-only publication', () => {
-      const areas = packGeometry({ ...base, parks: [{ rings: [ring] }] });
-      draw(false, false, { ...region, geometry: areas, rasterGeometry: geometry });
-      expect(getDotFieldEffect).toHaveBeenLastCalledWith({
-        filteredAreas: false,
-        blendLevels: false,
-      });
-      expect(getDotMaterialEffect).toHaveBeenLastCalledWith(false);
-    });
-
-    it('uses a blended compositor only while both detail levels contribute', () => {
-      draw(false, false, { ...region, spec: { ...spec, zoom: 13.16 } });
-      expect(getDotFieldEffect).toHaveBeenLastCalledWith({
-        filteredAreas: false,
-        blendLevels: true,
-      });
-    });
+  it.each([13.16, 15])('uses the same dot compositor for streets and parks at z%s', (zoom) => {
+    for (const features of [geometry, packGeometry({ ...base, parks: [{ rings: [ring] }] })]) {
+      draw(false, false, { ...region, geometry: features, spec: { ...spec, zoom } });
+      expect(getDotFieldEffect).toHaveBeenLastCalledWith();
+      expect(getDotMaterialEffect).toHaveBeenLastCalledWith();
+    }
   });
 
   it('reports allocation failure and releases the material pass even without an atlas', () => {

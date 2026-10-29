@@ -65,7 +65,6 @@ import {
 import {
   DOT_FIELD_UNIFORM_FLOATS,
   dotAtlasSize,
-  dotFieldMode,
   lodForZoom,
   packDotFieldUniforms,
   regionImageLayout,
@@ -154,7 +153,7 @@ export interface RegionImageInput {
   /** Draw building footprints and aeroway surfaces over the dot field (default false). */
   readonly structuresEnabled?: boolean;
   /**
-   * Resolution multiplier (default 1) for the final dot-compositing pass.
+   * Resolution multiplier (default 1) for the dot atlas and final bitmap.
    */
   readonly quality?: number;
 }
@@ -192,10 +191,8 @@ export function renderRegionImage({
   structuresEnabled = false,
   quality = 1,
 }: RegionImageInput): SkImage | null {
-  const mode = dotFieldMode(region.spec.zoom, drawnGeometry(region));
-  const { filteredAreas } = mode;
-  const effect = getDotFieldEffect(mode);
-  const materialEffect = getDotMaterialEffect(filteredAreas);
+  const effect = getDotFieldEffect();
+  const materialEffect = getDotMaterialEffect();
   if (!effect || !materialEffect) {
     console.warn('[map] dot-field shader failed to compile');
     return null;
@@ -211,7 +208,6 @@ export function renderRegionImage({
     reveal,
     explorationEnabled,
     hasElevation,
-    filteredAreas,
   });
   if (__DEV__ && uniforms.length !== DOT_FIELD_UNIFORM_FLOATS) {
     console.warn(
@@ -254,7 +250,7 @@ export function renderRegionImage({
     return resource;
   };
   try {
-    const atlasSize = dotAtlasSize(region.spec, undefined, filteredAreas);
+    const atlasSize = dotAtlasSize(region.spec, pixelRatio);
     const materialShader = own(materialEffect.makeShaderWithChildren(uniforms, inputs));
     const materialPaint = own(Skia.Paint());
     materialPaint.setShader(materialShader);

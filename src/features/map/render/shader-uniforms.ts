@@ -5,19 +5,18 @@ import type { RegionSpec } from '../core/region';
 import { contourLod, MERCATOR_CIRCUMFERENCE_M, SHADE_GAIN } from '../core/terrain';
 import type { MapPalette, WorldRect } from '../core/types';
 import type { MapRegion } from '../engine/map-engine';
-import type { PackedGeometry } from '../tiles/packed-geometry';
 
 export { DOT_STEP } from '../core/dot-style';
 
 /** Total float count of the shader's numeric uniform block, in declaration order. */
-export const DOT_FIELD_UNIFORM_FLOATS = 46;
+export const DOT_FIELD_UNIFORM_FLOATS = 40;
 
 /** Procedural material coordinates never follow the region's build zoom. */
 export const NOISE_WORLD_SCALE = scaleFor(12);
 /** The shader wraps the hash itself too, so crossing a wrap cannot change the pattern. */
 export const DOT_HASH_PERIOD = 12288;
-/** Sparse-area interpolation plus the aligned bitmap's overhang at minimum density. */
-export const DOT_ATLAS_HALO = 4;
+/** Neighbouring glyphs plus the aligned bitmap's one-pixel overhang. */
+export const DOT_ATLAS_HALO = 2;
 const MAX_IMAGE_DIM = 2400;
 const MAX_PIXEL_RATIO = 2;
 
@@ -40,7 +39,6 @@ export interface DotFieldUniformInput {
   readonly palette: MapPalette;
   /** Render (device) pixels per region-logical pixel of the bitmap. */
   readonly pixelRatio: number;
-  readonly step?: number;
   /** Load reveal 0..1 (1 = fully shown). Drives the cell-by-cell wipe. */
   readonly reveal?: number;
   /** LOD 0..1 override; defaults to {@link lodForZoom}(region build zoom). */
@@ -49,23 +47,6 @@ export interface DotFieldUniformInput {
   readonly explorationEnabled?: boolean;
   /** Whether the terrain texture carries absolute elevation. */
   readonly hasElevation?: boolean;
-  /** Must match the material/compositor variant and its atlas halo. */
-  readonly filteredAreas?: boolean;
-}
-
-export interface DotFieldMode {
-  readonly filteredAreas: boolean;
-  readonly blendLevels: boolean;
-}
-
-/** Specialize work that is fixed for the whole bitmap, not a per-pixel decision. */
-export function dotFieldMode(zoom: number, geometry: PackedGeometry): DotFieldMode {
-  return {
-    filteredAreas: geometry.parts.some(
-      (tile) => tile.parks.count > 0 || tile.water.count > 0 || tile.rivers.count > 0
-    ),
-    blendLevels: dotDetail(zoom).blend < 1,
-  };
 }
 
 /**
@@ -81,20 +62,16 @@ export function packDotFieldUniforms({
   region,
   palette,
   pixelRatio,
-  step = DOT_STEP,
   reveal = 1,
   lod,
   explorationEnabled = true,
   hasElevation = false,
-  filteredAreas = true,
 }: DotFieldUniformInput): number[] {
   const { rect, maskWidth, maskHeight, zoom } = region.spec;
   const scale = scaleFor(zoom); // region-logical px per world unit at anchor zoom
   const lodValue = lod ?? lodForZoom(zoom);
   const rgb = (c: readonly [number, number, number]) => [c[0] / 255, c[1] / 255, c[2] / 255];
-  // Keep the same world lattice between integer detail levels. A fractional
-  // zoom rebuild must not reseed every dot under an otherwise unchanged map.
-  const gridStep = dotGridStep(zoom, step);
+  const gridStep = dotGridStep(pixelRatio);
   const gx = (rect.minX * scale) / gridStep;
   const gy = (rect.minY * scale) / gridStep;
   const elevation = hasElevation ? region.elevation : null;
@@ -133,18 +110,12 @@ export function packDotFieldUniforms({
     elevation?.height ?? 1, // uElevSize
     contour.interval,
     contour.detail,
-    ...noiseWeights((NOISE_WORLD_SCALE / scale) * step * 2 * 0.045),
-    ...noiseWeights((NOISE_WORLD_SCALE / scale) * step * 2 * 0.03),
-    wrapGrid(Math.floor(gx / 2)),
-    wrapGrid(Math.floor(gy / 2)), // uCoarseGridOrigin
-    (Math.floor(gx / 2) + 0.5 - gx / 2) * gridStep * 2,
-    (Math.floor(gy / 2) + 0.5 - gy / 2) * gridStep * 2, // uCoarseGridPhase
-    atlasRows((rect.maxY - rect.minY) * scale, gridStep, filteredAreas), // uAtlasSplit
-    dotDetail(zoom).blend, // uDetailBlend
+    ...noiseWeights((NOISE_WORLD_SCALE / scale) * gridStep * 2 * 0.045),
+    ...noiseWeights((NOISE_WORLD_SCALE / scale) * gridStep * 2 * 0.03),
   ];
 }
 
-/** Filter against both lattices, preserving the mean as unresolved octaves fade out. */
+/** Filter for sparse sampling, preserving the mean as unresolved octaves fade out. */
 function noiseWeights(frequency: number): number[] {
   const weights: number[] = [];
   for (let i = 0; i < 4; i++) {
@@ -159,38 +130,22 @@ function wrapGrid(index: number): number {
   return ((index % DOT_HASH_PERIOD) + DOT_HASH_PERIOD) % DOT_HASH_PERIOD;
 }
 
-function dotGridStep(zoom: number, step = DOT_STEP): number {
-  return step * 2 ** (zoom - dotDetail(zoom).level);
+function dotGridStep(pixelRatio: number): number {
+  // A fractional bitmap-pixel pitch beats against the final raster, even when
+  // both grids are world-anchored. Keep a fixed two-bitmap-pixel footprint.
+  return DOT_STEP / pixelRatio;
 }
 
-function dotDetail(zoom: number): { level: number; blend: number } {
-  const level = Math.floor(zoom);
-  const fraction = zoom - level;
-  // Preserve the ordinary two-pixel field at integer zooms. Between levels,
-  // blend in the next finer field; never replace the whole pattern in one step.
-  // The mode and atlas must agree with the GPU's float32 weight at the endpoints.
-  return fraction <= 0.15
-    ? { level, blend: 1 }
-    : { level: level + 1, blend: Math.fround(clamp((fraction - 0.15) / 0.7, 0, 1)) };
-}
-
-function atlasRows(height: number, step: number, filteredAreas: boolean): number {
-  return Math.ceil(height / step) + 2 * (filteredAreas ? DOT_ATLAS_HALO : 1) + 1;
-}
-
-/** Two texels per dot, a neighbour halo, and the previous detail level underneath. */
+/** Two opaque texels per dot and a neighbour halo; no second detail grid. */
 export function dotAtlasSize(
   spec: RegionSpec,
-  inputStep = DOT_STEP,
-  filteredAreas = true
+  pixelRatio = regionImageLayout(spec).pixelRatio
 ): { width: number; height: number } {
   const logical = regionLogicalSize({ spec });
-  const step = dotGridStep(spec.zoom, inputStep);
+  const step = dotGridStep(pixelRatio);
   return {
-    width: (Math.ceil(logical.width / step) + 2 * (filteredAreas ? DOT_ATLAS_HALO : 1) + 1) * 2,
-    height:
-      atlasRows(logical.height, step, filteredAreas) +
-      (dotDetail(spec.zoom).blend < 1 ? atlasRows(logical.height, step * 2, filteredAreas) : 0),
+    width: (Math.ceil(logical.width / step) + 2 * DOT_ATLAS_HALO + 1) * 2,
+    height: Math.ceil(logical.height / step) + 2 * DOT_ATLAS_HALO + 1,
   };
 }
 

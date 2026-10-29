@@ -12,21 +12,12 @@ import { CryptidThemes } from '@/constants/cryptid-theme';
 import { scaleFor, visibleWorldRect } from '../../core/camera';
 import { buildPaletteLut, computeRegionSpec, type RegionSpec } from '../../core/region';
 import { elevationRgba, groundCode, type ElevationRaster } from '../../core/terrain';
-import type { Viewport, WorldPoint } from '../../core/types';
-import { EMPTY_PACKED } from '../../tiles/packed-geometry';
-import {
-  DOT_AREA_COVERAGE_SKSL,
-  DOT_MATERIAL_SKSL,
-  DOT_POINT_MATERIAL_SKSL,
-  dotFieldSksl,
-} from '../dot-field-sksl';
-import {
-  DOT_STEP,
-  dotAtlasSize,
-  dotFieldMode,
-  packDotFieldUniforms,
-  regionImageLayout,
-} from '../shader-uniforms';
+import { ROAD_VALUES, roadWidthFor } from '../../core/road-lod';
+import type { RoadClass, Viewport, WorldPoint } from '../../core/types';
+import { packGeometry } from '../../tiles/packed-geometry';
+import { DOT_FIELD_SKSL, DOT_MATERIAL_SKSL } from '../dot-field-sksl';
+import { buildMaskPaths } from '../mask-paths';
+import { dotAtlasSize, packDotFieldUniforms, regionImageLayout } from '../shader-uniforms';
 
 let ck: CanvasKit;
 const effects = new Map<string, RuntimeEffect>();
@@ -108,22 +99,22 @@ function render({
   quality = 1,
   cells = [255, 0, 0, 255],
   explorationEnabled = false,
-  filteredAreas = true,
   size = viewport,
   viewCenter = home,
+  fieldSource = DOT_FIELD_SKSL,
 }: {
   zoom?: number;
   viewZoom?: number;
   pan?: number;
   mask?: Texture;
   ground?: Texture;
-  terrain?: boolean;
+  terrain?: boolean | ElevationRaster;
   quality?: number;
   cells?: Texture;
   explorationEnabled?: boolean;
-  filteredAreas?: boolean;
   size?: Viewport;
   viewCenter?: WorldPoint;
+  fieldSource?: string;
 }): Uint8Array {
   const resources: { delete(): void }[] = [];
   const own = <T extends { delete(): void }>(resource: T | null): T => {
@@ -149,14 +140,13 @@ function render({
     const scale = scaleFor(zoom);
     const spec = specFor(zoom, pan, size);
     const layout = regionImageLayout(spec, quality);
-    const mode = { ...dotFieldMode(zoom, EMPTY_PACKED), filteredAreas };
+    const dem = terrain === true ? elevation : terrain || null;
     const uniforms = packDotFieldUniforms({
-      region: { spec, elevation: terrain ? elevation : null },
+      region: { spec, elevation: dem },
       palette,
       pixelRatio: layout.pixelRatio,
       explorationEnabled,
-      hasElevation: terrain,
-      filteredAreas,
+      hasElevation: dem !== null,
     });
     const texture = (input: Texture) => {
       if (typeof input !== 'function') return image(new Uint8Array(input));
@@ -168,8 +158,8 @@ function render({
       texture(cells),
       image(buildPaletteLut(palette), 256, 3),
       texture(ground),
-      terrain
-        ? image(elevationRgba(elevation), elevation.width, elevation.height)
+      dem
+        ? image(elevationRgba(dem), dem.width, dem.height)
         : image(new Uint8Array([0, 0, 0, 255])),
     ].map((im, i) =>
       own(
@@ -181,9 +171,9 @@ function render({
         )
       )
     );
-    const atlasSize = dotAtlasSize(spec, undefined, filteredAreas);
+    const atlasSize = dotAtlasSize(spec, layout.pixelRatio);
     const atlasSurface = own(ck.MakeSurface(atlasSize.width, atlasSize.height));
-    const material = compile(filteredAreas ? DOT_MATERIAL_SKSL : DOT_POINT_MATERIAL_SKSL);
+    const material = compile(DOT_MATERIAL_SKSL);
     const materialShader = own(material.makeShaderWithChildren(uniforms, inputs));
     const paint = own(new ck.Paint());
     paint.setShader(materialShader);
@@ -198,10 +188,7 @@ function render({
       )
     );
     const shader = own(
-      compile(dotFieldSksl(mode)).makeShaderWithChildren(uniforms, [
-        ...inputs.slice(0, 3),
-        atlasShader,
-      ])
+      compile(fieldSource).makeShaderWithChildren(uniforms, [...inputs.slice(0, 3), atlasShader])
     );
     const surface = own(ck.MakeSurface(layout.width, layout.height));
     paint.setShader(shader);
@@ -248,8 +235,8 @@ function channelMeans(pixels: Uint8Array): number[] {
   return sums.map((sum) => sum / (pixels.length / 4));
 }
 
-/** Coherent row/column carriers, excluding broad geographic shading. */
-function carrierPeak(pixels: Uint8Array, size: Viewport): number {
+/** Narrow-band excess above the local spectral floor of the filtered grain. */
+function carrierExcess(pixels: Uint8Array, size: Viewport): number {
   const rows = new Float64Array(size.height);
   const columns = new Float64Array(size.width);
   for (let y = 0; y < size.height; y++)
@@ -263,7 +250,8 @@ function carrierPeak(pixels: Uint8Array, size: Viewport): number {
   for (const values of [rows, columns]) {
     const n = values.length;
     const mean = values.reduce((sum, value) => sum + value, 0) / n;
-    for (let k = Math.ceil(n * 0.12); k <= n / 2; k++) {
+    const amplitudes = [0];
+    for (let k = 1; k <= n / 2; k++) {
       let re = 0;
       let im = 0;
       for (let i = 0; i < n; i++) {
@@ -271,7 +259,16 @@ function carrierPeak(pixels: Uint8Array, size: Viewport): number {
         re += (values[i] - mean) * window * Math.cos((2 * Math.PI * k * i) / n);
         im += (values[i] - mean) * window * Math.sin((2 * Math.PI * k * i) / n);
       }
-      peak = Math.max(peak, (4 * Math.hypot(re, im)) / n);
+      amplitudes.push((4 * Math.hypot(re, im)) / n);
+    }
+    for (let k = Math.ceil(n * 0.12); k < amplitudes.length; k++) {
+      // Circle footprints filter grain: its low-frequency floor is not the
+      // Nyquist floor. Exclude the candidate's Hann lobe from its neighbourhood.
+      const neighbours = amplitudes
+        .slice(Math.max(1, k - 8), Math.min(amplitudes.length, k + 9))
+        .filter((_, i) => Math.abs(Math.max(1, k - 8) + i - k) > 2)
+        .sort((a, b) => a - b);
+      peak = Math.max(peak, amplitudes[k] - 3 * neighbours[Math.floor(neighbours.length / 2)]);
     }
   }
   return peak;
@@ -288,6 +285,75 @@ function splitTexture(left: readonly number[], right: readonly number[]): Textur
         bytes.set(worldX < home[0] ? left : right, (y * width + x) * 4);
     }
     return { bytes, width, height };
+  };
+}
+
+function localContrast(pixels: Uint8Array, size: Viewport): number {
+  let sum = 0;
+  for (let y = 1; y < size.height - 1; y++)
+    for (let x = 1; x < size.width - 1; x++) {
+      const i = (y * size.width + x) * 4;
+      for (let c = 0; c < 3; c++) {
+        const neighbours =
+          pixels[i - 4 + c] +
+          pixels[i + 4 + c] +
+          pixels[i - size.width * 4 + c] +
+          pixels[i + size.width * 4 + c];
+        sum += Math.abs(pixels[i + c] - neighbours / 4);
+      }
+    }
+  return sum / ((size.width - 2) * (size.height - 2) * 3);
+}
+
+function roadMask(zoom: number, roadClass: RoadClass, slope: number): Texture {
+  const scale = scaleFor(zoom);
+  const geometry = packGeometry({
+    streets: [
+      {
+        roadClass,
+        points: [-300, 300].map((y): WorldPoint => [
+          home[0] + (y * slope) / scale,
+          home[1] + y / scale,
+        ]),
+      },
+    ],
+    parks: [],
+    water: [],
+    rivers: [],
+    transit: [],
+    places: [],
+  });
+  return (spec) => {
+    const width = roadWidthFor(roadClass, zoom);
+    if (width === null) throw new Error('Road fixture is below its visibility zoom');
+    const surface = ck.MakeSurface(spec.maskWidth, spec.maskHeight);
+    const path = ck.Path.MakeFromSVGString(buildMaskPaths(geometry, spec).streets[roadClass]);
+    if (!surface || !path) throw new Error('Road mask allocation failed');
+    const paint = new ck.Paint();
+    const canvas = surface.getCanvas();
+    canvas.clear(ck.BLACK);
+    paint.setAntiAlias(true);
+    paint.setStyle(ck.PaintStyle.Stroke);
+    paint.setStrokeWidth(width);
+    paint.setColor(ck.Color(ROAD_VALUES[roadClass], 0, 0, 1));
+    canvas.drawPath(path, paint);
+    const snapshot = surface.makeImageSnapshot();
+    try {
+      const bytes = snapshot.readPixels(0, 0, {
+        width: spec.maskWidth,
+        height: spec.maskHeight,
+        colorType: ck.ColorType.RGBA_8888,
+        alphaType: ck.AlphaType.Unpremul,
+        colorSpace: ck.ColorSpace.SRGB,
+      });
+      if (!(bytes instanceof Uint8Array)) throw new Error('Road mask readback failed');
+      return { bytes: new Uint8Array(bytes), width: spec.maskWidth, height: spec.maskHeight };
+    } finally {
+      snapshot.delete();
+      paint.delete();
+      path.delete();
+      surface.delete();
+    }
   };
 }
 
@@ -329,26 +395,38 @@ describe('real CanvasKit map shaders', () => {
       cells: [0, 0, 0, 255],
     };
     expect(layout.pixelRatio).toBe(0.5);
-    expect(meanDifference(render(options), render({ ...options, pan: -17.25 }))).toBeLessThan(0.1);
+    const before = render(options);
+    const after = render({ ...options, pan: -17.25 });
+    const interior = (pixels: Uint8Array) =>
+      pixels.filter((_, i) => {
+        const x = Math.floor(i / 4) % viewport.width;
+        const y = Math.floor(i / 4 / viewport.width);
+        return x > 0 && y > 0 && x < viewport.width - 1 && y < viewport.height - 1;
+      });
+    // Only the outer interpolated pixel can clamp against the bitmap edge.
+    expect(meanDifference(before, after)).toBeLessThan(0.5);
+    expect(meanDifference(interior(before), interior(after))).toBeLessThan(0.05);
   });
 
   it('does not shift broad mountain shading across an integer dot-detail boundary', () => {
-    const before = render({ zoom: 11.99, viewZoom: 12 });
-    const after = render({ zoom: 12.01, viewZoom: 12 });
+    const size = { width: 128, height: 128 };
+    const before = render({ zoom: 11.99, viewZoom: 12, size });
+    const after = render({ zoom: 12.01, viewZoom: 12, size });
     // Average out the deliberately finer stipple, not the relief or its contours.
     const blocks = (pixels: Uint8Array) => {
-      const columns = viewport.width / 8;
-      const rows = viewport.height / 8;
+      const span = 32;
+      const columns = size.width / span;
+      const rows = size.height / span;
       const means = new Uint8Array(columns * rows * 4);
       for (let by = 0; by < rows; by++)
         for (let bx = 0; bx < columns; bx++) {
           for (let c = 0; c < 3; c++) {
             let sum = 0;
-            for (let y = 0; y < 8; y++)
-              for (let x = 0; x < 8; x++) {
-                sum += pixels[((by * 8 + y) * viewport.width + bx * 8 + x) * 4 + c];
+            for (let y = 0; y < span; y++)
+              for (let x = 0; x < span; x++) {
+                sum += pixels[((by * span + y) * size.width + bx * span + x) * 4 + c];
               }
-            means[(by * columns + bx) * 4 + c] = Math.round(sum / 64);
+            means[(by * columns + bx) * 4 + c] = Math.round(sum / (span * span));
           }
         }
       return means;
@@ -357,74 +435,120 @@ describe('real CanvasKit map shaders', () => {
   });
 });
 
-describe('area reconstruction without a screen-door carrier', () => {
-  const size = { width: 96, height: 96 };
+describe('four-site compositing', () => {
+  const reference = DOT_FIELD_SKSL.replace(
+    /float3 fieldAt\(float2 frag\) \{[\s\S]*?\n\}/,
+    `float3 fieldAt(float2 frag) {
+      float3 col = uBg;
+      float baseIx = floor((frag.x - uGridPhase.x) / uStep + 0.5);
+      float baseIy = floor((frag.y - uGridPhase.y) / uStep + 0.5);
+      for (float dy = -1.0; dy <= 1.0; dy += 1.0) {
+        for (float dx = -1.0; dx <= 1.0; dx += 1.0) {
+          float4 d = dotAt(baseIx + dx, baseIy + dy, frag);
+          col = mix(col, d.rgb, d.a);
+        }
+      }
+      return col;
+    }`
+  );
 
   it.each([
-    { zoom: 10.25, explored: 0, viewDelta: 0, water: false },
-    { zoom: 12.25, explored: 0, viewDelta: 0, water: false },
-    { zoom: 12.25, explored: 1, viewDelta: 0, water: false },
-    { zoom: 13.16, explored: 0, viewDelta: 0, water: false },
-    { zoom: 13.16, explored: 1, viewDelta: 0, water: false },
-    { zoom: 13.16, explored: 0, viewDelta: 0.4, water: false },
-    { zoom: 13.16, explored: 1, viewDelta: 0.4, water: false },
-    { zoom: 12.25, explored: 0, viewDelta: 0, water: true },
+    { zoom: 13.16, quality: 0.25, fog: true, mask: [255, 0, 0, 255] },
+    { zoom: 16.5, quality: 1, fog: false, mask: [255, 0, 0, 255] },
+    { zoom: 10.25, quality: 1, fog: true, mask: [0, 255, 0, 255] },
+    { zoom: 10.25, quality: 1, fog: false, mask: [0, 255, 0, 255] },
+    { zoom: 13.16, quality: 0.65, fog: false, mask: [0, 255, 0, 255] },
+    { zoom: 12.25, quality: 1, fog: true, mask: [0, 0, 255, 255] },
+    { zoom: 12.25, quality: 1, fog: false, mask: [0, 0, 0, 255], terrain: true },
+  ])('matches all nine neighbours at z$zoom, quality=$quality, fog=$fog', (c) => {
+    expect(reference).not.toBe(DOT_FIELD_SKSL);
+    const options = { terrain: false, ...c, explorationEnabled: c.fog, cells: [0, 0, 0, 255] };
+    expect(render(options)).toEqual(render({ ...options, fieldSource: reference }));
+  });
+});
+
+describe('visible stipple without a screen-door carrier', () => {
+  const size = { width: 96, height: 96 };
+
+  it.each([4, 8])('distinguishes a period-%s mesh from visible irregular grain', (period) => {
+    let seed = 41;
+    const grain = new Uint8Array(size.width * size.height * 4);
+    const mesh = new Uint8Array(grain.length);
+    for (let i = 0; i < grain.length; i += 4) {
+      seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+      const value = 128 + (seed / 2 ** 32 - 0.5) * 32;
+      const periodic = 6 * Math.cos((2 * Math.PI * ((i / 4) % size.width)) / period);
+      for (let c = 0; c < 3; c++) {
+        grain[i + c] = value;
+        mesh[i + c] = value + periodic;
+      }
+    }
+    expect(localContrast(grain, size)).toBeGreaterThan(5);
+    expect(carrierExcess(grain, size)).toBeLessThan(0.7);
+    expect(carrierExcess(mesh, size)).toBeGreaterThan(4);
+  });
+
+  it('does not mistake filtered random grain for a periodic mesh', () => {
+    let seed = 41;
+    const noise = new Float64Array(size.width * size.height);
+    for (let i = 0; i < noise.length; i++) {
+      seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+      noise[i] = 128 + (seed / 2 ** 32 - 0.5) * 64;
+    }
+    const grain = new Uint8Array(noise.length * 4);
+    const mesh = new Uint8Array(grain.length);
+    for (let y = 0; y < size.height; y++)
+      for (let x = 0; x < size.width; x++) {
+        let value = 0;
+        for (let dy = -1; dy <= 1; dy++)
+          for (let dx = -1; dx <= 1; dx++) {
+            const ix = (x + dx + size.width) % size.width;
+            const iy = (y + dy + size.height) % size.height;
+            value += (noise[iy * size.width + ix] * (dx === 0 ? 2 : 1) * (dy === 0 ? 2 : 1)) / 16;
+          }
+        for (let c = 0; c < 3; c++) {
+          grain[(y * size.width + x) * 4 + c] = value;
+          mesh[(y * size.width + x) * 4 + c] = value + 6 * Math.cos((2 * Math.PI * x) / 8);
+        }
+      }
+    expect(localContrast(grain, size)).toBeGreaterThan(1);
+    expect(carrierExcess(grain, size)).toBeLessThan(0.7);
+    expect(carrierExcess(mesh, size)).toBeGreaterThan(4);
+  });
+
+  it.each([
+    { zoom: 12.25, fog: false, viewDelta: 0, water: false },
+    { zoom: 12.25, fog: true, viewDelta: 0, water: false },
+    { zoom: 13.16, fog: false, viewDelta: 0, water: false },
+    { zoom: 13.16, fog: true, viewDelta: 0, water: false },
+    { zoom: 13.16, fog: false, viewDelta: 0.4, water: false },
+    { zoom: 13.16, fog: true, viewDelta: 0.4, water: false },
+    { zoom: 13.16, fog: false, viewDelta: -0.4, water: false },
+    { zoom: 16.5, fog: false, viewDelta: 0, water: false },
+    { zoom: 12.25, fog: true, viewDelta: 0, water: true },
   ])(
-    'filters z$zoom e$explored live+$viewDelta water=$water without changing tone',
-    ({ zoom, explored, viewDelta, water }) => {
+    'retains grain at z$zoom fog=$fog live+$viewDelta water=$water',
+    ({ zoom, fog, viewDelta, water }) => {
       const options = {
         zoom,
         viewZoom: zoom + viewDelta,
         size,
-        explorationEnabled: true,
-        cells: [explored * 255, 0, 0, 255],
+        explorationEnabled: fog,
+        cells: [0, 0, 0, 255],
         mask: water ? [0, 0, 255, 255] : [0, 255, 0, 255],
         terrain: false,
       };
-      // The retained point renderer is the original circle-compositing reference.
-      const dots = render({ ...options, filteredAreas: false });
-      const filtered = render(options);
-      const before = carrierPeak(dots, size);
-      const after = carrierPeak(filtered, size);
-      expect(before).toBeGreaterThan(0.5);
-      expect(after).toBeLessThan(0.25);
-      expect(after).toBeLessThan(before * 0.15);
-      const mean = channelMeans(dots);
-      channelMeans(filtered).forEach((value, c) =>
-        expect(Math.abs(value - mean[c])).toBeLessThan(2.5)
-      );
-      expect(meanDifference(filtered, render({ ...options, pan: 17.25 }))).toBeLessThan(0.1);
+      const pixels = render(options);
+      expect(localContrast(pixels, size)).toBeGreaterThan(1);
+      expect(carrierExcess(pixels, size)).toBeLessThan(0.7);
+      expect(meanDifference(pixels, render({ ...options, pan: 17.25 }))).toBeLessThan(0.1);
+      if (!fog) {
+        expect(render({ ...options, explorationEnabled: true, cells: [255, 0, 0, 255] })).toEqual(
+          pixels
+        );
+      }
     }
   );
-
-  it.each([15, 13.16])('preserves the point-only renderer at z%s', (zoom) => {
-    for (const explored of [0, 255]) {
-      const options = {
-        zoom,
-        terrain: false,
-        explorationEnabled: true,
-        cells: [explored, 0, 0, 255],
-        mask: [255, 0, 0, 255],
-      };
-      expect(render(options)).toEqual(render({ ...options, filteredAreas: false }));
-    }
-  });
-
-  it('does not blur road dots beside a filtered park', () => {
-    const options = {
-      zoom: 13.16,
-      terrain: false,
-      size,
-      mask: splitTexture([0, 255, 0, 255], [255, 0, 0, 255]),
-    };
-    const filtered = render(options);
-    const dots = render({ ...options, filteredAreas: false });
-    for (let y = 0; y < size.height; y++) {
-      const start = (y * size.width + size.width / 2 + 8) * 4;
-      const end = (y + 1) * size.width * 4;
-      expect(filtered.subarray(start, end)).toEqual(dots.subarray(start, end));
-    }
-  });
 
   it('keeps water precedence and exploration boundaries stable', () => {
     const options = {
@@ -442,73 +566,110 @@ describe('area reconstruction without a screen-door carrier', () => {
   });
 });
 
-describe('integrated dot coverage', () => {
-  it('matches numerical integration of the actual AA circles to one RGBA8 level', () => {
-    const firstRadius = 64;
-    const width = 154;
-    const levels = 256;
-    const height = levels * 2;
-    const effect = compile(`${DOT_AREA_COVERAGE_SKSL}
-      half4 main(float2 p) {
-        bool sparse = p.y >= ${levels}.0;
-        float r = (${firstRadius}.0 + floor(p.x)) / 255.0;
-        float alpha = mod(floor(p.y), ${levels}.0) / 255.0;
-        return half4(float3(areaCoverage(r, alpha, sparse)), 1.0);
-      }`);
-    const surface = ck.MakeSurface(width, height);
-    if (!surface) throw new Error('Coverage surface allocation failed');
-    const paint = new ck.Paint();
-    const shader = effect.makeShaderWithChildren([], []);
-    paint.setShader(shader);
-    surface.getCanvas().drawPaint(paint);
-    const snapshot = surface.makeImageSnapshot();
-    try {
-      const pixels = snapshot.readPixels(0, 0, {
-        width,
-        height,
-        colorType: ck.ColorType.RGBA_8888,
-        alphaType: ck.AlphaType.Unpremul,
-        colorSpace: ck.ColorSpace.SRGB,
-      });
-      if (!(pixels instanceof Uint8Array)) throw new Error('Coverage readback failed');
-      let maximumError = 0;
-      const samples = 64;
-      const { hypot, min, max } = Math;
-      for (const sparse of [false, true])
-        for (let column = 0; column < width; column++) {
-          const radius = (firstRadius + column) / 255;
-          const pitch = sparse ? 2 : 1;
-          const overlaps = [0, 0, 0, 0, 0];
-          for (let y = 0; y < samples; y++)
-            for (let x = 0; x < samples; x++) {
-              const terms = [1, 0, 0, 0, 0, 0];
-              for (let dy = -1; dy <= 1; dy++)
-                for (let dx = -1; dx <= 1; dx++) {
-                  const distance = hypot(
-                    ((x + 0.5) / samples - 0.5 - dx) * pitch,
-                    ((y + 0.5) / samples - 0.5 - dy) * pitch
-                  );
-                  const coverage = min(1, max(0, DOT_STEP * (radius - distance) + 0.5));
-                  for (let j = 5; j > 0; j--) terms[j] += terms[j - 1] * coverage;
-                }
-              for (let j = 0; j < 5; j++) overlaps[j] += terms[j + 1] / samples / samples;
-            }
-          for (let row = 0; row < levels; row++) {
-            const alpha = row / 255;
-            const exact = overlaps.reduce(
-              (sum, coefficient, j) => sum + coefficient * alpha ** (j + 1) * (j % 2 ? -1 : 1),
-              0
-            );
-            const actual = pixels[((row + (sparse ? levels : 0)) * width + column) * 4] / 255;
-            maximumError = Math.max(maximumError, Math.abs(actual - exact));
+describe('finite-width roads, not a solid red mask', () => {
+  it.each([
+    { zoom: 12.25, fog: false },
+    { zoom: 13.16, fog: false },
+    { zoom: 13.5, fog: false },
+    { zoom: 15, fog: false },
+    { zoom: 16.5, fog: false },
+    { zoom: 19, fog: false },
+    { zoom: 12.25, fog: true },
+    { zoom: 13.16, fog: true },
+    { zoom: 16.5, fog: true },
+  ])('keeps roads connected at z$zoom fog=$fog', ({ zoom, fog }) => {
+    const size = { width: 64, height: 64 };
+    for (const roadClass of [1, 3] as const) {
+      if (roadWidthFor(roadClass, zoom) === null) continue;
+      for (const slope of [0, 0.4]) {
+        const pixels = render({
+          zoom,
+          size,
+          terrain: false,
+          mask: roadMask(zoom, roadClass, slope),
+          explorationEnabled: fog,
+          cells: [0, 0, 0, 255],
+        });
+        const ink: number[] = [];
+        for (let y = 8; y < size.height - 8; y++) {
+          const center = Math.round(size.width / 2 + (y + 0.5 - size.height / 2) * slope);
+          let sum = 0;
+          for (let x = center - 1; x <= center + 1; x++) {
+            const i = (y * size.width + x) * 4;
+            sum +=
+              (palette.bg[0] -
+                pixels[i] +
+                palette.bg[1] -
+                pixels[i + 1] +
+                palette.bg[2] -
+                pixels[i + 2]) /
+              3;
           }
+          ink.push(sum / 3);
         }
-      expect(maximumError).toBeLessThan(1 / 255);
-    } finally {
-      snapshot.delete();
-      shader.delete();
-      paint.delete();
-      surface.delete();
+        const mean = ink.reduce((sum, value) => sum + value, 0) / ink.length;
+        expect(mean).toBeGreaterThan(fog ? 2 : 20);
+        expect(Math.min(...ink)).toBeGreaterThan(mean * 0.65);
+        if (slope === 0) expect(Math.max(...ink) - Math.min(...ink)).toBeLessThan(mean * 0.12);
+      }
     }
+  });
+});
+
+describe('terrain continuity through material boundaries', () => {
+  const level = (metres: number): ElevationRaster => ({
+    ...elevation,
+    metres: new Float32Array(elevation.width * elevation.height).fill(metres),
+  });
+
+  it.each([3, 4])('retains the same absolute contour on ground kind %s', (kind) => {
+    const options = {
+      zoom: 13,
+      size: { width: 64, height: 64 },
+      mask: [0, 0, 0, 255],
+      ground: [groundCode(kind), 0, 0, 255],
+    };
+    const line = channelMeans(render({ ...options, terrain: level(2000) }));
+    const between = channelMeans(render({ ...options, terrain: level(2025) }));
+    expect(
+      line.reduce((sum, value, c) => sum + Math.abs(value - between[c]), 0) / 3
+    ).toBeGreaterThan(8);
+  });
+
+  it('does not paint an artificial green park-edge band above the treeline', () => {
+    const options = { zoom: 13.16, terrain: level(3000) };
+    expect(render({ ...options, ground: [0, 0, 0, 255] })).toEqual(
+      render({ ...options, ground: [0, 255, 0, 255] })
+    );
+  });
+
+  it.each([false, true])(
+    'uses the same alpine rock on either side of a park boundary, fog=%s',
+    (fog) => {
+      const options = {
+        zoom: 13.16,
+        terrain: level(3025),
+        explorationEnabled: fog,
+        cells: [0, 0, 0, 255],
+      };
+      expect(render({ ...options, mask: [0, 255, 0, 255], ground: [0, 255, 0, 255] })).toEqual(
+        render({ ...options, mask: [0, 0, 0, 255], ground: [groundCode(3), 0, 0, 255] })
+      );
+    }
+  );
+
+  it('keeps alpine relief at street zoom even without a ground-cover polygon', () => {
+    const options = {
+      zoom: 16.5,
+      mask: [0, 0, 0, 255],
+      ground: [0, 0, 0, 255],
+      size: { width: 64, height: 64 },
+    };
+    expect(
+      meanDifference(
+        render({ ...options, terrain: level(3000) }),
+        render({ ...options, terrain: level(3012) })
+      )
+    ).toBeGreaterThan(8);
   });
 });

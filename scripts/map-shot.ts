@@ -96,11 +96,7 @@ import {
   cellStateFills,
   exploredCellPath,
 } from '../src/features/map/render/cell-overlay-paths';
-import {
-  dotFieldSksl,
-  DOT_MATERIAL_SKSL,
-  DOT_POINT_MATERIAL_SKSL,
-} from '../src/features/map/render/dot-field-sksl';
+import { DOT_FIELD_SKSL, DOT_MATERIAL_SKSL } from '../src/features/map/render/dot-field-sksl';
 import { buildMaskPaths } from '../src/features/map/render/mask-paths';
 import { buildHatchPath, buildStructurePaths } from '../src/features/map/render/structure-paths';
 import { buildingBinSvgs, TILE_PATH_UNITS } from '../src/features/map/render/tile-path-svg';
@@ -126,11 +122,9 @@ import {
 } from '../src/features/map/core/structure-lod';
 import {
   dotAtlasSize,
-  dotFieldMode,
   lodForZoom,
   packDotFieldUniforms,
   regionImageLayout,
-  type DotFieldMode,
 } from '../src/features/map/render/shader-uniforms';
 import {
   elevationRgba,
@@ -318,7 +312,6 @@ async function main(): Promise<void> {
         ? { ...baseSpec, tileZoom: Number(process.env.SC_SHOT_TILE_ZOOM) }
         : baseSpec;
       const geometry = await loadGeometry(source, spec);
-      const mode = dotFieldMode(spec.zoom, geometry);
       // The ladder decides the resolution; `spec.cellRes` is null once the
       // camera drops below its coarsest rung, which is exactly when the layer
       // should vanish from the shot too.
@@ -328,9 +321,8 @@ async function main(): Promise<void> {
           : null;
       const png = renderShot({
         CanvasKit,
-        effect: compile(dotFieldSksl(mode)),
-        materialEffect: compile(mode.filteredAreas ? DOT_MATERIAL_SKSL : DOT_POINT_MATERIAL_SKSL),
-        mode,
+        effect: compile(DOT_FIELD_SKSL),
+        materialEffect: compile(DOT_MATERIAL_SKSL),
         lut,
         geometry,
         spec,
@@ -439,7 +431,6 @@ interface ShotInput {
   CanvasKit: any;
   effect: RuntimeEffect;
   materialEffect: RuntimeEffect;
-  mode: DotFieldMode;
   lut: any;
   geometry: PackedGeometry;
   spec: RegionSpec;
@@ -463,7 +454,6 @@ function renderShot({
   CanvasKit,
   effect,
   materialEffect,
-  mode,
   lut,
   geometry,
   spec,
@@ -503,7 +493,6 @@ function renderShot({
     pixelRatio: layout.pixelRatio,
     explorationEnabled: cellField !== null,
     hasElevation: terrain.hasElevation,
-    filteredAreas: mode.filteredAreas,
   });
 
   const inputs = [
@@ -538,7 +527,7 @@ function renderShot({
       CanvasKit.MipmapMode.None
     ),
   ];
-  const atlasSize = dotAtlasSize(spec, undefined, mode.filteredAreas);
+  const atlasSize = dotAtlasSize(spec, layout.pixelRatio);
   const atlasSurface = CanvasKit.MakeSurface(atlasSize.width, atlasSize.height);
   if (!atlasSurface) throw new Error('dot atlas surface failed');
   const atlasPaint = new CanvasKit.Paint();

@@ -1,11 +1,11 @@
 import { ROAD_DILATE_MIN, ROAD_MASK_FLOOR } from '../core/road-lod';
 import { GROUND_CODE_STEP } from '../core/terrain';
 import { DOT_STEP } from '../core/dot-style';
-import { DOT_ATLAS_HALO, DOT_HASH_PERIOD, type DotFieldMode } from './shader-uniforms';
+import { DOT_ATLAS_HALO, DOT_HASH_PERIOD } from './shader-uniforms';
 
 /**
  * Material is evaluated at lattice points into a small atlas; the final pass
- * reconstructs area ink or composites neighbouring point features. Terrain/noise
+ * composites neighbouring dot glyphs. Terrain/noise
  * must not be recalculated for every output pixel touched by the same dot.
  *
  * It is **camera-independent**: it renders the whole region rect into a bitmap
@@ -72,10 +72,6 @@ uniform float  uContourInterval; // absolute metres between detail contours
 uniform float  uContourDetail;   // fade in intermediate lines, never relocate them
 uniform float4 uCanopyWeights;   // sampling-filtered octave amplitudes, centred on 0.5
 uniform float4 uWaterWeights;
-uniform float2 uCoarseGridOrigin;
-uniform float2 uCoarseGridPhase;
-uniform float  uAtlasSplit;
-uniform float  uDetailBlend;
 `;
 
 const SAMPLING = `
@@ -97,34 +93,7 @@ float3 rampLut(float t, float row) {
 }
 `;
 
-/**
- * Mean coverage of the existing linear-AA circles, not their optical density
- * (averaging density darkens canopy). The dense case integrates
- * 1 - product(1 - alpha * coverage) over a lattice cell. These degree-six fits
- * approximate the alpha^2, alpha^3 and alpha^4 overlap coefficients for
- * radius/step in [0.25, 0.851]; the numerical-integration render test
- * bounds the error below one RGBA8 level. At the shipped sparse opacities,
- * ignoring their tiny overlaps costs less than 0.05/255.
- */
-export const DOT_AREA_COVERAGE_SKSL = `
-float areaCoverage(float r, float alpha, bool sparse) {
-  float area = 3.14159265 * (r * r + 1.0 / 48.0);
-  if (sparse) return alpha * area * 0.25;
-  float t = (r - 0.25) / 0.6;
-  float3 overlap = float3(0.3116777, -3.9312626, 0.1535741);
-  overlap = overlap * t + float3(-2.4392213, 12.2483635, 0.1919365);
-  overlap = overlap * t + float3(4.7311483, -11.7692370, -0.5361927);
-  overlap = overlap * t + float3(-1.0278164, 4.8993563, 0.3394671);
-  overlap = overlap * t + float3(0.3071636, -0.9153937, -0.0832372);
-  overlap = overlap * t + float3(-0.0247104, 0.0655773, 0.0073383);
-  overlap = max(float3(0.0), overlap * t + float3(0.0003902, -0.0009902, -0.0001330));
-  return clamp(alpha * (area - alpha * (overlap.x - alpha * (overlap.y - alpha * overlap.z))), 0.0, 1.0);
-}
-`;
-
-function materialSksl(filteredAreas: boolean): string {
-  const halo = filteredAreas ? DOT_ATLAS_HALO : 1;
-  return `${UNIFORMS}${SAMPLING}${filteredAreas ? DOT_AREA_COVERAGE_SKSL : ''}
+export const DOT_MATERIAL_SKSL = `${UNIFORMS}${SAMPLING}
 uniform shader groundTex;
 uniform shader terrainTex;
 
@@ -132,6 +101,14 @@ uniform shader terrainTex;
 float hash2(float2 p) {
   float s = sin(p.x * 12.9898 + p.y * 78.233) * 43758.5453;
   return s - floor(s);
+}
+
+// Keep site randomness away from large, quantized float32 sine arguments.
+float siteHash(float2 id) {
+  float2 p = mod(id, ${DOT_HASH_PERIOD}.0);
+  float3 q = fract(float3(p.x, p.y, p.x) * float3(0.1031, 0.1030, 0.0973));
+  q += dot(q, q.yzx + 33.33);
+  return fract((q.x + q.y) * q.z);
 }
 
 float vnoise(float2 p) {
@@ -186,6 +163,14 @@ float contourAt(float h) {
   return mix(coarse, fine, uContourDetail);
 }
 
+float3 contourInk(float shade) { return rampLut(0.5 + 0.2 * shade, 0.0); }
+
+float4 rockAt(float shade, float n, float line) {
+  float3 color = mix(rampLut(0.30 + 0.40 * shade + 0.10 * n, 0.0), contourInk(shade), line * 0.65);
+  float density = 1.0 - smoothstep(n, n + 0.08, 0.55 * (1.0 - line));
+  return float4(color, density);
+}
+
 float lum(float3 c) { return dot(c, float3(0.299, 0.587, 0.114)); }
 
 // Fog-of-war muting of undiscovered dots. Lower = the hidden world keeps more of
@@ -201,23 +186,20 @@ float3 applyFog(float3 color, float fog, float isArea) {
   return mix(mix(color, float3(l), fg * FOG_DESAT), uBg, fg * FOG_DIM);
 }
 
-// Two opaque texels per dot: RGB ink, then radius/step, opacity and area coverage.
-float4 materialAt(float ix, float iy, bool metrics, bool coarseGrid) {
-  float step = coarseGrid ? uStep * 2.0 : uStep;
-  float2 id = (coarseGrid ? uCoarseGridOrigin : uGridOrigin) + float2(ix, iy);
-  float2 center = float2(ix, iy) * step + (coarseGrid ? uCoarseGridPhase : uGridPhase);
+// Two opaque texels per dot: RGB ink, then radius/step, opacity and glyph jitter.
+float4 materialAt(float ix, float iy, bool metrics) {
+  float step = uStep;
+  float2 id = uGridOrigin + float2(ix, iy);
+  float2 center = float2(ix, iy) * step + uGridPhase;
   float dotScale = step / ${DOT_STEP}.0;
 
   // Explored occupancy of this dot's fixed-resolution cell.
   float e = uExploration > 0.5 ? cellAt(center).r : 1.0;
-  if (e < 0.5 && (mod(id.x, 2.0) > 0.5 || mod(id.y, 2.0) > 0.5)) return float4(0.0);
   float coarse = e < 0.5 ? 1.0 : 0.0;
 
-  float n = hash2(mod(id, ${DOT_HASH_PERIOD}.0));
   float3 m = maskAt(center);
   float wv = m.b * 255.0;
   float pv = m.g * 255.0;
-  float2 np = uNoiseOrigin + center * uNoiseScale;
   // street sampleMax5, gated: a road may only claim a dot it does not cover if
   // it is big enough to be worth the lie (ROAD_DILATE_MIN). Ungated, the six
   // hundred service roads in a downtown tile each grow to a full dot and the
@@ -230,10 +212,18 @@ float4 materialAt(float ix, float iy, bool metrics, bool coarseGrid) {
                   maskAt(center + float2(0.0, -o)).r))) * 255.0;
   float sv = near >= ${ROAD_DILATE_MIN}.0 ? max(here, near) : here;
 
+  // Independent thinning: one-per-block still patterns overlaps at block edges.
+  // Roads keep their connected sampling and lose opacity instead.
+  if (e < 0.5 && sv <= ${ROAD_MASK_FLOOR}.0
+      && siteHash(id + float2(17.0, 89.0)) >= 0.25) return float4(0.0);
+  float n = siteHash(id);
+  float2 np = uNoiseOrigin + center * uNoiseScale;
+
   // kind: 0 street 1 park 2 water 3 bg/ground cover. A branch may override the
   // kind's alpha floor/ceiling (floorA/maxA >= 0).
   float3 color; float val; float isArea; int kind;
   float floorA = -1.0; float maxA = -1.0;
+  float areaGrowth = 1.0;
   float gk = sv <= ${ROAD_MASK_FLOOR}.0 && wv <= 40.0 && pv <= 40.0 ? groundAt(center) : 0.0;
   if (sv > ${ROAD_MASK_FLOOR}.0) {
     val = clamp(sv / 255.0, 0.0, 1.0);
@@ -264,14 +254,17 @@ float4 materialAt(float ix, float iy, bool metrics, bool coarseGrid) {
       float h = t.r;
       float sh = shadeAt(center, h);
       float alp = t.g;
+      band *= 1.0 - alp;
+      areaGrowth = 1.0 - alp;
       float line = contourAt(h);
-      color = mix(rampLut(min(0.96, 0.32 + 0.42 * sh + 0.30 * canopy + 0.04 * n), 2.0), rampLut(0.08 + 0.22 * sh, 0.0), alp);
-      val = mix(0.32 + 0.20 * sh, 0.54, line);
+      color = rampLut(min(0.96, 0.32 + 0.42 * sh + 0.30 * canopy + 0.04 * n), 2.0);
       color = mix(color, rampLut(0.96, 2.0), line * 0.75);
-      // Keep the alpine grain, but fade its world-anchored dots rather than
-      // toggling holes as the treeline or contour detail changes.
-      float density = 1.0 - smoothstep(n, n + 0.08, 0.40 * alp * (1.0 - line));
-      maxA = 0.72 * density; floorA = 0.34 * density;
+      float4 rock = rockAt(sh, n, line);
+      color = mix(color, rock.rgb, alp);
+      val = mix(mix(0.32 + 0.20 * sh, 0.55, alp), 0.54, line);
+      float density = mix(1.0, rock.a, alp);
+      maxA = mix(0.72, 0.75, alp) * density;
+      floorA = mix(0.34, 0.30, alp) * density;
     } else {
       // Canopy: the same calm without elevation to shade.
       color = rampLut(min(0.96, 0.40 + 0.46 * f + 0.24 * canopy + 0.04 * n), 2.0);
@@ -286,9 +279,12 @@ float4 materialAt(float ix, float iy, bool metrics, bool coarseGrid) {
   } else if (gk > 0.5) {
     // Ground cover (GROUND_KINDS order): each class its own stipple, shaded by
     // the terrain where the region has elevation.
-    float sh = 0.5;
+    float sh = 0.5; float line = 0.0;
     float4 t = terrainAt(center);
-    if (t.a > 0.5) sh = shadeAt(center, t.r);
+    if (t.a > 0.5) {
+      sh = shadeAt(center, t.r);
+      if (gk >= 3.5) line = contourAt(t.r);
+    }
     isArea = 0.0; kind = 3;
     floorA = 0.30; maxA = 0.72;
     if (gk < 1.5) {              // farmland: dots in rows
@@ -304,13 +300,19 @@ float4 materialAt(float ix, float iy, bool metrics, bool coarseGrid) {
       color = mix(rampLut(0.55 + 0.20 * n, 0.0), float3(0.93, 0.84, 0.60), 0.35);
       val = 0.26; maxA = 0.70;
     } else if (gk < 4.5) {       // rock: sparse, coarse, shaded
-      if (n < 0.55) return float4(0.0);
-      color = rampLut(0.30 + 0.40 * sh + 0.10 * n, 0.0);
-      val = 0.55; maxA = 0.75;
+      float4 rock = rockAt(sh, n, line);
+      color = rock.rgb;
+      val = mix(0.55, 0.54, line);
+      maxA = 0.75 * rock.a; floorA = 0.30 * rock.a;
     } else {                     // ice: pale and even
-      if (n < 0.05) return float4(0.0);
+      if (n < 0.05 * (1.0 - line)) return float4(0.0);
       color = mix(rampLut(0.85, 1.0), float3(1.0), 0.45) * (0.85 + 0.3 * sh);
-      val = 0.34; maxA = 0.75;
+      color = mix(color, contourInk(sh), line * 0.65);
+      val = mix(0.34, 0.54, line); maxA = 0.75;
+    }
+    if (gk >= 3.5) {
+      isArea = 1.0;
+      areaGrowth = 0.0;
     }
   } else {
     // Background/building noise thins out as you zoom out, so the city field
@@ -318,7 +320,7 @@ float4 materialAt(float ix, float iy, bool metrics, bool coarseGrid) {
     // share of the land, the same ground carries the relief: shaded slopes keep
     // more (and darker) dots, lit ones thin, and contours stay dotted.
     float4 t = terrainAt(center);
-    float relief = t.a * uLod;
+    float relief = t.a * max(uLod, t.g);
     float sh = 0.5; float line = 0.0;
     if (relief > 0.001) {
       float h = t.r;
@@ -342,110 +344,66 @@ float4 materialAt(float ix, float iy, bool metrics, bool coarseGrid) {
   float radius;
   if (coarse > 0.5) {
     alpha *= isArea > 0.5 ? 0.72 : 0.5;
+    if (kind == 0) alpha *= 0.25;
     radius = (0.55 + 0.72 * val) * 1.5;
   } else {
     radius = (0.3 + 0.85 * val) * (0.6 + 0.55 * e);
   }
   // Zoomed out, grow area (park/water) dots until they merge into readable
   // filled terrain instead of a stipple of separate dots.
-  if (isArea > 0.5) radius = mix(radius, max(radius, ${DOT_STEP}.0 * 0.85), uLod);
+  if (isArea > 0.5) radius = mix(radius, max(radius, ${DOT_STEP}.0 * 0.85), uLod * areaGrowth);
   radius *= dotScale;
-  ${
-    filteredAreas
-      ? `if (!metrics) return float4(fogged, 1.0);
-  float r = radius / step;
-  // Match the quantized radius/opacity the point compositor reads from this atlas.
-  float areaCode = 0.0;
-  if (isArea > 0.5) {
-    float2 footprint = floor(float2(r, alpha) * 255.0 + 0.5) / 255.0;
-    float coverage = areaCoverage(footprint.x, footprint.y, coarse > 0.5);
-    areaCode = (1.0 + coverage * 254.0) / 255.0;
-  }
-  return float4(r, alpha, areaCode, 1.0);`
-      : 'return metrics ? float4(radius / step, alpha, 0.0, 1.0) : float4(fogged, 1.0);'
-  }
+  if (!metrics) return float4(fogged, 1.0);
+  // Sample geometry at the unperturbed site: jittering thin roads breaks them.
+  // The two nibbles carry a small non-road glyph offset; 255 means no offset.
+  float code = kind == 0 ? 255.0 : floor(siteHash(id + float2(43.0, 71.0)) * 255.0);
+  return float4(radius / step, alpha, code / 255.0, 1.0);
 }
 
 half4 main(float2 p) {
-  bool coarse = p.y >= uAtlasSplit;
-  if ((coarse && uDetailBlend >= 1.0) || (!coarse && uDetailBlend <= 0.0)) return half4(0.0);
-  float x = floor(p.x * 0.5) - ${halo}.0;
-  if (coarse && x > ceil(uRectSize.x * uScale / (uStep * 2.0)) + ${halo}.0) return half4(0.0);
-  float y = floor(p.y - (coarse ? uAtlasSplit : 0.0)) - ${halo}.0;
-  return half4(materialAt(x, y, mod(floor(p.x), 2.0) > 0.5, coarse));
+  float x = floor(p.x * 0.5) - ${DOT_ATLAS_HALO}.0;
+  float y = floor(p.y) - ${DOT_ATLAS_HALO}.0;
+  return half4(materialAt(x, y, mod(floor(p.x), 2.0) > 0.5));
 }
 `;
-}
 
-export function dotFieldSksl({ filteredAreas, blendLevels }: DotFieldMode): string {
-  const halo = filteredAreas ? DOT_ATLAS_HALO : 1;
-  return `${UNIFORMS}${SAMPLING}
+export const DOT_FIELD_SKSL = `${UNIFORMS}${SAMPLING}
 uniform shader dotTex;
-const bool FILTER_AREAS = ${filteredAreas};
 
-float2 dotPixel(float2 index, bool coarse) {
-  return float2((index.x + ${halo}.0) * 2.0 + 0.5,
-    index.y + ${halo}.5 + (coarse ? uAtlasSplit : 0.0));
+float2 dotPixel(float2 index) {
+  return float2((index.x + ${DOT_ATLAS_HALO}.0) * 2.0 + 0.5,
+    index.y + ${DOT_ATLAS_HALO}.5);
 }
 
-float4 dotAt(float ix, float iy, float2 frag, bool coarse) {
-  float step = coarse ? uStep * 2.0 : uStep;
-  float2 center = float2(ix, iy) * step + (coarse ? uCoarseGridPhase : uGridPhase);
+float4 dotAt(float ix, float iy, float2 frag) {
+  float step = uStep;
+  float2 p = dotPixel(float2(ix, iy));
+  float3 metrics = dotTex.eval(p + float2(1.0, 0.0)).rgb;
+  if (metrics.g == 0.0) return float4(0.0);
+  float code = floor(metrics.b * 255.0 + 0.5);
+  float2 jitter = (float2(mod(code, 16.0), floor(code / 16.0)) - 7.5) * (step * 0.2 / 15.0);
+  float2 center = float2(ix, iy) * step + uGridPhase
+    + jitter * (code < 254.5 ? 1.0 : 0.0);
   float dotScale = step / ${DOT_STEP}.0;
   float dist = distance(frag, center);
-  if (dist > 2.5 * dotScale) return float4(0.0);
-  float2 p = dotPixel(float2(ix, iy), coarse);
-  float2 metrics = dotTex.eval(p + float2(1.0, 0.0)).rg;
-  float cov = clamp((metrics.r * step - dist) / dotScale + 0.5, 0.0, 1.0);
+  float cov = clamp((metrics.r * step - dist) / max(dotScale, 1.0 / uPixelRatio) + 0.5, 0.0, 1.0);
   float alpha = cov * metrics.g;
   if (alpha == 0.0) return float4(0.0);
   return float4(dotTex.eval(p).rgb, alpha);
 }
 
-float4 areaAt(float2 frag, bool coarse, bool unexplored) {
-  float step = coarse ? uStep * 2.0 : uStep;
-  float2 phase = coarse ? uCoarseGridPhase : uGridPhase;
-  float stride = unexplored ? 2.0 : 1.0;
-  float2 parity = mod(coarse ? uCoarseGridOrigin : uGridOrigin, stride);
-  float2 q = ((frag - phase) / step + parity) / stride;
-  float2 lo = floor(q) * stride - parity;
-  float2 t = fract(q);
-  float3 col = uBg;
-  for (float y = 0.0; y <= 1.0; y += 1.0) {
-    for (float x = 0.0; x <= 1.0; x += 1.0) {
-      float2 p = dotPixel(lo + float2(x, y) * stride, coarse);
-      float code = dotTex.eval(p + float2(1.0, 0.0)).b;
-      // Mixed feature edges retain the original dot coverage.
-      if (code == 0.0) return float4(0.0);
-      float alpha = (code * 255.0 - 1.0) / 254.0;
-      float weight = (x == 0.0 ? 1.0 - t.x : t.x) * (y == 0.0 ? 1.0 - t.y : t.y);
-      col += (dotTex.eval(p).rgb - uBg) * (alpha * weight);
-    }
-  }
-  return float4(col, 1.0);
-}
-
-float3 fieldAt(float2 frag, bool coarse, bool unexplored) {
+float3 fieldAt(float2 frag) {
   float3 col = uBg;
 
-  float step = coarse ? uStep * 2.0 : uStep;
-  float2 phase = coarse ? uCoarseGridPhase : uGridPhase;
-  float baseIx = floor((frag.x - phase.x) / step + 0.5);
-  float baseIy = floor((frag.y - phase.y) / step + 0.5);
-  if (FILTER_AREAS) {
-    float2 probe = float2(baseIx, baseIy);
-    if (unexplored) {
-      float2 origin = coarse ? uCoarseGridOrigin : uGridOrigin;
-      probe -= mod(probe + origin, 2.0);
-    }
-    if (dotTex.eval(dotPixel(probe, coarse) + float2(1.0, 0.0)).b > 0.0) {
-      float4 ink = areaAt(frag, coarse, unexplored);
-      if (ink.a > 0.0) return ink.rgb;
-    }
-  }
-  for (float dy = -1.0; dy <= 1.0; dy += 1.0) {
-    for (float dx = -1.0; dx <= 1.0; dx += 1.0) {
-      float4 d = dotAt(baseIx + dx, baseIy + dy, frag, coarse);
+  float step = uStep;
+  float2 phase = uGridPhase;
+  // Two-pixel registration puts fragments a quarter-cell from a site.
+  // Even the largest antialiased glyph cannot reach beyond these four sites.
+  float baseIx = floor((frag.x - phase.x) / step);
+  float baseIy = floor((frag.y - phase.y) / step);
+  for (float dy = 0.0; dy <= 1.0; dy += 1.0) {
+    for (float dx = 0.0; dx <= 1.0; dx += 1.0) {
+      float4 d = dotAt(baseIx + dx, baseIy + dy, frag);
       col = mix(col, d.rgb, d.a);
     }
   }
@@ -454,12 +412,7 @@ float3 fieldAt(float2 frag, bool coarse, bool unexplored) {
 
 half4 main(float2 fragCoord) {
   float2 frag = fragCoord / uPixelRatio;
-  bool unexplored = FILTER_AREAS && uExploration > 0.5 && cellAt(frag).r < 0.5;
-  float3 col = ${
-    blendLevels
-      ? 'mix(fieldAt(frag, true, unexplored), fieldAt(frag, false, unexplored), uDetailBlend)'
-      : 'fieldAt(frag, false, unexplored)'
-  };
+  float3 col = fieldAt(frag);
 
   if (uNeonGlow > 0.001) {
     float street = maskAt(frag).r;
@@ -493,8 +446,3 @@ half4 main(float2 fragCoord) {
   return half4(col.r * revealA, col.g * revealA, col.b * revealA, revealA);
 }
 `;
-}
-
-export const DOT_FIELD_SKSL = dotFieldSksl({ filteredAreas: true, blendLevels: true });
-export const DOT_MATERIAL_SKSL = materialSksl(true);
-export const DOT_POINT_MATERIAL_SKSL = materialSksl(false);

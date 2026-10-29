@@ -1,115 +1,149 @@
 # Map renderer performance over time
 
-## Removing the screen-door pattern
+## Keeping the pixel aesthetic without a screen-door pattern
 
-Baseline: `829cdd2`, after the world-anchoring changes below. Anchoring stopped
-the texture moving, but did not remove its periodic carrier: unexplored areas
-used a repeating one-in-four dot lattice, and even explored circles had
-periodic gaps/overlaps. Fractional bitmap sampling and live scaling turned that
-regular coverage into a grid or moire pattern, especially over green.
+References: `0f84053` before the stability optimization, `829cdd2` with that
+optimization merged, and the rejected mean-area reconstruction at `b8330cb`.
+The latter removed the grid partly by removing the wanted texture. Its
+previous 23-case timing comparison did not protect aesthetic quality, and is
+not evidence for the replacement described here.
 
-Park and water interiors now reconstruct **mean ink coverage**, not overlapping
-circles. The material atlas stores the integrated coverage of the existing
-antialiased footprint; four surrounding retained sites interpolate it into a
-continuous field. Sparse interpolation follows the same world-anchored parity.
-An area with zero ink still has a nonzero type code, so alpine thinning does
-not accidentally reactivate the circle renderer. Roads, other point features,
-and mixed feature edges retain their original circle coverage. Terrain heights,
-hillshade, contours, geographic noise, exploration, and label placement are
-unchanged. This is not a blur of the finished map.
+### Cause and rendering contract
 
-Coverage is the mean of the original alpha composite, not mean optical density,
-which would darken the greenery. A constant-cost polynomial approximates the
-dense footprint's overlap integrals; a real CanvasKit test compares it with
-numerical integration to within one RGBA8 level. Sparse circles barely overlap.
-In the full-size comparison, canopy/water mean RGB shifted by less than 0.14/255.
-Spatially varying alpine stipple is reconstructed rather than preserved
-pixel-for-pixel: the explored synthetic mountain was 4.7/255 brighter on average,
-with its contours and broad shading retained.
+The stability optimization crossfaded two **non-coincident** dot grids at
+fractional zooms. Thin roads were sampled differently on each grid, so their
+crossfade interlaced two different road shapes. At integer/detail endpoints
+only one grid contributed, which is why max zoom looked better. A dot's
+antialiasing width could also shrink below one bitmap pixel. World anchoring
+alone could not fix either problem.
 
-The initial filtering prototype regressed city views. The fix also specializes
-the compositor **before compilation**: one detail level or two blended levels,
-with area filtering omitted when the raster geometry has no parks, water or
-rivers. This removes unused branches from the compiled program, rather than
-depending on per-pixel uniform branches. There are at most four cached field
-effects and two material effects, not a shader per zoom. Selection follows
-`rasterGeometry`, and the app and screenshotter share `dotFieldMode`, the shader
-sources, uniforms and atlas sizing. Detail weights use float32 precision before
-selecting the mode or allocating the atlas: at zooms such as 13.85, a JavaScript
-weight just below one otherwise selects two levels while the GPU sees exactly
-one. No extra render pass, readback, timer or per-frame JS work was added.
+There is now one grid with a fixed **two-bitmap-pixel pitch**, registered to
+the final bitmap's global pixel grid. The logical pitch is `2 / pixelRatio`;
+atlas sizing receives that same actual density, including reduced-quality
+renders. There is no detail-grid crossfade and no area-coverage reconstruction.
+Park, water and ground cover retain real antialiased dot glyphs. A restrained
+non-road glyph offset breaks coherent circle overlap without jittering the
+geometry samples. Site randomness uses a bounded non-trigonometric hash;
+geographic canopy/water noise keeps its own fixed-world coordinates.
 
-The area atlas needs a four-site halo for sparse interpolation and the aligned
-bitmap's overhang at minimum density. Point-only atlases retain their old halo;
-both variants omit the unused level at the float32 detail endpoint.
-Across the same 0.01-zoom sweep below, the maximum area atlas is 34.1 MiB on the
-430 x 932 phone viewport and 119.9 MiB on the tablet (both orientations):
-approximately 0.3/0.5 MiB more **temporary texture storage**, not additional
-persistent bitmaps. The largest axis remains below 8192 texels.
+Unexplored non-road sites are independently thinned rather than taking one
+fixed site in every 2 x 2 block. Roads retain connected sampling and reduce
+opacity instead: randomly deleting road samples just replaces a periodic
+screen door with broken roads.
 
-### Repeated full-size rendering comparison
+The fixed footprint also makes the compositor cheaper. At registered bitmap
+pixel centres, only the four surrounding sites can contribute: the next site
+is at least 1.25 pitches away on one axis, beyond the glyph's radius,
+antialiasing and jitter combined. The compositor therefore visits **four
+sites instead of nine**, without changing a pixel. CPU image tests and seven
+GPU photo comparisons check it against the full nine-neighbour reference.
+This relies on the fixed two-pixel pitch, not an arbitrary configurable step.
 
-Chrome 156 / CanvasKit 0.41 WebGL on **SwiftShader**, 390 x 780 logical viewport,
-actual capped bitmap density, seven interleaved samples after three warm-up
-renders per revision/case. Both revisions render the entire padded region and
-perform the final readback. Input creation, photography, encoding, React and
-network are excluded; no CPU throttle or concurrent build/test workload was
-used. These are component timings, **not native-phone frame rates or energy
-measurements**.
+Terrain treatment no longer stops at a material boundary. Alpine forest and
+rock use the same shaded stipple and absolute contour ink; snow receives the
+same contours. Park-edge green fades out above the treeline, and unclassified
+alpine ground keeps its relief at street zoom. The native-resolution DEM and
+its absolute-height decoding are unchanged.
 
-| Scene / zoom                  | Explored | Before ms | After ms | Change |
-| ----------------------------- | -------- | --------: | -------: | -----: |
-| Canopy / 10.25                | no       |    1177.9 |    914.8 | -22.3% |
-| Canopy / 12.25                | no       |    2030.8 |   1703.7 | -16.1% |
-| Canopy / 13.16                | no       |    2667.3 |   2388.1 | -10.5% |
-| Canopy / 12.25                | yes      |    2024.4 |   1720.4 | -15.0% |
-| Canopy / 13.16                | yes      |    2718.6 |   2458.8 |  -9.6% |
-| Water / 12.25                 | no       |    1928.7 |   1624.3 | -15.8% |
-| Mountain / 12.25              | no       |    2041.4 |   1739.7 | -14.8% |
-| Mountain / 12.25              | yes      |    2165.6 |   1823.9 | -15.8% |
-| Street / 15                   | yes      |    1027.5 |    902.4 | -12.2% |
-| Street / 13.16                | yes      |    2663.5 |   2611.6 |  -1.9% |
-| Background / 13.16            | yes      |    2635.1 |   2619.6 |  -0.6% |
-| Sparse parks / 15             | yes      |    1025.8 |    911.4 | -11.2% |
-| Dense parks / 15              | yes      |    1029.9 |    877.5 | -14.8% |
-| Sparse parks / 13.16          | yes      |    2739.9 |   2654.6 |  -3.1% |
-| Dense parks / 13.16           | yes      |    2743.2 |   2600.3 |  -5.2% |
-| Street / 15                   | no       |    1002.1 |    873.6 | -12.8% |
-| Sparse parks / 15             | no       |     995.6 |    908.1 |  -8.8% |
-| Sparse parks / 13.16          | no       |    2625.4 |   2564.5 |  -2.3% |
-| Dense parks / 13.16           | no       |    2661.2 |   2540.3 |  -4.5% |
-| Area-capable fallback / 13.16 | no       |    2618.9 |   2548.6 |  -2.7% |
-| Area-capable fallback / 13.16 | yes      |    2655.2 |   2617.8 |  -1.4% |
-| Canopy / 13.85                | no       |    1285.3 |    878.4 | -31.7% |
-| Street / 13.85                | yes      |    1342.4 |    982.5 | -26.8% |
+The app and screenshotter share one material effect, one field effect, one
+atlas layout and a 40-float uniform block. The six specialized effects and
+their grid/area-selection machinery are gone. The material atlas still stays
+on the rendering thread; only the completed UI bitmap is read back. There is
+no additional pass, readback, timer or per-frame JS work.
 
-Sparse/dense park scenes cover about 10%/49% of a repeating block, with roads
-and background dots retained. The two fallback cases force the area-capable
-shader with no visible park at all: a tile can contain an area outside the
-rendered crop. The 13.85 cases cover the float32 endpoint; they also shed an
-unused half-height atlas level. No median regressed across these 23 cases;
-the smallest differences are within normal timing noise, not evidence of a
-meaningful speedup.
+Pans retain bitmap registration and dot identities. Zoom rebuilds may
+resample individual stipples; the geographic noise, relief and contours stay
+anchored. Exact identity of every dot across build scales is not the promise.
 
-In the same photographs, the strongest coherent row/column carrier over
-canopy/water fell from 0.74-11.91 RGB levels to less than 0.014, a reduction above
-98%. Broad mountain shading has low-frequency energy of its own and is not
-classified as moire. Image regressions additionally cover live scaling,
-fractional bitmap density, region replacement, exploration boundaries,
-water precedence, road edges and the minimum-density bitmap border.
-The real screenshotter also rendered the committed Seattle MVT at zooms
-12.25, 13.16 and 15, with labels, transit and exploration enabled.
+### Quality and memory checks
 
-Both before/after `just map-bench` attempts exported the real web app but
-produced no completed scenario; the after run reported zero region renders.
-The live tile host still fails DNS resolution here. These incomplete runs are
-not performance evidence, and live Rainier/Olympic Peninsula views and
-physical-phone thermals remain unverified.
+Comparisons include exploration **off**, unexplored fog and explored cells,
+fractional and max zoom, live scaling, real bundled Capitol Hill streets and
+the committed SeaTac MVT. A continuous synthetic DEM across forest, rock and
+ice isolates material-boundary behaviour; it is not a photograph of Rainier.
+
+The pixel regressions exercise finite-width roads built with the production
+mask rasterizer, class widths and visibility gates, rather than a solid red
+texture. They require continuous centreline ink, visible local grain, and no
+narrow-band row/column carrier. The carrier metric uses a local spectral
+floor: filtered random stipple has more low-frequency energy than white
+noise, which must not be mistaken for a grid. Separate controls verify that
+both regular and filtered grain pass while added periodic meshes fail.
+Terrain tests require contours on rock and ice and identical rendering of
+fully alpine forest and rock. Pan, live-scale, minimum-density edge, uniform
+layout and native resource-lifetime checks remain.
+
+Across zooms 1-19 in 0.01 increments, temporary RGBA8 atlas storage peaks at
+**7.0 MiB** on a 430 x 932 phone viewport and **24.6 MiB** on a 1032 x 1376
+tablet, in either orientation, down from 34.1/119.9 MiB in `b8330cb`.
+The largest axis is 4144 texels, below 8192. These are texture sizes, not
+process-memory peaks; final bitmaps, driver caches and other map resources
+are additional.
+
+### Measured rendering cost
+
+Seven-sample medians in milliseconds, using the same SDK 57 dependency tree
+for all three revisions. `Original` is `0f84053`; `Area` is the rejected
+`b8330cb`; `Dots` is the four-site replacement. `Off` disables exploration;
+`fog` uses unexplored cells.
+
+| Scene / zoom / exploration      | Original |   Area |  Dots | Change vs area |
+| ------------------------------- | -------: | -----: | ----: | -------------: |
+| Capitol Hill / 13.16 / off      |   6703.8 | 2927.9 | 924.4 |         -68.4% |
+| Capitol Hill / 13.16 / fog      |   6075.0 | 2692.7 | 860.5 |         -68.0% |
+| Capitol Hill / 15 / off         |   6666.7 | 1002.1 | 900.2 |         -10.2% |
+| Capitol Hill / 16.5 / off       |   6654.6 | 2192.0 | 957.1 |         -56.3% |
+| Capitol Hill / 19 / off         |   6469.4 |  974.3 | 840.0 |         -13.8% |
+| Canopy / 10.25 / off            |   5646.6 |  962.7 | 705.1 |         -26.8% |
+| Canopy / 10.25 / fog            |   5004.3 |  954.2 | 672.9 |         -29.5% |
+| Canopy / 13.16 / off            |   7296.8 | 2544.2 | 839.0 |         -67.0% |
+| Canopy / 13.16 / fog            |   6470.6 | 2487.3 | 826.4 |         -66.8% |
+| Water / 12.25 / fog             |   6109.4 | 1680.5 | 795.1 |         -52.7% |
+| Synthetic terrain / 12.25 / off |   7430.3 | 1955.3 | 865.5 |         -55.7% |
+| Synthetic terrain / 13.16 / fog |   6457.0 | 2665.7 | 829.8 |         -68.9% |
+
+All 12 three-way cases improved: **10-69% less rendering time** than the
+rejected area reconstruction and **86-89% less** than the pre-optimization
+renderer. Two extra single-level canopy controls at z15 were essentially
+unchanged: 863.3 to 866.8 ms with exploration off (+0.4%), and 831.8 to
+811.4 ms in fog (-2.5%). These are software-rendered component timings, not
+phone frame times or an estimate of battery savings.
+
+The offline real-app run (SDK 57, 4x CPU throttle) also completed nine region
+renders on each revision. Total rendering time fell from 20,214 to 19,389 ms
+cold (-4.1%) and 19,827 to 18,888 ms warm (-4.7%). This is not a clean
+whole-app smoothness result: both revisions timed out in `pan-new` and
+`pan-cached`, and jank counts rose from 123/114 to 135/123. The component
+comparison isolates the rendering change; this single app comparison does
+not establish a frame-rate improvement.
+
+### Measurement method and limits
+
+Component comparisons use Chrome 156 / CanvasKit 0.41 WebGL on **SwiftShader**,
+a 390 x 780 logical viewport, the actual capped bitmap density, and seven
+interleaved samples after three warm-up renders per revision/case. Each
+revision renders the full padded region and performs the final readback.
+Input creation, photography, encoding, React and network are excluded. There
+is no CPU throttle or concurrent build/test workload during these runs.
+
+The real-app benchmark can also run against the bundled offline geometry:
+export with `EXPO_PUBLIC_TILE_URL=''`, `EXPO_PUBLIC_MAP_PERF_RUN=bench`,
+`EXPO_PUBLIC_MAP_PERF_DEEP_ZOOM=1`, telemetry disabled, and **`expo export
+--clear`**, then run `scripts/map-bench.ts --web-build <directory> --headless`.
+Clearing Metro matters when switching data sources: an export without it
+retained the previous live URL inside an otherwise updated bundle. Verify
+the exported dataset before treating a zero-render result as a benchmark.
+
+Live tile/elevation origins still fail DNS resolution here. These offline
+measurements do not verify the exact Rainier/Olympic Peninsula views,
+native-phone frame rates, energy use or thermals.
 
 ## World-anchored terrain and viewport labels
 
-Baseline: `0f84053` (v2.25.0). These changes replace crop-dependent terrain
-inputs and padded-region label placement; they do not change the tile transport.
+Historical baseline: `0f84053` (v2.25.0). This section records the stability
+optimization; the follow-up above supersedes its dot-detail sampling. These
+changes replace crop-dependent terrain inputs and padded-region label placement;
+they do not change the tile transport.
 
 Elevation textures now encode absolute metres in R/G and alpine weight in B,
 with latitude evaluated per DEM row. They stay at native DEM resolution; their
@@ -120,12 +154,12 @@ invents 256-metre steps. Hillshade uses the DEM's projected pixel spacing,
 not a zoom-dependent screen-pixel offset. Contours use nested absolute elevation
 intervals rather than each crop's minimum, maximum or flatness.
 
-Dot identities, canopy noise, water waves and ground-cover rows are world
-anchored. Adjacent dot-detail lattices crossfade instead of replacing every dot
-at a zoom boundary. Unresolved noise octaves fade toward their mean; normalizing
-the remaining weights would turn the last octave abruptly on or off. Polygon
-masks also align to a global pixel grid so a pan does not shift their coverage
-samples.
+Dot identities, canopy noise, water waves and ground-cover rows became world
+anchored. This stage initially crossfaded adjacent dot-detail lattices; the
+single registered footprint above replaces that approach. Unresolved noise
+octaves fade toward their mean; normalizing the remaining weights would turn
+the last octave abruptly on or off. Polygon masks also align to a global pixel
+grid so a pan does not shift their coverage samples.
 
 The final bitmap needs a fixed pixel grid as well. Its capped density comes
 from the unrounded padded span (`RegionSpec.nominalSize`), not the mask-rounded
