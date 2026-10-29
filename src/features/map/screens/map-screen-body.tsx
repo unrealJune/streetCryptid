@@ -58,6 +58,11 @@ import { SELF_AUTHOR, type TrailPoint } from '@/features/social/net/background/t
  * read well inside this.
  */
 const MAP_ANCHOR_WAIT_MS = 1500;
+
+/** A trailing inset at least this wide is a system rail (iPhone Duo's 84pt), not a notch. */
+const SYSTEM_RAIL_MIN_INSET = 64;
+/** The map FABs' diameter (`islandStyles.fab`), for centring them in a rail. */
+const FAB_SIZE = 48;
 /** A live fix this far from the stored one the map opened on moves the camera to it. */
 const MAP_REANCHOR_DISTANCE_M = 1000;
 
@@ -521,19 +526,29 @@ export default function MapScreenBody() {
   // Chrome clears the horizontal insets too: landscape notches, iPadOS/Android split windows, and the
   // vertical system rail iPhone Duo draws on either edge (84pt). Beside a column it starts after it.
   const sides = { left: island.chromeLeft, right: insets.right + Spacing.three };
+  // A rail that wide is empty below the status items, so the FABs live in it, centred, rather
+  // than spending another column of map beside it. Settings joins them: alone at the top it would
+  // sit under the clock.
+  const rail = insets.right >= SYSTEM_RAIL_MIN_INSET;
+  const openSettings = () => {
+    closeLayers();
+    router.push('/settings');
+  };
   const controls = (
     <View
       pointerEvents="box-none"
       style={[
         styles.controls,
-        island.column && {
+        (island.column || rail) && {
           // Beside a column the map controls have the map's trailing corner to themselves.
           bottom: Math.max(insets.bottom, Spacing.two),
           position: 'absolute',
           right: insets.right,
         },
+        rail && { paddingHorizontal: 0, right: (insets.right - FAB_SIZE) / 2 },
       ]}
     >
+      {rail ? <SettingsControl onPress={openSettings} theme={theme} /> : null}
       <MapLayersControl
         expanded={layersOpen}
         layers={layers}
@@ -640,13 +655,7 @@ export default function MapScreenBody() {
         >
           © OPENSTREETMAP · COPERNICUS DEM
         </Text>
-        <SettingsControl
-          onPress={() => {
-            closeLayers();
-            router.push('/settings');
-          }}
-          theme={theme}
-        />
+        {rail ? null : <SettingsControl onPress={openSettings} theme={theme} />}
       </View>
       {/* The one thing on this screen that is not a map affordance. See `SharingMutedBanner`:
           a phone that cannot share in the background looks completely healthy from in here, and
@@ -659,6 +668,7 @@ export default function MapScreenBody() {
           <SharingMutedBanner theme={theme} />
         </View>
       ) : null}
+      {rail && !island.column ? controls : null}
       {island.column ? (
         <>
           {controls}
@@ -682,7 +692,7 @@ export default function MapScreenBody() {
         // Only map affordances float: layers and locate. They ride above the drawer and are
         // pushed off-screen as it docks, which is correct — a full sheet is not a map view.
         <View pointerEvents="box-none" style={[styles.islandLayer, island.frame]}>
-          {controls}
+          {rail ? null : controls}
           <MapDrawer
             activeTab={islandTab}
             detent={detent}

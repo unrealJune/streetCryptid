@@ -1,5 +1,5 @@
 import { type ReactNode, useEffect, useRef } from 'react';
-import { Pressable, ScrollView, StyleSheet, View } from 'react-native';
+import { Pressable, ScrollView, StyleSheet, View, type ScrollViewInstance } from 'react-native';
 import { useRouter } from 'expo-router';
 import { SymbolView } from 'expo-symbols';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -50,7 +50,7 @@ export function SettingsPage({
   const theme = useTheme();
   const insets = useSafeAreaInsets();
   const router = useRouter();
-  const scroll = useRef<ScrollView>(null);
+  const scroll = useRef<ScrollViewInstance>(null);
 
   // A page whose first screen is one tall element (Delivery's preview) gives no hint that there is
   // more below it, so show the scroll bar once as it opens. iOS only flashes it when it can scroll.

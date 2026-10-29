@@ -45,6 +45,12 @@ const SignalColorPicker = lazy(() =>
 );
 
 const PROFILE_MAX_WIDTH = 640;
+/** Wide enough for the fields and the preview side by side (an unfolded foldable, a tablet). */
+const TWO_PANE_MIN_WIDTH = 720;
+// Narrower than the window on purpose: at full width the card ran gutter to gutter and read as
+// jammed into the corner, with the rest of the screen empty below it.
+const TWO_PANE_MAX_WIDTH = 760;
+const PREVIEW_PANE_WIDTH = 320;
 
 type ActiveEditor = 'icon' | 'signal' | null;
 
@@ -89,6 +95,10 @@ export function CryptidProfileEditor({
   const chrome = CryptidThemes[scheme === 'dark' ? 'deepsea' : 'daybreak'].chrome;
   const insets = useSafeAreaInsets();
   const pinnedContinue = mode === 'onboarding' && onDone !== undefined;
+  // Measured, not the window: in edit mode this is inside the Settings sheet.
+  const [frameWidth, setFrameWidth] = useState(0);
+  const twoPane = frameWidth - insets.left - insets.right >= TWO_PANE_MIN_WIDTH;
+  const maxWidth = twoPane ? TWO_PANE_MAX_WIDTH : PROFILE_MAX_WIDTH;
   const [initialDraft] = useState<CryptidProfileDraft>(() => startingDraft(initialProfile));
   const initialColor = initialDraft.color || DEFAULT_SIGNAL_COLOR;
 
@@ -214,15 +224,357 @@ export function CryptidProfileEditor({
     setGeneratorOpen(false);
   };
 
+  // The preview and the fields are one card: stacked on a phone, side by side when the window
+  // is wide enough that stacking left the fields below the fold.
+  const preview = (
+    <>
+      <View style={styles.preview}>
+        <Pressable
+          accessibilityHint="Replaces the cryptid, its title, and your signal color"
+          accessibilityLabel="Randomize profile"
+          accessibilityRole="button"
+          testID="randomize-persona"
+          disabled={saving}
+          onPress={rollPersona}
+          style={({ pressed }) => [
+            styles.rollButton,
+            { backgroundColor: color, opacity: saving ? 0.38 : pressed ? 0.72 : 1 },
+          ]}
+        >
+          <SymbolView
+            name={{ ios: 'dice', android: 'casino', web: 'casino' }}
+            size={24}
+            tintColor={signalColorInk(color)}
+          />
+        </Pressable>
+        <Pressable
+          accessibilityHint="Opens the profile icon picker"
+          accessibilityLabel={`Profile icon: ${iconLabel}. Tap to change it.`}
+          accessibilityRole="button"
+          onPress={openIconFromHero}
+          style={({ pressed }) => [styles.previewTarget, { opacity: pressed ? 0.62 : 1 }]}
+        >
+          <CryptidAvatar
+            art={sigil || ' + '}
+            name={iconName}
+            color={color}
+            size="large"
+            style={styles.previewAvatar}
+          />
+        </Pressable>
+        <Pressable
+          accessibilityHint="Focuses the username field"
+          accessibilityLabel={`Username: ${bareHandle ? `@${bareHandle}` : 'not set'}`}
+          accessibilityRole="button"
+          onPress={focusHandle}
+          style={({ pressed }) => [styles.previewTarget, { opacity: pressed ? 0.62 : 1 }]}
+        >
+          <ThemedText
+            adjustsFontSizeToFit
+            minimumFontScale={0.74}
+            numberOfLines={1}
+            style={[styles.handlePreview, { color: bareHandle ? color : theme.textSecondary }]}
+          >
+            {bareHandle ? `@${bareHandle}` : 'Not set'}
+          </ThemedText>
+        </Pressable>
+
+        {mode === 'edit' && hasChanges ? (
+          <View
+            accessibilityLiveRegion="polite"
+            style={[
+              styles.profileDecision,
+              { backgroundColor: theme.background, borderColor: chrome.amber },
+            ]}
+          >
+            <ThemedText type="smallBold">Unsaved profile changes</ThemedText>
+            <ThemedText type="small" themeColor="textSecondary">
+              Save or discard your changes.
+            </ThemedText>
+            <View style={styles.profileDecisionActions}>
+              <Pressable
+                accessibilityLabel="Save profile changes"
+                accessibilityRole="button"
+                accessibilityState={{ disabled: hasIssues || saving }}
+                testID="save-profile"
+                disabled={hasIssues || saving}
+                onPress={() => void saveDraft()}
+                style={({ pressed }) => [
+                  styles.profileDecisionButton,
+                  {
+                    backgroundColor: color,
+                    borderColor: color,
+                    opacity: hasIssues || saving ? 0.38 : pressed ? 0.72 : 1,
+                  },
+                ]}
+              >
+                <ThemedText type="smallBold" style={{ color: signalColorInk(color) }}>
+                  {saving ? 'Saving...' : 'Save'}
+                </ThemedText>
+              </Pressable>
+              <Pressable
+                accessibilityLabel="Discard profile changes"
+                accessibilityRole="button"
+                accessibilityState={{ disabled: saving }}
+                testID="discard-profile"
+                disabled={saving}
+                onPress={discardDraft}
+                style={({ pressed }) => [
+                  styles.profileDecisionButton,
+                  {
+                    backgroundColor: theme.backgroundElement,
+                    borderColor: theme.backgroundSelected,
+                    opacity: saving ? 0.38 : pressed ? 0.72 : 1,
+                  },
+                ]}
+              >
+                <ThemedText type="smallBold">Discard</ThemedText>
+              </Pressable>
+            </View>
+          </View>
+        ) : null}
+      </View>
+    </>
+  );
+  const fields = (
+    <>
+      {/* Username is always open — it is the one field everybody sets, so
+          hiding it behind a disclosure row only adds a tap. */}
+      <View style={[styles.inlineEditor, { backgroundColor: theme.background }]}>
+        <ThemedText style={styles.fieldLabel}>Username</ThemedText>
+        <View
+          style={[
+            styles.handleInputShell,
+            {
+              backgroundColor: theme.backgroundElement,
+              borderColor: handleErrors.length > 0 ? chrome.amber : theme.backgroundSelected,
+            },
+          ]}
+        >
+          <ThemedText style={[styles.handlePrefix, { color }]}>@</ThemedText>
+          <TextInput
+            accessibilityLabel="Username"
+            testID="username-input"
+            autoCapitalize="none"
+            autoCorrect={false}
+            editable={!saving}
+            maxLength={20}
+            ref={handleInputRef}
+            onBlur={() => setHandleTouched(true)}
+            onChangeText={(value) => {
+              setSaveError(null);
+              setHandleTouched(true);
+              setHandle(value.replace(/^@+/, '').toLowerCase());
+            }}
+            placeholder="username"
+            placeholderTextColor={theme.textSecondary}
+            selectionColor={color}
+            spellCheck={false}
+            style={[styles.handleInput, { color: theme.text }]}
+            value={handle}
+          />
+        </View>
+        <FieldNote errorColor={chrome.amberDark} issues={handleErrors} hint={USERNAME_GUIDANCE} />
+      </View>
+
+      <View style={[styles.divider, { backgroundColor: theme.backgroundSelected }]} />
+
+      <SettingRow
+        active={activeEditor === 'icon'}
+        label="Profile icon"
+        value={iconLabel}
+        onPress={() => setActiveEditor((current) => (current === 'icon' ? null : 'icon'))}
+      />
+
+      {activeEditor === 'icon' ? (
+        <View style={[styles.inlineEditor, { backgroundColor: theme.background }]}>
+          {Platform.OS !== 'ios' ? (
+            <Pressable
+              accessibilityHint="Draws an icon from a description, on this phone"
+              accessibilityLabel="Generate a profile icon"
+              accessibilityRole="button"
+              disabled={saving}
+              onPress={() => setGeneratorOpen(true)}
+              style={({ pressed }) => [
+                styles.iconActionButton,
+                {
+                  backgroundColor: theme.backgroundElement,
+                  borderColor: theme.backgroundSelected,
+                  opacity: saving ? 0.38 : pressed ? 0.62 : 1,
+                },
+              ]}
+            >
+              <ThemedText style={[styles.iconActionGlyph, { color }]}>{'{*}'}</ThemedText>
+              <ThemedText type="small" style={styles.iconActionLabel}>
+                Generate
+              </ThemedText>
+            </Pressable>
+          ) : null}
+
+          {/* Custom is not a mode any more — the fields below ARE the custom
+              option, and they stay open so a rolled or generated icon can be
+              edited straight away. */}
+          <View style={styles.customFields}>
+            <ThemedText style={styles.fieldLabel}>Icon name</ThemedText>
+            <TextInput
+              accessibilityLabel="Custom profile icon name"
+              autoCapitalize="words"
+              editable={!saving}
+              maxLength={24}
+              onBlur={() => setCustomNameTouched(true)}
+              onChangeText={(value) => {
+                setSaveError(null);
+                setCustomNameTouched(true);
+                setCryptidName(value);
+              }}
+              placeholder="Icon name"
+              placeholderTextColor={theme.textSecondary}
+              selectionColor={color}
+              style={[
+                styles.textInput,
+                {
+                  backgroundColor: theme.backgroundElement,
+                  borderColor:
+                    customNameErrors.length > 0 ? chrome.amber : theme.backgroundSelected,
+                  color: theme.text,
+                },
+              ]}
+              value={cryptidName}
+            />
+            <FieldNote
+              errorColor={chrome.amberDark}
+              issues={customNameErrors}
+              hint="Optional. Up to 24 characters."
+            />
+
+            <View style={styles.asciiLabelRow}>
+              <ThemedText style={styles.fieldLabel}>ASCII art</ThemedText>
+              <ThemedText type="code" themeColor="textSecondary">
+                {measurements.lines}/{MAX_SIGIL_LINES} lines · {measurements.columns}/
+                {MAX_SIGIL_COLUMNS} columns
+              </ThemedText>
+            </View>
+            <TextInput
+              accessibilityLabel="Custom ASCII profile icon"
+              allowFontScaling={false}
+              autoCapitalize="none"
+              autoCorrect={false}
+              editable={!saving}
+              multiline
+              onBlur={() => setCustomArtTouched(true)}
+              onChangeText={(value) => {
+                setSaveError(null);
+                setCustomArtTouched(true);
+                setSigil(normalizeAsciiArt(value));
+              }}
+              placeholder={'Enter ASCII art.\nSpaces and line breaks are preserved.'}
+              placeholderTextColor={theme.textSecondary}
+              selectionColor={color}
+              spellCheck={false}
+              style={[
+                styles.asciiInput,
+                {
+                  backgroundColor: theme.backgroundElement,
+                  borderColor: customArtErrors.length > 0 ? chrome.amber : theme.backgroundSelected,
+                  color,
+                },
+              ]}
+              textAlignVertical="top"
+              value={sigil}
+            />
+            <FieldNote
+              errorColor={chrome.amberDark}
+              issues={customArtErrors}
+              hint="ASCII characters only. Spacing and line breaks are preserved."
+            />
+          </View>
+        </View>
+      ) : null}
+
+      <View style={[styles.divider, { backgroundColor: theme.backgroundSelected }]} />
+
+      <SettingRow
+        active={activeEditor === 'signal'}
+        label="Signal color"
+        value={colorName}
+        onPress={() => setActiveEditor((current) => (current === 'signal' ? null : 'signal'))}
+      />
+
+      {activeEditor === 'signal' ? (
+        <View style={[styles.inlineEditor, { backgroundColor: theme.background }]}>
+          <ThemedText style={styles.fieldLabel}>Choose a signal color</ThemedText>
+          <Suspense fallback={null}>
+            <SignalColorPicker
+              color={color}
+              disabled={saving}
+              onChange={(value) => {
+                setSaveError(null);
+                setColor(value);
+              }}
+            />
+          </Suspense>
+          <ThemedText style={styles.fieldLabel}>Quick colors</ThemedText>
+          <View
+            accessibilityLabel="Signal color"
+            accessibilityRole="radiogroup"
+            style={styles.colorOptions}
+          >
+            {colorOptions.map((option) => {
+              const selected = option.value.toLowerCase() === color.toLowerCase();
+              return (
+                <Pressable
+                  accessibilityLabel={`${option.name} signal color`}
+                  accessibilityRole="radio"
+                  accessibilityState={{ checked: selected }}
+                  key={option.value}
+                  disabled={saving}
+                  onPress={() => {
+                    setSaveError(null);
+                    setColor(option.value);
+                  }}
+                  style={({ pressed }) => [
+                    styles.colorOption,
+                    {
+                      backgroundColor: selected ? `${option.value}14` : theme.backgroundElement,
+                      borderColor: selected ? option.value : theme.backgroundSelected,
+                      opacity: saving ? 0.38 : pressed ? 0.58 : 1,
+                    },
+                  ]}
+                >
+                  <View style={[styles.colorSwatch, { backgroundColor: option.value }]}>
+                    {selected ? (
+                      <View
+                        style={[
+                          styles.colorSelected,
+                          { backgroundColor: signalColorInk(option.value) },
+                        ]}
+                      />
+                    ) : null}
+                  </View>
+                  <ThemedText type="small" style={styles.colorName}>
+                    {option.name}
+                  </ThemedText>
+                </Pressable>
+              );
+            })}
+          </View>
+        </View>
+      ) : null}
+    </>
+  );
+
   return (
     <KeyboardAvoidingView
       behavior={Platform.OS === 'ios' ? 'padding' : 'position'}
+      onLayout={({ nativeEvent }) => setFrameWidth(nativeEvent.layout.width)}
       style={[styles.root, { backgroundColor: theme.background }]}
     >
       <ScrollView
         style={{ paddingLeft: insets.left, paddingRight: insets.right }}
         contentContainerStyle={[
           styles.content,
+          // Short enough to fit, so it sits in the middle of the space above Continue.
+          twoPane && styles.contentCentered,
           {
             paddingTop: insets.top + Spacing.four,
             paddingBottom: pinnedContinue ? Spacing.four : insets.bottom + Spacing.four,
@@ -230,7 +582,7 @@ export function CryptidProfileEditor({
         ]}
         keyboardShouldPersistTaps="handled"
       >
-        <View style={styles.shell}>
+        <View style={[styles.shell, { maxWidth }]}>
           {mode === 'edit' && onDone ? (
             <Pressable
               accessibilityLabel="Back to settings"
@@ -280,350 +632,23 @@ export function CryptidProfileEditor({
           <View
             style={[
               styles.overview,
+              twoPane && styles.overviewRow,
               { backgroundColor: theme.backgroundElement, borderColor: theme.backgroundSelected },
             ]}
           >
-            <View style={styles.preview}>
-              <Pressable
-                accessibilityHint="Replaces the cryptid, its title, and your signal color"
-                accessibilityLabel="Randomize profile"
-                accessibilityRole="button"
-                testID="randomize-persona"
-                disabled={saving}
-                onPress={rollPersona}
-                style={({ pressed }) => [
-                  styles.rollButton,
-                  { backgroundColor: color, opacity: saving ? 0.38 : pressed ? 0.72 : 1 },
-                ]}
-              >
-                <SymbolView
-                  name={{ ios: 'dice', android: 'casino', web: 'casino' }}
-                  size={24}
-                  tintColor={signalColorInk(color)}
-                />
-              </Pressable>
-              <Pressable
-                accessibilityHint="Opens the profile icon picker"
-                accessibilityLabel={`Profile icon: ${iconLabel}. Tap to change it.`}
-                accessibilityRole="button"
-                onPress={openIconFromHero}
-                style={({ pressed }) => [styles.previewTarget, { opacity: pressed ? 0.62 : 1 }]}
-              >
-                <CryptidAvatar
-                  art={sigil || ' + '}
-                  name={iconName}
-                  color={color}
-                  size="large"
-                  style={styles.previewAvatar}
-                />
-              </Pressable>
-              <Pressable
-                accessibilityHint="Focuses the username field"
-                accessibilityLabel={`Username: ${bareHandle ? `@${bareHandle}` : 'not set'}`}
-                accessibilityRole="button"
-                onPress={focusHandle}
-                style={({ pressed }) => [styles.previewTarget, { opacity: pressed ? 0.62 : 1 }]}
-              >
-                <ThemedText
-                  adjustsFontSizeToFit
-                  minimumFontScale={0.74}
-                  numberOfLines={1}
-                  style={[
-                    styles.handlePreview,
-                    { color: bareHandle ? color : theme.textSecondary },
-                  ]}
-                >
-                  {bareHandle ? `@${bareHandle}` : 'Not set'}
-                </ThemedText>
-              </Pressable>
-
-              {mode === 'edit' && hasChanges ? (
-                <View
-                  accessibilityLiveRegion="polite"
-                  style={[
-                    styles.profileDecision,
-                    { backgroundColor: theme.background, borderColor: chrome.amber },
-                  ]}
-                >
-                  <ThemedText type="smallBold">Unsaved profile changes</ThemedText>
-                  <ThemedText type="small" themeColor="textSecondary">
-                    Save or discard your changes.
-                  </ThemedText>
-                  <View style={styles.profileDecisionActions}>
-                    <Pressable
-                      accessibilityLabel="Save profile changes"
-                      accessibilityRole="button"
-                      accessibilityState={{ disabled: hasIssues || saving }}
-                      testID="save-profile"
-                      disabled={hasIssues || saving}
-                      onPress={() => void saveDraft()}
-                      style={({ pressed }) => [
-                        styles.profileDecisionButton,
-                        {
-                          backgroundColor: color,
-                          borderColor: color,
-                          opacity: hasIssues || saving ? 0.38 : pressed ? 0.72 : 1,
-                        },
-                      ]}
-                    >
-                      <ThemedText type="smallBold" style={{ color: signalColorInk(color) }}>
-                        {saving ? 'Saving...' : 'Save'}
-                      </ThemedText>
-                    </Pressable>
-                    <Pressable
-                      accessibilityLabel="Discard profile changes"
-                      accessibilityRole="button"
-                      accessibilityState={{ disabled: saving }}
-                      testID="discard-profile"
-                      disabled={saving}
-                      onPress={discardDraft}
-                      style={({ pressed }) => [
-                        styles.profileDecisionButton,
-                        {
-                          backgroundColor: theme.backgroundElement,
-                          borderColor: theme.backgroundSelected,
-                          opacity: saving ? 0.38 : pressed ? 0.72 : 1,
-                        },
-                      ]}
-                    >
-                      <ThemedText type="smallBold">Discard</ThemedText>
-                    </Pressable>
-                  </View>
-                </View>
-              ) : null}
-            </View>
-
-            <View style={[styles.divider, { backgroundColor: theme.backgroundSelected }]} />
-
-            {/* Username is always open — it is the one field everybody sets, so
-                hiding it behind a disclosure row only adds a tap. */}
-            <View style={[styles.inlineEditor, { backgroundColor: theme.background }]}>
-              <ThemedText style={styles.fieldLabel}>Username</ThemedText>
-              <View
-                style={[
-                  styles.handleInputShell,
-                  {
-                    backgroundColor: theme.backgroundElement,
-                    borderColor: handleErrors.length > 0 ? chrome.amber : theme.backgroundSelected,
-                  },
-                ]}
-              >
-                <ThemedText style={[styles.handlePrefix, { color }]}>@</ThemedText>
-                <TextInput
-                  accessibilityLabel="Username"
-                  testID="username-input"
-                  autoCapitalize="none"
-                  autoCorrect={false}
-                  editable={!saving}
-                  maxLength={20}
-                  ref={handleInputRef}
-                  onBlur={() => setHandleTouched(true)}
-                  onChangeText={(value) => {
-                    setSaveError(null);
-                    setHandleTouched(true);
-                    setHandle(value.replace(/^@+/, '').toLowerCase());
-                  }}
-                  placeholder="username"
-                  placeholderTextColor={theme.textSecondary}
-                  selectionColor={color}
-                  spellCheck={false}
-                  style={[styles.handleInput, { color: theme.text }]}
-                  value={handle}
-                />
-              </View>
-              <FieldNote
-                errorColor={chrome.amberDark}
-                issues={handleErrors}
-                hint={USERNAME_GUIDANCE}
-              />
-            </View>
-
-            <View style={[styles.divider, { backgroundColor: theme.backgroundSelected }]} />
-
-            <SettingRow
-              active={activeEditor === 'icon'}
-              label="Profile icon"
-              value={iconLabel}
-              onPress={() => setActiveEditor((current) => (current === 'icon' ? null : 'icon'))}
-            />
-
-            {activeEditor === 'icon' ? (
-              <View style={[styles.inlineEditor, { backgroundColor: theme.background }]}>
-                {Platform.OS !== 'ios' ? (
-                  <Pressable
-                    accessibilityHint="Draws an icon from a description, on this phone"
-                    accessibilityLabel="Generate a profile icon"
-                    accessibilityRole="button"
-                    disabled={saving}
-                    onPress={() => setGeneratorOpen(true)}
-                    style={({ pressed }) => [
-                      styles.iconActionButton,
-                      {
-                        backgroundColor: theme.backgroundElement,
-                        borderColor: theme.backgroundSelected,
-                        opacity: saving ? 0.38 : pressed ? 0.62 : 1,
-                      },
-                    ]}
-                  >
-                    <ThemedText style={[styles.iconActionGlyph, { color }]}>{'{*}'}</ThemedText>
-                    <ThemedText type="small" style={styles.iconActionLabel}>
-                      Generate
-                    </ThemedText>
-                  </Pressable>
-                ) : null}
-
-                {/* Custom is not a mode any more — the fields below ARE the custom
-                    option, and they stay open so a rolled or generated icon can be
-                    edited straight away. */}
-                <View style={styles.customFields}>
-                  <ThemedText style={styles.fieldLabel}>Icon name</ThemedText>
-                  <TextInput
-                    accessibilityLabel="Custom profile icon name"
-                    autoCapitalize="words"
-                    editable={!saving}
-                    maxLength={24}
-                    onBlur={() => setCustomNameTouched(true)}
-                    onChangeText={(value) => {
-                      setSaveError(null);
-                      setCustomNameTouched(true);
-                      setCryptidName(value);
-                    }}
-                    placeholder="Icon name"
-                    placeholderTextColor={theme.textSecondary}
-                    selectionColor={color}
-                    style={[
-                      styles.textInput,
-                      {
-                        backgroundColor: theme.backgroundElement,
-                        borderColor:
-                          customNameErrors.length > 0 ? chrome.amber : theme.backgroundSelected,
-                        color: theme.text,
-                      },
-                    ]}
-                    value={cryptidName}
-                  />
-                  <FieldNote
-                    errorColor={chrome.amberDark}
-                    issues={customNameErrors}
-                    hint="Optional. Up to 24 characters."
-                  />
-
-                  <View style={styles.asciiLabelRow}>
-                    <ThemedText style={styles.fieldLabel}>ASCII art</ThemedText>
-                    <ThemedText type="code" themeColor="textSecondary">
-                      {measurements.lines}/{MAX_SIGIL_LINES} lines · {measurements.columns}/
-                      {MAX_SIGIL_COLUMNS} columns
-                    </ThemedText>
-                  </View>
-                  <TextInput
-                    accessibilityLabel="Custom ASCII profile icon"
-                    allowFontScaling={false}
-                    autoCapitalize="none"
-                    autoCorrect={false}
-                    editable={!saving}
-                    multiline
-                    onBlur={() => setCustomArtTouched(true)}
-                    onChangeText={(value) => {
-                      setSaveError(null);
-                      setCustomArtTouched(true);
-                      setSigil(normalizeAsciiArt(value));
-                    }}
-                    placeholder={'Enter ASCII art.\nSpaces and line breaks are preserved.'}
-                    placeholderTextColor={theme.textSecondary}
-                    selectionColor={color}
-                    spellCheck={false}
-                    style={[
-                      styles.asciiInput,
-                      {
-                        backgroundColor: theme.backgroundElement,
-                        borderColor:
-                          customArtErrors.length > 0 ? chrome.amber : theme.backgroundSelected,
-                        color,
-                      },
-                    ]}
-                    textAlignVertical="top"
-                    value={sigil}
-                  />
-                  <FieldNote
-                    errorColor={chrome.amberDark}
-                    issues={customArtErrors}
-                    hint="ASCII characters only. Spacing and line breaks are preserved."
-                  />
-                </View>
-              </View>
-            ) : null}
-
-            <View style={[styles.divider, { backgroundColor: theme.backgroundSelected }]} />
-
-            <SettingRow
-              active={activeEditor === 'signal'}
-              label="Signal color"
-              value={colorName}
-              onPress={() => setActiveEditor((current) => (current === 'signal' ? null : 'signal'))}
-            />
-
-            {activeEditor === 'signal' ? (
-              <View style={[styles.inlineEditor, { backgroundColor: theme.background }]}>
-                <ThemedText style={styles.fieldLabel}>Choose a signal color</ThemedText>
-                <Suspense fallback={null}>
-                  <SignalColorPicker
-                    color={color}
-                    disabled={saving}
-                    onChange={(value) => {
-                      setSaveError(null);
-                      setColor(value);
-                    }}
-                  />
-                </Suspense>
-                <ThemedText style={styles.fieldLabel}>Quick colors</ThemedText>
-                <View
-                  accessibilityLabel="Signal color"
-                  accessibilityRole="radiogroup"
-                  style={styles.colorOptions}
-                >
-                  {colorOptions.map((option) => {
-                    const selected = option.value.toLowerCase() === color.toLowerCase();
-                    return (
-                      <Pressable
-                        accessibilityLabel={`${option.name} signal color`}
-                        accessibilityRole="radio"
-                        accessibilityState={{ checked: selected }}
-                        key={option.value}
-                        disabled={saving}
-                        onPress={() => {
-                          setSaveError(null);
-                          setColor(option.value);
-                        }}
-                        style={({ pressed }) => [
-                          styles.colorOption,
-                          {
-                            backgroundColor: selected
-                              ? `${option.value}14`
-                              : theme.backgroundElement,
-                            borderColor: selected ? option.value : theme.backgroundSelected,
-                            opacity: saving ? 0.38 : pressed ? 0.58 : 1,
-                          },
-                        ]}
-                      >
-                        <View style={[styles.colorSwatch, { backgroundColor: option.value }]}>
-                          {selected ? (
-                            <View
-                              style={[
-                                styles.colorSelected,
-                                { backgroundColor: signalColorInk(option.value) },
-                              ]}
-                            />
-                          ) : null}
-                        </View>
-                        <ThemedText type="small" style={styles.colorName}>
-                          {option.name}
-                        </ThemedText>
-                      </Pressable>
-                    );
-                  })}
-                </View>
-              </View>
-            ) : null}
+            {twoPane ? (
+              <>
+                <View style={styles.fieldsPane}>{fields}</View>
+                <View style={[styles.paneDivider, { backgroundColor: theme.backgroundSelected }]} />
+                <View style={styles.previewPane}>{preview}</View>
+              </>
+            ) : (
+              <>
+                {preview}
+                <View style={[styles.divider, { backgroundColor: theme.backgroundSelected }]} />
+                {fields}
+              </>
+            )}
           </View>
         </View>
       </ScrollView>
@@ -631,7 +656,7 @@ export function CryptidProfileEditor({
         // Pinned, not the end of the scroll: on a short window (a landscape foldable is ~670 pt)
         // the scroll's end is below the fold, and Continue is the only way off this step.
         // The shell's cap sits inside the scroll's padding; the footer's cap includes its own.
-        <PageFooter maxWidth={PROFILE_MAX_WIDTH + Spacing.four * 2}>
+        <PageFooter maxWidth={maxWidth + Spacing.four * 2}>
           <Pressable
             accessibilityRole="button"
             testID="onboarding-continue"
@@ -725,6 +750,9 @@ const styles = StyleSheet.create({
     flexGrow: 1,
     paddingHorizontal: Spacing.four,
   },
+  contentCentered: {
+    justifyContent: 'center',
+  },
   shell: {
     alignSelf: 'center',
     gap: Spacing.three,
@@ -773,6 +801,18 @@ const styles = StyleSheet.create({
     borderRadius: 16,
     borderWidth: StyleSheet.hairlineWidth,
     overflow: 'hidden',
+  },
+  overviewRow: {
+    flexDirection: 'row',
+  },
+  fieldsPane: {
+    flex: 1,
+  },
+  paneDivider: {
+    width: StyleSheet.hairlineWidth,
+  },
+  previewPane: {
+    width: PREVIEW_PANE_WIDTH,
   },
   preview: {
     alignItems: 'center',

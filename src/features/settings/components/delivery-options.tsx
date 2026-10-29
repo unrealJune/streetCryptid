@@ -36,7 +36,7 @@ export function DeliveryOptions({
   const twoColumn = width >= TWO_COLUMN_MIN_WIDTH;
   // Explicit widths, not flex shares: the stage is `width: '100%'`, and Yoga resolved that against
   // the whole row and gave the preview most of it.
-  const previewWidth = Math.round((width - Spacing.four) * 0.58);
+  const previewWidth = Math.round((width - Spacing.four) * 0.52);
   const controlsWidth = width - Spacing.four - previewWidth;
   const options = useMemo(() => deliveryModeOptions(availability), [availability]);
   const copy = DELIVERY_MODE_COPY[selected];
