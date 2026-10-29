@@ -29,10 +29,19 @@ function mockResource<T extends object>(value: T) {
   return resource;
 }
 
-jest.mock('../dot-field-shader', () => ({
-  getDotFieldEffect: jest.fn(() => ({ makeShaderWithChildren: () => mockResource({}) })),
-  getDotMaterialEffect: jest.fn(() => ({ makeShaderWithChildren: () => mockResource({}) })),
-}));
+jest.mock('../dot-field-shader', () => {
+  const makeEffect = () => ({
+    makeShaderWithChildren: jest.fn((_uniforms: number[], children: unknown[]) =>
+      mockResource({ children })
+    ),
+  });
+  const effect = makeEffect();
+  const materialEffect = makeEffect();
+  return {
+    getDotFieldEffect: jest.fn(() => effect),
+    getDotMaterialEffect: jest.fn(() => materialEffect),
+  };
+});
 
 // The "image" is the recording canvas, so a test can read back what was drawn.
 jest.mock('../offscreen', () => ({
@@ -80,6 +89,7 @@ jest.mock('@shopify/react-native-skia', () => {
           state,
           setShader: jest.fn(),
           setAntiAlias: jest.fn(),
+          dispose: jest.fn(),
           setColor: (value: string) => (state.color = value),
           setStyle: (value: string) => (state.style = value),
           setStrokeWidth: (value: number) => (state.width = value),
@@ -89,18 +99,21 @@ jest.mock('@shopify/react-native-skia', () => {
         });
       },
       Path: {
-        MakeFromSVGString: (svg: string) => ({ svg, setFillType: jest.fn() }),
-        // An assembled region path names the tile paths it was built from.
+        MakeFromSVGString: (svg: string) => ({ svg }),
+      },
+      // An assembled region path names the tile paths it was built from.
+      PathBuilder: {
         Make: () => {
           const parts: string[] = [];
-          return {
-            get svg() {
-              return parts.join(' ');
+          const builder = {
+            setFillType: () => builder,
+            addPath: (src: { svg: string }) => {
+              parts.push(src.svg);
+              return builder;
             },
-            setFillType: jest.fn(),
-            addPath: (src: { svg: string }) => parts.push(src.svg),
-            dispose: jest.fn(),
+            detach: () => ({ svg: parts.join(' '), dispose: jest.fn() }),
           };
+          return builder;
         },
       },
       Matrix: jest.fn(),
@@ -325,4 +338,33 @@ describe('dotted region overlays', () => {
   it('keeps transit and runways out of the street, park and water feature masks', () => {
     expect(buildMaskPaths(geometry, spec)).toEqual(buildMaskPaths(packGeometry(base), spec));
   });
+});
+
+// The inputs are GPU textures of the JS thread's Skia context, held by these wrappers. Left to the
+// garbage collector, Hermes may finalize them on its own thread, and the texture's last unref then
+// races the JS thread inside GrResourceCache: zooming out fast over uncached ground crashed there.
+it('releases the dot-field shader, its image children and its paint on the calling thread', () => {
+  const canvas = renderRegionImage({
+    region,
+    palette: CryptidThemes.daybreak.canvas,
+    maskImage: image,
+    groundImage: image,
+    terrainImage: image,
+    cellImage: image,
+    lutImage: image,
+    explorationEnabled: false,
+  }) as unknown as { drawPaint: jest.Mock };
+  const effect = jest.requireMock('../dot-field-shader').getDotFieldEffect();
+  const materialEffect = jest.requireMock('../dot-field-shader').getDotMaterialEffect();
+  const shader = effect.makeShaderWithChildren.mock.results[0].value;
+  const materialShader = materialEffect.makeShaderWithChildren.mock.results[0].value;
+  expect(shader.children).toHaveLength(4);
+  expect(materialShader.children).toHaveLength(5);
+  for (const [index, pass] of [materialShader, shader].entries()) {
+    for (const child of pass.children) expect(child.dispose).toHaveBeenCalledTimes(1);
+    expect(pass.dispose).toHaveBeenCalledTimes(1);
+    const [paint] = canvas.drawPaint.mock.calls[index];
+    expect(paint.setShader).toHaveBeenCalledWith(pass);
+    expect(paint.dispose).toHaveBeenCalledTimes(1);
+  }
 });

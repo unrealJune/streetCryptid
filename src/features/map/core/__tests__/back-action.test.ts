@@ -51,4 +51,12 @@ describe('resolveMapBackAction', () => {
     current = { ...current, selectedEndpoint: null, detent: 'peek' };
     expect(resolveMapBackAction(current)).toBeNull();
   });
+
+  /** A wide window's column has no smaller stop; claiming the press would make back do nothing. */
+  it('leaves the always-open column alone and exits', () => {
+    expect(resolveMapBackAction(state({ detent: 'full', column: true }))).toBeNull();
+    expect(resolveMapBackAction(state({ selectedEndpoint: 'aabb', column: true }))).toBe(
+      'close-detail'
+    );
+  });
 });

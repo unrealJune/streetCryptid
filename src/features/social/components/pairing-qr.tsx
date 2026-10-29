@@ -49,7 +49,7 @@ export function PairingQr({ value, size, color, background }: PairingQrProps) {
     if (!matrix) return null;
     const { modules, side } = matrix;
     const cell = size / (side + QUIET_MODULES * 2);
-    const built = Skia.Path.Make();
+    const built = Skia.PathBuilder.Make();
     for (let y = 0; y < side; y += 1) {
       for (let x = 0; x < side; x += 1) {
         if (!modules[y * side + x]) continue;
@@ -64,7 +64,7 @@ export function PairingQr({ value, size, color, background }: PairingQrProps) {
         );
       }
     }
-    return built;
+    return built.detach();
   }, [matrix, size]);
 
   if (!path) return null;

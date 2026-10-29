@@ -22,20 +22,20 @@ export function buildCellStateImage(field: RegionCellField, spec: RegionSpec): S
   // fill misses (cell enumeration covers the rect, so this is boundary dust).
   canvas.drawColor(Skia.Color('black'));
 
-  // Reuse one paint + one path across all cells: at thousands of cells the
-  // per-cell Paint allocation and SVG parse were the dominant texture cost.
+  // Reuse one paint + one path builder across all cells: at thousands of cells
+  // the per-cell Paint allocation and SVG parse were the dominant texture cost.
   const paint = Skia.Paint();
   paint.setStyle(PaintStyle.Fill);
   paint.setAntiAlias(false);
-  const path = Skia.Path.Make();
+  const builder = Skia.PathBuilder.Make();
   for (const fill of cellStateFillGeometry(field, spec)) {
     const pts = fill.points;
-    path.reset();
-    path.moveTo(pts[0][0], pts[0][1]);
-    for (let i = 1; i < pts.length; i++) path.lineTo(pts[i][0], pts[i][1]);
-    path.close();
+    builder.moveTo(pts[0][0], pts[0][1]);
+    for (let i = 1; i < pts.length; i++) builder.lineTo(pts[i][0], pts[i][1]);
+    builder.close();
     paint.setColor(Skia.Color(fill.color));
-    canvas.drawPath(path, paint);
+    // `detach` hands the path over and leaves the builder empty for the next cell.
+    canvas.drawPath(builder.detach(), paint);
   }
 
   // The load reveal samples this on the UI thread's canvas, so it must be pixels.

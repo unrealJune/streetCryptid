@@ -1,0 +1,22 @@
+diff --git a/cpp/api/JsiSkSurface.h b/cpp/api/JsiSkSurface.h
+index 189af001b7e55ac862412276db144aa927e48dbe..4ebadb48c58e0c942c68d91baca1629bfea8dbe7 100644
+--- a/cpp/api/JsiSkSurface.h
++++ b/cpp/api/JsiSkSurface.h
+@@ -75,9 +75,17 @@ public:
+     auto surface = getObject();
+     auto canvas =
+         std::make_shared<JsiSkCanvas>(getContext(), surface->getCanvas());
++#if defined(SK_GRAPHITE)
+     // Keep a reference to the owning surface so the canvas can read pixels back
+     // through a snapshot on Graphite (which lacks synchronous canvas readback).
+     canvas->setSurface(surface);
++#endif
++    // streetCryptid patch: Graphite only. On Ganesh nothing reads `_surface`,
++    // and the pin made the canvas wrapper the surface's last owner once the
++    // surface itself was disposed. JsiSkCanvas has no thread-dispatching
++    // destructor (JsiSkSurface's has), so a GC of that wrapper off the thread
++    // that owns the GPU context destroyed an SkSurface_Ganesh there: a SIGSEGV
++    // at 0x20 under ~SkSurface_Ganesh on iOS (2026-10-29, 2.26.1(102)).
+     return canvas;
+   }
+ 

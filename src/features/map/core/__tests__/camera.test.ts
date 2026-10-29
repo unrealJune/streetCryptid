@@ -1,5 +1,6 @@
 import {
   applyViewTransform,
+  centerBeside,
   clampCamera,
   scaleFor,
   screenToWorld,
@@ -122,5 +123,23 @@ describe('viewTransformFor / applyViewTransform (layer placement)', () => {
     expect(t.k).toBeCloseTo(1, 12);
     expect(t.tx).toBeCloseTo(0, 9);
     expect(t.ty).toBeCloseTo(0, 9);
+  });
+});
+
+describe('centerBeside', () => {
+  it('puts the target at the centre of the viewport right of what is obscured', () => {
+    const obscured = 452;
+    const wide: Viewport = { width: 852, height: 883 };
+    const framed = centerBeside(camera, obscured);
+    const [x, y] = worldToScreen(framed, wide, camera.center);
+    expect(x).toBeCloseTo(obscured + (wide.width - obscured) / 2, 6);
+    expect(y).toBeCloseTo(wide.height / 2, 6);
+    expect(framed.zoom).toBe(camera.zoom);
+  });
+
+  it('is undone by the opposite offset, and is the camera itself at 0', () => {
+    expect(centerBeside(camera, 0)).toBe(camera);
+    const back = centerBeside(centerBeside(camera, 300), -300);
+    expect(back.center[0]).toBeCloseTo(camera.center[0], 12);
   });
 });

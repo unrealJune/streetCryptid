@@ -1,6 +1,6 @@
 # Expo HAS CHANGED
 
-Read the exact versioned docs at https://docs.expo.dev/versions/v57.0.0/ before writing any code.
+Read the exact versioned docs at https://docs.expo.dev/versions/v58.0.0/ before writing any code.
 
 ## Project conventions
 
@@ -8,12 +8,15 @@ Read the exact versioned docs at https://docs.expo.dev/versions/v57.0.0/ before 
 - Prefer the **just** recipes for common tasks (`just --list`). Run **`just check`**
   (typecheck + lint + format) before committing.
 - Keep dependencies SDK-aligned: install native/Expo packages with
-  `bunx expo install <pkg>` (not `bun add`) so versions match Expo SDK 57.
+  `bunx expo install <pkg>` (not `bun add`) so versions match Expo SDK 58. `react-native` is in
+  `expo.install.exclude` because the SDK 58 version table says 0.88.0 while the prebuilt
+  `expo-modules-core` Android libraries are built for 0.88.1 (the version `expo` itself bundles) —
+  on any other version Gradle silently compiles them from source again. Re-check when bumping.
 - Routes are file-based under `src/app/` (expo-router, typed routes). Import via the
   `@/*` → `src/*` path alias.
 - `expo-env.d.ts` and `.expo/types/` are generated (git-ignored). Run `just start`
   once on a fresh clone before `just typecheck`.
-- ESLint is pinned to v9 (eslint-config-expo@57's plugins are not yet ESLint 10 ready).
+- ESLint is pinned to v9 (eslint-config-expo's plugins were not ESLint 10 ready as of SDK 57).
 
 ## Developer telemetry (OTEL)
 
@@ -296,9 +299,26 @@ Conventions when changing that code:
   `?? false || result` and short-circuits to `true` only when NO subscriber implements it; once ours
   does, returning anything else breaks universal-link cold launches, and `applinks:streetcrypt.id`
   is live. `willFinishLaunching` is the only usable hook — `subscriberDidRegister` runs from `+load`
-  before `main()`, and a subscriber's `didFinishLaunching` runs after the app delegate's own, which
-  is where `startReactNative` already happened. It arms the Core Location ladder but deliberately
-  does NOT take ownership, so a foreground launch is byte-for-byte unchanged.
+  before `main()`. It arms the Core Location ladder but deliberately does NOT take ownership, so a
+  foreground launch is byte-for-byte unchanged.
+- **Since SDK 58 the scene starts React, and the scene classifies the launch.** The iOS 27 SDK
+  requires the UIKit scene life cycle: `ExpoAppSceneDelegate.scene(_:willConnectTo:)` builds the
+  window and starts React, and `applicationState` before a scene connects says nothing about
+  whether the launch is a background one. So `IrohLaunchClassifier` decides once per process from
+  the `.location` launch key, else the first connecting scene's `activationState` (the generated
+  `SceneDelegate` posts `IrohLocationSceneWillConnect` synchronously before it reads
+  `sc.bg.rn_deferred`), else "no scene by the first main-queue turn" = background.
+  `withDeferredReactNativeStart` rewrites the template `SceneDelegate` to hold a background
+  connection back and replay it into `super` only when the scene comes to the foreground — replaying
+  the ORIGINAL options is what keeps `Linking.getInitialURL()` working for a cold-start link. **React
+  starts only for a scene on its way to the screen**; everything else is native. A URL or user
+  activity delivered to a held-back scene still in `.background` is queued and replayed after the
+  foreground starts React — it is never a reason to start it. Do not add a start path; the plugin
+  test counts the callers of `startReactNativeIfNeeded`. The
+  bootstrap NSLog's `via=` (`location` / `scene` / `no-scene`) says which evidence decided; a
+  `no-scene` on a launch someone opened means the ladder was armed before JS. UIKit no longer calls
+  the app delegate's foreground/background methods; `ExpoAppSceneDelegate` forwards the scene's to
+  every subscriber.
 - **`BackgroundLocationRuntime.shared` is built by the launch bootstrap, on main, on every launch.**
   Core Location delivers to the run loop of the thread that created the manager, and a thread
   without one receives nothing and says nothing. Left to JS, the first touch was

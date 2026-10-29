@@ -53,7 +53,7 @@ jobs:
     name: Warm iOS build caches
     # Must match build_ios's runner in pr-development-builds.yml: runner.os/runner.arch are part
     # of both cache keys, and the cached Cargo artifacts are image-specific.
-    runs-on: macos-latest
+    runs-on: xcode-27
     timeout-minutes: 90
     steps:
       - name: Check out repository

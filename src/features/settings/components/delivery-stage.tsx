@@ -72,6 +72,13 @@ export interface DeliveryStageProps {
   /** Seconds for one full loop. The design's default is 10. */
   readonly loopSeconds?: number;
   readonly height?: number;
+  /**
+   * Lay the scene out at this height and scale it to `height`, rather than laying it out at
+   * `height`. The layout fills whatever box it is given, so a short box squashed the phones into
+   * wide slabs that no longer read as phones, and a tall one stretched them; scaling keeps their
+   * proportions.
+   */
+  readonly designHeight?: number;
 }
 
 const DEFAULT_HEIGHT = 340;
@@ -342,6 +349,7 @@ export default function DeliveryStage({
   palette,
   loopSeconds = 10,
   height = DEFAULT_HEIGHT,
+  designHeight,
 }: DeliveryStageProps) {
   const reduceMotion = useReducedMotion();
   const [width, setWidth] = useState(0);
@@ -375,17 +383,25 @@ export default function DeliveryStage({
   // each mode rests on.
   const t = reduceMotion ? REDUCED_MOTION_FRAME[mode] : tick;
 
+  const scale = designHeight ? height / designHeight : 1;
+
   const picture = useMemo(() => {
     if (width <= 0) return null;
-    const size = { width, height };
+    const size = { width: width / scale, height: height / scale };
     const scene = buildDeliveryScene(mode, t, size);
     return createPicture(
-      (canvas) => drawScene(canvas, scene, palette, size, stageFont()),
+      (canvas) => {
+        canvas.scale(scale, scale);
+        drawScene(canvas, scene, palette, size, stageFont());
+      },
       Skia.XYWHRect(0, 0, width, height)
     );
-  }, [mode, t, width, height, palette]);
+  }, [mode, t, width, height, scale, palette]);
 
-  const scene = width > 0 ? buildDeliveryScene(mode, t, { width, height }) : null;
+  const scene =
+    width > 0
+      ? buildDeliveryScene(mode, t, { width: width / scale, height: height / scale })
+      : null;
 
   return (
     <View

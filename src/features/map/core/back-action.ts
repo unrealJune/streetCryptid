@@ -14,6 +14,11 @@ export interface MapBackState {
   /** A locator is selected — a friend's detail pane, or our own trail. */
   selectedEndpoint: string | null;
   detent: DrawerDetent;
+  /**
+   * The island is the always-open column of a wide window. It has no smaller stop, so there is no
+   * drawer to collapse, and claiming the press would leave back doing nothing visible.
+   */
+  column?: boolean;
 }
 
 /**
@@ -35,6 +40,8 @@ export interface MapBackState {
 export function resolveMapBackAction(state: MapBackState): MapBackAction {
   if (state.layersOpen) return 'close-layers';
   if (state.selectedEndpoint) return 'close-detail';
-  if (state.detent === 'mid' || state.detent === 'full') return 'collapse-drawer';
+  if (!state.column && (state.detent === 'mid' || state.detent === 'full')) {
+    return 'collapse-drawer';
+  }
   return null;
 }

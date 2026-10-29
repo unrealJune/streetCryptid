@@ -54,80 +54,55 @@ function entry(tile: PackedTile): TileCache {
   return found;
 }
 
-function layerPath(
-  tile: PackedTile,
-  layer: Layer,
-  build: () => string,
-  fill: boolean
-): SkPath | null {
+function layerPath(tile: PackedTile, layer: Layer, build: () => string): SkPath | null {
   const { layers } = entry(tile);
   if (layers.has(layer)) return layers.get(layer)!;
   const svg = build();
+  // Non-zero winding unions overlapping fills (see `mask-image.ts`), and a path parsed from SVG is
+  // already non-zero. Paths are immutable since Skia 2.14; copying every tile layer through a
+  // builder to restate the default would be pure cost.
   const path = svg ? Skia.Path.MakeFromSVGString(svg) : null;
-  // Non-zero winding unions overlapping fills (see `mask-image.ts`).
-  if (path && fill) path.setFillType(FillType.Winding);
   layers.set(layer, path);
   return path;
 }
 
 export function streetPath(tile: PackedTile, roadClass: number): SkPath | null {
   const s = tile.streets;
-  return layerPath(
-    tile,
-    `street:${roadClass}`,
-    () => linesSvg(s, (i) => s.roadClass[i] === roadClass),
-    false
+  return layerPath(tile, `street:${roadClass}`, () =>
+    linesSvg(s, (i) => s.roadClass[i] === roadClass)
   );
 }
 
-export const parkPath = (tile: PackedTile) =>
-  layerPath(tile, 'park', () => areasSvg(tile.parks), true);
-export const waterPath = (tile: PackedTile) =>
-  layerPath(tile, 'water', () => areasSvg(tile.water), true);
+export const parkPath = (tile: PackedTile) => layerPath(tile, 'park', () => areasSvg(tile.parks));
+export const waterPath = (tile: PackedTile) => layerPath(tile, 'water', () => areasSvg(tile.water));
 export const riverPath = (tile: PackedTile) =>
-  layerPath(tile, 'rivers', () => linesSvg(tile.rivers), false);
+  layerPath(tile, 'rivers', () => linesSvg(tile.rivers));
 
 export function groundPath(tile: PackedTile, kindIndex: number): SkPath | null {
   const g = tile.groundCover;
   if (g.count === 0 || kindIndex >= GROUND_KINDS.length) return null;
-  return layerPath(
-    tile,
-    `ground:${kindIndex}`,
-    () => areasSvg(g, (i) => g.kind[i] === kindIndex),
-    true
-  );
+  return layerPath(tile, `ground:${kindIndex}`, () => areasSvg(g, (i) => g.kind[i] === kindIndex));
 }
 
 export function transitPath(tile: PackedTile, modeIndex: number): SkPath | null {
   const t = tile.transit;
   if (t.count === 0 || modeIndex >= TRANSIT_MODES.length) return null;
-  return layerPath(
-    tile,
-    `transit:${modeIndex}`,
-    () => linesSvg(t, (i) => t.mode[i] === modeIndex),
-    false
-  );
+  return layerPath(tile, `transit:${modeIndex}`, () => linesSvg(t, (i) => t.mode[i] === modeIndex));
 }
 
 export function aeroAreaPath(tile: PackedTile, kindIndex: number): SkPath | null {
   const a = tile.aeroAreas;
   if (a.count === 0 || kindIndex >= AERO_AREA_KINDS.length) return null;
-  return layerPath(
-    tile,
-    `aeroArea:${kindIndex}`,
-    () => areasSvg(a, (i) => a.kind[i] === kindIndex),
-    true
+  return layerPath(tile, `aeroArea:${kindIndex}`, () =>
+    areasSvg(a, (i) => a.kind[i] === kindIndex)
   );
 }
 
 export function aeroLinePath(tile: PackedTile, kindIndex: number): SkPath | null {
   const a = tile.aeroLines;
   if (a.count === 0 || kindIndex >= AERO_LINE_KINDS.length) return null;
-  return layerPath(
-    tile,
-    `aeroLine:${kindIndex}`,
-    () => linesSvg(a, (i) => a.kind[i] === kindIndex),
-    false
+  return layerPath(tile, `aeroLine:${kindIndex}`, () =>
+    linesSvg(a, (i) => a.kind[i] === kindIndex)
   );
 }
 
@@ -137,9 +112,8 @@ export function buildingBins(tile: PackedTile): readonly BuildingBin[] {
   if (!e.buildings) {
     e.buildings = buildingBinSvgs(tile.buildings).flatMap(({ minZoom, svg }) => {
       const path = Skia.Path.MakeFromSVGString(svg);
-      if (!path) return [];
-      path.setFillType(FillType.Winding);
-      return [{ minZoom, path }];
+      // Non-zero already: see `layerPath`.
+      return path ? [{ minZoom, path }] : [];
     });
   }
   return e.buildings;
@@ -181,8 +155,7 @@ export function assembleRegionPath(
   pathsOf: (tile: PackedTile) => readonly (SkPath | null)[]
 ): SkPath | null {
   const k = scale / TILE_PATH_UNITS;
-  const out = Skia.Path.Make();
-  out.setFillType(FillType.Winding);
+  const out = Skia.PathBuilder.Make().setFillType(FillType.Winding);
   let any = false;
   for (const tile of tiles) {
     const paths = pathsOf(tile);
@@ -204,5 +177,5 @@ export function assembleRegionPath(
       any = true;
     }
   }
-  return any ? out : null;
+  return any ? out.detach() : null;
 }

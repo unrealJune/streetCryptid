@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { AppState, type AppStateStatus } from 'react-native';
 
+import { currentAppState } from '@/hooks/current-app-state';
+
 import { useBumpToPair, type BumpSensorState } from './use-bump-to-pair';
 import { useLocationSharing } from './use-location-sharing';
 import type { PairingSnapshot } from '../net/location-sharing';
@@ -32,7 +34,7 @@ export interface ArmedBump {
  */
 export function useArmedBump(active: boolean): ArmedBump {
   const { pairing, armBump, commitBump, cancelBump, refreshPairing } = useLocationSharing();
-  const [appState, setAppState] = useState<AppStateStatus>(AppState.currentState);
+  const [appState, setAppState] = useState<AppStateStatus>(currentAppState);
   const [error, setError] = useState<string | null>(null);
   const [arming, setArming] = useState(false);
   const armingRef = useRef(false);

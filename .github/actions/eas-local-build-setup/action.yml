@@ -93,12 +93,20 @@ runs:
       shell: bash
       run: bun install --frozen-lockfile
 
-    - name: Select the SDK 57 Xcode toolchain
+    # SDK 58 builds against the iOS 27 SDK (the scene life cycle it requires is what keeps the app
+    # launching on iOS 27), and 27.1 is the first with the iPhone Duo runtime. `macos-latest` (macOS
+    # 26) ships only Xcode 26, so the iOS jobs run on GitHub's `xcode-27` image (public preview).
+    # Pinned to the stable release, not the newest present: that image also carries a 27.2 release
+    # candidate, and a release build must not drift onto a pre-release toolchain.
+    - name: Select the SDK 58 Xcode toolchain (Xcode 27.1)
       if: inputs.platform == 'ios'
       shell: bash
-      run: sudo xcode-select --switch /Applications/Xcode_26.6.app/Contents/Developer
+      run: |
+        set -euo pipefail
+        sudo xcode-select --switch /Applications/Xcode_27.1.app/Contents/Developer
+        xcodebuild -version
 
-    - name: Install the SDK 57 Android NDK
+    - name: Install the SDK 58 Android NDK
       if: inputs.platform == 'android'
       shell: bash
       run: |

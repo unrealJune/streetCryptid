@@ -44,7 +44,7 @@ describe('PairLinkAction share', () => {
     Object.defineProperty(Platform, 'OS', { value: os, configurable: true });
     const share = jest
       .spyOn(Share, 'share')
-      .mockResolvedValue({ action: 'sharedAction', activityType: null });
+      .mockResolvedValue({ action: 'sharedAction', activityType: undefined });
     act(() => {
       renderer = create(
         <PairLinkAction

@@ -11,7 +11,13 @@ import {
   Skia,
 } from '@shopify/react-native-skia';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Platform, StyleSheet, View, type LayoutChangeEvent } from 'react-native';
+import {
+  Platform,
+  StyleSheet,
+  View,
+  type LayoutChangeEvent,
+  type ViewInstance,
+} from 'react-native';
 import { Gesture, GestureDetector } from 'react-native-gesture-handler';
 import {
   cancelAnimation,
@@ -28,6 +34,7 @@ import {
 
 import {
   applyViewTransform,
+  centerBeside,
   scaleFor,
   viewTransformFor,
   visibleWorldRect,
@@ -109,6 +116,29 @@ const FRIEND_PREFETCH_MAX = 4;
 /** Double-tap zoom-in factor and animation length. */
 const DOUBLE_TAP_FACTOR = 2;
 const DOUBLE_TAP_MS = 260;
+/**
+ * One-finger zoom (iOS / Google Maps): tap, then touch again and drag — down zooms in, up zooms
+ * out, about the second touch. The second touch must land within this long and this close to the
+ * first tap, and the first must have been a tap (short).
+ */
+const QUICK_ZOOM_TAP_MS = 250;
+const QUICK_ZOOM_GAP_MS = 300;
+const QUICK_ZOOM_SLOP_PX = 40;
+/**
+ * How far the first touch may wander and still count as a tap. Android reports a move for a
+ * resting finger's jitter, so "any move is not a tap" never recorded one there.
+ */
+const QUICK_ZOOM_TAP_DRIFT_PX = 12;
+/** Vertical travel of the second touch that commits to zooming. */
+const QUICK_ZOOM_ACTIVATE_PX = 6;
+/** Vertical drag that doubles (or halves) the scale. */
+const QUICK_ZOOM_DOUBLING_PX = 150;
+
+/** Wall clock for gesture worklets (touch events carry no timestamp). */
+function gestureNow(): number {
+  'worklet';
+  return Date.now();
+}
 /**
  * Screen-space distance (logical px) within which two locators are considered
  * overlapping. Converted into anchor-space before clustering — markers are drawn
@@ -241,6 +271,7 @@ export function MapView({
   onSelectFriend,
   onInteraction = noInteraction,
   locateTarget = null,
+  obscuredLeft = 0,
 }: {
   /** Surfaces the coverage/place readout to the surrounding chrome. */
   onReadout?: (readout: MapReadout) => void;
@@ -279,6 +310,12 @@ export function MapView({
    */
   onInteraction?: () => void;
   locateTarget?: { readonly requestId: number; readonly location: LatLon } | null;
+  /**
+   * Screen px on the leading edge that chrome covers (a wide window's island column). Anything the
+   * map centres on is centred in the rest, and when this changes the map pans by half the change,
+   * so the point in the middle of what you can see stays there.
+   */
+  obscuredLeft?: number;
 }) {
   const [viewport, setViewport] = useState<Viewport | null>(null);
   const reducedMotion = useReducedMotion();
@@ -335,6 +372,16 @@ export function MapView({
   const locateProgress = useSharedValue(1);
   /** Outstanding fling decay animations (x + y); commit when the last ends. */
   const decaysLeft = useSharedValue(0);
+  // One-finger zoom bookkeeping: the last tap, and the touch that may turn into a zoom.
+  const lastTapAt = useSharedValue(0);
+  const lastTapX = useSharedValue(0);
+  const lastTapY = useSharedValue(0);
+  const touchDownAt = useSharedValue(0);
+  const quickZoomArmed = useSharedValue(false);
+  const quickZoomX = useSharedValue(0);
+  const quickZoomY = useSharedValue(0);
+  const quickZoomFrom = useSharedValue<ViewTransform>({ k: 1, tx: 0, ty: 0 });
+  const quickZooming = useSharedValue(false);
   /** Transform at the last prefetch check, to gate by movement. */
   const lastPrefetch = useSharedValue<ViewTransform>({ k: 1, tx: 0, ty: 0 });
   /** Resets the pan stride origin on the first frame after scale motion ends. */
@@ -668,6 +715,31 @@ export function MapView({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [viewport, anchor]);
 
+  // What the camera is framed beside. Starts at 0, so the opening camera — centred on the whole
+  // viewport by the engine — is moved into the uncovered part on the first viewport. A locate reads
+  // it rather than depending on `obscuredLeft`: a change in what is obscured is a pan of its own,
+  // never a reason to fly to the last locate target again. This effect is declared first, so in a
+  // render that changes both, the locate already sees the new value.
+  const framedBesideRef = useRef(0);
+  useEffect(() => {
+    if (!viewport) return;
+    const delta = obscuredLeft - framedBesideRef.current;
+    if (delta === 0) return;
+    framedBesideRef.current = obscuredLeft;
+    const current = applyViewTransform(anchor, viewport, {
+      k: k.value,
+      tx: tx.value,
+      ty: ty.value,
+    });
+    const moved = viewTransformFor(anchor, viewport, centerBeside(current, delta));
+    const t = limits ? clampTranslation(moved, limits) : moved;
+    k.value = t.k;
+    tx.value = t.tx;
+    ty.value = t.ty;
+    commit(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [obscuredLeft, viewport, anchor]);
+
   useEffect(() => {
     if (!viewport || !limits || !locateTarget) return;
     cancelAnimation(k);
@@ -690,13 +762,16 @@ export function MapView({
       viewTransformFor(
         anchor,
         viewport,
-        locateCamera(
-          current,
-          latLonToWorld(locateTarget.location),
-          viewport,
-          region?.spec ?? null,
-          zoomFloor,
-          Math.max(zoomCeiling, zoomFloor)
+        centerBeside(
+          locateCamera(
+            current,
+            latLonToWorld(locateTarget.location),
+            viewport,
+            region?.spec ?? null,
+            zoomFloor,
+            Math.max(zoomCeiling, zoomFloor)
+          ),
+          framedBesideRef.current
         )
       ),
       limits
@@ -937,14 +1012,93 @@ export function MapView({
         });
       });
 
-    return Gesture.Race(doubleTap, Gesture.Simultaneous(pan, pinch));
+    // Tap, then touch-hold-drag. RNGH has no such gesture, so this one stays undecided while it
+    // watches: it records each short touch as a tap, arms when a touch lands right after one, and
+    // activates (beating the double tap and the pan in the race) only once that armed touch moves.
+    // Undecided, it never holds up an ordinary pan or pinch: whichever activates first cancels it.
+    //
+    // The scale is driven from the touch's own view-relative position against a snapshot taken
+    // when it landed, not from the pan's accumulated translation: one source of coordinates for
+    // the anchor and the drag, and the zoom is a pure function of where the finger is.
+    const quickZoom = Gesture.Pan()
+      .manualActivation(true)
+      .maxPointers(1)
+      .onTouchesDown((e, manager) => {
+        const touch = e.allTouches[0];
+        if (e.numberOfTouches !== 1 || !touch) {
+          manager.fail();
+          return;
+        }
+        const now = gestureNow();
+        touchDownAt.value = now;
+        quickZooming.value = false;
+        quickZoomArmed.value =
+          now - lastTapAt.value < QUICK_ZOOM_GAP_MS &&
+          Math.hypot(touch.x - lastTapX.value, touch.y - lastTapY.value) < QUICK_ZOOM_SLOP_PX;
+        quickZoomX.value = touch.x;
+        quickZoomY.value = touch.y;
+        // A tap only ever arms the touch right after it.
+        if (quickZoomArmed.value) {
+          lastTapAt.value = 0;
+          stopFling();
+          quickZoomFrom.value = { k: k.value, tx: tx.value, ty: ty.value };
+        }
+      })
+      .onTouchesMove((e, manager) => {
+        const touch = e.allTouches[0];
+        if (e.numberOfTouches !== 1 || !touch) {
+          manager.fail();
+          return;
+        }
+        const dy = touch.y - quickZoomY.value;
+        if (!quickZoomArmed.value) {
+          // Still possibly the first tap; fail only once it is clearly a drag.
+          if (Math.hypot(touch.x - quickZoomX.value, dy) > QUICK_ZOOM_TAP_DRIFT_PX) manager.fail();
+          return;
+        }
+        if (!quickZooming.value) {
+          if (Math.abs(dy) <= QUICK_ZOOM_ACTIVATE_PX) return;
+          quickZooming.value = true;
+          manager.activate();
+        }
+        // Down zooms in, up zooms out, about where the second touch landed.
+        const t = applyPinch(
+          quickZoomFrom.value,
+          Math.pow(2, dy / QUICK_ZOOM_DOUBLING_PX),
+          quickZoomX.value,
+          quickZoomY.value,
+          limits
+        );
+        k.value = t.k;
+        tx.value = t.tx;
+        ty.value = t.ty;
+      })
+      .onTouchesUp((e, manager) => {
+        const touch = e.changedTouches[0];
+        if (
+          !quickZoomArmed.value &&
+          touch &&
+          gestureNow() - touchDownAt.value < QUICK_ZOOM_TAP_MS &&
+          Math.hypot(touch.x - quickZoomX.value, touch.y - quickZoomY.value) <
+            QUICK_ZOOM_TAP_DRIFT_PX
+        ) {
+          lastTapAt.value = gestureNow();
+          lastTapX.value = touch.x;
+          lastTapY.value = touch.y;
+        }
+        manager.end();
+      })
+      .onTouchesCancelled((_e, manager) => manager.fail())
+      .onEnd(commitNow);
+
+    return Gesture.Race(quickZoom, doubleTap, Gesture.Simultaneous(pan, pinch));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [limits, commit, prefetchAt, onInteraction]);
 
   // Desktop web: wheel / trackpad zoom at the cursor, like Google Maps. RN Web's
   // <View> doesn't forward an onWheel prop to the DOM node, so bind a non-passive
   // native 'wheel' listener to the container element directly.
-  const containerRef = useRef<View | null>(null);
+  const containerRef = useRef<ViewInstance | null>(null);
   const wheelCommitTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => {
     if (Platform.OS !== 'web' || !limits) return;
@@ -1251,10 +1405,10 @@ interface TrailScreenPoint {
 
 function buildTrail(points: readonly TrailScreenPoint[], color: string) {
   if (points.length === 0) return null;
-  const path = Skia.Path.Make();
-  path.moveTo(points[0].screen[0], points[0].screen[1]);
-  for (const { screen } of points.slice(1)) path.lineTo(screen[0], screen[1]);
-  return { color, path, points };
+  const builder = Skia.PathBuilder.Make();
+  builder.moveTo(points[0].screen[0], points[0].screen[1]);
+  for (const { screen } of points.slice(1)) builder.lineTo(screen[0], screen[1]);
+  return { color, path: builder.detach(), points };
 }
 
 const ZERO_RECT = { x: 0, y: 0, width: 0, height: 0 };

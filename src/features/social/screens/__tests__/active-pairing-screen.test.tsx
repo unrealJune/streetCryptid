@@ -136,7 +136,9 @@ describe('ActivePairingScreen', () => {
     mockSharing.createPairInvite.mockResolvedValue(LINK);
     mockSharing.acknowledgeDiscoveredFriend.mockResolvedValue(undefined);
     mockSharing.rejectDiscoveredFriend.mockResolvedValue(undefined);
-    jest.spyOn(Share, 'share').mockResolvedValue({ action: Share.sharedAction });
+    jest
+      .spyOn(Share, 'share')
+      .mockResolvedValue({ action: Share.sharedAction, activityType: undefined });
   });
 
   afterEach(async () => {

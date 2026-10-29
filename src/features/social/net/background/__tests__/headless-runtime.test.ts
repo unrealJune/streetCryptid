@@ -95,8 +95,8 @@ jest.mock('../battery-source', () => ({
   })),
 }));
 
-function setAppState(state: string): void {
-  (AppState as unknown as { currentState: string }).currentState = state;
+function setAppState(state: string | null | undefined): void {
+  (AppState as unknown as { currentState: string | null | undefined }).currentState = state;
 }
 
 /**
