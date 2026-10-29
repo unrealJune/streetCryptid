@@ -1,4 +1,4 @@
-import type { ReactNode } from 'react';
+import { type ReactNode, useEffect, useRef } from 'react';
 import { Pressable, ScrollView, StyleSheet, View } from 'react-native';
 import { useRouter } from 'expo-router';
 import { SymbolView } from 'expo-symbols';
@@ -50,9 +50,18 @@ export function SettingsPage({
   const theme = useTheme();
   const insets = useSafeAreaInsets();
   const router = useRouter();
+  const scroll = useRef<ScrollView>(null);
+
+  // A page whose first screen is one tall element (Delivery's preview) gives no hint that there is
+  // more below it, so show the scroll bar once as it opens. iOS only flashes it when it can scroll.
+  useEffect(() => {
+    const timer = setTimeout(() => scroll.current?.flashScrollIndicators(), FLASH_SCROLL_DELAY_MS);
+    return () => clearTimeout(timer);
+  }, []);
 
   const page = (
     <ScrollView
+      ref={scroll}
       testID={testID}
       style={{
         backgroundColor: theme.background,
@@ -160,6 +169,9 @@ export function PageFooter({
     </View>
   );
 }
+
+/** After the push animation, or the flash plays under it. */
+const FLASH_SCROLL_DELAY_MS = 450;
 
 /** A labelled group of rows inside a {@link SettingsPage}. */
 export function SettingsSection({

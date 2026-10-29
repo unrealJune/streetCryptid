@@ -22,7 +22,8 @@ export function PairingOverlays() {
   const dismissedForSessionId = useRef<string | null>(null);
   useEffect(() => {
     if (!transitionId || dismissedForSessionId.current === transitionId) return;
-    if (pathname === '/pairing') return;
+    // Settings pushes the same screen inside its sheet; it handles the transition itself.
+    if (pathname === '/pairing' || pathname === '/settings/pairing') return;
     dismissedForSessionId.current = transitionId;
     router.dismissTo('/pairing' as Href);
   }, [pathname, router, transitionId]);

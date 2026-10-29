@@ -82,7 +82,9 @@ export default function SettingsScreen() {
           accent={deliveryHonoured ? chrome.green : chrome.amber}
         />
         <SettingsMenuRow
-          href={'/pairing' as Href}
+          // Pushed inside this sheet: the root `/pairing` route would present as a second modal
+          // stacked over it, and read the window's insets instead of the sheet's.
+          href={'/settings/pairing' as Href}
           label="Pair"
           value={
             friends === 0
