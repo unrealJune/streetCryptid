@@ -14,7 +14,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { ThemedText } from '@/components/themed-text';
 import { BrandFonts, MaxContentWidth, Spacing } from '@/constants/theme';
-import { useSystemRail } from '@/hooks/use-system-rail';
+import { LEADING_SCROLL_BAR, useSystemRail } from '@/hooks/use-system-rail';
 import { useTheme } from '@/hooks/use-theme';
 
 interface SettingsPageProps {
@@ -76,16 +76,19 @@ export function SettingsPage({
   const page = (
     <ScrollView
       ref={scroll}
-      // Beside the rail's tabs the scroll bar runs down the page's edge, not across them.
-      scrollIndicatorInsets={railed ? { right: railWidth } : undefined}
       testID={testID}
-      style={{
-        backgroundColor: theme.background,
-        paddingLeft: insets.left,
-        paddingRight: insets.right,
-      }}
+      // Beside the rail's tabs the scroll bar moves to the leading edge, clear of them.
+      style={[
+        {
+          backgroundColor: theme.background,
+          paddingLeft: railed ? insets.right : insets.left,
+          paddingRight: railed ? insets.left : insets.right,
+        },
+        railed && LEADING_SCROLL_BAR,
+      ]}
       contentContainerStyle={[
         styles.content,
+        railed && LEADING_SCROLL_BAR,
         {
           paddingTop: insets.top + Spacing.four,
           paddingBottom: footer && !railed ? Spacing.four : insets.bottom + Spacing.six,

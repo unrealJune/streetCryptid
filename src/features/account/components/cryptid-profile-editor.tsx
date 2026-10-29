@@ -16,7 +16,7 @@ import { useColorScheme } from '@/hooks/use-color-scheme';
 import { ThemedText } from '@/components/themed-text';
 import { SIGNAL_COLOR_OPTIONS, signalColorInk } from '@/constants/signal-colors';
 import { CryptidThemes, Fonts, Spacing } from '@/constants/theme';
-import { useSystemRail } from '@/hooks/use-system-rail';
+import { LEADING_SCROLL_BAR, useSystemRail } from '@/hooks/use-system-rail';
 import { useTheme } from '@/hooks/use-theme';
 import { PageFooter } from '@/features/settings/components/settings-page';
 import type { GeneratedCryptid } from '../core/cryptid-generator';
@@ -97,8 +97,8 @@ export function CryptidProfileEditor({
   const insets = useSafeAreaInsets();
   const pinnedContinue = mode === 'onboarding' && onDone !== undefined;
   // Beside a system rail Continue moves into it, and the scroll keeps its own bottom inset.
-  const railWidth = useSystemRail();
-  const railed = railWidth > 0;
+  const railed = useSystemRail() > 0;
+  const leadingBar = railed && pinnedContinue;
   // Measured, not the window: in edit mode this is inside the Settings sheet.
   const [frameWidth, setFrameWidth] = useState(0);
   const twoPane = frameWidth - insets.left - insets.right >= TWO_PANE_MIN_WIDTH;
@@ -578,10 +578,17 @@ export function CryptidProfileEditor({
       style={[styles.root, { backgroundColor: theme.background }]}
     >
       <ScrollView
-        scrollIndicatorInsets={railed && pinnedContinue ? { right: railWidth } : undefined}
-        style={{ paddingLeft: insets.left, paddingRight: insets.right }}
+        // Beside the rail's tab the scroll bar moves to the leading edge, clear of it.
+        style={[
+          {
+            paddingLeft: leadingBar ? insets.right : insets.left,
+            paddingRight: leadingBar ? insets.left : insets.right,
+          },
+          leadingBar && LEADING_SCROLL_BAR,
+        ]}
         contentContainerStyle={[
           styles.content,
+          leadingBar && LEADING_SCROLL_BAR,
           // Short enough to fit, so it sits in the middle of the space above Continue.
           twoPane && styles.contentCentered,
           {

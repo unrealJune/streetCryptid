@@ -4,7 +4,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useColorScheme } from '@/hooks/use-color-scheme';
 import { ThemedText } from '@/components/themed-text';
 import { CryptidThemes, MaxContentWidth, Spacing } from '@/constants/theme';
-import { useSystemRail } from '@/hooks/use-system-rail';
+import { LEADING_SCROLL_BAR, useSystemRail } from '@/hooks/use-system-rail';
 import { useTheme } from '@/hooks/use-theme';
 import { PageFooter } from '@/features/settings/components/settings-page';
 
@@ -24,20 +24,23 @@ export function LocationDisclosureScreen({ onChoice }: { onChoice: (accepted: bo
   const scheme = useColorScheme();
   const chrome = CryptidThemes[scheme === 'dark' ? 'deepsea' : 'daybreak'].chrome;
   const insets = useSafeAreaInsets();
-  const railWidth = useSystemRail();
+  const railed = useSystemRail() > 0;
 
   return (
     <View style={[styles.screen, { backgroundColor: theme.background }]}>
       <ScrollView
-        // Beside the rail's tabs the scroll bar runs down the page's edge, not across them.
-        scrollIndicatorInsets={railWidth > 0 ? { right: railWidth } : undefined}
-        style={{
-          backgroundColor: theme.background,
-          paddingLeft: insets.left,
-          paddingRight: insets.right,
-        }}
+        // Beside the rail's tabs the scroll bar moves to the leading edge, clear of them.
+        style={[
+          {
+            backgroundColor: theme.background,
+            paddingLeft: railed ? insets.right : insets.left,
+            paddingRight: railed ? insets.left : insets.right,
+          },
+          railed && LEADING_SCROLL_BAR,
+        ]}
         contentContainerStyle={[
           styles.content,
+          railed && LEADING_SCROLL_BAR,
           { paddingTop: insets.top + Spacing.five, paddingBottom: Spacing.four },
         ]}
       >
