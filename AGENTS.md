@@ -520,6 +520,17 @@ Conventions when changing that code:
   / trail-sync to `connectNewFriend` WITHOUT awaiting it — a friend is a local decision, and nothing
   the network does may stand between a human saying "keep this one" and the app having kept them.
   `awaitFriendWiring()` is what shutdown and the tests use instead.
+- **A BLE pipe outlives its last connection by `PIPE_IDLE_LINGER` (30 s), and a refusal is said out
+  loud.** Every pairing message is its own short QUIC connection, and the vendored transport used to
+  tear its BLE pipe down the moment the last one closed; on 2026-10-29 a Pixel 10's Reveal was
+  dialled 5 ms before the pipe under it went, and seven nearby pairings in a row died or fell back to
+  cellular (Loki: "all watched iroh connections closed; tearing BLE pipe down"). An inbound handler
+  that refuses (`NotListening` = Bump window shut, anything else) closes with
+  `PAIR_CLOSE_NOT_LISTENING` / `PAIR_CLOSE_REFUSED` before dropping, so the dialler ends with a
+  reason instead of 25 s of "did not answer" (`pair.dial{outcome=refused}`). Test transport
+  changes against `third_party/iroh-ble-transport/tests/sim_pairing.rs` (`just
+test-ble-transport`): real iroh endpoints on BLE alone over `SimRadio`, which logs every link so
+  a test can assert how many pipes a pairing took.
 - **`our_endpoint_ticket` pays the relay wait once per NODE, not once per message.** Four messages
   are built to reach the SAS gate (two per side) and each side's reply is built inside the other's
   dial, so an `Endpoint::online()` wait that is paid per message serializes across both phones.

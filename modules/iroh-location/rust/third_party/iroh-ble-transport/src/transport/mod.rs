@@ -18,6 +18,8 @@ pub mod transport;
 pub mod watchdog;
 
 #[cfg(feature = "testing")]
+pub mod sim;
+#[cfg(feature = "testing")]
 pub mod test_util;
 
 pub use driver::IncomingPacket;

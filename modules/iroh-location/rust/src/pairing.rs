@@ -189,6 +189,64 @@ const PAIR_INBOUND_TIMEOUT: Duration = Duration::from_secs(30);
 /// `conn.closed()` on its own never returns for a peer that vanished mid-handshake.
 const PAIR_CLOSE_LINGER: Duration = Duration::from_secs(5);
 
+/// QUIC application close codes on the pairing ALPN. Code 0 is every ordinary close
+/// (`pair-done`, `pair-error`, …); these two are a REFUSAL, sent by the answering phone so the
+/// dialler can stop at once and say why.
+///
+/// Before them a refused request was answered by dropping the connection, and the close that
+/// implies could be lost with the link carrying it: on 2026-10-29 an iPhone 14 refused a Pixel 10's
+/// nearby Hello (its Bump window had closed), tore its BLE pipe down with the connection, and the
+/// Pixel waited out all 25 s of `PAIR_EXCHANGE_TIMEOUT` before telling its user "That phone did not
+/// answer" — about a phone that had answered, with a no. An explicit close is sent before anything
+/// is dropped. Closing with a code is not part of the signed wire, so older peers are unaffected:
+/// an older dialler simply sees the connection end, sooner.
+const PAIR_CLOSE_NOT_LISTENING: u32 = 1;
+const PAIR_CLOSE_REFUSED: u32 = 2;
+
+/// The answering phone is not taking nearby pair requests right now: its Bump window is shut.
+#[derive(Debug)]
+struct NotListening;
+
+impl std::fmt::Display for NotListening {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("not accepting nearby pair requests")
+    }
+}
+
+impl std::error::Error for NotListening {}
+
+/// The close code the inbound handler sends for an error from `handle_incoming`.
+fn refusal_code(err: &anyhow::Error) -> u32 {
+    if err.downcast_ref::<NotListening>().is_some() {
+        PAIR_CLOSE_NOT_LISTENING
+    } else {
+        PAIR_CLOSE_REFUSED
+    }
+}
+
+/// The refusal a peer closed `conn` with, if that is how it ended.
+fn peer_refusal(conn: &Connection) -> Option<u32> {
+    match conn.close_reason()? {
+        iroh::endpoint::ConnectionError::ApplicationClosed(close) => {
+            match close.error_code.into_inner() {
+                1 => Some(PAIR_CLOSE_NOT_LISTENING),
+                2 => Some(PAIR_CLOSE_REFUSED),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+/// What the pairing screen shows for a refusal. Shown verbatim, like the dial's other errors.
+fn refusal_message(code: u32) -> &'static str {
+    if code == PAIR_CLOSE_NOT_LISTENING {
+        "That phone is not ready to pair. Open Bump on both phones, then try again."
+    } else {
+        "That phone turned this pairing down. Start a fresh pairing on both phones."
+    }
+}
+
 /// The budget for a SECOND or later attempt to reach a relay, once a full
 /// [`ENDPOINT_ONLINE_TIMEOUT`] has already been spent and failed. See `our_endpoint_ticket`.
 const ENDPOINT_ONLINE_RETRY_TIMEOUT: Duration = Duration::from_secs(2);
@@ -2814,7 +2872,7 @@ impl PairCore {
                 if nearby {
                     // Nearby: gated on pairing_ready and a matching deterministic id.
                     if !self.pairing_ready() {
-                        bail!("not accepting nearby pair requests");
+                        return Err(NotListening.into());
                     }
                     let expected = derive_nearby_id(&self.endpoint_id, &remote);
                     if expected != session_id {
@@ -3082,6 +3140,10 @@ async fn dial_exchange_in(
         Ok(Ok(resp)) => resp,
         Ok(Err(e)) => {
             span.record("exchange_ms", exchange_started.elapsed().as_millis() as u64);
+            if let Some(code) = peer_refusal(&conn) {
+                span.record("outcome", "refused");
+                return Err(anyhow!(refusal_message(code)));
+            }
             span.record("outcome", "exchange_failed");
             conn.close(0u32.into(), b"pair-error");
             return Err(e);
@@ -3144,6 +3206,7 @@ impl ProtocolHandler for PairProtocol {
             outcome = tracing::field::Empty,
         );
         let started = Instant::now();
+        let refused = AtomicBool::new(false);
         let served = tokio::time::timeout(PAIR_INBOUND_TIMEOUT, async {
             let (mut send, mut recv) = conn.accept_bi().await.map_err(accept_err)?;
             let req = read_frame(&mut recv).await.map_err(accept_err)?;
@@ -3153,11 +3216,16 @@ impl ProtocolHandler for PairProtocol {
                 tracing::field::display(crate::telemetry::short_hex(&msg.session_id)),
             );
             span.record("decision", tracing::field::debug(msg.decision));
-            let resp = self
-                .core
-                .handle_incoming(remote_bytes, msg)
-                .await
-                .map_err(accept_err)?;
+            let resp = match self.core.handle_incoming(remote_bytes, msg).await {
+                Ok(resp) => resp,
+                Err(e) => {
+                    // Say no out loud before anything is dropped; see `PAIR_CLOSE_REFUSED`.
+                    let code = refusal_code(&e);
+                    conn.close(code.into(), b"pair-refused");
+                    refused.store(true, Ordering::Relaxed);
+                    return Err(accept_err(e));
+                }
+            };
             let encoded = encode_msg(&resp).map_err(accept_err)?;
             write_frame(&mut send, &encoded).await.map_err(accept_err)?;
             Ok::<_, AcceptError>(())
@@ -3174,7 +3242,12 @@ impl ProtocolHandler for PairProtocol {
                 Ok(())
             }
             Ok(Err(e)) => {
-                span.record("outcome", "failed");
+                let outcome = if refused.load(Ordering::Relaxed) {
+                    "refused"
+                } else {
+                    "failed"
+                };
+                span.record("outcome", outcome);
                 Err(e)
             }
             Err(_) => {
@@ -3199,6 +3272,34 @@ mod tests {
     fn identity() -> ([u8; 32], [u8; 32]) {
         let sk = SigningKey::generate(&mut OsRng);
         (sk.to_bytes(), sk.verifying_key().to_bytes())
+    }
+
+    #[test]
+    fn a_shut_bump_window_is_the_not_listening_refusal() {
+        let not_listening: anyhow::Error = NotListening.into();
+        assert_eq!(refusal_code(&not_listening), PAIR_CLOSE_NOT_LISTENING);
+        // The text the inbound log line has always carried.
+        assert_eq!(
+            not_listening.to_string(),
+            "not accepting nearby pair requests"
+        );
+        assert_eq!(
+            refusal_code(&anyhow!("invite rejected: BadSecret")),
+            PAIR_CLOSE_REFUSED
+        );
+    }
+
+    #[test]
+    fn refusals_are_not_ordinary_closes_and_read_differently() {
+        assert_ne!(
+            PAIR_CLOSE_NOT_LISTENING, 0,
+            "0 is every ordinary pairing close"
+        );
+        assert_ne!(PAIR_CLOSE_REFUSED, 0);
+        assert_ne!(
+            refusal_message(PAIR_CLOSE_NOT_LISTENING),
+            refusal_message(PAIR_CLOSE_REFUSED)
+        );
     }
 
     /// A real endpoint ticket for `endpoint` shaped like the ones `our_endpoint_ticket` mints:

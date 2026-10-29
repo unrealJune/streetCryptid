@@ -79,7 +79,28 @@ standalone / path dependency:
          suppresses CoreBluetooth callbacks that arrive after the real pairing dial has already
          advanced the peer beyond `Discovered`.
 
+2026-10 — A BLE pipe outlives its last iroh connection, and a simulated radio to test that on:
+
+  * src/transport/hook.rs
+      - A pipe whose last watched connection closed is released only after `PIPE_IDLE_LINGER`
+         (30 s) with no new connection on it, instead of at once. Pairing sends each message on
+         its own short connection, and the next message's dial raced the teardown of the pipe it
+         was about to use.
+      - The connection tracking moved to the transport, so every hook it hands out shares it.
+
+  * src/transport/transport.rs
+      - Split the registry/driver/hook/watchdog wiring out of `construct` into `assemble`, which
+         takes any `BleInterface`, so the simulator runs the same code as a phone.
+
+  * src/transport/sim.rs (new, `testing` feature) and tests/sim_pairing.rs (new)
+      - `SimRadio`: an in-process radio that delivers GATT writes and notifications between
+         nodes' registries with ordered latency, link loss, and a log of every link opened, so
+         real iroh endpoints can run over the BLE transport alone.
+
+  * Cargo.toml
+      - Enabled tokio's `test-util` for the paused-clock hook tests.
+
 The upstream `examples/` directory was intentionally not vendored; it
 demonstrates endpoint wiring that this checkpoint does not yet use.
 
-No other upstream source files were modified.
+No other upstream source files were modified (src/transport/mod.rs gained the `sim` module).

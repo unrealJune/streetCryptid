@@ -342,6 +342,12 @@ test-android:
 test-rust:
     cd modules/iroh-location/rust && cargo test
 
+# The vendored BLE transport's own suite, including real iroh endpoints pairing over a simulated
+# radio (tests/sim_pairing.rs). Not part of `test-rust`: the app crate only builds BLE for
+# Android/Apple, while this crate's tests build `blew`'s Linux backend (needs libdbus-1-dev).
+test-ble-transport:
+    cd modules/iroh-location/rust/third_party/iroh-ble-transport && cargo test --features testing
+
 # Benchmark Rust protobuf parsing + SCG1 encoding with committed fixtures.
 profile-mvt:
     cd modules/iroh-location/rust && cargo run --release --example profile_mvt -- 200 20

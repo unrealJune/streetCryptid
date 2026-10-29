@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 use blew::DeviceId;
 use iroh::endpoint::{AfterHandshakeOutcome, Connection, EndpointHooks};
@@ -59,12 +60,25 @@ pub(crate) enum HookEvent {
     },
 }
 
+/// How long a BLE pipe outlives the last iroh connection that used it.
+///
+/// streetCryptid's pairing handshake is a run of SHORT connections — one per message (Hello,
+/// Reveal, then Accept once the humans have compared figures) — each closed the moment its reply
+/// lands. Tearing the pipe down on the last close meant the next message's dial raced the teardown
+/// of the pipe it was about to use: on 2026-10-29 a Pixel 10's Reveal was dialled 5 ms before its
+/// pipe was torn down and sat out a 15 s connect timeout, and every nearby attempt that evening
+/// either died that way or fell back to cellular. Keeping the pipe a while is what lets the next
+/// connection find it. Long enough to span the SAS comparison between Reveal and Accept; short
+/// enough that a peer who walked off is released long before anyone would notice the radio.
+pub const PIPE_IDLE_LINGER: Duration = Duration::from_secs(30);
+
 #[derive(Debug, Clone)]
 pub struct BleDedupHook {
     self_endpoint: EndpointId,
     routing: Arc<Routing>,
     tx: mpsc::UnboundedSender<HookEvent>,
     active_connections: Arc<ActiveConnections>,
+    idle_linger: Duration,
 }
 
 impl BleDedupHook {
@@ -73,32 +87,47 @@ impl BleDedupHook {
         self_endpoint: EndpointId,
         routing: Arc<Routing>,
         tx: mpsc::UnboundedSender<HookEvent>,
+        active_connections: Arc<ActiveConnections>,
+        idle_linger: Duration,
     ) -> Self {
         Self {
             self_endpoint,
             routing,
             tx,
-            active_connections: Arc::new(ActiveConnections::default()),
+            active_connections,
+            idle_linger,
         }
     }
 }
 
 type ActiveConnectionKey = (EndpointId, StableConnId);
 
+/// Which iroh connections ride each BLE pipe, and since when a pipe has had none.
+///
+/// Owned by the transport and shared by every [`BleDedupHook`] it hands out, so two hooks can never
+/// disagree about whether a pipe is still in use.
 #[derive(Debug, Default)]
-struct ActiveConnections {
+pub(crate) struct ActiveConnections {
     next_id: AtomicU64,
-    inner: parking_lot::Mutex<HashMap<ActiveConnectionKey, HashSet<u64>>>,
+    inner: parking_lot::Mutex<ActiveInner>,
+}
+
+#[derive(Debug, Default)]
+struct ActiveInner {
+    open: HashMap<ActiveConnectionKey, HashSet<u64>>,
+    /// The watch whose close left a pipe with no connections. A pipe is released only if the SAME
+    /// idle period is still running when that watch's linger ends: a connection that came and
+    /// went in the meantime started a newer period, with a full linger of its own.
+    idle_since: HashMap<ActiveConnectionKey, u64>,
 }
 
 impl ActiveConnections {
     fn insert(&self, endpoint_id: EndpointId, stable_id: StableConnId) -> u64 {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed) + 1;
-        self.inner
-            .lock()
-            .entry((endpoint_id, stable_id))
-            .or_default()
-            .insert(id);
+        let key = (endpoint_id, stable_id);
+        let mut inner = self.inner.lock();
+        inner.idle_since.remove(&key);
+        inner.open.entry(key).or_default().insert(id);
         id
     }
 
@@ -110,16 +139,56 @@ impl ActiveConnections {
     ) -> bool {
         let mut inner = self.inner.lock();
         let key = (endpoint_id, stable_id);
-        let Some(ids) = inner.get_mut(&key) else {
+        let Some(ids) = inner.open.get_mut(&key) else {
             return true;
         };
         ids.remove(&watch_id);
         if ids.is_empty() {
-            inner.remove(&key);
+            inner.open.remove(&key);
+            inner.idle_since.insert(key, watch_id);
             true
         } else {
             false
         }
+    }
+
+    /// True, once, if the idle period `watch_id`'s close began is still running: nothing has
+    /// used the pipe since. Consumes the marker so a pipe is released exactly once.
+    fn take_still_idle(
+        &self,
+        endpoint_id: EndpointId,
+        stable_id: StableConnId,
+        watch_id: u64,
+    ) -> bool {
+        let mut inner = self.inner.lock();
+        let key = (endpoint_id, stable_id);
+        if inner.open.contains_key(&key) || inner.idle_since.get(&key) != Some(&watch_id) {
+            return false;
+        }
+        inner.idle_since.remove(&key);
+        true
+    }
+}
+
+/// Release a pipe once its last connection has closed AND it then stayed unused for `linger`.
+/// See [`PIPE_IDLE_LINGER`] for why the wait exists.
+async fn report_idle_after_linger(
+    active: &ActiveConnections,
+    tx: &mpsc::UnboundedSender<HookEvent>,
+    endpoint_id: EndpointId,
+    stable_id: StableConnId,
+    watch_id: u64,
+    linger: Duration,
+) {
+    if !active.remove_and_is_empty(endpoint_id, stable_id, watch_id) {
+        return;
+    }
+    tokio::time::sleep(linger).await;
+    if active.take_still_idle(endpoint_id, stable_id, watch_id) {
+        let _ = tx.send(HookEvent::ConnectionClosed {
+            endpoint_id,
+            stable_id,
+        });
     }
 }
 
@@ -211,14 +280,18 @@ impl EndpointHooks for BleDedupHook {
             let weak = conn.weak_handle();
             let tx = self.tx.clone();
             let active_connections = Arc::clone(&self.active_connections);
+            let linger = self.idle_linger;
             tokio::spawn(async move {
                 let _ = weak.closed().await;
-                if active_connections.remove_and_is_empty(remote_endpoint, stable_id, watch_id) {
-                    let _ = tx.send(HookEvent::ConnectionClosed {
-                        endpoint_id: remote_endpoint,
-                        stable_id,
-                    });
-                }
+                report_idle_after_linger(
+                    &active_connections,
+                    &tx,
+                    remote_endpoint,
+                    stable_id,
+                    watch_id,
+                    linger,
+                )
+                .await;
             });
         }
         AfterHandshakeOutcome::Accept
@@ -250,6 +323,127 @@ mod tests {
             active.remove_and_is_empty(endpoint_id, stable_id, second),
             "last close reports the peer/stable-id bucket empty"
         );
+    }
+
+    fn closed_events(rx: &mut mpsc::UnboundedReceiver<HookEvent>) -> usize {
+        let mut n = 0;
+        while let Ok(event) = rx.try_recv() {
+            if matches!(event, HookEvent::ConnectionClosed { .. }) {
+                n += 1;
+            }
+        }
+        n
+    }
+
+    /// Run the spawned linger task up to its timer without moving the paused clock.
+    async fn settle() {
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+    }
+
+    fn spawn_close(
+        active: &Arc<ActiveConnections>,
+        tx: &mpsc::UnboundedSender<HookEvent>,
+        endpoint_id: EndpointId,
+        stable_id: StableConnId,
+        watch_id: u64,
+    ) -> tokio::task::JoinHandle<()> {
+        let (active, tx) = (Arc::clone(active), tx.clone());
+        tokio::spawn(async move {
+            report_idle_after_linger(
+                &active,
+                &tx,
+                endpoint_id,
+                stable_id,
+                watch_id,
+                PIPE_IDLE_LINGER,
+            )
+            .await;
+        })
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_idle_pipe_is_released_only_after_the_linger() {
+        let active = Arc::new(ActiveConnections::default());
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (endpoint_id, stable_id) = (endpoint(3), StableConnId::for_test(10));
+
+        let watch = active.insert(endpoint_id, stable_id);
+        let task = spawn_close(&active, &tx, endpoint_id, stable_id, watch);
+        settle().await;
+        tokio::time::advance(PIPE_IDLE_LINGER - Duration::from_millis(1)).await;
+        settle().await;
+        assert_eq!(closed_events(&mut rx), 0, "released inside the linger");
+
+        tokio::time::advance(Duration::from_millis(2)).await;
+        task.await.unwrap();
+        assert_eq!(
+            closed_events(&mut rx),
+            1,
+            "an unused pipe is released after it"
+        );
+    }
+
+    /// The 2026-10-29 Pixel 10 sequence: Hello's connection closes and Reveal's is dialled over
+    /// the same pipe 5 ms later. The pipe has to still be there when it arrives.
+    #[tokio::test(start_paused = true)]
+    async fn a_connection_inside_the_linger_keeps_the_pipe() {
+        let active = Arc::new(ActiveConnections::default());
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (endpoint_id, stable_id) = (endpoint(4), StableConnId::for_test(11));
+
+        let hello = active.insert(endpoint_id, stable_id);
+        let hello_closed = spawn_close(&active, &tx, endpoint_id, stable_id, hello);
+        settle().await;
+        tokio::time::advance(Duration::from_millis(5)).await;
+        let reveal = active.insert(endpoint_id, stable_id);
+
+        tokio::time::advance(PIPE_IDLE_LINGER).await;
+        hello_closed.await.unwrap();
+        assert_eq!(
+            closed_events(&mut rx),
+            0,
+            "Hello's linger tore down the pipe Reveal is using"
+        );
+
+        // Reveal closes in turn; its own linger, from its own close, is the one that counts.
+        let reveal_closed = spawn_close(&active, &tx, endpoint_id, stable_id, reveal);
+        settle().await;
+        tokio::time::advance(PIPE_IDLE_LINGER + Duration::from_millis(1)).await;
+        reveal_closed.await.unwrap();
+        assert_eq!(closed_events(&mut rx), 1);
+    }
+
+    /// A connection that came AND went during an earlier linger began a newer idle period. The
+    /// earlier timer must not cut that one short.
+    #[tokio::test(start_paused = true)]
+    async fn only_the_latest_idle_period_can_release_the_pipe() {
+        let active = Arc::new(ActiveConnections::default());
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (endpoint_id, stable_id) = (endpoint(5), StableConnId::for_test(12));
+
+        let first = active.insert(endpoint_id, stable_id);
+        let first_closed = spawn_close(&active, &tx, endpoint_id, stable_id, first);
+        settle().await;
+        tokio::time::advance(Duration::from_secs(10)).await;
+        let second = active.insert(endpoint_id, stable_id);
+        let second_closed = spawn_close(&active, &tx, endpoint_id, stable_id, second);
+        settle().await;
+
+        // The first linger ends twenty seconds into the second idle period.
+        tokio::time::advance(PIPE_IDLE_LINGER - Duration::from_secs(10) + Duration::from_millis(1))
+            .await;
+        first_closed.await.unwrap();
+        assert_eq!(
+            closed_events(&mut rx),
+            0,
+            "a stale idle period released the pipe"
+        );
+
+        tokio::time::advance(Duration::from_secs(10)).await;
+        second_closed.await.unwrap();
+        assert_eq!(closed_events(&mut rx), 1);
     }
 
     #[test]
