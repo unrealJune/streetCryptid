@@ -215,10 +215,17 @@ impl EndpointHooks for BleDedupHook {
                 .scan_hint_for_prefix(&prefix_from_endpoint(&remote_addr.id))
                 .is_some()
         {
+            // Values in the message too: Loki keeps only the message, and "who was dialling a
+            // phone in BLE range during pairing, and for what" is the question this line answers.
+            let alpn = String::from_utf8_lossy(alpn);
+            let remote: String = remote_addr.id.as_bytes()[..5]
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect();
             tracing::info!(
                 remote_endpoint = %remote_addr.id,
-                alpn = %String::from_utf8_lossy(alpn),
-                "BleDedupHook: holding a dial off BLE (link reserved)"
+                %alpn,
+                "BleDedupHook: holding a dial off BLE (link reserved): {alpn} to {remote}"
             );
             return BeforeConnectOutcome::Reject;
         }

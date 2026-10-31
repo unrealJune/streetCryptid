@@ -423,12 +423,17 @@ impl Registry {
         let _ = rssi;
         let device_id = device.id.clone();
 
-        let has_verified_live = self.peers.values().any(|e| {
-            e.verified_endpoint
-                .map(|eid| crate::transport::routing::prefix_from_endpoint(&eid) == prefix)
-                .unwrap_or(false)
-                && matches!(e.phase, PeerPhase::Connected { .. })
-        });
+        let verified_live = self
+            .peers
+            .values()
+            .find(|e| {
+                e.verified_endpoint
+                    .map(|eid| crate::transport::routing::prefix_from_endpoint(&eid) == prefix)
+                    .unwrap_or(false)
+                    && matches!(e.phase, PeerPhase::Connected { .. })
+            })
+            .map(|e| (e.device_id.clone(), e.pipe.is_some()));
+        let has_verified_live = verified_live.is_some();
         let i_am_lower = self.my_prefix < prefix;
         let already_verified_peer = self.verified_prefixes.contains_key(&prefix);
         let should_defer = i_am_lower && !already_verified_peer;
@@ -438,9 +443,15 @@ impl Registry {
                 entry.last_adv = Some(now);
                 entry.prefix = Some(prefix);
                 if !entry.verified_live_suppressed_logged {
-                    tracing::trace!(
+                    // Values in the message: Loki keeps only the message. A live entry with no
+                    // pipe is one that will never carry anything, and while it stands every
+                    // advertisement from this peer is ignored.
+                    let (live_device, live_has_pipe) =
+                        verified_live.clone().expect("has_verified_live");
+                    tracing::debug!(
                         device = %device_id,
-                        "suppressing dial: verified live peer already exists for this prefix",
+                        "suppressing dial from {device_id}: {live_device} already holds a verified \
+                         connection to this peer (pipe={live_has_pipe})",
                     );
                     entry.verified_live_suppressed_logged = true;
                 }
@@ -606,6 +617,32 @@ impl Registry {
             decision = decision_tag,
             "registry SendDatagram"
         );
+        // A dial that asks for a new pipe and does not get a connect started is invisible
+        // otherwise: on 2026-10-31 a Pixel's Bump dial timed out three times with no BLE activity
+        // at all, and nothing could say what state the peer was in. Once per state, values in the
+        // message (Loki keeps only the message).
+        if wants_new_pipe {
+            let tag = if matches!(decision, SendDecision::Enqueue) && entry.pipe.is_none() {
+                "enqueue-without-pipe"
+            } else {
+                decision_tag
+            };
+            if tag != "start_and_enqueue" && tag != "enqueue" {
+                let key = format!("{entry_phase_kind:?}/{tag}");
+                if entry.last_new_pipe_send.as_deref() != Some(key.as_str()) {
+                    tracing::debug!(
+                        device = %device_id,
+                        "new-pipe send to {device_id} not dialled: phase={entry_phase_kind:?} \
+                         decision={tag} buffered={} role={:?}",
+                        entry.pending_sends.len(),
+                        entry.role,
+                    );
+                    entry.last_new_pipe_send = Some(key);
+                }
+            } else {
+                entry.last_new_pipe_send = None;
+            }
+        }
         if let Some(target_endpoint) = target_endpoint
             && matches!(
                 decision,

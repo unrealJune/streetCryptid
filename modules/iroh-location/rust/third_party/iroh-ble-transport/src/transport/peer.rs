@@ -112,6 +112,9 @@ pub struct PeerEntry {
     pub verified_at: Option<Instant>,
     pub l2cap_upgrade_failed: bool,
     pub verified_live_suppressed_logged: bool,
+    /// The last `phase/decision` a send asking for a new pipe was logged under, so a dial that
+    /// cannot start logs once per state rather than once per retransmitted datagram.
+    pub last_new_pipe_send: Option<String>,
 }
 
 impl PeerEntry {
@@ -136,6 +139,7 @@ impl PeerEntry {
             verified_at: None,
             l2cap_upgrade_failed: false,
             verified_live_suppressed_logged: false,
+            last_new_pipe_send: None,
         }
     }
 }
