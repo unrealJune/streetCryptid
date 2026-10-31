@@ -233,7 +233,7 @@ export function renderRegionImage({
     terrainImage.makeShaderOptions(
       TileMode.Clamp,
       TileMode.Clamp,
-      FilterMode.Linear,
+      FilterMode.Nearest,
       MipmapMode.None
     ),
   ];

@@ -1,4 +1,4 @@
-import { Skia, type SkImage } from '@shopify/react-native-skia';
+import { FilterMode, Skia, type SkImage } from '@shopify/react-native-skia';
 
 import { CryptidThemes } from '@/constants/cryptid-theme';
 
@@ -234,6 +234,25 @@ describe('temporary shader resources', () => {
       expect(getDotFieldEffect).toHaveBeenLastCalledWith();
       expect(getDotMaterialEffect).toHaveBeenLastCalledWith();
     }
+  });
+
+  it('hands the shader DEM texels unfiltered, because their two bytes do not filter exactly', () => {
+    const makeShaderOptions = jest.fn(() => mockResource({}));
+    renderRegionImage({
+      region,
+      palette: CryptidThemes.daybreak.canvas,
+      maskImage: image,
+      groundImage: image,
+      terrainImage: { makeShaderOptions } as unknown as SkImage,
+      cellImage: image,
+      lutImage: image,
+    });
+    expect(makeShaderOptions).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.anything(),
+      FilterMode.Nearest,
+      expect.anything()
+    );
   });
 
   it('reports allocation failure and releases the material pass even without an atlas', () => {

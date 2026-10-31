@@ -44,9 +44,8 @@ export function alpineWeight(metres: number, treeline: number): number {
 
 /**
  * Elevation in metres on a row-major grid covering `rect` edge to edge, at the
- * DEM's own resolution rather than the mask's: the shader samples it directly
- * with a bilinear filter. Sea and
- * bathymetry may be negative; they are drawn as sea level.
+ * DEM's own resolution rather than the mask's: the shader interpolates its
+ * texels itself. Sea and bathymetry may be negative; they are drawn as sea level.
  */
 export interface ElevationRaster {
   readonly width: number;
@@ -80,10 +79,11 @@ export function contourLod(zoom: number): { interval: number; detail: number } {
 }
 
 /**
- * R/G = unsigned 16-bit elevation in metres, B = alpine weight. Sample this
- * image DIRECTLY with bilinear filtering, then decode R*65280 + G*255 in the
- * shader. Drawing the two bytes through an intermediate RGBA8 surface rounds
- * the high byte and introduces 256 m steps.
+ * R/G = unsigned 16-bit elevation in metres, B = alpine weight. Read this image
+ * texel by texel, sampled nearest, and decode R*256 + G before interpolating: the
+ * low byte wraps every 256 m, so a filtered pair is only as good as the GPU's
+ * filter, and drawing it through an intermediate RGBA8 surface rounds the high
+ * byte and introduces 256 m steps.
  *
  * No region statistics, sorting, or flat-region switch: a summit and a forest
  * keep the same encoding when another mountain enters the crop. Latitude is
