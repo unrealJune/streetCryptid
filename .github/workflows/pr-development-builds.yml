@@ -135,16 +135,17 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
-      # The hit rate is the whole point of the ccache, so it goes in the summary. ccache's stats name
-      # nothing but its own counters and cache directory.
+      # The hit rate is the whole point of the ccache, so it goes in the summary and the log (job
+      # summaries cannot be read back through the API). ccache's stats name nothing but its own
+      # counters, its cache directory, and -- verbose -- why a call was uncacheable.
       - name: Report ccache statistics
         if: '!cancelled()'
         run: |
           {
             printf '### ccache\n\n```\n'
-            ccache --show-stats 2>&1 || true
+            ccache --show-stats --verbose 2>&1 || true
             printf '```\n'
-          } >> "$GITHUB_STEP_SUMMARY"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Save the ccache
         if: "!cancelled() && steps.setup.outputs.ccache-hit != 'true'"
@@ -152,6 +153,17 @@ jobs:
         with:
           path: ~/Library/Caches/ccache
           key: ${{ steps.setup.outputs.ccache-key }}
+
+      # Entries in and out are the Metro cache's hit evidence: after a JS-only change, an output
+      # directory nearly as large as the restored one is a cache that was read.
+      - name: Report Metro cache size
+        if: '!cancelled()'
+        run: |
+          for dir in "$EXPO_METRO_CACHE_RESTORE_DIR" "$EXPO_METRO_CACHE_OUTPUT_DIR"; do
+            printf '%s: %s files, %s\n' "$(basename "$dir")" \
+              "$(find "$dir" -type f 2> /dev/null | wc -l | tr -d ' ')" \
+              "$(du -sh "$dir" 2> /dev/null | cut -f1)"
+          done | tee -a "$GITHUB_STEP_SUMMARY"
 
       # Only what this build's bundle used (see eas-local-build-setup), so the entry does not grow.
       - name: Save the Metro transform cache
@@ -353,6 +365,17 @@ jobs:
           path: ${{ runner.temp }}/build-profile-bundle
           if-no-files-found: ignore
           retention-days: 14
+
+      # Entries in and out are the Metro cache's hit evidence: after a JS-only change, an output
+      # directory nearly as large as the restored one is a cache that was read.
+      - name: Report Metro cache size
+        if: '!cancelled()'
+        run: |
+          for dir in "$EXPO_METRO_CACHE_RESTORE_DIR" "$EXPO_METRO_CACHE_OUTPUT_DIR"; do
+            printf '%s: %s files, %s\n' "$(basename "$dir")" \
+              "$(find "$dir" -type f 2> /dev/null | wc -l | tr -d ' ')" \
+              "$(du -sh "$dir" 2> /dev/null | cut -f1)"
+          done | tee -a "$GITHUB_STEP_SUMMARY"
 
       # Only what this build's bundle used (see eas-local-build-setup), so the entry does not grow.
       - name: Save the Metro transform cache

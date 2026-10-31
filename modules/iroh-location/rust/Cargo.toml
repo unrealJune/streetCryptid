@@ -200,11 +200,13 @@ opt-level = "z"
 lto = "thin"
 strip = true
 
-# Optimize dependencies in debug and test builds; this crate itself stays at opt-level 0 so it
-# keeps fast rebuilds and full debuggability. The test suite is CPU-bound in dependency code it
-# cannot avoid -- x25519/ed25519, ChaCha, BLAKE3 and redb, all unoptimized by default -- and on CI
+# Optimize dependencies in test builds only; this crate itself stays at opt-level 0 so it keeps
+# fast rebuilds and full debuggability. The test suite is CPU-bound in dependency code it cannot
+# avoid -- x25519/ed25519, ChaCha, BLAKE3 and redb, all unoptimized by default -- and on CI
 # `cargo test` spent ~5 minutes running against ~80 s compiling (2026-10-31: restart_protocol
-# 150 s, ratchet_conditions 69 s, pairing_integration 57 s). Dependencies come from the Cargo
-# cache, so the extra optimization is paid once per lockfile change, not per run.
-[profile.dev.package."*"]
+# 150 s, ratchet_conditions 69 s, pairing_integration 57 s; 104 s for the whole suite at
+# opt-level 2). `test`, not `dev`: the dev profile also builds the host library UniFFI generates
+# bindings from in every EAS build, and optimizing its dependencies there made a cold build of
+# it take 8 minutes instead of 4 for no benefit.
+[profile.test.package."*"]
 opt-level = 2
