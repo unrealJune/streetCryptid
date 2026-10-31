@@ -1099,6 +1099,12 @@ uint64_t uniffi_iroh_location_fn_func_flush_telemetry(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_FUNC_PUSH_TELEMETRY_NOW
+#define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_FUNC_PUSH_TELEMETRY_NOW
+uint64_t uniffi_iroh_location_fn_func_push_telemetry_now(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_FUNC_SET_TELEMETRY_SPOOL_DIR
 #define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_FUNC_SET_TELEMETRY_SPOOL_DIR
 int8_t uniffi_iroh_location_fn_func_set_telemetry_spool_dir(RustBuffer dir, RustCallStatus *_Nonnull out_status
@@ -1505,6 +1511,12 @@ uint16_t uniffi_iroh_location_checksum_func_configure_telemetry(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_FUNC_FLUSH_TELEMETRY
 #define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_FUNC_FLUSH_TELEMETRY
 uint16_t uniffi_iroh_location_checksum_func_flush_telemetry(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_FUNC_PUSH_TELEMETRY_NOW
+#define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_FUNC_PUSH_TELEMETRY_NOW
+uint16_t uniffi_iroh_location_checksum_func_push_telemetry_now(void
     
 );
 #endif

@@ -8665,6 +8665,109 @@ public func FfiConverterTypeSealReport_lower(_ value: SealReport) -> RustBuffer 
 
 
 /**
+ * What [`push_telemetry_now`] came to, for the debug screen's status line.
+ */
+public struct TelemetryPush: Equatable, Hashable {
+    /**
+     * An exporter is configured. `false` in a build without `otel`, or before `configure`.
+     */
+    public var configured: Bool
+    /**
+     * Spooled batches (traces and logs) the collector took during this push.
+     */
+    public var delivered: UInt64
+    /**
+     * Spooled batches given up on during this push: refused by the collector, or too old.
+     */
+    public var dropped: UInt64
+    /**
+     * The collector answered every send. `false` means the rest is still queued.
+     */
+    public var reachable: Bool
+    /**
+     * What is still waiting afterwards.
+     */
+    public var remainingBatches: UInt64
+    public var remainingBytes: UInt64
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * An exporter is configured. `false` in a build without `otel`, or before `configure`.
+         */configured: Bool, 
+        /**
+         * Spooled batches (traces and logs) the collector took during this push.
+         */delivered: UInt64, 
+        /**
+         * Spooled batches given up on during this push: refused by the collector, or too old.
+         */dropped: UInt64, 
+        /**
+         * The collector answered every send. `false` means the rest is still queued.
+         */reachable: Bool, 
+        /**
+         * What is still waiting afterwards.
+         */remainingBatches: UInt64, remainingBytes: UInt64) {
+        self.configured = configured
+        self.delivered = delivered
+        self.dropped = dropped
+        self.reachable = reachable
+        self.remainingBatches = remainingBatches
+        self.remainingBytes = remainingBytes
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension TelemetryPush: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeTelemetryPush: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> TelemetryPush {
+        return
+            try TelemetryPush(
+                configured: FfiConverterBool.read(from: &buf), 
+                delivered: FfiConverterUInt64.read(from: &buf), 
+                dropped: FfiConverterUInt64.read(from: &buf), 
+                reachable: FfiConverterBool.read(from: &buf), 
+                remainingBatches: FfiConverterUInt64.read(from: &buf), 
+                remainingBytes: FfiConverterUInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: TelemetryPush, into buf: inout [UInt8]) {
+        FfiConverterBool.write(value.configured, into: &buf)
+        FfiConverterUInt64.write(value.delivered, into: &buf)
+        FfiConverterUInt64.write(value.dropped, into: &buf)
+        FfiConverterBool.write(value.reachable, into: &buf)
+        FfiConverterUInt64.write(value.remainingBatches, into: &buf)
+        FfiConverterUInt64.write(value.remainingBytes, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTelemetryPush_lift(_ buf: RustBuffer) throws -> TelemetryPush {
+    return try FfiConverterTypeTelemetryPush.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTelemetryPush_lower(_ value: TelemetryPush) -> RustBuffer {
+    return FfiConverterTypeTelemetryPush.lower(value)
+}
+
+
+/**
  * One author's fix slot in the LOCAL durable replica — what this device could hand to a peer.
  *
  * Companion to [`TransportDiagnostics`]: a diagnostics read, carrying no location data, so it
@@ -11211,6 +11314,30 @@ public func flushTelemetry()async   {
         )
 }
 /**
+ * Send every Rust span and log this phone is holding, NOW: flush the batch processors, then drain
+ * the offline spool ignoring its backoff and its per-export budget. The normal drain only runs
+ * when a new batch is exported, so a phone that has gone quiet can sit on a spool for hours. For
+ * the debug screen's "push logs" button.
+ *
+ * Runs on a thread of its own rather than the blocking pool: the HTTP client is reqwest's blocking
+ * one, which must not be driven from inside a tokio runtime context.
+ */
+public func pushTelemetryNow()async  -> TelemetryPush  {
+    return
+        try!  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_iroh_location_fn_func_push_telemetry_now(
+                )
+            },
+            pollFunc: ffi_iroh_location_rust_future_poll_rust_buffer,
+            completeFunc: ffi_iroh_location_rust_future_complete_rust_buffer,
+            freeFunc: ffi_iroh_location_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeTelemetryPush_lift,
+            errorHandler: nil
+            
+        )
+}
+/**
  * Where Rust telemetry that could not be sent waits for the collector (the app's caches
  * directory). Until this is called it waits in memory, bounded, and dies with the process. Call it
  * before [`configure_telemetry`]; calling it again moves future batches, not queued ones. Returns
@@ -11309,6 +11436,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_func_flush_telemetry() != 65035) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_iroh_location_checksum_func_push_telemetry_now() != 33874) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_func_set_telemetry_spool_dir() != 28941) {
