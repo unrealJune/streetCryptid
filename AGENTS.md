@@ -553,6 +553,19 @@ Conventions when changing that code:
   Measured 2026-09-17 at a bar: 44 s from arming Bump to the visual gate, which reads as slow BLE
   and is not BLE. `endpoint_was_online` latches; `pair.endpoint_ticket`'s `latched` is how you see
   it. The FIRST wait is still the full budget — that is where the invite-address argument lives.
+- **The core's telemetry is spooled, because pairing over BLE is exactly when a phone is offline.**
+  The SDK hands a batch to the exporter once; `opentelemetry-otlp` dropped it on a failed POST, so
+  on 2026-10-31 an offline iPhone's Rust spans for three Bump pairings (its own `bump.resolve`
+  included) were simply lost while its JS spans came back from the journal. The exporters in
+  `telemetry.rs` (`spool_export`) now hand every batch to `telemetry_spool::Shipper`: sent at once
+  when nothing is queued, otherwise written to `otel-spool/` in the app's caches (set by
+  `set_telemetry_spool_dir` from `TelemetryConfigurator` on both platforms, before the first
+  configure) and drained oldest first with backoff. Keep the rules its tests pin: a refused (4xx)
+  batch is dropped, never retried at the head; the spool is bounded; and nothing on the export
+  thread emits `tracing` except the one `telemetry.recovered` span after a backlog drains. Bump
+  itself is recorded as `bump.stage` (one span per stage change, with the reason a window closed)
+  and every local cancel as `pair.cancel{reason}`, both from JS; `ble.probe` and `ble.pipe` cover
+  the radio. See `infra/otel/README.md`.
 - **Pairing telemetry is spans, not `tracing::info!`.** Loki's OTLP ingest keeps the message and
   drops the fields, so the core's `connect_ms` / `exchange_ms` / `ticket_ms` existed and answered
   nothing on the one night they were needed. `pair.dial`, `pair.handshake`, `pair.inbound`,

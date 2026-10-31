@@ -72,6 +72,7 @@ mod relay;
 /// iroh's DNS through the OS resolver on Apple and Android, never a nameserver list.
 mod system_dns;
 mod telemetry;
+mod telemetry_spool;
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
@@ -99,7 +100,7 @@ use pairing::{
     PairStateData, SasChallengeData, SasRole,
 };
 use profile::{ProfileDocs, ProfileFields, ProfileRecord, ProfileSink};
-pub use telemetry::{configure_telemetry, flush_telemetry};
+pub use telemetry::{configure_telemetry, flush_telemetry, set_telemetry_spool_dir};
 
 uniffi::setup_scaffolding!();
 
@@ -4550,6 +4551,17 @@ impl LocationNode {
             linked_peers = tracing::field::Empty,
             pairing_holds_ble = self.pair.holds_ble_for_pairing(),
             ms = tracing::field::Empty,
+            // Filled by `BleHandle::resolve_bump_peer`: what the scan heard at all (`heard`), how
+            // many of those advertised an iroh key, their RSSIs strongest first, and whether the
+            // winner was named from what the transport already knew or by a GATT probe (each
+            // probe is its own `ble.probe` span).
+            scan_ms = tracing::field::Empty,
+            scan_started = tracing::field::Empty,
+            heard = tracing::field::Empty,
+            iroh_devices = tracing::field::Empty,
+            candidate_rssi = tracing::field::Empty,
+            resolved_via = tracing::field::Empty,
+            probes = tracing::field::Empty,
         );
         let started = std::time::Instant::now();
         let resolution = resolve_bump_with(&handle, timeout)

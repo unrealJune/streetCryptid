@@ -335,7 +335,6 @@ mod imp {
         Context,
     };
     use opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge;
-    use opentelemetry_otlp::WithExportConfig;
     use opentelemetry_sdk::{logs::SdkLoggerProvider, trace::SdkTracerProvider, Resource};
     use tracing_opentelemetry::OpenTelemetrySpanExt;
     use tracing_subscriber::layer::{Layered, SubscriberExt};
@@ -427,28 +426,10 @@ mod imp {
             ])
             .build();
 
-        let span_exporter = match opentelemetry_otlp::SpanExporter::builder()
-            .with_http()
-            .with_endpoint(format!("{endpoint}/v1/traces"))
-            .build()
-        {
-            Ok(e) => e,
-            Err(e) => {
-                tracing::warn!("telemetry: building OTLP span exporter failed: {e}");
-                return false;
-            }
-        };
-        let log_exporter = match opentelemetry_otlp::LogExporter::builder()
-            .with_http()
-            .with_endpoint(format!("{endpoint}/v1/logs"))
-            .build()
-        {
-            Ok(e) => e,
-            Err(e) => {
-                tracing::warn!("telemetry: building OTLP log exporter failed: {e}");
-                return false;
-            }
-        };
+        // Our own exporters rather than opentelemetry-otlp's: theirs drop a batch whose POST fails,
+        // and these keep it (`telemetry_spool`).
+        let span_exporter = spool_export::SpanSpool::new(&endpoint, &resource);
+        let log_exporter = spool_export::LogSpool::new(&endpoint, &resource);
 
         let tracer_provider = SdkTracerProvider::builder()
             .with_batch_exporter(span_exporter)
@@ -475,6 +456,182 @@ mod imp {
             tracing::info!("telemetry: OTLP export active → {endpoint}");
         }
         swapped
+    }
+
+    /// OTLP/HTTP protobuf exporters that hand every batch to a `Shipper`, which delivers it or
+    /// keeps it until it can (see `telemetry_spool`).
+    mod spool_export {
+        use std::sync::OnceLock;
+        use std::time::Duration;
+
+        use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
+        use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
+        use opentelemetry_proto::transform::common::tonic::ResourceAttributesWithSchema;
+        use opentelemetry_proto::transform::logs::tonic::group_logs_by_resource_and_scope;
+        use opentelemetry_proto::transform::trace::tonic::group_spans_by_resource_and_scope;
+        use opentelemetry_sdk::error::OTelSdkResult;
+        use opentelemetry_sdk::logs::{LogBatch, LogExporter};
+        use opentelemetry_sdk::trace::{SpanData, SpanExporter};
+        use opentelemetry_sdk::Resource;
+        use prost::Message;
+
+        use crate::telemetry_spool::{PostOutcome, Recovered, Shipper, Signal, Sink};
+
+        /// `telemetry.recovered`: a backlog this phone could not send has just gone out. Its spans
+        /// keep their original timestamps, so without this nothing says that the last half hour
+        /// of a device's trace arrived late, or that a gap in it was filled in afterwards.
+        fn report_recovered(recovered: Recovered) {
+            let signal = match recovered.signal {
+                Signal::Traces => "traces",
+                Signal::Logs => "logs",
+            };
+            let spool = crate::telemetry_spool::snapshot();
+            let span = tracing::info_span!(
+                "telemetry.recovered",
+                signal,
+                batches = recovered.batches,
+                oldest_age_ms = recovered.oldest_age.as_millis() as u64,
+                spooled_total = spool.spooled_total,
+                dropped_total = spool.dropped_total,
+            );
+            drop(span.entered());
+        }
+
+        /// Short on connect: an offline phone finds out in seconds and goes back to spooling.
+        const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
+        const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+
+        pub(super) struct HttpSink {
+            url: String,
+            /// Built on first use, on the export thread: reqwest's blocking client runs a runtime
+            /// of its own and must not be created inside a tokio one, which `configure` can be.
+            client: OnceLock<Option<reqwest::blocking::Client>>,
+        }
+
+        impl HttpSink {
+            fn new(url: String) -> Self {
+                Self {
+                    url,
+                    client: OnceLock::new(),
+                }
+            }
+        }
+
+        impl Sink for HttpSink {
+            fn post(&self, body: &[u8]) -> PostOutcome {
+                let client = self.client.get_or_init(|| {
+                    reqwest::blocking::Client::builder()
+                        .connect_timeout(CONNECT_TIMEOUT)
+                        .timeout(REQUEST_TIMEOUT)
+                        .build()
+                        .ok()
+                });
+                let Some(client) = client else {
+                    return PostOutcome::Retry;
+                };
+                let sent = client
+                    .post(&self.url)
+                    .header(reqwest::header::CONTENT_TYPE, "application/x-protobuf")
+                    .body(body.to_vec())
+                    .send();
+                match sent {
+                    Ok(response) => {
+                        let status = response.status();
+                        if status.is_success() {
+                            PostOutcome::Delivered
+                        } else if status.is_server_error() || matches!(status.as_u16(), 408 | 429) {
+                            PostOutcome::Retry
+                        } else {
+                            PostOutcome::Refused
+                        }
+                    }
+                    Err(_) => PostOutcome::Retry,
+                }
+            }
+        }
+
+        pub(super) struct SpanSpool {
+            shipper: Shipper<HttpSink>,
+            resource: ResourceAttributesWithSchema,
+        }
+
+        impl SpanSpool {
+            pub(super) fn new(endpoint: &str, resource: &Resource) -> Self {
+                Self {
+                    shipper: Shipper::new(
+                        Signal::Traces,
+                        HttpSink::new(format!("{endpoint}/v1/traces")),
+                    )
+                    .on_recovered(report_recovered),
+                    resource: resource.into(),
+                }
+            }
+        }
+
+        impl std::fmt::Debug for SpanSpool {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("SpanSpool")
+            }
+        }
+
+        impl SpanExporter for SpanSpool {
+            fn export(
+                &self,
+                batch: Vec<SpanData>,
+            ) -> impl std::future::Future<Output = OTelSdkResult> + Send {
+                let request = ExportTraceServiceRequest {
+                    resource_spans: group_spans_by_resource_and_scope(batch, &self.resource),
+                };
+                self.shipper.ship(request.encode_to_vec());
+                // Delivered or kept: either way the SDK has nothing to retry or report.
+                std::future::ready(Ok(()))
+            }
+
+            fn set_resource(&mut self, resource: &Resource) {
+                self.resource = resource.into();
+            }
+        }
+
+        pub(super) struct LogSpool {
+            shipper: Shipper<HttpSink>,
+            resource: ResourceAttributesWithSchema,
+        }
+
+        impl LogSpool {
+            pub(super) fn new(endpoint: &str, resource: &Resource) -> Self {
+                Self {
+                    shipper: Shipper::new(
+                        Signal::Logs,
+                        HttpSink::new(format!("{endpoint}/v1/logs")),
+                    )
+                    .on_recovered(report_recovered),
+                    resource: resource.into(),
+                }
+            }
+        }
+
+        impl std::fmt::Debug for LogSpool {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("LogSpool")
+            }
+        }
+
+        impl LogExporter for LogSpool {
+            fn export(
+                &self,
+                batch: LogBatch<'_>,
+            ) -> impl std::future::Future<Output = OTelSdkResult> + Send {
+                let request = ExportLogsServiceRequest {
+                    resource_logs: group_logs_by_resource_and_scope(batch, &self.resource),
+                };
+                self.shipper.ship(request.encode_to_vec());
+                std::future::ready(Ok(()))
+            }
+
+            fn set_resource(&mut self, resource: &Resource) {
+                self.resource = resource.into();
+            }
+        }
     }
 
     /// Force-flush both providers — headless background contexts call this before the OS
@@ -609,6 +766,19 @@ pub(crate) use imp::set_parent;
 #[uniffi::export]
 pub fn configure_telemetry(endpoint: String, instance_id: String) -> bool {
     imp::configure(endpoint, instance_id)
+}
+
+/// Where Rust telemetry that could not be sent waits for the collector (the app's caches
+/// directory). Until this is called it waits in memory, bounded, and dies with the process. Call it
+/// before [`configure_telemetry`]; calling it again moves future batches, not queued ones. Returns
+/// whether the directory is usable; always `false` without the `otel` feature.
+#[uniffi::export]
+pub fn set_telemetry_spool_dir(dir: String) -> bool {
+    if cfg!(feature = "otel") {
+        crate::telemetry_spool::set_dir(std::path::PathBuf::from(dir))
+    } else {
+        false
+    }
 }
 
 /// Flush buffered telemetry. Headless background tasks await this before returning — the OS may

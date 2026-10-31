@@ -3,7 +3,9 @@ package com.unrealjune.irohlocation
 import android.content.Context
 import android.os.Build
 import android.util.Log
+import java.io.File
 import uniffi.iroh_location.configureTelemetry
+import uniffi.iroh_location.setTelemetrySpoolDir
 
 /**
  * The single door to the Rust OTLP layer on Android, so a process with no JS still reports.
@@ -37,6 +39,7 @@ internal object TelemetryConfigurator {
 
   private var applied: Pair<String, String>? = null
   private var lastResult = false
+  private var spoolDirSet = false
 
   /**
    * Point the Rust exporter at [endpoint], unless that is already where it points.
@@ -56,6 +59,12 @@ internal object TelemetryConfigurator {
     val wanted = endpoint to instanceId
     if (applied == wanted) return lastResult
     applied = wanted
+    // Before the first configure, so a phone offline from launch keeps what the core records
+    // (`telemetry_spool.rs`). The cache dir: not backed up, and a purge costs telemetry only.
+    if (!spoolDirSet && context != null) {
+      spoolDirSet = true
+      setTelemetrySpoolDir(File(context.cacheDir, "otel-spool").absolutePath)
+    }
     lastResult = configureTelemetry(endpoint, instanceId)
     return lastResult
   }

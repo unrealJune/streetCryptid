@@ -110,11 +110,11 @@ export function useArmedBump(active: boolean): ArmedBump {
   useEffect(() => {
     if (live || stage === 'idle') return;
     if (!active) {
-      void cancelBump();
+      void cancelBump('not-live');
       return;
     }
     const timer = setTimeout(() => {
-      void cancelBump();
+      void cancelBump('background-grace');
     }, BUMP_FOREGROUND_GRACE_MS);
     return () => clearTimeout(timer);
   }, [active, cancelBump, live, stage]);

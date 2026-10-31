@@ -380,7 +380,12 @@ object BlePeripheralManager {
                 return
             }
 
-        bluetoothManager?.adapter?.name = name
+        // Upstream renamed the whole Bluetooth adapter to `name` ("iroh") so the scan response
+        // could carry it. That is the phone's Bluetooth name for EVERYTHING — cars, headphones,
+        // Quick Share — and it persists after the app is gone. Nothing reads the advertised name
+        // (peers match on the key service UUID), so it is no longer set, and the scan response no
+        // longer carries a device name, which would now be the owner's real one.
+        if (name.isNotEmpty()) Log.d(TAG, "advertising without a local name (requested \"$name\")")
 
         val settings =
             AdvertiseSettings
@@ -399,11 +404,10 @@ object BlePeripheralManager {
         }
         val data = dataBuilder.build()
 
-        // Scan response can carry the device name.
         val scanResponse =
             AdvertiseData
                 .Builder()
-                .setIncludeDeviceName(true)
+                .setIncludeDeviceName(false)
                 .build()
 
         advertiseCallback =

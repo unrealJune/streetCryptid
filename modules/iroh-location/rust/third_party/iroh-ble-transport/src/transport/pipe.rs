@@ -133,6 +133,16 @@ pub async fn run_data_pipe(
     empty_frames_counter: Arc<AtomicU64>,
     last_rx_at: LivenessClock,
 ) {
+    // For the `ble.pipe` summary at the end. The two counters are transport-wide, so the deltas
+    // are this pipe's only while it is the only one; between two phones pairing it is.
+    let opened = std::time::Instant::now();
+    let retransmits_at_open = retransmit_counter.load(Ordering::Relaxed);
+    let truncations_at_open = truncation_counter.load(Ordering::Relaxed);
+    let mut l2cap_after_ms: Option<u64> = None;
+    let mut datagrams_out = 0u64;
+    let mut bytes_out = 0u64;
+    let mut gatt_fragments_in = 0u64;
+    let mut end = "registry-closed";
     let mut workers = match initial_path {
         ConnectPath::Gatt => WorkerSet {
             gatt: Some(spawn_gatt_worker(
@@ -174,14 +184,18 @@ pub async fn run_data_pipe(
                 let Some(send) = maybe_send else {
                     // Registry dropped its outbound sender → pipe is
                     // shutting down. Fall through to teardown.
+                    end = "outbound-closed";
                     break;
                 };
+                datagrams_out += 1;
+                bytes_out += send.datagram.len() as u64;
                 forward_outbound(&mut workers, send, &device_id, &registry_tx).await;
                 if workers.is_empty() {
                     tracing::debug!(
                         device = %device_id,
                         "both paths dead after outbound send; pipe exiting"
                     );
+                    end = "both-paths-dead";
                     break;
                 }
             }
@@ -191,8 +205,10 @@ pub async fn run_data_pipe(
                     // closure does NOT imply L2CAP is dead. But the
                     // registry closes this when the peer entry is
                     // gone, which is our signal to shut down.
+                    end = "inbound-closed";
                     break;
                 };
+                gatt_fragments_in += 1;
                 forward_inbound_gatt(&mut workers, bytes, &device_id);
                 // Inbound doesn't force a path-dead check here — even
                 // if GATT just died, L2CAP may still be carrying traffic.
@@ -228,9 +244,37 @@ pub async fn run_data_pipe(
                     has_gatt = workers.gatt.is_some(),
                     "L2CAP path added to pipe"
                 );
+                l2cap_after_ms.get_or_insert(opened.elapsed().as_millis() as u64);
             }
         }
     }
+
+    // `ble.pipe`: one per pipe, at its end. Every pipe starts on GATT and only the central
+    // upgrades to L2CAP, so how long a pipe ran on GATT, and how often the reliable layer had to
+    // retransmit there, is the cost of the slow path; on 2026-10-30 a Pixel⇄iPhone pipe logged an
+    // ACK-timeout retransmit every ~0.5 s and nothing could say how many or on which path. A span,
+    // because Loki drops `tracing` event fields (`infra/otel/README.md`).
+    let span = tracing::info_span!(
+        "ble.pipe",
+        device = %device_id,
+        role = ?role,
+        initial_path = ?initial_path,
+        ms = opened.elapsed().as_millis() as u64,
+        l2cap_after_ms = l2cap_after_ms,
+        gatt_at_end = workers.gatt.is_some(),
+        l2cap_at_end = workers.l2cap.is_some(),
+        datagrams_out = datagrams_out,
+        bytes_out = bytes_out,
+        gatt_fragments_in = gatt_fragments_in,
+        retransmits = retransmit_counter
+            .load(Ordering::Relaxed)
+            .saturating_sub(retransmits_at_open),
+        truncations = truncation_counter
+            .load(Ordering::Relaxed)
+            .saturating_sub(truncations_at_open),
+        end = end,
+    );
+    drop(span.entered());
 
     teardown_worker_set(workers, device_id, L2CAP_HANDOVER_TIMEOUT).await;
 }

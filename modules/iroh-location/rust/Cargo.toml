@@ -36,7 +36,12 @@ cli = [
 otel = [
     "dep:opentelemetry",
     "dep:opentelemetry_sdk",
-    "dep:opentelemetry-otlp",
+    "dep:opentelemetry-proto",
+    "dep:prost",
+    # The BLOCKING client (reqwest itself is a normal dependency): the SDK's batch processors run
+    # on a plain dedicated thread with no tokio reactor, and the async client panics there ("there
+    # is no reactor running"), killing the export pipeline seconds after startup.
+    "reqwest/blocking",
     "dep:tracing-opentelemetry",
     "dep:opentelemetry-appender-tracing",
 ]
@@ -105,22 +110,18 @@ serde_json = { version = "1", optional = true }
 # --- developer telemetry (the `otel` feature; see src/telemetry.rs) ---
 # tracing-subscriber moves to a normal dependency (it was already in the tree via iroh, and the
 # telemetry registry needs it on every target now, not just Android's logcat pipe). The OTEL
-# stack proper stays optional. opentelemetry-otlp uses HTTP/protobuf over reqwest+rustls: the
-# collector is a plain-HTTP LAN endpoint, and reqwest's default native-tls would drag OpenSSL
-# into the Android cross-build.
+# stack proper stays optional. Export is OTLP/HTTP protobuf over reqwest+rustls, through our own
+# spooling exporters (src/telemetry_spool.rs) rather than opentelemetry-otlp's, which drop a batch
+# whose POST fails. reqwest's default native-tls would drag OpenSSL into the Android cross-build.
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "registry"] }
 opentelemetry = { version = "0.31", optional = true }
 opentelemetry_sdk = { version = "0.31", optional = true }
-opentelemetry-otlp = { version = "0.31", default-features = false, features = [
+opentelemetry-proto = { version = "0.31", default-features = false, features = [
+    "gen-tonic-messages",
     "trace",
     "logs",
-    "http-proto",
-    # MUST be the BLOCKING reqwest client: the SDK's batch processors run on a plain dedicated
-    # thread with no tokio reactor, and the async client panics there ("there is no reactor
-    # running"), killing the export pipeline seconds after startup.
-    "reqwest-blocking-client",
-    "reqwest-rustls",
 ], optional = true }
+prost = { version = "0.14", optional = true }
 tracing-opentelemetry = { version = "0.32", optional = true }
 opentelemetry-appender-tracing = { version = "0.31", optional = true }
 h3o = { version = "0.10.0", features = ["geo"] }

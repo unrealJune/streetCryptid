@@ -168,7 +168,11 @@ export default function ActivePairingScreen() {
   const standDown = useCallback(async (): Promise<void> => {
     const sessionIds = abandonableRef.current;
     abandonableRef.current = [];
-    await Promise.allSettled([cancelBump(), cancelPairInvite(), standDownPairing(sessionIds)]);
+    await Promise.allSettled([
+      cancelBump('left-screen'),
+      cancelPairInvite(),
+      standDownPairing(sessionIds),
+    ]);
   }, [cancelBump, cancelPairInvite, standDownPairing]);
 
   useFocusEffect(
@@ -197,7 +201,7 @@ export default function ActivePairingScreen() {
     setIntent('redeem');
     setRedeeming(true);
     setWorking('redeem');
-    void cancelBump()
+    void cancelBump('pair-from-input')
       .then(() => (routeActive.current ? pairFromInput(token) : undefined))
       .then(() => setIntent('bump'))
       .catch((redeemError: unknown) => {
@@ -611,7 +615,7 @@ export default function ActivePairingScreen() {
     setLinkNotice(null);
     clearPairingFailure();
     try {
-      await cancelBump();
+      await cancelBump('switch-channel');
       if (!routeActive.current) return;
       const link = await createPairInvite(INVITE_TTL_SECONDS);
       if (!routeActive.current) return;
@@ -647,7 +651,7 @@ export default function ActivePairingScreen() {
     setRedeeming(true);
     setInputError(null);
     try {
-      await cancelBump();
+      await cancelBump('pair-from-input');
       if (!routeActive.current) return;
       await pairFromInput(value);
       setIntent('bump');

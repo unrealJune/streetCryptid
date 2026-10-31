@@ -40,8 +40,9 @@ the iOS XCFramework — therefore contains and executes this code.
 - **License:** GNU Affero General Public License v3.0 or later (**AGPL-3.0-or-later**)
 
 The Kotlin central/peripheral managers are the Android runtime half of the Rust `blew`
-dependency. They are vendored unchanged so Rust BLE threads can call into Android's
-Bluetooth APIs through JNI, and are reached from
+dependency. They are vendored so Rust BLE threads can call into Android's Bluetooth APIs
+through JNI (modified once since: advertising no longer renames the phone's Bluetooth
+adapter; see that directory's NOTICE), and are reached from
 `com/unrealjune/irohlocation/IrohAndroidBootstrap.kt`.
 
 ## Distribution obligation
