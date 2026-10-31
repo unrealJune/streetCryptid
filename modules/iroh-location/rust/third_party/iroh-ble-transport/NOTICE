@@ -134,6 +134,16 @@ standalone / path dependency:
         Friend sync established before a Bump window opened kept streaming through it and
         delayed every pairing message behind ~700 KB of traffic.
 
+2026-10-31 — A scan does not move a peer off a link that is coming up:
+
+  * src/transport/routing.rs and src/transport/registry.rs
+      - The registry publishes the devices it is connecting to, handshaking with or
+        connected to (`Routing::set_live_devices`), and `note_scan_hint` no longer
+        replaces a prefix's device while that device is one of them. An Android
+        peripheral re-advertises under a new address as soon as a central connects, and
+        following it forgot the link just made. A handshake-verified device still
+        overrides (`note_verified_scan_hint`).
+
 The upstream `examples/` directory was intentionally not vendored; it
 demonstrates endpoint wiring that this checkpoint does not yet use.
 

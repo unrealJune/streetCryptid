@@ -554,7 +554,11 @@ Conventions when changing that code:
   SAS gate, when the window closes, or after `BLE_PAIRING_HOLD_MAX` — never let it outlive the
   window, or friend sync between nearby phones stops. A hold also CLOSES connections of other
   protocols already on BLE (a 500 ms sweep in the transport): on 2026-10-31 sync that began before
-  the window kept ~700 KB a side streaming through it, and three Hellos and a Reject timed out. Each phone searches independently and only
+  the window kept ~700 KB a side streaming through it, and three Hellos and a Reject timed out.
+  **A scan never moves a peer off a link that is coming up** (`Routing::set_live_devices`): an
+  Android peripheral re-advertises under a new address the moment a central connects, and following
+  that address made an iPhone forget every link it made to the Pixel (2026-10-31 23:23, ten Bumps,
+  no message crossed) while the Pixel kept the orphan and would not dial the iPhone itself. Each phone searches independently and only
   one needs to succeed, so a `noPeers`/`probeFailed` search is the `waiting` Bump stage ("LISTENING"),
   not a failure; the other phone's request takes the screen from there. `bump.resolve` records what
   each search saw.

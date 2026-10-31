@@ -1845,6 +1845,22 @@ impl Registry {
         self.peers.get(device_id)
     }
 
+    /// Devices with a link coming up or up, for [`crate::transport::routing::Routing`]'s scan rule.
+    fn live_devices(&self) -> std::collections::HashSet<DeviceId> {
+        self.peers
+            .iter()
+            .filter(|(_, entry)| {
+                matches!(
+                    entry.phase,
+                    PeerPhase::Connecting { .. }
+                        | PeerPhase::Handshaking { .. }
+                        | PeerPhase::Connected { .. }
+                )
+            })
+            .map(|(device_id, _)| device_id.clone())
+            .collect()
+    }
+
     pub(crate) fn publish_snapshot(&self, target: &ArcSwap<SnapshotMaps>) {
         let mut maps = SnapshotMaps::default();
         for (device_id, entry) in &self.peers {
@@ -1911,7 +1927,7 @@ impl Registry {
                         // at a different DeviceId, also forget its
                         // registry entry so we don't dial a ghost.
                         if let crate::transport::routing::ScanHintUpdate::Replaced { previous } =
-                            routing.note_scan_hint(prefix, device_id.clone())
+                            routing.note_verified_scan_hint(prefix, device_id.clone())
                         {
                             let forget_actions = self.handle(PeerCommand::Forget {
                                 device_id: previous,
@@ -1928,6 +1944,7 @@ impl Registry {
                 driver.execute(action).await;
             }
             self.publish_snapshot(&snapshots);
+            routing.set_live_devices(self.live_devices());
             if shutdown {
                 break;
             }

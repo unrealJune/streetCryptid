@@ -26,7 +26,7 @@
 //!   the BLE transport id. Tokens are [`StableConnId`] values
 //!   round-tripped through iroh's `CustomAddr` carrier.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::task::Waker;
@@ -266,6 +266,10 @@ struct RoutingInner {
     /// opened under the SAME id (`reserve_outbound`, `resurrect_for_send`), and iroh's path simply
     /// works again. See those for the 2026-10-29 failure this fixes.
     retired: HashMap<StableConnId, (EndpointId, Instant)>,
+    /// Devices the registry is connecting to, handshaking with or connected to (central or
+    /// peripheral), refreshed after every registry command. A scan must not move a prefix off one
+    /// of these: see [`Routing::note_scan_hint`].
+    live_devices: HashSet<DeviceId>,
 }
 
 impl RoutingInner {
@@ -483,8 +487,50 @@ impl Routing {
     /// replaces the v1 `pinned` mechanism and the registry-side
     /// `publish_active_prefixes` plumbing.
     pub fn note_scan_hint(&self, prefix: KeyPrefix, device: DeviceId) -> ScanHintUpdate {
+        self.update_scan_hint(prefix, device, true)
+    }
+
+    /// [`Self::note_scan_hint`] for a device a handshake has just VERIFIED: authoritative, so a
+    /// link still coming up on another device does not hold the prefix (a routable pipe still
+    /// does).
+    pub(crate) fn note_verified_scan_hint(
+        &self,
+        prefix: KeyPrefix,
+        device: DeviceId,
+    ) -> ScanHintUpdate {
+        self.update_scan_hint(prefix, device, false)
+    }
+
+    fn update_scan_hint(
+        &self,
+        prefix: KeyPrefix,
+        device: DeviceId,
+        respect_live_links: bool,
+    ) -> ScanHintUpdate {
         let update = {
             let mut inner = self.inner.lock();
+            // The same rule while a link is still coming up, before any pipe is routable. An
+            // Android peripheral re-advertises under a fresh random address the moment a central
+            // connects to it, so the scan reports the peer under a new DeviceId within a second
+            // of every connect. Moving the prefix there Forgot the link that was just made and
+            // dialled an address the phone could not connect to again while that link was up:
+            // on 2026-10-31 an iPhone did this on every launch, its connect to the Pixel
+            // succeeded and was abandoned, and the Pixel served the orphaned link for 45 s with
+            // nothing on it while refusing to dial the iPhone itself ("already holds a verified
+            // connection"). No pairing message crossed in ten attempts.
+            if respect_live_links
+                && let Some(current) = inner.scan_hint.get(&prefix).cloned()
+                && current != device
+                && inner.live_devices.contains(&current)
+            {
+                tracing::trace!(
+                    ?prefix,
+                    scan_device = %device,
+                    bound_device = %current,
+                    "routing: scan_hint ignored — the current device has a live link"
+                );
+                return ScanHintUpdate::ActivelyBound { bound: current };
+            }
             // Anti-MAC-rotation: if any routable pipe's endpoint maps
             // to this prefix, and its device_id differs from the new
             // scan, reject the update.
@@ -522,6 +568,15 @@ impl Routing {
             self.wake_endpoint_waiters_for_prefix(&prefix);
         }
         update
+    }
+
+    /// Replace the set of devices with a link coming up or up. Called by the registry after every
+    /// command it handles.
+    pub(crate) fn set_live_devices(&self, devices: HashSet<DeviceId>) {
+        let mut inner = self.inner.lock();
+        if inner.live_devices != devices {
+            inner.live_devices = devices;
+        }
     }
 
     fn wake_endpoint_waiters_for_prefix(&self, prefix: &KeyPrefix) {
@@ -1703,6 +1758,33 @@ mod tests {
             r.scan_hint_for_prefix(&prefix).as_ref(),
             Some(&bound_device),
             "scan_hint must NOT be overwritten while a routable pipe is live"
+        );
+    }
+
+    #[test]
+    fn note_scan_hint_keeps_a_device_whose_link_is_still_coming_up() {
+        let r = Routing::new();
+        let prefix: KeyPrefix = [11u8; 12];
+        let connecting = dev("first-address");
+        let readvertised = dev("address-after-connect");
+        r.note_scan_hint(prefix, connecting.clone());
+        r.set_live_devices(HashSet::from([connecting.clone()]));
+
+        assert_eq!(
+            r.note_scan_hint(prefix, readvertised.clone()),
+            ScanHintUpdate::ActivelyBound {
+                bound: connecting.clone()
+            }
+        );
+        assert_eq!(r.scan_hint_for_prefix(&prefix).as_ref(), Some(&connecting));
+
+        // Once that link is gone, a rotated address is followed as before.
+        r.set_live_devices(HashSet::new());
+        assert_eq!(
+            r.note_scan_hint(prefix, readvertised.clone()),
+            ScanHintUpdate::Replaced {
+                previous: connecting
+            }
         );
     }
 
