@@ -146,6 +146,13 @@ jobs:
             ccache --show-stats --verbose 2>&1 || true
             # Written by scripts/eas-build-post-install.sh, in fixed words only.
             cat "$RUNNER_TEMP/ccache-wiring.txt" 2> /dev/null || printf 'ccache-wiring: not recorded\n'
+            calls="$RUNNER_TEMP/ccache-wrapper-calls"
+            if [[ -f "$calls" ]]; then
+              printf 'wrapper_calls=%s (CCACHE_BINARY set: %s, unset: %s)\n' \
+                "$(wc -c < "$calls" | tr -d ' ')" \
+                "$(tr -cd b < "$calls" | wc -c | tr -d ' ')" \
+                "$(tr -cd n < "$calls" | wc -c | tr -d ' ')"
+            fi
             printf '```\n'
           } | tee -a "$GITHUB_STEP_SUMMARY"
 
