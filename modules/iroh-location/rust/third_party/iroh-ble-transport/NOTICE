@@ -112,7 +112,21 @@ standalone / path dependency:
   * Cargo.toml
       - Enabled tokio's `test-util` for the paused-clock hook tests.
 
+2026-10 — A link can be kept for a few protocols:
+
+  * src/transport/priority.rs (new), src/transport/hook.rs and src/transport/transport.rs
+      - `BleTransport::reserve_links_for(alpns, held)`: while `held()` is true, the dedup hook
+         refuses any other protocol on BLE — `before_connect` rejects a dial to a peer in BLE
+         range, and `after_handshake` closes a connection that arrived over BLE with
+         `BLE_HELD_CLOSE_CODE`. IP and relay connections are untouched. streetCryptid holds the
+         link for its pairing protocol during a Bump window, after friend sync crowded a pairing
+         message off a pipe.
+
+  * tests/sim_pairing.rs
+      - Tests that held links refuse other protocols in both directions and release afterwards.
+
 The upstream `examples/` directory was intentionally not vendored; it
 demonstrates endpoint wiring that this checkpoint does not yet use.
 
-No other upstream source files were modified (src/transport/mod.rs gained the `sim` module).
+No other upstream source files were modified (src/transport/mod.rs gained the `sim` and
+`priority` modules).

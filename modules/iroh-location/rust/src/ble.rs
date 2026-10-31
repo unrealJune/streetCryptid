@@ -219,7 +219,15 @@ mod imp {
     /// Build the BLE transport for `endpoint_id` and wire its dedup hook, custom transport, and
     /// address lookup onto `builder` (additive — N0 IP/relay transports stay intact). If the radio
     /// or permission is unavailable, log the failure and return the untouched IP/relay builder.
-    pub async fn attach(builder: Builder, endpoint_id: EndpointId) -> (Builder, BleHandle) {
+    ///
+    /// While `pairing_holds_ble()` is true the transport keeps its links for the pairing protocol
+    /// alone (`BleTransport::reserve_links_for`), so friend sync cannot crowd a Hello off a link
+    /// that carries a few kilobytes a second. See `BLE_PAIRING_HOLD_MAX` in `pairing.rs`.
+    pub async fn attach(
+        builder: Builder,
+        endpoint_id: EndpointId,
+        pairing_holds_ble: impl Fn() -> bool + Send + Sync + 'static,
+    ) -> (Builder, BleHandle) {
         let attached = match tokio::time::timeout(ATTACH_TIMEOUT, setup(endpoint_id)).await {
             Ok(result) => result,
             Err(_) => {
@@ -234,6 +242,8 @@ mod imp {
         };
         match attached {
             Ok((transport, central, peripheral)) => {
+                transport
+                    .reserve_links_for(vec![crate::pairing::PAIR_ALPN.to_vec()], pairing_holds_ble);
                 let builder = builder
                     .hooks(transport.dedup_hook())
                     .add_custom_transport(transport.as_custom_transport())

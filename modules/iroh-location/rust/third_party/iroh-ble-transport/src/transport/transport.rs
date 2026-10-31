@@ -32,6 +32,7 @@ use crate::transport::events::{
 };
 use crate::transport::hook::{ActiveConnections, BleDedupHook, HookEvent};
 use crate::transport::peer::{ConnectPath, KEY_PREFIX_LEN, PeerCommand};
+use crate::transport::priority::LinkPriority;
 use crate::transport::registry::{PhaseKind, Registry, RegistryHandle, SnapshotMaps};
 use crate::transport::routing::{TOKEN_LEN, parse_token_addr, token_custom_addr};
 use crate::transport::store::{InMemoryPeerStore, PeerStore};
@@ -290,6 +291,9 @@ pub struct BleTransport {
     active_connections: Arc<ActiveConnections>,
     /// How long a pipe outlives its last connection ([`crate::transport::hook::PIPE_IDLE_LINGER`]).
     idle_linger: Duration,
+    /// Which protocols keep BLE to themselves, and when; shared by every hook. See
+    /// [`Self::reserve_links_for`].
+    link_priority: Arc<LinkPriority>,
 }
 
 impl std::fmt::Debug for BleTransport {
@@ -542,6 +546,7 @@ impl BleTransport {
             probe_disconnects,
             active_connections: Arc::new(ActiveConnections::default()),
             idle_linger,
+            link_priority: Arc::new(LinkPriority::default()),
         })
     }
 
@@ -577,7 +582,23 @@ impl BleTransport {
             self.hook_tx.clone(),
             Arc::clone(&self.active_connections),
             self.idle_linger,
+            Arc::clone(&self.link_priority),
         )
+    }
+
+    /// Keep this transport's links for `alpns` alone whenever `held()` returns true.
+    ///
+    /// While held, the hooks from [`Self::dedup_hook`] refuse every other protocol on BLE: a dial
+    /// to a peer in BLE range is rejected before it starts, and a connection that arrives over
+    /// BLE anyway is closed once its handshake identifies its protocol. Connections over IP or a
+    /// relay are untouched. `held` is asked once per connection, so it should be cheap; a later
+    /// call replaces the earlier policy. See [`crate::transport::priority`] for why.
+    pub fn reserve_links_for(
+        &self,
+        alpns: Vec<Vec<u8>>,
+        held: impl Fn() -> bool + Send + Sync + 'static,
+    ) {
+        self.link_priority.set(alpns, Arc::new(held));
     }
 
     /// Counts-only snapshot of the routing table (pipes / scan hints /

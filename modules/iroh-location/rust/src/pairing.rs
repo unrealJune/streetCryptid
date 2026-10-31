@@ -203,6 +203,18 @@ const PAIR_CLOSE_LINGER: Duration = Duration::from_secs(5);
 const PAIR_CLOSE_NOT_LISTENING: u32 = 1;
 const PAIR_CLOSE_REFUSED: u32 = 2;
 
+/// The longest a Bump window keeps BLE for pairing alone ([`PairCore::holds_ble_for_pairing`]).
+///
+/// A BLE link carries a few kilobytes a second and every connection to a peer shares it. On
+/// 2026-10-30 a Pixel 10 had just removed an iPhone to pair with it again; the moment a pipe came
+/// up, thirteen friend-sync connections and a gossip one between the two phones were established
+/// over it, the link retransmitted continuously, and the Pixel's Hello never connected (37.7 s,
+/// "Could not reach that phone"). While the window is open, friend sync between phones in BLE
+/// range waits; it is released when a nearby pair reaches the SAS gate, when the app closes the
+/// window, or after this long, whichever comes first, so a window the app never closed (a process
+/// suspended mid-Bump) cannot starve sync. The app's window is 2 min, plus the search.
+const BLE_PAIRING_HOLD_MAX: Duration = Duration::from_secs(150);
+
 /// The answering phone is not taking nearby pair requests right now: its Bump window is shut.
 #[derive(Debug)]
 struct NotListening;
@@ -1549,6 +1561,8 @@ pub struct PairCore {
     notices: Mutex<VecDeque<PairNotice>>,
     runtime: Mutex<Option<PairRuntime>>,
     pairing_ready: AtomicBool,
+    /// Until when BLE is kept for pairing alone. See [`BLE_PAIRING_HOLD_MAX`].
+    ble_hold_until: std::sync::Mutex<Option<Instant>>,
     /// Whether this node has been seen fully online (relay handshake complete) at least once,
     /// and whether a full relay wait has already been spent and lost. See
     /// [`Self::our_endpoint_ticket`] for why both are worth remembering.
@@ -1567,6 +1581,7 @@ impl PairCore {
             notices: Mutex::new(VecDeque::new()),
             runtime: Mutex::new(None),
             pairing_ready: AtomicBool::new(false),
+            ble_hold_until: std::sync::Mutex::new(None),
             endpoint_was_online: AtomicBool::new(false),
             endpoint_wait_spent: AtomicBool::new(false),
         })
@@ -1602,8 +1617,36 @@ impl PairCore {
 
     /// Whether we currently accept *nearby* (invite-less) pair requests. Invite-based requests
     /// are always allowed (creating an invite is itself consent).
+    ///
+    /// Opening the window also keeps BLE for pairing alone, for at most [`BLE_PAIRING_HOLD_MAX`];
+    /// closing it lets friend sync back on.
     pub fn set_pairing_ready(&self, ready: bool) {
         self.pairing_ready.store(ready, Ordering::SeqCst);
+        self.hold_ble_for_pairing(ready.then(|| Instant::now() + BLE_PAIRING_HOLD_MAX));
+    }
+
+    fn hold_ble_for_pairing(&self, until: Option<Instant>) {
+        let mut held = self
+            .ble_hold_until
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Two messages rather than one with a field: Loki keeps the message and drops the fields.
+        match (held.is_some(), until.is_some()) {
+            (false, true) => tracing::info!("pairing: BLE reserved for pairing"),
+            (true, false) => tracing::info!("pairing: BLE released for friend sync"),
+            _ => {}
+        }
+        *held = until;
+    }
+
+    /// Whether BLE links are being kept for the pairing protocol alone right now: a Bump window is
+    /// open and no nearby pair has reached the SAS gate yet. Asked by the BLE transport's hook once
+    /// per connection (`ble::attach`), so it must stay cheap and must never await.
+    pub fn holds_ble_for_pairing(&self) -> bool {
+        self.ble_hold_until
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_some_and(|until| Instant::now() < until)
     }
 
     pub fn pairing_ready(&self) -> bool {
@@ -1955,6 +1998,11 @@ impl PairCore {
         peer_endpoint: [u8; ENDPOINT_LEN],
         nearby: bool,
     ) {
+        // The figures are on screen: the handshake no longer needs the link to itself, and what
+        // follows (the Accept, then the new friend's first sync) should not wait for the window.
+        if nearby && signal == PairSignal::Verifying {
+            self.hold_ble_for_pairing(None);
+        }
         self.notices.lock().await.push_back(PairNotice {
             signal,
             session_id,
@@ -4162,6 +4210,45 @@ mod tests {
         OsRng.fill_bytes(&mut recv);
         let core = PairCore::new(sk.to_bytes(), endpoint, recv.to_vec());
         (core, endpoint, recv)
+    }
+
+    #[test]
+    fn a_bump_window_holds_ble_for_pairing_until_it_closes() {
+        let (core, _, _) = test_core();
+        assert!(!core.holds_ble_for_pairing());
+        core.set_pairing_ready(true);
+        assert!(core.holds_ble_for_pairing());
+        core.set_pairing_ready(false);
+        assert!(!core.holds_ble_for_pairing());
+    }
+
+    #[test]
+    fn a_ble_hold_the_app_never_closes_lapses_on_its_own() {
+        let (core, _, _) = test_core();
+        core.hold_ble_for_pairing(Some(Instant::now()));
+        assert!(!core.holds_ble_for_pairing());
+    }
+
+    #[tokio::test]
+    async fn reaching_the_sas_gate_nearby_lets_friend_sync_back_on_ble() {
+        let (core, _, _) = test_core();
+        let peer = SigningKey::generate(&mut OsRng).verifying_key().to_bytes();
+        core.set_pairing_ready(true);
+
+        core.push_notice(PairSignal::Verifying, [7; SESSION_ID_LEN], peer, false)
+            .await;
+        assert!(
+            core.holds_ble_for_pairing(),
+            "an invite pair says nothing about BLE"
+        );
+
+        core.push_notice(PairSignal::Verifying, [8; SESSION_ID_LEN], peer, true)
+            .await;
+        assert!(!core.holds_ble_for_pairing());
+        assert!(
+            core.pairing_ready(),
+            "the window itself is the app's to close"
+        );
     }
 
     #[tokio::test]

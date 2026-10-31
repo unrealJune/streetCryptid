@@ -10,14 +10,20 @@
 #![cfg(feature = "testing")]
 #![allow(clippy::unwrap_used)]
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use iroh::endpoint::{Connection, presets};
 use iroh::protocol::{AcceptError, ProtocolHandler, Router};
 use iroh::{Endpoint, SecretKey};
+use iroh_ble_transport::BleTransport;
+use iroh_ble_transport::transport::hook::BLE_HELD_CLOSE_CODE;
 use iroh_ble_transport::transport::sim::{SimNodeConfig, SimRadio};
 
 const ALPN: &[u8] = b"streetcryptid/sim-pair/0";
+/// Stands in for the friend sync (`/iroh-sync/1`, gossip) that shares a pipe with pairing.
+const SYNC_ALPN: &[u8] = b"streetcryptid/sim-sync/0";
 
 /// What one message may take end to end. Generous for a simulated radio; a pipe torn down under
 /// a dial blows straight through it (the app's own budget is 15 s to connect, 25 s to answer).
@@ -46,9 +52,23 @@ impl ProtocolHandler for Echo {
     }
 }
 
+/// Drinks whatever a friend-sync connection sends, until the dialler closes it.
+#[derive(Debug, Clone)]
+struct Sink;
+
+impl ProtocolHandler for Sink {
+    async fn accept(&self, conn: Connection) -> Result<(), AcceptError> {
+        while let Ok(mut recv) = conn.accept_uni().await {
+            let _ = recv.read_to_end(usize::MAX).await;
+        }
+        Ok(())
+    }
+}
+
 /// A phone: an endpoint whose ONLY transport is BLE, answering pairing-shaped requests.
 struct Phone {
     router: Router,
+    ble: Arc<BleTransport>,
 }
 
 impl Phone {
@@ -73,8 +93,31 @@ async fn phone(radio: &SimRadio, device: &str, config: SimNodeConfig) -> Phone {
         .bind()
         .await
         .expect("bind a BLE-only endpoint");
-    let router = Router::builder(endpoint).accept(ALPN, Echo).spawn();
-    Phone { router }
+    let router = Router::builder(endpoint)
+        .accept(ALPN, Echo)
+        .accept(SYNC_ALPN, Sink)
+        .spawn();
+    Phone { router, ble }
+}
+
+/// Keep `phone`'s BLE links for pairing alone while the returned flag is set, the way the app
+/// does for the length of a Bump window.
+fn reserve_for_pairing(phone: &Phone) -> Arc<AtomicBool> {
+    let held = Arc::new(AtomicBool::new(true));
+    let flag = Arc::clone(&held);
+    phone
+        .ble
+        .reserve_links_for(vec![ALPN.to_vec()], move || flag.load(Ordering::SeqCst));
+    held
+}
+
+/// Open a friend-sync connection and push `bytes` down it.
+async fn sync(from: &Phone, to: &Phone, bytes: usize) -> anyhow::Result<Connection> {
+    let conn = from.endpoint().connect(to.id(), SYNC_ALPN).await?;
+    let mut send = conn.open_uni().await?;
+    send.write_all(&vec![0x5a; bytes]).await?;
+    send.finish()?;
+    Ok(conn)
 }
 
 /// One pairing-shaped message: its own connection, one request, one reply, closed at once.
@@ -209,4 +252,73 @@ async fn a_lost_link_is_replaced_by_the_next_message() {
 
     message(&a, &b, b"after").await;
     assert!(radio.connects_between("a", "b") >= 2, "{:?}", radio.log());
+}
+
+/// The 2026-10-30 failure, held back: both phones are in a Bump window, so neither dials friend
+/// sync over the link the pairing needs, and the pairing goes through on its own. Once the window
+/// closes, sync uses BLE again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn friend_sync_waits_while_a_bump_window_holds_the_link() {
+    init_tracing();
+    let radio = SimRadio::new();
+    radio.set_latency(Duration::from_millis(15));
+    let pixel = phone(&radio, "pixel", SimNodeConfig::default()).await;
+    let iphone = phone(&radio, "iphone", SimNodeConfig::default()).await;
+    let pixel_held = reserve_for_pairing(&pixel);
+    let iphone_held = reserve_for_pairing(&iphone);
+    radio.discover_both("pixel", "iphone").await;
+
+    for (from, to) in [(&iphone, &pixel), (&pixel, &iphone)] {
+        let refused = sync(from, to, 64 * 1024).await;
+        assert!(refused.is_err(), "a held link let friend sync dial over it");
+    }
+    message(&pixel, &iphone, b"hello").await;
+    message(&pixel, &iphone, b"reveal").await;
+
+    pixel_held.store(false, Ordering::SeqCst);
+    iphone_held.store(false, Ordering::SeqCst);
+    let conn = sync(&iphone, &pixel, 16 * 1024)
+        .await
+        .expect("friend sync uses BLE again once the window closes");
+    conn.close(0u32.into(), b"done");
+    assert_eq!(
+        radio.connects_between("pixel", "iphone"),
+        1,
+        "{:?}",
+        radio.log()
+    );
+}
+
+/// A peer whose build does not hold back still dials sync over BLE. The phone in a Bump window
+/// turns it away as soon as the handshake names the protocol, and pairing is unaffected.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sync_arriving_over_a_held_link_is_turned_away() {
+    init_tracing();
+    let radio = SimRadio::new();
+    radio.set_latency(Duration::from_millis(15));
+    let old_build = phone(&radio, "old", SimNodeConfig::default()).await;
+    let bumping = phone(&radio, "bumping", SimNodeConfig::default()).await;
+    let _held = reserve_for_pairing(&bumping);
+    radio.discover_both("old", "bumping").await;
+
+    let conn = old_build
+        .endpoint()
+        .connect(bumping.id(), SYNC_ALPN)
+        .await
+        .expect("the handshake itself completes");
+    let reason = tokio::time::timeout(MESSAGE_BUDGET, conn.closed())
+        .await
+        .expect("the held side closes the connection");
+    match reason {
+        iroh::endpoint::ConnectionError::ApplicationClosed(close) => {
+            assert_eq!(
+                close.error_code,
+                noq_proto::VarInt::from_u32(BLE_HELD_CLOSE_CODE)
+            );
+        }
+        other => panic!("expected the BLE-reserved close, got {other:?}"),
+    }
+
+    message(&old_build, &bumping, b"hello").await;
+    message(&bumping, &old_build, b"reply").await;
 }

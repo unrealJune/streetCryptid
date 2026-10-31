@@ -2590,7 +2590,9 @@ impl LocationNode {
 
         #[cfg(any(target_os = "android", target_vendor = "apple"))]
         let ble = if ble_enabled {
-            let (b, handle) = ble::attach(builder, endpoint_id).await;
+            let pair = Arc::clone(&self.pair);
+            let (b, handle) =
+                ble::attach(builder, endpoint_id, move || pair.holds_ble_for_pairing()).await;
             builder = b;
             handle
         } else {
@@ -4516,6 +4518,7 @@ impl LocationNode {
     /// prefix. No friendship is granted here; the returned endpoint still enters the authenticated
     /// nearby pairing + mandatory SAS flow.
     pub async fn resolve_bump_peer(&self, timeout_ms: u64) -> BumpResolution {
+        use tracing::Instrument;
         let handle = {
             match self.live_opt().await {
                 Some(started) => started.ble,
@@ -4532,48 +4535,41 @@ impl LocationNode {
             }
         };
         let timeout = std::time::Duration::from_millis(timeout_ms.clamp(2_000, 12_000));
-        match handle.resolve_bump_peer(timeout).await {
-            Ok(peer) => BumpResolution {
-                status: "resolved".into(),
-                endpoint_id: Some(peer.endpoint_id),
-                device_id: Some(peer.device_id),
-                rssi: peer.rssi,
-                peer_count: peer.peer_count,
-                detail: "Nearby phone resolved.".into(),
-            },
-            Err(ble::BumpResolveError::Unavailable) => BumpResolution {
-                status: "unavailable".into(),
-                endpoint_id: None,
-                device_id: None,
-                rssi: None,
-                peer_count: 0,
-                detail: "BLE is unavailable in this build or on this device.".into(),
-            },
-            Err(ble::BumpResolveError::NoPeers) => BumpResolution {
-                status: "noPeers".into(),
-                endpoint_id: None,
-                device_id: None,
-                rssi: None,
-                peer_count: 0,
-                detail: "No fresh streetCryptid signal was found.".into(),
-            },
-            Err(ble::BumpResolveError::Ambiguous { peer_count }) => BumpResolution {
-                status: "ambiguous".into(),
-                endpoint_id: None,
-                device_id: None,
-                rssi: None,
-                peer_count,
-                detail: "More than one equally close signal was found.".into(),
-            },
-            Err(ble::BumpResolveError::ProbeFailed { peer_count, detail }) => BumpResolution {
-                status: "probeFailed".into(),
-                endpoint_id: None,
-                device_id: None,
-                rssi: None,
-                peer_count,
-                detail,
-            },
+        // `bump.resolve`: what one phone's search saw and how it ended. On 2026-10-30 an iPhone said
+        // "No other streetCryptid phone answered" while a Pixel beside it had found it and was
+        // dialling, and nothing recorded why its own search came back empty. `linked_peers` is the
+        // transport's view at the end (a peer it already holds a link to can stop showing up as a
+        // fresh advertisement), and `pairing_holds_ble` whether this phone's window was open.
+        let span = tracing::info_span!(
+            "bump.resolve",
+            timeout_ms = timeout.as_millis() as u64,
+            outcome = tracing::field::Empty,
+            peer_count = tracing::field::Empty,
+            rssi = tracing::field::Empty,
+            detail = tracing::field::Empty,
+            linked_peers = tracing::field::Empty,
+            pairing_holds_ble = self.pair.holds_ble_for_pairing(),
+            ms = tracing::field::Empty,
+        );
+        let started = std::time::Instant::now();
+        let resolution = resolve_bump_with(&handle, timeout)
+            .instrument(span.clone())
+            .await;
+        let linked = handle
+            .nearby_peers()
+            .await
+            .iter()
+            .filter(|peer| peer.phase == "connected")
+            .count();
+        span.record("ms", started.elapsed().as_millis() as u64);
+        span.record("outcome", resolution.status.as_str());
+        span.record("peer_count", resolution.peer_count);
+        span.record("detail", resolution.detail.as_str());
+        span.record("linked_peers", linked as u64);
+        if let Some(rssi) = resolution.rssi {
+            span.record("rssi", i64::from(rssi));
         }
+        resolution
     }
 
     /// Passive proximity hint: has this peer's BLE advertisement been seen this session? This is
@@ -5857,6 +5853,52 @@ impl Subscription {
         }
         .instrument(span)
         .await
+    }
+}
+
+/// One Bump search, as the app's [`BumpResolution`] (see [`LocationNode::resolve_bump_peer`]).
+async fn resolve_bump_with(handle: &BleHandle, timeout: std::time::Duration) -> BumpResolution {
+    match handle.resolve_bump_peer(timeout).await {
+        Ok(peer) => BumpResolution {
+            status: "resolved".into(),
+            endpoint_id: Some(peer.endpoint_id),
+            device_id: Some(peer.device_id),
+            rssi: peer.rssi,
+            peer_count: peer.peer_count,
+            detail: "Nearby phone resolved.".into(),
+        },
+        Err(ble::BumpResolveError::Unavailable) => BumpResolution {
+            status: "unavailable".into(),
+            endpoint_id: None,
+            device_id: None,
+            rssi: None,
+            peer_count: 0,
+            detail: "BLE is unavailable in this build or on this device.".into(),
+        },
+        Err(ble::BumpResolveError::NoPeers) => BumpResolution {
+            status: "noPeers".into(),
+            endpoint_id: None,
+            device_id: None,
+            rssi: None,
+            peer_count: 0,
+            detail: "No fresh streetCryptid signal was found.".into(),
+        },
+        Err(ble::BumpResolveError::Ambiguous { peer_count }) => BumpResolution {
+            status: "ambiguous".into(),
+            endpoint_id: None,
+            device_id: None,
+            rssi: None,
+            peer_count,
+            detail: "More than one equally close signal was found.".into(),
+        },
+        Err(ble::BumpResolveError::ProbeFailed { peer_count, detail }) => BumpResolution {
+            status: "probeFailed".into(),
+            endpoint_id: None,
+            device_id: None,
+            rssi: None,
+            peer_count,
+            detail,
+        },
     }
 }
 

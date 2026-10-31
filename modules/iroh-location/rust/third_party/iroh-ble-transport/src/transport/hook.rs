@@ -4,12 +4,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use blew::DeviceId;
-use iroh::endpoint::{AfterHandshakeOutcome, Connection, EndpointHooks};
-use iroh_base::{EndpointId, TransportAddr};
+use iroh::endpoint::{AfterHandshakeOutcome, BeforeConnectOutcome, Connection, EndpointHooks};
+use iroh_base::{EndpointAddr, EndpointId, TransportAddr};
 use tokio::sync::mpsc;
 
-use crate::transport::routing::parse_token_addr;
+use crate::transport::priority::LinkPriority;
 use crate::transport::routing::{PromoteOutcome, Routing, StableConnId};
+use crate::transport::routing::{parse_token_addr, prefix_from_endpoint};
 use crate::transport::transport::BLE_TRANSPORT_ID;
 
 /// `EndpointHooks` implementation that runs the pending→routable
@@ -79,6 +80,7 @@ pub struct BleDedupHook {
     tx: mpsc::UnboundedSender<HookEvent>,
     active_connections: Arc<ActiveConnections>,
     idle_linger: Duration,
+    link_priority: Arc<LinkPriority>,
 }
 
 impl BleDedupHook {
@@ -89,6 +91,7 @@ impl BleDedupHook {
         tx: mpsc::UnboundedSender<HookEvent>,
         active_connections: Arc<ActiveConnections>,
         idle_linger: Duration,
+        link_priority: Arc<LinkPriority>,
     ) -> Self {
         Self {
             self_endpoint,
@@ -96,6 +99,7 @@ impl BleDedupHook {
             tx,
             active_connections,
             idle_linger,
+            link_priority,
         }
     }
 }
@@ -192,7 +196,35 @@ async fn report_idle_after_linger(
     }
 }
 
+/// Close code for a connection turned away because BLE is being kept for other protocols.
+pub const BLE_HELD_CLOSE_CODE: u32 = 0x424c_4548;
+
 impl EndpointHooks for BleDedupHook {
+    /// Hold back a dial that would land on BLE while the link is reserved for other protocols
+    /// ([`crate::BleTransport::reserve_links_for`]). "Would land on BLE" is read as "the peer is
+    /// in BLE range": nothing else is known before iroh picks a path, and a held link is kept for
+    /// a couple of minutes at most.
+    async fn before_connect<'a>(
+        &'a self,
+        remote_addr: &'a EndpointAddr,
+        alpn: &'a [u8],
+    ) -> BeforeConnectOutcome {
+        if self.link_priority.defers(alpn)
+            && self
+                .routing
+                .scan_hint_for_prefix(&prefix_from_endpoint(&remote_addr.id))
+                .is_some()
+        {
+            tracing::info!(
+                remote_endpoint = %remote_addr.id,
+                alpn = %String::from_utf8_lossy(alpn),
+                "BleDedupHook: holding a dial off BLE (link reserved)"
+            );
+            return BeforeConnectOutcome::Reject;
+        }
+        BeforeConnectOutcome::Accept
+    }
+
     async fn after_handshake<'a>(&'a self, conn: &'a Connection) -> AfterHandshakeOutcome {
         let remote_endpoint = conn.remote_id();
         // iroh 1.0: `Connection::paths()` returns a snapshot of only the
@@ -293,6 +325,19 @@ impl EndpointHooks for BleDedupHook {
                 )
                 .await;
             });
+        }
+        // Checked last, so the pipe is promoted and watched like any other: a connection turned
+        // away here is one more close, and the pipe it rode stays for the protocols it is held for.
+        if token.is_some() && self.link_priority.defers(conn.alpn()) {
+            tracing::info!(
+                %remote_endpoint,
+                alpn = %String::from_utf8_lossy(conn.alpn()),
+                "BleDedupHook: turning a connection away from BLE (link reserved)"
+            );
+            return AfterHandshakeOutcome::Reject {
+                error_code: noq_proto::VarInt::from_u32(BLE_HELD_CLOSE_CODE),
+                reason: b"ble-reserved".to_vec(),
+            };
         }
         AfterHandshakeOutcome::Accept
     }
