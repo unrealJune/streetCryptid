@@ -60,3 +60,14 @@ described below.
         the stream cannot take yet in a per-channel queue, and no longer close
         the channel when a write returns 0. The Rust-side bridge stops reading
         from the app while 64 KiB are queued (back-pressure).
+
+2026-10-31 — Android L2CAP writes off the async runtime:
+
+  * src/platform/android/l2cap_state.rs
+      - The Rust->Kotlin bridge no longer calls `writeL2cap` from a tokio task.
+        `BluetoothSocket`'s output stream blocks until the peer grants L2CAP
+        credits, so a peer that stopped reading froze the whole runtime the
+        task ran on for 30+ s. Each channel now has a writer thread fed by a
+        bounded queue (4 chunks); the bridge task awaits queue space, which
+        keeps back-pressure, and the writer thread closes the socket when the
+        queue ends.

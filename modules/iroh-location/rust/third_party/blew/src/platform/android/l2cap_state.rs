@@ -7,7 +7,14 @@
 //! -> `mpsc::UnboundedSender` -> tokio drain task -> DuplexStream writer -> L2capChannel read.
 //!
 //! **Rust->Kotlin data path:** L2capChannel write -> DuplexStream -> tokio read task
-//! -> JNI `writeL2cap` -> Kotlin OutputStream.
+//! -> bounded queue -> per-channel writer thread -> JNI `writeL2cap` -> Kotlin OutputStream.
+//!
+//! The writer thread exists because `BluetoothSocket.getOutputStream().write` BLOCKS until
+//! the peer grants L2CAP credits, and a peer that stops reading grants none. Called from a
+//! tokio task it froze the runtime that task ran on — for the host app that is the single
+//! thread every iroh timer, socket and BLE pipe shares — until the link itself gave up
+//! (30+ s), so the pipe's own dead-link watchdog could not even run to tear the channel
+//! down. Closing the socket (the channel's close hook) is what unblocks a stuck write.
 
 use std::collections::HashMap;
 use std::sync::OnceLock;
@@ -26,6 +33,8 @@ use super::jni_globals::{central_class, jvm, peripheral_class};
 
 const DUPLEX_BUF_SIZE: usize = 65536;
 const L2CAP_READ_BUF_SIZE: usize = 4096;
+/// Chunks queued for the writer thread before the bridge stops reading from the app.
+const L2CAP_WRITE_QUEUE: usize = 4;
 
 type AcceptSender = mpsc::UnboundedSender<BlewResult<(DeviceId, L2capChannel)>>;
 
@@ -114,35 +123,50 @@ pub(crate) fn on_channel_opened(device_addr: &str, socket_id: i32, from_server: 
     });
 
     let is_server = from_server;
+    let (write_tx, mut write_rx) = mpsc::channel::<Vec<u8>>(L2CAP_WRITE_QUEUE);
+    let writer = std::thread::Builder::new()
+        .name(format!("blew-l2cap-tx-{socket_id}"))
+        .spawn(move || {
+            while let Some(data) = write_rx.blocking_recv() {
+                let result = jvm().attach_current_thread(|env| {
+                    let j_data = env.byte_array_from_slice(&data)?;
+                    let class = if is_server {
+                        peripheral_class()
+                    } else {
+                        central_class()
+                    };
+                    env.call_static_method(
+                        class,
+                        jni_str!("writeL2cap"),
+                        jni_sig!("(I[B)V"),
+                        &[socket_id.into(), (&j_data).into()],
+                    )?;
+                    Ok::<_, jni::errors::Error>(())
+                });
+                if result.is_err() {
+                    break;
+                }
+            }
+            close_socket(socket_id, is_server);
+        });
+    if let Err(err) = writer {
+        tracing::warn!(socket_id, %err, "L2CAP writer thread did not start; closing channel");
+        close_socket(socket_id, is_server);
+    }
+
     handle.spawn(async move {
         let mut buf = vec![0_u8; L2CAP_READ_BUF_SIZE];
         loop {
             match bridge_reader.read(&mut buf).await {
                 Ok(0) | Err(_) => break,
                 Ok(n) => {
-                    let data = buf[..n].to_vec();
-                    let result = jvm().attach_current_thread(|env| {
-                        let j_data = env.byte_array_from_slice(&data)?;
-                        let class = if is_server {
-                            peripheral_class()
-                        } else {
-                            central_class()
-                        };
-                        env.call_static_method(
-                            class,
-                            jni_str!("writeL2cap"),
-                            jni_sig!("(I[B)V"),
-                            &[socket_id.into(), (&j_data).into()],
-                        )?;
-                        Ok::<_, jni::errors::Error>(())
-                    });
-                    if result.is_err() {
+                    if write_tx.send(buf[..n].to_vec()).await.is_err() {
                         break;
                     }
                 }
             }
         }
-        close_socket(socket_id, is_server);
+        // Dropping the sender lets the writer thread drain what is queued, then close.
     });
 
     let channel = L2capChannel::from_duplex_with_close_hook(app_half, move || {

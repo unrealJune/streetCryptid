@@ -585,6 +585,12 @@ Conventions when changing that code:
   take, rather than closing the channel. None of this runs on Linux, so the transport's SimRadio
   tests cannot cover it: change it only with an iPhone to test on, and record each change in its
   NOTICE (AGPL §5). The Kotlin half is still `android/src/main/java/org/jakebot/blew`.
+  **Android: never call a blocking JNI method from a tokio task.** The core's runtime is one
+  thread, and `BluetoothSocket` writes block until the peer grants credits: on 2026-10-31 an L2CAP
+  write to an iPhone that had stopped reading froze every timer, socket and pipe in the Pixel for
+  30 s twice in a row (Loki silent, `LINK_DEAD_DEADLINE` reporting `elapsed_ms=33422` against a
+  6 s deadline), and the first Bump after an un-friend failed with `connect_timeout`. L2CAP writes
+  now go through a per-channel writer thread (`l2cap_state.rs`).
 - **Pairing telemetry is spans, not `tracing::info!`.** Loki's OTLP ingest keeps the message and
   drops the fields, so the core's `connect_ms` / `exchange_ms` / `ticket_ms` existed and answered
   nothing on the one night they were needed. `pair.dial`, `pair.handshake`, `pair.inbound`,
