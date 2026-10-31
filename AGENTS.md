@@ -574,7 +574,10 @@ Conventions when changing that code:
   thread emits `tracing` except the one `telemetry.recovered` span after a backlog drains. Bump
   itself is recorded as `bump.stage` (one span per stage change, with the reason a window closed)
   and every local cancel as `pair.cancel{reason}`, both from JS; `ble.probe` and `ble.pipe` cover
-  the radio. See `infra/otel/README.md`.
+  the radio. See `infra/otel/README.md`. Both spools drain only when something NEW is exported, so a
+  quiet phone sits on its backlog: Settings → Debug → Push Logs (`pushAllTelemetry`) drains
+  MetricKit, the JS journal and the Rust spool (`push_telemetry_now`) at once, ignoring backoff, and
+  says what is still queued. Ask whoever holds the phone to press it after reproducing a bug.
 - **`blew` is vendored (`rust/third_party/blew`), because its CoreBluetooth backend dropped data.**
   On Apple, `updateValue:forCharacteristic:onSubscribedCentrals:` returning `NO` (queue full) and
   a write without response sent while `canSendWriteWithoutResponse` is false both lose the bytes

@@ -45,7 +45,7 @@ export {
 } from './event-log';
 export { getBuildResource, getResolvedDeviceId, resolveDeviceId } from './identity';
 export { createShipper } from './shipper';
-export type { Shipper, ShipperOptions } from './shipper';
+export type { Shipper, ShipperOptions, ShipperPush } from './shipper';
 export type {
   EventLogEntry,
   EventLogLaunchContext,

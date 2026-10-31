@@ -4,6 +4,20 @@
  * sources). Keys cross the bridge as lowercase hex strings.
  */
 
+/** What one {@link IrohLocationApi.pushTelemetryNow} did. Mirrors Rust's `TelemetryPush`. */
+export interface NativeTelemetryPush {
+  /** An exporter is configured; `false` in a build without telemetry. */
+  configured: boolean;
+  /** Spooled batches (traces and logs) the collector took during this push. */
+  delivered: number;
+  /** Spooled batches given up on during this push: refused, or too old to send. */
+  dropped: number;
+  /** The collector answered every send; `false` means the rest is still queued. */
+  reachable: boolean;
+  remainingBatches: number;
+  remainingBytes: number;
+}
+
 /** A raw location fix as it crosses the native bridge. */
 /** What one {@link IrohLocationModule.ingestFix} call did. Mirrors Rust's `IngestOutcome`. */
 export interface NativeIngestOutcome {
@@ -1178,6 +1192,11 @@ export interface IrohLocationApi {
   configureTelemetry?(endpoint: string, instanceId: string): Promise<boolean>;
   /** Flush buffered native telemetry. Headless contexts call this before the OS freezes them. */
   flushTelemetry?(): Promise<void>;
+  /**
+   * Flush, then send the core's whole offline spool now, ignoring its backoff (the debug screen's
+   * push button). OPTIONAL: absent on web and on binaries built before it existed.
+   */
+  pushTelemetryNow?(): Promise<NativeTelemetryPush>;
   /**
    * Drain the OS-reported crash / hang / CPU / disk diagnostics recorded since the last call,
    * each a JSON object string (see `MetricKitDiagnostics.swift`).

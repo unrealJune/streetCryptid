@@ -156,6 +156,30 @@ describe('journal shipper', () => {
     expect(await unshippedCount()).toBe(6);
   });
 
+  it('pushes the whole journal on demand, inside the backoff and past the batch budget', async () => {
+    let down = true;
+    const { shipper, sent } = harness({ batchSize: 2, maxBatches: 2, fail: () => down });
+    const telemetry = createTelemetry({ now: () => 5_000 });
+    for (let i = 0; i < 10; i += 1) telemetry.startSpan(`span.${i}`).end();
+
+    await shipper.drain();
+    expect(shipper.isBackingOff()).toBe(true);
+
+    down = false;
+    expect(await shipper.pushNow()).toEqual({ sent: 10, reachable: true, remaining: 0 });
+    expect(sent).toHaveLength(5);
+    expect(shipper.isBackingOff()).toBe(false);
+  });
+
+  it('says so when a push cannot reach the collector, and keeps every row', async () => {
+    const { shipper, sent } = harness({ fail: () => true });
+    const telemetry = createTelemetry({ now: () => 5_000 });
+    telemetry.startSpan('bump.stage').end();
+
+    expect(await shipper.pushNow()).toEqual({ sent: 0, reachable: false, remaining: 1 });
+    expect(sent).toEqual([]);
+  });
+
   it('stamps resource attributes read at send time, not at record time', async () => {
     const resource: Attributes = { 'service.name': 'streetcryptid-app' };
     const { shipper, sent } = harness({ resource });

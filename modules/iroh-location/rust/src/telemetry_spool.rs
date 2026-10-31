@@ -150,6 +150,27 @@ struct MemoryItem {
     body: Vec<u8>,
 }
 
+/// What a forced drain ([`Shipper::push_now`]) came to.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct Pushed {
+    /// Queued batches the collector took.
+    pub delivered: u64,
+    /// Queued batches given up on: refused, or too old.
+    pub dropped: u64,
+    /// The collector could not be reached (or asked us to come back later); the rest stays queued.
+    pub unreachable: bool,
+}
+
+impl Pushed {
+    pub(crate) fn merge(self, other: Pushed) -> Pushed {
+        Pushed {
+            delivered: self.delivered + other.delivered,
+            dropped: self.dropped + other.dropped,
+            unreachable: self.unreachable || other.unreachable,
+        }
+    }
+}
+
 struct State {
     memory: VecDeque<MemoryItem>,
     memory_bytes: usize,
@@ -164,6 +185,9 @@ pub(crate) struct Shipper<S: Sink> {
     /// `None` reads the process-wide directory from [`set_dir`]; tests pin their own.
     dir_override: Option<PathBuf>,
     state: Mutex<State>,
+    /// Held across every send, so a forced drain from another thread and the export thread never
+    /// both read the same head and deliver it twice.
+    sending: Mutex<()>,
     on_recovered: Option<fn(Recovered)>,
 }
 
@@ -196,6 +220,7 @@ impl<S: Sink> Shipper<S> {
                 failures: 0,
                 backoff_until: None,
             }),
+            sending: Mutex::new(()),
             on_recovered: None,
         }
     }
@@ -220,6 +245,7 @@ impl<S: Sink> Shipper<S> {
     }
 
     fn ship_at(&self, body: Vec<u8>, now: Instant, wall: SystemTime) {
+        let _sending = self.sending.lock().unwrap_or_else(|p| p.into_inner());
         let backing_off = self.lock().backoff_until.is_some_and(|until| now < until);
         if !backing_off && self.queued(wall).is_empty() {
             match self.sink.post(&body) {
@@ -262,36 +288,91 @@ impl<S: Sink> Shipper<S> {
                 return;
             };
             oldest.get_or_insert(head.at());
-            let body = match &head {
-                Queued::Memory(_) => match self.lock().memory.front() {
-                    Some(item) => item.body.clone(),
-                    None => continue,
-                },
-                Queued::File(path, _, _) => match std::fs::read(path) {
-                    Ok(body) => body,
-                    Err(_) => {
-                        let _ = std::fs::remove_file(path);
-                        continue;
-                    }
-                },
-            };
-            match self.sink.post(&body) {
-                PostOutcome::Delivered => {
-                    REPLAYED.fetch_add(1, Relaxed);
-                    replayed += 1;
-                    self.remove(&head);
-                }
-                PostOutcome::Refused => {
-                    DROPPED.fetch_add(1, Relaxed);
-                    self.remove(&head);
-                }
-                PostOutcome::Retry => {
+            match self.post_head(&head) {
+                None => continue,
+                Some(PostOutcome::Delivered) => replayed += 1,
+                Some(PostOutcome::Refused) => {}
+                Some(PostOutcome::Retry) => {
                     self.note_failure(now);
                     return;
                 }
             }
         }
         self.publish_backlog(wall);
+    }
+
+    /// POST the head of the queue and settle it: delivered and refused leave the queue, a retry
+    /// stays. `None` when the head was gone by the time it was read.
+    fn post_head(&self, head: &Queued) -> Option<PostOutcome> {
+        let body = match head {
+            Queued::Memory(_) => self.lock().memory.front()?.body.clone(),
+            Queued::File(path, _, _) => match std::fs::read(path) {
+                Ok(body) => body,
+                Err(_) => {
+                    let _ = std::fs::remove_file(path);
+                    return None;
+                }
+            },
+        };
+        let outcome = self.sink.post(&body);
+        match outcome {
+            PostOutcome::Delivered => {
+                REPLAYED.fetch_add(1, Relaxed);
+                self.remove(head);
+            }
+            PostOutcome::Refused => {
+                DROPPED.fetch_add(1, Relaxed);
+                self.remove(head);
+            }
+            PostOutcome::Retry => {}
+        }
+        Some(outcome)
+    }
+
+    /// Send everything queued now, ignoring the backoff and the per-export budget, until the
+    /// queue is empty, the collector fails, or `deadline` passes. For a human pressing a button:
+    /// the normal drain only runs when a NEW batch is exported, so a phone that has gone quiet
+    /// (an iPhone reclaimed in the background) can sit on its spool indefinitely.
+    pub(crate) fn push_now(&self, deadline: Instant) -> Pushed {
+        let _sending = self.sending.lock().unwrap_or_else(|p| p.into_inner());
+        let dropped_before = DROPPED.load(Relaxed);
+        let mut pushed = Pushed::default();
+        let mut oldest: Option<SystemTime> = None;
+        loop {
+            let wall = SystemTime::now();
+            if Instant::now() >= deadline {
+                self.publish_backlog(wall);
+                break;
+            }
+            let Some(head) = self.queued(wall).into_iter().next() else {
+                self.note_success();
+                if pushed.delivered > 0 {
+                    if let (Some(hook), Some(oldest)) = (self.on_recovered, oldest) {
+                        hook(Recovered {
+                            signal: self.signal,
+                            batches: pushed.delivered,
+                            oldest_age: wall.duration_since(oldest).unwrap_or_default(),
+                        });
+                    }
+                }
+                break;
+            };
+            oldest.get_or_insert(head.at());
+            match self.post_head(&head) {
+                Some(PostOutcome::Delivered) => pushed.delivered += 1,
+                Some(PostOutcome::Retry) => {
+                    pushed.unreachable = true;
+                    self.note_failure(Instant::now());
+                    self.publish_backlog(wall);
+                    break;
+                }
+                Some(PostOutcome::Refused) | None => {}
+            }
+        }
+        // Counts what `queued` aged out as well as what was refused. Another signal's export
+        // thread can drop in the same window; for a button's status line that is close enough.
+        pushed.dropped = DROPPED.load(Relaxed).saturating_sub(dropped_before);
+        pushed
     }
 
     fn keep(&self, body: Vec<u8>, wall: SystemTime) {
@@ -677,6 +758,54 @@ mod tests {
             SystemTime::now(),
         );
         assert_eq!(sink.received(), vec![b"fresh".to_vec()]);
+    }
+
+    #[test]
+    fn a_push_sends_the_whole_backlog_inside_the_backoff_and_past_the_export_budget() {
+        let dir = temp_dir("push");
+        let sink = FakeSink::down();
+        let shipper = Shipper::with_dir(Signal::Traces, sink.clone(), Some(dir.clone()));
+        let t0 = Instant::now();
+        let wall = SystemTime::now();
+        let total = DRAIN_PER_EXPORT as u8 + 4;
+        for i in 0..total {
+            shipper.ship_at(vec![i], t0, wall);
+        }
+        assert!(sink.received().is_empty());
+        // Still inside the backoff the failures armed: `ship` would only have queued.
+        sink.set(PostOutcome::Delivered);
+        let pushed = shipper.push_now(Instant::now() + Duration::from_secs(60));
+        assert_eq!(pushed.delivered, u64::from(total));
+        assert!(!pushed.unreachable);
+        assert_eq!(
+            sink.received(),
+            (0..total).map(|i| vec![i]).collect::<Vec<_>>()
+        );
+        assert!(shipper.files(&dir).is_empty());
+    }
+
+    #[test]
+    fn a_push_to_an_unreachable_collector_keeps_everything_and_says_so() {
+        let dir = temp_dir("push-down");
+        let sink = FakeSink::down();
+        let shipper = Shipper::with_dir(Signal::Logs, sink.clone(), Some(dir.clone()));
+        shipper.ship_at(b"a".to_vec(), Instant::now(), SystemTime::now());
+        let pushed = shipper.push_now(Instant::now() + Duration::from_secs(60));
+        assert_eq!(pushed.delivered, 0);
+        assert!(pushed.unreachable);
+        assert_eq!(shipper.files(&dir).len(), 1);
+    }
+
+    #[test]
+    fn a_push_past_its_deadline_sends_nothing_and_keeps_the_queue() {
+        let dir = temp_dir("push-deadline");
+        let sink = FakeSink::down();
+        let shipper = Shipper::with_dir(Signal::Traces, sink.clone(), Some(dir.clone()));
+        shipper.ship_at(b"a".to_vec(), Instant::now(), SystemTime::now());
+        sink.set(PostOutcome::Delivered);
+        let pushed = shipper.push_now(Instant::now());
+        assert_eq!((pushed.delivered, pushed.unreachable), (0, false));
+        assert_eq!(shipper.files(&dir).len(), 1);
     }
 
     #[test]

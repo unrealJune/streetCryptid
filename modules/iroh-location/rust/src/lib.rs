@@ -100,7 +100,10 @@ use pairing::{
     PairStateData, SasChallengeData, SasRole,
 };
 use profile::{ProfileDocs, ProfileFields, ProfileRecord, ProfileSink};
-pub use telemetry::{configure_telemetry, flush_telemetry, set_telemetry_spool_dir};
+pub use telemetry::{
+    configure_telemetry, flush_telemetry, push_telemetry_now, set_telemetry_spool_dir,
+    TelemetryPush,
+};
 
 uniffi::setup_scaffolding!();
 

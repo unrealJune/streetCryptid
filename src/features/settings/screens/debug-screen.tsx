@@ -8,9 +8,12 @@ import { FriendConnectionDetailsRow } from '../components/friend-connection-deta
 import { EventLogPanel } from '../components/event-log-panel';
 import { GlassStatusRow } from '../components/glass-status-row';
 import { SettingsPage, SettingsSection } from '../components/settings-page';
+import { TelemetryPushControls } from '../components/telemetry-push-controls';
+import { pushAllTelemetry } from '../core/telemetry-push';
 
 /**
- * Force a publish, reveal connection details, and read the local event journal.
+ * Force a publish, push queued telemetry, reveal connection details, and read the local event
+ * journal.
  */
 export default function DebugScreen() {
   const scheme = useColorScheme();
@@ -35,6 +38,12 @@ export default function DebugScreen() {
 
       {/* The journal does not exist in a stripped build, so the viewer would render a
           permanently empty list and read as a bug rather than as an absent feature. */}
+      {DEV_TELEMETRY_ENABLED ? (
+        <SettingsSection label="TELEMETRY">
+          <TelemetryPushControls accent={chrome.green} onPush={pushAllTelemetry} />
+        </SettingsSection>
+      ) : null}
+
       {DEV_TELEMETRY_ENABLED ? (
         <SettingsSection label="EVENT JOURNAL">
           <EventLogPanel activeColor={chrome.green} warningColor={chrome.amber} />

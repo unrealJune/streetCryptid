@@ -58,6 +58,7 @@ import uniffi.iroh_location.deriveTopic
 import uniffi.iroh_location.encodePairInvite
 import uniffi.iroh_location.endpointIdFromTicket
 import uniffi.iroh_location.flushTelemetry
+import uniffi.iroh_location.pushTelemetryNow
 import uniffi.iroh_location.h3CellsForPolygon
 
 private fun ByteArray.toHex(): String = joinToString("") { "%02x".format(it) }
@@ -1248,6 +1249,20 @@ class IrohLocationModule : Module() {
     AsyncFunction("flushTelemetry") Coroutine
       { ->
         flushTelemetry()
+      }
+
+    // Debug screen: send every queued Rust span and log now, ignoring the spool's backoff.
+    AsyncFunction("pushTelemetryNow") Coroutine
+      { ->
+        val r = pushTelemetryNow()
+        mapOf(
+          "configured" to r.configured,
+          "delivered" to r.delivered.toLong(),
+          "dropped" to r.dropped.toLong(),
+          "reachable" to r.reachable,
+          "remainingBatches" to r.remainingBatches.toLong(),
+          "remainingBytes" to r.remainingBytes.toLong(),
+        )
       }
 
     AsyncFunction("docTicket") Coroutine

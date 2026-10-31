@@ -411,6 +411,7 @@ mod imp {
                 let _ = logs.shutdown();
             }
         }
+        spool_export::forget_live();
 
         let endpoint = endpoint.trim().trim_end_matches('/').to_owned();
         if endpoint.is_empty() {
@@ -461,8 +462,8 @@ mod imp {
     /// OTLP/HTTP protobuf exporters that hand every batch to a `Shipper`, which delivers it or
     /// keeps it until it can (see `telemetry_spool`).
     mod spool_export {
-        use std::sync::OnceLock;
-        use std::time::Duration;
+        use std::sync::{Arc, Mutex, OnceLock};
+        use std::time::{Duration, Instant};
 
         use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
         use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
@@ -475,7 +476,36 @@ mod imp {
         use opentelemetry_sdk::Resource;
         use prost::Message;
 
-        use crate::telemetry_spool::{PostOutcome, Recovered, Shipper, Signal, Sink};
+        use crate::telemetry_spool::{PostOutcome, Pushed, Recovered, Shipper, Signal, Sink};
+
+        /// The shippers of the live pipeline, so [`push_now`] can reach them. The SDK owns the
+        /// exporters; this keeps a second handle on what is inside them. Replaced on `configure`.
+        static LIVE: Mutex<Vec<Arc<Shipper<HttpSink>>>> = Mutex::new(Vec::new());
+
+        pub(super) fn forget_live() {
+            LIVE.lock().unwrap_or_else(|p| p.into_inner()).clear();
+        }
+
+        fn register(shipper: Shipper<HttpSink>) -> Arc<Shipper<HttpSink>> {
+            let shipper = Arc::new(shipper);
+            LIVE.lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .push(shipper.clone());
+            shipper
+        }
+
+        /// Drain every live spool now (see `Shipper::push_now`). `None` when nothing is configured.
+        pub(super) fn push_now(deadline: Instant) -> Option<Pushed> {
+            let live = LIVE.lock().unwrap_or_else(|p| p.into_inner()).clone();
+            if live.is_empty() {
+                return None;
+            }
+            Some(
+                live.iter()
+                    .map(|shipper| shipper.push_now(deadline))
+                    .fold(Pushed::default(), Pushed::merge),
+            )
+        }
 
         /// `telemetry.recovered`: a backlog this phone could not send has just gone out. Its spans
         /// keep their original timestamps, so without this nothing says that the last half hour
@@ -551,18 +581,20 @@ mod imp {
         }
 
         pub(super) struct SpanSpool {
-            shipper: Shipper<HttpSink>,
+            shipper: Arc<Shipper<HttpSink>>,
             resource: ResourceAttributesWithSchema,
         }
 
         impl SpanSpool {
             pub(super) fn new(endpoint: &str, resource: &Resource) -> Self {
                 Self {
-                    shipper: Shipper::new(
-                        Signal::Traces,
-                        HttpSink::new(format!("{endpoint}/v1/traces")),
-                    )
-                    .on_recovered(report_recovered),
+                    shipper: register(
+                        Shipper::new(
+                            Signal::Traces,
+                            HttpSink::new(format!("{endpoint}/v1/traces")),
+                        )
+                        .on_recovered(report_recovered),
+                    ),
                     resource: resource.into(),
                 }
             }
@@ -593,18 +625,17 @@ mod imp {
         }
 
         pub(super) struct LogSpool {
-            shipper: Shipper<HttpSink>,
+            shipper: Arc<Shipper<HttpSink>>,
             resource: ResourceAttributesWithSchema,
         }
 
         impl LogSpool {
             pub(super) fn new(endpoint: &str, resource: &Resource) -> Self {
                 Self {
-                    shipper: Shipper::new(
-                        Signal::Logs,
-                        HttpSink::new(format!("{endpoint}/v1/logs")),
-                    )
-                    .on_recovered(report_recovered),
+                    shipper: register(
+                        Shipper::new(Signal::Logs, HttpSink::new(format!("{endpoint}/v1/logs")))
+                            .on_recovered(report_recovered),
+                    ),
                     resource: resource.into(),
                 }
             }
@@ -642,6 +673,22 @@ mod imp {
                 let _ = traces.force_flush();
                 let _ = logs.force_flush();
             }
+        }
+    }
+
+    /// Flush the providers into the spool, then send the whole spool now. Blocking.
+    pub(crate) fn push_now(budget: std::time::Duration) -> super::TelemetryPush {
+        let deadline = std::time::Instant::now() + budget;
+        flush();
+        let pushed = spool_export::push_now(deadline);
+        let spool = crate::telemetry_spool::snapshot();
+        super::TelemetryPush {
+            configured: pushed.is_some(),
+            delivered: pushed.map_or(0, |p| p.delivered),
+            dropped: pushed.map_or(0, |p| p.dropped),
+            reachable: pushed.is_some_and(|p| !p.unreachable),
+            remaining_batches: spool.backlog_batches,
+            remaining_bytes: spool.backlog_bytes,
         }
     }
 
@@ -752,6 +799,10 @@ mod imp {
 
     pub(crate) fn flush() {}
 
+    pub(crate) fn push_now(_budget: std::time::Duration) -> super::TelemetryPush {
+        super::TelemetryPush::default()
+    }
+
     pub(crate) fn set_parent(_span: &tracing::Span, _traceparent: Option<&str>) {}
 }
 
@@ -788,6 +839,46 @@ pub fn set_telemetry_spool_dir(dir: String) -> bool {
 #[uniffi::export(async_runtime = "tokio")]
 pub async fn flush_telemetry() {
     let _ = tokio::task::spawn_blocking(imp::flush).await;
+}
+
+/// What [`push_telemetry_now`] came to, for the debug screen's status line.
+#[derive(Debug, Clone, Default, PartialEq, Eq, uniffi::Record)]
+pub struct TelemetryPush {
+    /// An exporter is configured. `false` in a build without `otel`, or before `configure`.
+    pub configured: bool,
+    /// Spooled batches (traces and logs) the collector took during this push.
+    pub delivered: u64,
+    /// Spooled batches given up on during this push: refused by the collector, or too old.
+    pub dropped: u64,
+    /// The collector answered every send. `false` means the rest is still queued.
+    pub reachable: bool,
+    /// What is still waiting afterwards.
+    pub remaining_batches: u64,
+    pub remaining_bytes: u64,
+}
+
+/// How long one push may spend sending, before it reports what is left.
+const PUSH_BUDGET: std::time::Duration = std::time::Duration::from_secs(25);
+
+/// Send every Rust span and log this phone is holding, NOW: flush the batch processors, then drain
+/// the offline spool ignoring its backoff and its per-export budget. The normal drain only runs
+/// when a new batch is exported, so a phone that has gone quiet can sit on a spool for hours. For
+/// the debug screen's "push logs" button.
+///
+/// Runs on a thread of its own rather than the blocking pool: the HTTP client is reqwest's blocking
+/// one, which must not be driven from inside a tokio runtime context.
+#[uniffi::export(async_runtime = "tokio")]
+pub async fn push_telemetry_now() -> TelemetryPush {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let spawned = std::thread::Builder::new()
+        .name("telemetry-push".into())
+        .spawn(move || {
+            let _ = tx.send(imp::push_now(PUSH_BUDGET));
+        });
+    if spawned.is_err() {
+        return TelemetryPush::default();
+    }
+    rx.await.unwrap_or_default()
 }
 
 #[cfg(test)]
