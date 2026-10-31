@@ -716,6 +716,12 @@ export class LocationSharingService {
   private bumpError: string | null = null;
   private bumpResolveInFlight: Promise<void> | null = null;
   private bumpGeneration = 0;
+  /**
+   * How many times the pairing screen has been left ({@link standDownPairing}). A Bump handshake
+   * that returns after one of these is cancelled; one that returns after the window merely
+   * closed (see {@link commitBump}) is not.
+   */
+  private pairingStandDowns = 0;
   private pairingOperations = 0;
   private rebindInFlight = false;
   private readonly discoveries = new Map<string, Friend>();
@@ -1731,6 +1737,7 @@ export class LocationSharingService {
   async commitBump(): Promise<void> {
     if (!this.mod || !this.isBumpActive() || this.bumpResolveInFlight) return;
     const generation = this.bumpGeneration;
+    const standDowns = this.pairingStandDowns;
     this.bumpStage = 'searching';
     this.bumpSearchStartedAt = Date.now();
     this.bumpUntil = Math.max(this.bumpUntil, this.bumpSearchStartedAt + BUMP_SEARCH_DURATION_MS);
@@ -1763,7 +1770,16 @@ export class LocationSharingService {
           }
           throw error;
         }
-        if (generation !== this.bumpGeneration) {
+        // The window closing under a running handshake is not a reason to end it. It closes on
+        // every trip out of the foreground, and Android leaves it for a second or two whenever
+        // another activity takes the screen: on 2026-10-31 a Pixel 10 went to `background` for
+        // 1.6 s, 0.3 s into its Hello (its owner saw Android Auto open), and again for 0.2 s during the
+        // next try. Each time the handshake went on to put the figures on the iPhone's screen,
+        // and each time this branch then cancelled it, so the iPhone read "they declined" about a
+        // pair nobody had declined. Only leaving the pairing screen abandons a pair, and leaving
+        // already tells the other phone (`standDownPairing`); a handshake it could not yet name
+        // is caught here.
+        if (generation !== this.bumpGeneration && standDowns !== this.pairingStandDowns) {
           this.initiatedRoutes.delete(sessionId);
           await this.mod!.cancelPair(sessionId);
           return;
@@ -2536,6 +2552,7 @@ export class LocationSharingService {
    * cannot be reached is exactly the case where the local decision still has to stand.
    */
   async standDownPairing(candidateSessionIds: readonly string[]): Promise<void> {
+    this.pairingStandDowns += 1;
     if (!this.mod || candidateSessionIds.length === 0) return;
     const span = getTelemetry().startSpan('pair.stand_down');
     try {
@@ -5324,7 +5341,11 @@ export class LocationSharingService {
         // identified none of them, which is why this took a day to find.
         pairing_read_ms: reads.pairingReadMs ?? 0,
       });
-      if (current) await this.pollTransportDiagnosticsOnce();
+      // Started, never awaited. It is diagnostics, and `remote_info` can wait on a peer whose
+      // path is still being built: on 2026-10-31 a Pixel 10's poll sat behind it for 14.8 s while
+      // its own Bump handshake dialled over BLE, so the screen could not move off SEARCHING and no
+      // other poll could start. Deduplicated by the in-flight promise, and it never throws.
+      if (current) void this.pollTransportDiagnosticsOnce();
       // Pair events FIRST: `pool.applyProfile` is a no-op for an endpoint that isn't a friend yet,
       // and both queues are drained together above, so applying profiles first threw away the
       // persona of anyone whose `ready` was sitting in the very same batch.

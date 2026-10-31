@@ -7,6 +7,17 @@ import { useBumpToPair, type BumpSensorState } from './use-bump-to-pair';
 import { useLocationSharing } from './use-location-sharing';
 import type { PairingSnapshot } from '../net/location-sharing';
 
+/**
+ * How long the app may be out of the foreground before the Bump window closes.
+ *
+ * Leaving the SCREEN closes it at once; this covers the app losing the foreground while the
+ * screen is still up. That is routinely seconds, not a departure: Android pauses the activity
+ * whenever another one takes the screen, iOS goes `inactive` for Control Centre and system
+ * alerts. On 2026-10-31 a Pixel 10 went to `background` for 1.6 s and then 0.2 s during two
+ * bumps (its owner saw Android Auto open), and each blip closed the window mid-handshake.
+ */
+export const BUMP_FOREGROUND_GRACE_MS = 10_000;
+
 export interface ArmedBump {
   readonly pairing: PairingSnapshot | null;
   readonly sensor: BumpSensorState;
@@ -25,8 +36,9 @@ export interface ArmedBump {
  *
  * Entering the screen is the deliberate user gesture that opens Bluetooth and motion
  * permissions. A timed-out or transiently interrupted window re-arms itself while the
- * screen remains visible; a physical miss stays parked for an explicit retry. Leaving
- * or backgrounding the screen always closes the radio.
+ * screen remains visible; a physical miss stays parked for an explicit retry. Leaving the
+ * screen closes the radio at once; the app leaving the foreground closes it after
+ * {@link BUMP_FOREGROUND_GRACE_MS}.
  *
  * Strictly the RADIO's lifecycle. Haptics used to live here too, which quietly made them a
  * Bump-only feature: this hook is armed only for nearby pairing, so every link and QR pair ran
@@ -97,8 +109,15 @@ export function useArmedBump(active: boolean): ArmedBump {
 
   useEffect(() => {
     if (live || stage === 'idle') return;
-    void cancelBump();
-  }, [cancelBump, live, stage]);
+    if (!active) {
+      void cancelBump();
+      return;
+    }
+    const timer = setTimeout(() => {
+      void cancelBump();
+    }, BUMP_FOREGROUND_GRACE_MS);
+    return () => clearTimeout(timer);
+  }, [active, cancelBump, live, stage]);
 
   const sensor = useBumpToPair(live && stage === 'armed' && !hasActiveSession, commitBump);
 

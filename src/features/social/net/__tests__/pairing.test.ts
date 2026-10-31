@@ -935,11 +935,43 @@ describe('LocationSharingService — pairing / profile wiring', () => {
     const committing = svc.commitBump();
     await Promise.resolve();
     await Promise.resolve();
+    // What leaving the screen does: close the radio and stand down the sessions it can name,
+    // which cannot include one whose initiation has not returned yet.
     await svc.cancelBump();
+    await svc.standDownPairing([]);
     resolveSession('sess-too-late');
     await committing;
 
     expect(mockHolder.mod.calls.cancelPair).toContain('sess-too-late');
+  });
+
+  // 2026-10-31: a Pixel 10 left the foreground for 1.6 s during its Hello, which closed the Bump
+  // window; the handshake reached the figures on the iPhone and was then cancelled by the Pixel.
+  it('lets a handshake finish when the window closes because the app left the foreground', async () => {
+    const svc = newService();
+    await svc.init('@me', 'mothman');
+    mockHolder.mod.bumpResolution = {
+      status: 'resolved',
+      endpointId: 'peer-blip',
+      deviceId: 'ble-blip',
+      rssi: -32,
+      peerCount: 1,
+      detail: 'resolved',
+    };
+    let resolveSession!: (sessionId: string) => void;
+    mockHolder.mod.initiateNearbyPromise = new Promise((resolve) => {
+      resolveSession = resolve;
+    });
+
+    await svc.armBump();
+    const committing = svc.commitBump();
+    await Promise.resolve();
+    await Promise.resolve();
+    await svc.cancelBump();
+    resolveSession('sess-blip');
+    await committing;
+
+    expect(mockHolder.mod.calls.cancelPair).not.toContain('sess-blip');
   });
 
   it('does not cancel a simultaneous nearby session that reaches verification before initiation returns', async () => {

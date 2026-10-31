@@ -1716,10 +1716,34 @@ impl PairCore {
     ///
     /// Bounded, because being offline is a legitimate state: on timeout we fall back to the
     /// local-only address, which is still correct for same-LAN pairing.
-    async fn our_endpoint_ticket(&self) -> String {
+    ///
+    /// `nearby` never waits. The argument above is about an address someone ELSEWHERE has to
+    /// dial; a nearby pair is carried by the BLE link it arrived on, and the peer finds this
+    /// endpoint again through the BLE address lookup and the N0 lookup, never through the relay
+    /// in this ticket (`relay::scrub_addr` drops a stale one anyway). So a relay wait there buys
+    /// nothing and costs the whole pair: on 2026-10-31 06:02-06:05 UTC a Pixel 10 and an iPhone
+    /// 16 Pro Max bumped with no internet, and each side's first message waited out the full
+    /// 10 s, every later one the 2 s retry, inside the other side's dial. 20 of the 25 s from
+    /// Bump to the figures, and the reason the phone that was found sat on SEARCHING while the
+    /// one that found it said CONNECTING: its Hello had not been sent yet.
+    async fn our_endpoint_ticket(&self, nearby: bool) -> String {
         let Ok(ep) = self.runtime_endpoint().await else {
             return String::new();
         };
+        if nearby {
+            // What `addr()` knows right now, relay included if one is already up.
+            tracing::info_span!(
+                "pair.endpoint_ticket",
+                sc.author = %crate::telemetry::short_hex(&self.endpoint_id),
+                waited_ms = 0u64,
+                timed_out = false,
+                latched = self.endpoint_was_online.load(Ordering::SeqCst),
+                budget_ms = 0u64,
+                nearby = true,
+            )
+            .in_scope(|| {});
+            return EndpointTicket::new(ep.addr()).to_string();
+        }
 
         // THE FULL WAIT IS PAID ONCE PER NODE, not once per message — and that distinction is
         // most of a slow bump.
@@ -1774,6 +1798,7 @@ impl PairCore {
             timed_out,
             latched,
             budget_ms = budget.as_millis() as u64,
+            nearby = false,
         )
         .in_scope(|| {});
         EndpointTicket::new(ep.addr()).to_string()
@@ -1869,7 +1894,7 @@ impl PairCore {
     ) -> Result<PairMsg> {
         let session_id = session.session_id;
         let build_started = Instant::now();
-        let endpoint_ticket = self.our_endpoint_ticket().await;
+        let endpoint_ticket = self.our_endpoint_ticket(session.nearby).await;
         let ticket_ms = build_started.elapsed().as_millis() as u64;
         let (mut profile_ticket, mut trail_ticket, mut profile_record) = match decision {
             Decision::Accept => (
@@ -2100,7 +2125,7 @@ impl PairCore {
         let mut secret = [0u8; INVITE_SECRET_LEN];
         OsRng.fill_bytes(&mut invite_id);
         OsRng.fill_bytes(&mut secret);
-        let endpoint_ticket = self.our_endpoint_ticket().await;
+        let endpoint_ticket = self.our_endpoint_ticket(false).await;
         if endpoint_ticket.is_empty() {
             bail!("node not started: no endpoint ticket for invite");
         }
