@@ -552,7 +552,9 @@ Conventions when changing that code:
   (`BleTransport::reserve_links_for`): dials to a peer in BLE range are refused before they start,
   and other protocols arriving over BLE are closed after the handshake. The hold ends at the nearby
   SAS gate, when the window closes, or after `BLE_PAIRING_HOLD_MAX` — never let it outlive the
-  window, or friend sync between nearby phones stops. Each phone searches independently and only
+  window, or friend sync between nearby phones stops. A hold also CLOSES connections of other
+  protocols already on BLE (a 500 ms sweep in the transport): on 2026-10-31 sync that began before
+  the window kept ~700 KB a side streaming through it, and three Hellos and a Reject timed out. Each phone searches independently and only
   one needs to succeed, so a `noPeers`/`probeFailed` search is the `waiting` Bump stage ("LISTENING"),
   not a failure; the other phone's request takes the screen from there. `bump.resolve` records what
   each search saw.

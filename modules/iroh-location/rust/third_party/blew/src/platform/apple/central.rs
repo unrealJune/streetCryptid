@@ -567,6 +567,56 @@ impl CentralDelegate {
     }
 }
 
+/// A connect CoreBluetooth has not answered yet, owned by the `connect` future.
+///
+/// Upstream left its `connects` entry behind when the future was DROPPED rather than timed out —
+/// a caller's own timeout around `connect`, such as the Bump identity probe's. Every later connect
+/// to that peripheral then failed at once with `ConnectInFlight`: on 2026-10-31 an iPhone's Bump
+/// search failed this way on every attempt for ninety seconds, until the Pixel's address rotated.
+/// Dropping this un-settled withdraws the request and cancels the connection.
+struct PendingConnect {
+    handle: Arc<CentralHandle>,
+    device_id: DeviceId,
+    peripheral: ObjcSend<CBPeripheral>,
+    rx: Option<oneshot::Receiver<BlewResult<()>>>,
+    settled: bool,
+}
+
+impl PendingConnect {
+    /// The connect finished (or its own timeout cleaned up); nothing is left to withdraw.
+    fn settle(&mut self) {
+        self.settled = true;
+    }
+}
+
+impl Drop for PendingConnect {
+    fn drop(&mut self) {
+        if self.settled {
+            return;
+        }
+        // Close our receiver first, so the entry can be told apart from a newer connect's.
+        drop(self.rx.take());
+        let Some(tx) = self.handle.inner.connects.take(&self.device_id) else {
+            return;
+        };
+        if !tx.is_closed() {
+            // Not ours: a newer connect to the same peripheral took the slot after ours was
+            // answered. Put it back.
+            let _ = self
+                .handle
+                .inner
+                .connects
+                .try_insert(self.device_id.clone(), tx);
+            return;
+        }
+        unsafe {
+            self.handle
+                .manager
+                .cancelPeripheralConnection(&self.peripheral)
+        };
+    }
+}
+
 struct CentralHandle {
     manager: ObjcSend<CBCentralManager>,
     /// Retained here so the CB manager's weak-ref delegate stays alive.
@@ -640,8 +690,7 @@ impl CentralBackend for AppleCentral {
             debug!(device_id = %device_id, "connecting to device");
             // All ObjC ops in a synchronous block to avoid holding !Send types across .await.
             let id_for_err = device_id.clone();
-            let peripheral_to_cancel;
-            let rx = {
+            let mut pending = {
                 let peripheral = handle
                     .inner
                     .peripherals
@@ -666,9 +715,15 @@ impl CentralBackend for AppleCentral {
                     peripheral.setDelegate(Some(ProtocolObject::from_ref(&*handle.delegate)));
                     handle.manager.connectPeripheral_options(&peripheral, None);
                 }
-                peripheral_to_cancel = peripheral;
-                rx
+                PendingConnect {
+                    handle: Arc::clone(&handle),
+                    device_id: device_id.clone(),
+                    peripheral,
+                    rx: Some(rx),
+                    settled: false,
+                }
             };
+            let rx = pending.rx.as_mut().expect("set above");
 
             let timeout = *handle.inner.connect_timeout.lock();
             let result = match timeout {
@@ -680,7 +735,7 @@ impl CentralBackend for AppleCentral {
                         unsafe {
                             handle
                                 .manager
-                                .cancelPeripheralConnection(&peripheral_to_cancel);
+                                .cancelPeripheralConnection(&pending.peripheral);
                         }
                         handle.inner.emit(CentralEvent::DeviceDisconnected {
                             device_id: id_for_err.clone(),
@@ -693,7 +748,7 @@ impl CentralBackend for AppleCentral {
                     .await
                     .unwrap_or(Err(BlewError::DisconnectedDuringOperation(id_for_err))),
             };
-            drop(peripheral_to_cancel);
+            pending.settle();
             result
         }
     }

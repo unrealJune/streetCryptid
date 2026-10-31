@@ -167,6 +167,10 @@ const TOPIC_PREFIX: &[u8] = b"streetcryptid.loc";
 /// screen rather than a slow one.
 const ENDPOINT_BIND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
+/// How long [`LocationNode::cancel_pair`] waits for the peer to hear about a cancel before it
+/// returns and lets delivery finish in the background.
+const CANCEL_PAIR_WAIT: std::time::Duration = std::time::Duration::from_millis(1500);
+
 #[derive(Debug, thiserror::Error, uniffi::Error)]
 pub enum LocationError {
     #[error("crypto error: {0}")]
@@ -4317,12 +4321,22 @@ impl LocationNode {
     }
 
     /// Cancel a pairing under SAS verification — terminal (requires a fresh attempt).
+    ///
+    /// Returns once the decision is RECORDED, not once the peer has heard it. Telling the peer is a
+    /// dial, bounded only by `PAIR_CONNECT_TIMEOUT`, and every caller is a human pressing REJECT or
+    /// leaving the screen: on 2026-10-31 a Pixel's REJECT sat 15 s behind a Reject that could not
+    /// reach an iPhone over a congested BLE link, and the app read as frozen. The decision itself
+    /// (and any contradiction error) lands within the first lock, well inside
+    /// [`CANCEL_PAIR_WAIT`]; delivery carries on in the background after that.
     pub async fn cancel_pair(&self, session_id: Vec<u8>) -> Result<(), LocationError> {
         let sid = session_id_arr(&session_id)?;
-        self.pair
-            .cancel_sas(&sid)
-            .await
-            .map_err(|e| LocationError::Network(e.to_string()))
+        let pair = self.pair.clone();
+        let mut cancel = tokio::spawn(async move { pair.cancel_sas(&sid).await });
+        match tokio::time::timeout(CANCEL_PAIR_WAIT, &mut cancel).await {
+            Ok(Ok(result)) => result.map_err(|e| LocationError::Network(e.to_string())),
+            Ok(Err(join)) => Err(LocationError::Network(join.to_string())),
+            Err(_) => Ok(()),
+        }
     }
 
     /// Drain pairing events (pending requests, peer responses, ready, rejects) since the last poll.

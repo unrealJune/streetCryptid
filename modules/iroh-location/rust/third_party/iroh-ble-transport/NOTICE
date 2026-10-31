@@ -125,6 +125,15 @@ standalone / path dependency:
   * tests/sim_pairing.rs
       - Tests that held links refuse other protocols in both directions and release afterwards.
 
+2026-10-31 — A hold also closes connections already on the link:
+
+  * src/transport/priority.rs, src/transport/hook.rs and src/transport/transport.rs
+      - The hook tracks every connection it admits over BLE (weakly), and
+        `reserve_links_for` starts a 500 ms sweep that, while the hold is on, closes
+        tracked connections of other protocols that still ride BLE (`BLE_HELD_CLOSE_CODE`).
+        Friend sync established before a Bump window opened kept streaming through it and
+        delayed every pairing message behind ~700 KB of traffic.
+
 The upstream `examples/` directory was intentionally not vendored; it
 demonstrates endpoint wiring that this checkpoint does not yet use.
 

@@ -71,3 +71,11 @@ described below.
         bounded queue (4 chunks); the bridge task awaits queue space, which
         keeps back-pressure, and the writer thread closes the socket when the
         queue ends.
+
+2026-10-31 — Apple connects withdrawn when their future is dropped:
+
+  * src/platform/apple/central.rs
+      - `connect` keeps its pending request in a guard. If the future is dropped before
+        CoreBluetooth answers (a caller's own timeout), the guard removes the request and
+        cancels the connection. Upstream left the request behind, so every later connect to
+        that peripheral failed with `ConnectInFlight`.

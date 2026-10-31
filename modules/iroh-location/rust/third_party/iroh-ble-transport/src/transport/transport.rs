@@ -261,6 +261,10 @@ pub struct BleMetricsSnapshot {
     pub empty_frames: u64,
 }
 
+/// How often a held link is swept for connections it no longer admits. See
+/// [`BleTransport::reserve_links_for`].
+const HOLD_SWEEP_INTERVAL: Duration = Duration::from_millis(500);
+
 pub struct BleTransport {
     local_id: EndpointId,
     /// Sender half of the verified-endpoint channel. Cloned into every
@@ -294,6 +298,8 @@ pub struct BleTransport {
     /// Which protocols keep BLE to themselves, and when; shared by every hook. See
     /// [`Self::reserve_links_for`].
     link_priority: Arc<LinkPriority>,
+    /// Whether the sweep [`Self::reserve_links_for`] starts is running.
+    hold_sweep_started: std::sync::atomic::AtomicBool,
 }
 
 impl std::fmt::Debug for BleTransport {
@@ -547,6 +553,7 @@ impl BleTransport {
             active_connections: Arc::new(ActiveConnections::default()),
             idle_linger,
             link_priority: Arc::new(LinkPriority::default()),
+            hold_sweep_started: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
@@ -590,15 +597,40 @@ impl BleTransport {
     ///
     /// While held, the hooks from [`Self::dedup_hook`] refuse every other protocol on BLE: a dial
     /// to a peer in BLE range is rejected before it starts, and a connection that arrives over
-    /// BLE anyway is closed once its handshake identifies its protocol. Connections over IP or a
-    /// relay are untouched. `held` is asked once per connection, so it should be cheap; a later
-    /// call replaces the earlier policy. See [`crate::transport::priority`] for why.
+    /// BLE anyway is closed once its handshake identifies its protocol. Connections of other
+    /// protocols already on BLE when the hold begins are closed by a sweep that runs every
+    /// [`HOLD_SWEEP_INTERVAL`] for the transport's life. Connections over IP or a relay are
+    /// untouched. `held` is asked once per connection and once per sweep, so it should be cheap; a
+    /// later call replaces the earlier policy. See [`crate::transport::priority`] for why.
     pub fn reserve_links_for(
         &self,
         alpns: Vec<Vec<u8>>,
         held: impl Fn() -> bool + Send + Sync + 'static,
     ) {
         self.link_priority.set(alpns, Arc::new(held));
+        if self.hold_sweep_started.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            warn!("reserve_links_for outside a runtime: established connections are not swept");
+            return;
+        };
+        let priority = Arc::downgrade(&self.link_priority);
+        runtime.spawn(async move {
+            loop {
+                tokio::time::sleep(HOLD_SWEEP_INTERVAL).await;
+                let Some(priority) = priority.upgrade() else {
+                    return;
+                };
+                let closed = priority.close_deferred();
+                if closed > 0 {
+                    info!(
+                        closed,
+                        "BleDedupHook: closed {closed} connection(s) holding BLE while it is reserved"
+                    );
+                }
+            }
+        });
     }
 
     /// Counts-only snapshot of the routing table (pipes / scan hints /

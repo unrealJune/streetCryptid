@@ -8,7 +8,7 @@ use iroh::endpoint::{AfterHandshakeOutcome, BeforeConnectOutcome, Connection, En
 use iroh_base::{EndpointAddr, EndpointId, TransportAddr};
 use tokio::sync::mpsc;
 
-use crate::transport::priority::LinkPriority;
+use crate::transport::priority::{LinkPriority, TrackedConnection};
 use crate::transport::routing::{PromoteOutcome, Routing, StableConnId};
 use crate::transport::routing::{parse_token_addr, prefix_from_endpoint};
 use crate::transport::transport::BLE_TRANSPORT_ID;
@@ -199,6 +199,40 @@ async fn report_idle_after_linger(
 /// Close code for a connection turned away because BLE is being kept for other protocols.
 pub const BLE_HELD_CLOSE_CODE: u32 = 0x424c_4548;
 
+/// An accepted BLE connection, held weakly so tracking it never keeps it open.
+struct BleConnection {
+    alpn: Vec<u8>,
+    handle: iroh::endpoint::WeakConnectionHandle,
+}
+
+impl TrackedConnection for BleConnection {
+    fn alpn(&self) -> &[u8] {
+        &self.alpn
+    }
+
+    fn alive(&self) -> bool {
+        self.handle
+            .upgrade()
+            .is_some_and(|conn| conn.close_reason().is_none())
+    }
+
+    fn close_if_on_ble(&self) -> bool {
+        let Some(conn) = self.handle.upgrade() else {
+            return false;
+        };
+        let on_ble = conn.paths().iter().any(|path| {
+            matches!(path.remote_addr(), TransportAddr::Custom(addr) if addr.id() == BLE_TRANSPORT_ID)
+        });
+        if on_ble {
+            conn.close(
+                noq_proto::VarInt::from_u32(BLE_HELD_CLOSE_CODE),
+                b"ble-reserved",
+            );
+        }
+        on_ble
+    }
+}
+
 impl EndpointHooks for BleDedupHook {
     /// Hold back a dial that would land on BLE while the link is reserved for other protocols
     /// ([`crate::BleTransport::reserve_links_for`]). "Would land on BLE" is read as "the peer is
@@ -345,6 +379,12 @@ impl EndpointHooks for BleDedupHook {
                 error_code: noq_proto::VarInt::from_u32(BLE_HELD_CLOSE_CODE),
                 reason: b"ble-reserved".to_vec(),
             };
+        }
+        if token.is_some() {
+            self.link_priority.track(Box::new(BleConnection {
+                alpn: conn.alpn().to_vec(),
+                handle: conn.weak_handle(),
+            }));
         }
         AfterHandshakeOutcome::Accept
     }
