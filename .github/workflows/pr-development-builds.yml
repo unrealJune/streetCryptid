@@ -90,47 +90,6 @@ jobs:
           platform: ios
           eas-cli-version: ${{ env.EAS_CLI_VERSION }}
 
-      # Xcode spends most of this build compiling the same pods' C, C++ and Objective-C on every
-      # run. `ios.ccacheEnabled` (app.json) makes the Podfile route CC/CXX through React Native's
-      # ccache wrappers, but only when `ccache` is on PATH at `pod install` time, so a machine
-      # without it builds exactly as before. Swift is not covered: ccache only wraps clang.
-      #
-      # Hits need no base_dir rewriting: EAS_LOCAL_BUILD_WORKINGDIR above pins the project path, so
-      # every run compiles the same files at the same absolute paths. React Native's wrapper points
-      # CCACHE_CONFIGPATH at its own ccache.conf, so the cache lives in ccache's default macOS
-      # directory rather than anything set here.
-      - name: Install ccache
-        env:
-          CCACHE_VERSION: 4.14.2
-          CCACHE_SHA256: cf240009630b605b775c7c5c7b7105a3b196c79f31af322c1557969aa28003fc
-        run: |
-          set -euo pipefail
-          curl --fail --location --silent --show-error \
-            --output "$RUNNER_TEMP/ccache.tar.gz" \
-            "https://github.com/ccache/ccache/releases/download/v$CCACHE_VERSION/ccache-$CCACHE_VERSION-darwin.tar.gz"
-          echo "$CCACHE_SHA256  $RUNNER_TEMP/ccache.tar.gz" | shasum -a 256 --check
-          tar --extract --gzip --file "$RUNNER_TEMP/ccache.tar.gz" --directory "$RUNNER_TEMP"
-          sudo install -m 0755 "$RUNNER_TEMP/ccache-$CCACHE_VERSION-darwin/ccache" /usr/local/bin/ccache
-          ccache --version | head -1
-
-      # Keyed on what decides the native compile, so a pull request whose pushes change only JS
-      # hits exactly and saves nothing. A change falls back to the newest entry with this prefix:
-      # the same pull request's previous one, or main's. The Xcode version is in the key because
-      # React Native's ccache.conf sets `system_headers` sloppiness, so an SDK change alone would
-      # not invalidate an entry.
-      - name: Restore the ccache
-        id: ccache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ~/Library/Caches/ccache
-          key: eas-local-ccache-ios-${{ runner.os }}-${{ runner.arch }}-xcode-27.1-${{ hashFiles('bun.lock', 'package.json', 'app.json', 'patches/**', 'plugins/*.js', 'modules/*/ios/**') }}
-          restore-keys: |
-            eas-local-ccache-ios-${{ runner.os }}-${{ runner.arch }}-xcode-27.1-
-
-      # Zeroed after the restore, so the summary counts this build and not the ones that filled it.
-      - name: Reset ccache statistics
-        run: ccache --zero-stats
-
       - name: Verify CI output isolation
         run: |
           set -euo pipefail
@@ -188,11 +147,19 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Save the ccache
-        if: "!cancelled() && steps.ccache.outputs.cache-hit != 'true'"
+        if: "!cancelled() && steps.setup.outputs.ccache-hit != 'true'"
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/Library/Caches/ccache
-          key: ${{ steps.ccache.outputs.cache-primary-key }}
+          key: ${{ steps.setup.outputs.ccache-key }}
+
+      # Only what this build's bundle used (see eas-local-build-setup), so the entry does not grow.
+      - name: Save the Metro transform cache
+        if: "!cancelled() && steps.setup.outputs.metro-cache-hit != 'true'"
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/metro-cache-output
+          key: ${{ steps.setup.outputs.metro-cache-key }}
 
       # actions/cache's own post step is `post-if: success()`, so a 40-minute build that fails
       # would otherwise discard the pod downloads it just made and leave the retry cold.
@@ -386,6 +353,14 @@ jobs:
           path: ${{ runner.temp }}/build-profile-bundle
           if-no-files-found: ignore
           retention-days: 14
+
+      # Only what this build's bundle used (see eas-local-build-setup), so the entry does not grow.
+      - name: Save the Metro transform cache
+        if: "!cancelled() && steps.setup.outputs.metro-cache-hit != 'true'"
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/metro-cache-output
+          key: ${{ steps.setup.outputs.metro-cache-key }}
 
       # actions/cache's own post step is `post-if: success()`, so a 40-minute build that fails
       # would otherwise discard the Gradle downloads it just made and leave the retry cold.

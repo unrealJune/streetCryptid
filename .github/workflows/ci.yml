@@ -195,6 +195,7 @@ jobs:
           tool: |
             rust@1.97.0
             just@1.57.0
+            cargo-nextest@0.9.150
           fallback: none
 
       - name: Restore Rust compilation cache
@@ -204,8 +205,14 @@ jobs:
           key: native
           save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
+      # nextest, not `cargo test`: cargo runs test binaries one after another, and three of them
+      # (restart_protocol, ratchet_conditions, pairing_integration) were ~280 s of that serially.
+      # nextest runs every test as its own process across all binaries at once. The crate has no
+      # doctests, which nextest would skip. `.config/nextest.toml` keeps the loopback-network
+      # scenarios serialized, as their own in-process lock did under `cargo test`.
       - name: Run Rust tests
-        run: just test-rust
+        working-directory: modules/iroh-location/rust
+        run: cargo nextest run --profile ci
 
       # A change to the Rust UniFFI surface leaves the tracked Kotlin/Swift bindings stale, which
       # used to fail CI until someone ran `just bindgen-android` / `just bindgen-ios` by hand.

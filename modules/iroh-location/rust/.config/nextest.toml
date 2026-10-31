@@ -1,0 +1,14 @@
+# cargo-nextest runs each test in its own process, so in-process locks no longer serialize
+# anything. ratchet_conditions' NETWORK_TEST_LOCK exists because its scenarios each stand up
+# real loopback QUIC endpoints, docs reconciliation and blob transfer, and running them all at
+# once starved healthy exchanges on a loaded runner; this group restores that across processes.
+[test-groups]
+loopback-network = { max-threads = 1 }
+
+[[profile.default.overrides]]
+filter = 'binary(ratchet_conditions)'
+test-group = 'loopback-network'
+
+[profile.ci]
+# Report every failure in one run rather than stopping at the first.
+fail-fast = false

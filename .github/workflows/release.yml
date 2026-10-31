@@ -282,6 +282,33 @@ jobs:
           SC_WHAT_TO_TEST: ${{ needs.version.outputs.what_to_test }}
         run: bash scripts/submit-testflight.sh "$BUILD_ARTIFACT"
 
+      # Saved here on main, where every pull request's restore can fall back to it.
+      # The hit rate is the whole point of the ccache, so it goes in the summary. ccache's stats name
+      # nothing but its own counters and cache directory.
+      - name: Report ccache statistics
+        if: '!cancelled()'
+        run: |
+          {
+            printf '### ccache\n\n```\n'
+            ccache --show-stats 2>&1 || true
+            printf '```\n'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Save the ccache
+        if: "!cancelled() && steps.setup.outputs.ccache-hit != 'true'"
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/Library/Caches/ccache
+          key: ${{ steps.setup.outputs.ccache-key }}
+
+      # Only what this build's bundle used (see eas-local-build-setup), so the entry does not grow.
+      - name: Save the Metro transform cache
+        if: "!cancelled() && steps.setup.outputs.metro-cache-hit != 'true'"
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/metro-cache-output
+          key: ${{ steps.setup.outputs.metro-cache-key }}
+
       - name: Save CocoaPods download cache
         if: "!cancelled() && steps.setup.outputs.native-cache-hit != 'true'"
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -434,6 +461,14 @@ jobs:
           PLAY_SERVICE_ACCOUNT_JSON_BASE64: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON_BASE64 }}
           SC_WHAT_TO_TEST: ${{ needs.version.outputs.what_to_test }}
         run: bash scripts/submit-play.sh "$BUILD_ARTIFACT"
+
+      # Only what this build's bundle used (see eas-local-build-setup), so the entry does not grow.
+      - name: Save the Metro transform cache
+        if: "!cancelled() && steps.setup.outputs.metro-cache-hit != 'true'"
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/metro-cache-output
+          key: ${{ steps.setup.outputs.metro-cache-key }}
 
       - name: Save Gradle dependency and build caches
         if: "!cancelled() && steps.setup.outputs.native-cache-hit != 'true'"

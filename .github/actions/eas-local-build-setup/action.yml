@@ -54,6 +54,18 @@ outputs:
   artifact-cache-key:
     description: Primary key of the restored native artifact cache, for the caller's save step.
     value: ${{ steps.artifact-cache.outputs.cache-primary-key }}
+  ccache-hit:
+    description: Whether the iOS ccache was an exact hit (iOS build jobs only).
+    value: ${{ steps.ccache.outputs.cache-hit }}
+  ccache-key:
+    description: Primary key of the restored iOS ccache, for the caller's save step.
+    value: ${{ steps.ccache.outputs.cache-primary-key }}
+  metro-cache-hit:
+    description: Whether the Metro transform cache was an exact hit.
+    value: ${{ steps.metro-cache.outputs.cache-hit }}
+  metro-cache-key:
+    description: Primary key of the restored Metro transform cache, for the caller's save step.
+    value: ${{ steps.metro-cache.outputs.cache-primary-key }}
 
 runs:
   using: composite
@@ -163,6 +175,86 @@ runs:
         key: eas-local-gradle-${{ runner.os }}-${{ hashFiles('bun.lock', 'package.json', 'app.json', 'app.config.ts', 'modules/iroh-location/android/build.gradle') }}
         restore-keys: |
           eas-local-gradle-${{ runner.os }}-
+
+    # Xcode spends most of an iOS build compiling the same pods' C, C++ and Objective-C on every
+    # run. `ios.ccacheEnabled` (app.json) makes the Podfile route CC/CXX through React Native's
+    # ccache wrappers, but only when `ccache` is on PATH at `pod install` time, so a machine
+    # without it builds exactly as before. Swift is not covered: ccache only wraps clang.
+    #
+    # Hits need no base_dir rewriting: the callers pin EAS_LOCAL_BUILD_WORKINGDIR, so every run
+    # compiles the same files at the same absolute paths. React Native's wrapper points
+    # CCACHE_CONFIGPATH at its own ccache.conf, so the cache lives in ccache's default macOS
+    # directory rather than anything set here.
+    - name: Install ccache
+      if: inputs.platform == 'ios' && inputs.native-dependency-cache == 'true'
+      shell: bash
+      env:
+        CCACHE_VERSION: 4.14.2
+        CCACHE_SHA256: cf240009630b605b775c7c5c7b7105a3b196c79f31af322c1557969aa28003fc
+      run: |
+        set -euo pipefail
+        curl --fail --location --silent --show-error \
+          --output "$RUNNER_TEMP/ccache.tar.gz" \
+          "https://github.com/ccache/ccache/releases/download/v$CCACHE_VERSION/ccache-$CCACHE_VERSION-darwin.tar.gz"
+        echo "$CCACHE_SHA256  $RUNNER_TEMP/ccache.tar.gz" | shasum -a 256 --check
+        tar --extract --gzip --file "$RUNNER_TEMP/ccache.tar.gz" --directory "$RUNNER_TEMP"
+        sudo install -m 0755 "$RUNNER_TEMP/ccache-$CCACHE_VERSION-darwin/ccache" /usr/local/bin/ccache
+        ccache --version | head -1
+
+    # Keyed on what decides the native compile, so a push that changes only JS hits exactly and
+    # saves nothing. A change falls back to the newest entry with this prefix: the same pull
+    # request's previous one, or the one the last release saved on main. The Xcode version is in
+    # the key because React Native's ccache.conf sets `system_headers` sloppiness, so an SDK change
+    # alone would not invalidate an entry.
+    - name: Restore the ccache
+      id: ccache
+      if: inputs.platform == 'ios' && inputs.native-dependency-cache == 'true'
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ~/Library/Caches/ccache
+        key: eas-local-ccache-ios-${{ runner.os }}-${{ runner.arch }}-xcode-27.1-${{ hashFiles('bun.lock', 'package.json', 'app.json', 'app.config.ts', 'patches/**', 'plugins/*.js', 'modules/*/ios/**') }}
+        restore-keys: |
+          eas-local-ccache-ios-${{ runner.os }}-${{ runner.arch }}-xcode-27.1-
+
+    # Zeroed after the restore, so the caller's report counts this build, not the ones that filled it.
+    - name: Reset ccache statistics
+      if: inputs.platform == 'ios' && inputs.native-dependency-cache == 'true'
+      shell: bash
+      run: ccache --zero-stats
+
+    # Expo's Metro config has a build-runner mode: with both variables set it reads entries from
+    # RESTORE and writes every entry the bundle used -- hits included -- to OUTPUT, so saving OUTPUT
+    # stores exactly this build's working set and an entry nothing uses any more is dropped instead
+    # of carried forward. Metro keys each transform by file content and transformer config, so a
+    # stale entry is a miss, never a wrong transform. Gradle (`createBundleReleaseJsAndAssets`) and
+    # Xcode's bundle phase both inherit the variables through `eas build --local`.
+    - name: Point Metro at the build cache directories
+      if: inputs.native-dependency-cache == 'true'
+      shell: bash
+      run: |
+        set -euo pipefail
+        restore_dir="$RUNNER_TEMP/metro-cache-restored"
+        output_dir="$RUNNER_TEMP/metro-cache-output"
+        rm -rf -- "$output_dir"
+        mkdir -p -- "$restore_dir" "$output_dir"
+        {
+          echo "EXPO_METRO_CACHE_RESTORE_DIR=$restore_dir"
+          echo "EXPO_METRO_CACHE_OUTPUT_DIR=$output_dir"
+        } >> "$GITHUB_ENV"
+
+    # The second hash covers the JS the bundle is built from, so a push that changes only native
+    # code hits exactly and saves nothing; any JS change falls back to the newest entry for the
+    # same dependency set, then to any entry at all.
+    - name: Restore the Metro transform cache
+      id: metro-cache
+      if: inputs.native-dependency-cache == 'true'
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ${{ runner.temp }}/metro-cache-restored
+        key: eas-local-metro-${{ inputs.platform }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('bun.lock', 'package.json', 'app.json', 'app.config.ts', 'metro.config.js', 'patches/**') }}-${{ hashFiles('src/**', 'assets/**', 'modules/*/index.ts', 'modules/*/src/**') }}
+        restore-keys: |
+          eas-local-metro-${{ inputs.platform }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('bun.lock', 'package.json', 'app.json', 'app.config.ts', 'metro.config.js', 'patches/**') }}-
+          eas-local-metro-${{ inputs.platform }}-${{ runner.os }}-${{ runner.arch }}-
 
     - name: Install EAS CLI
       shell: bash
