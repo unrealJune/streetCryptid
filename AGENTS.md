@@ -535,6 +535,18 @@ Conventions when changing that code:
   against `third_party/iroh-ble-transport/tests/sim_pairing.rs` (`just test-ble-transport`): real
   iroh endpoints on BLE alone over `SimRadio`, which logs every link so a test can assert how many
   pipes a pairing took. It reproduced the stale-id failure before anyone had read the iroh source.
+- **While a Bump window is open, BLE is for pairing alone, and a phone whose own search misses is
+  still listening.** A BLE link carries a few KB/s and every connection to a peer shares it: on
+  2026-10-30 a Pixel had just removed an iPhone to pair again, 13 friend-sync connections and a
+  gossip one between them took the new pipe the moment it came up, and the Hello never connected
+  (37.7 s). `PairCore::set_pairing_ready(true)` now holds BLE for `PAIR_ALPN`
+  (`BleTransport::reserve_links_for`): dials to a peer in BLE range are refused before they start,
+  and other protocols arriving over BLE are closed after the handshake. The hold ends at the nearby
+  SAS gate, when the window closes, or after `BLE_PAIRING_HOLD_MAX` — never let it outlive the
+  window, or friend sync between nearby phones stops. Each phone searches independently and only
+  one needs to succeed, so a `noPeers`/`probeFailed` search is the `waiting` Bump stage ("LISTENING"),
+  not a failure; the other phone's request takes the screen from there. `bump.resolve` records what
+  each search saw.
 - **`our_endpoint_ticket` pays the relay wait once per NODE, not once per message.** Four messages
   are built to reach the SAS gate (two per side) and each side's reply is built inside the other's
   dial, so an `Endpoint::online()` wait that is paid per message serializes across both phones.

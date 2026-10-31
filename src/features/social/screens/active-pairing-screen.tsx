@@ -510,6 +510,19 @@ export default function ActivePairingScreen() {
           fieldMode: 'scatter',
           tone: 'amber',
         };
+      case 'bump-waiting':
+        // This phone's search came back empty, but its window is still open: the other phone may
+        // have found this one, and its request lands here. Saying "nothing found" was the lie.
+        return {
+          mode: 'BUMP ARMED',
+          status: 'LISTENING',
+          detail:
+            'This phone did not find the other one. If the other phone found this one, pairing starts here. Keep both open.',
+          caption: 'LISTENING',
+          readout: '',
+          fieldMode: 'pulse',
+          tone: 'signal',
+        };
       case 'bump-searching':
         return {
           mode: 'BUMP ARMED',
@@ -1108,7 +1121,7 @@ export default function ActivePairingScreen() {
               </>
             ) : stage === 'service-failed' ? (
               <Action color={signal} label="TRY AGAIN" onPress={retryService} />
-            ) : stage === 'bump-failed' ? (
+            ) : stage === 'bump-failed' || stage === 'bump-waiting' ? (
               <>
                 <Action
                   color={chrome.steel}

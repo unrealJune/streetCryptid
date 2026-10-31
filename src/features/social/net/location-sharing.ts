@@ -183,7 +183,17 @@ export interface PairingVerification {
   peerVerified: boolean;
 }
 
-export type BumpStage = 'idle' | 'armed' | 'searching' | 'contact' | 'failed';
+/**
+ * Where this phone's half of a Bump stands.
+ *
+ * `waiting` is this phone's own search coming back empty while its window is still open. Each phone
+ * searches for the other independently and only one needs to succeed: on 2026-10-30 a Pixel found
+ * an iPhone and was dialling it while the iPhone's search found nothing and said "No other
+ * streetCryptid phone answered" — and then, when the Pixel's Hello landed, jumped straight from
+ * that to the SAS figures. A miss on this side is not a miss: the phone is still listening, and an
+ * inbound request takes the screen to `handshaking` from here like from `armed`.
+ */
+export type BumpStage = 'idle' | 'armed' | 'searching' | 'contact' | 'waiting' | 'failed';
 
 /**
  * Why a pairing that had actually started did not finish.
@@ -1762,15 +1772,19 @@ export class LocationSharingService {
         return;
       }
 
+      // Nothing found, or found but not read: the other phone may still have found THIS one, and
+      // the window is still open to its Hello. Only the outcomes no Hello can fix are failures.
+      if (result.status === 'noPeers' || result.status === 'probeFailed') {
+        this.bumpStage = 'waiting';
+        this.bumpError = null;
+        this.setPairingActivity('listening for the other phone');
+        return;
+      }
       this.bumpStage = 'failed';
       this.bumpError =
         result.status === 'ambiguous'
           ? 'More than one phone is equally close. Move the two phones apart and try again.'
-          : result.status === 'noPeers'
-            ? 'No other streetCryptid phone answered. Keep Friends open on both phones and retry.'
-            : result.status === 'unavailable'
-              ? 'Bluetooth is not available on this device or build.'
-              : 'The nearby phone was found, but its identity could not be read. Try Bump again.';
+          : 'Bluetooth is not available on this device or build.';
       this.setPairingActivity('bump needs another try');
     }).finally(() => {
       this.bumpResolveInFlight = null;

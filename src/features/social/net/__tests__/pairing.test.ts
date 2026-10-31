@@ -846,6 +846,48 @@ describe('LocationSharingService — pairing / profile wiring', () => {
     expect(snap.current?.pairing.bump.error).toMatch(/more than one phone/i);
   });
 
+  /**
+   * 2026-10-30: an iPhone's own search found nothing and it said "No other streetCryptid phone
+   * answered", while the Pixel beside it had found it and was dialling. The window was still open
+   * the whole time, and the Pixel's Hello turned that "failure" straight into the SAS figures.
+   */
+  for (const status of ['noPeers', 'probeFailed'] as const) {
+    it(`keeps listening when its own search ends ${status}, and takes the other phone's request`, async () => {
+      const svc = newService();
+      const snap = watch(svc);
+      await svc.init('@me', 'mothman');
+      mockHolder.mod.bumpResolution = {
+        status,
+        endpointId: null,
+        deviceId: null,
+        rssi: null,
+        peerCount: status === 'noPeers' ? 0 : 1,
+        detail: status,
+      };
+
+      await svc.armBump();
+      await svc.commitBump();
+
+      expect(snap.current?.pairing.bump.stage).toBe('waiting');
+      expect(snap.current?.pairing.bump.error).toBeNull();
+      expect(mockHolder.mod.calls.setPairingReady.at(-1)).toBe(true);
+
+      mockHolder.mod.pairEvents = [
+        {
+          kind: 'pendingRequest',
+          sessionId: 'nearby-from-them',
+          peerEndpointId: 'peer-who-found-us',
+          nearby: true,
+        },
+      ];
+      await svc.refreshPairing();
+
+      // Picked up as this Bump's handshake, not parked as an unsolicited request.
+      expect(snap.current?.pairing.pendingRequests).toHaveLength(0);
+      expect(mockHolder.mod.calls.respondPair).toHaveLength(0);
+    });
+  }
+
   it('does not pair from a Bump result that arrives after cancellation', async () => {
     const svc = newService();
     const snap = watch(svc);
