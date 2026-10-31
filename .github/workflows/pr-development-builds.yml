@@ -384,6 +384,22 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
+      - name: Report ccache statistics
+        if: '!cancelled()'
+        run: |
+          {
+            printf '### ccache\n\n```\n'
+            ccache --show-stats --verbose 2>&1 || true
+            printf '```\n'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Save the ccache
+        if: "!cancelled() && steps.setup.outputs.ccache-hit != 'true'"
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/ccache
+          key: ${{ steps.setup.outputs.ccache-key }}
+
       # Entries in and out are the Metro cache's hit evidence: after a JS-only change, an output
       # directory nearly as large as the restored one is a cache that was read.
       - name: Report Metro cache size

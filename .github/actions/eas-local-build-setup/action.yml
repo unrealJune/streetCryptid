@@ -55,11 +55,14 @@ outputs:
     description: Primary key of the restored native artifact cache, for the caller's save step.
     value: ${{ steps.artifact-cache.outputs.cache-primary-key }}
   ccache-hit:
-    description: Whether the iOS ccache was an exact hit (iOS build jobs only).
-    value: ${{ steps.ccache.outputs.cache-hit }}
+    description: Whether the ccache was an exact hit.
+    value: ${{ steps.ccache-ios.outputs.cache-hit }}${{ steps.ccache-android.outputs.cache-hit }}
   ccache-key:
-    description: Primary key of the restored iOS ccache, for the caller's save step.
-    value: ${{ steps.ccache.outputs.cache-primary-key }}
+    description: Primary key of the restored ccache, for the caller's save step.
+    value: ${{ steps.ccache-ios.outputs.cache-primary-key }}${{ steps.ccache-android.outputs.cache-primary-key }}
+  ccache-path:
+    description: Directory the ccache lives in on this platform, for the caller's save step.
+    value: ${{ inputs.platform == 'ios' && '~/Library/Caches/ccache' || '~/.cache/ccache' }}
   metro-cache-hit:
     description: Whether the Metro transform cache was an exact hit.
     value: ${{ steps.metro-cache.outputs.cache-hit }}
@@ -176,38 +179,59 @@ runs:
         restore-keys: |
           eas-local-gradle-${{ runner.os }}-
 
-    # Xcode spends most of an iOS build compiling the same pods' C, C++ and Objective-C on every
-    # run. `ios.ccacheEnabled` (app.json) makes the Podfile route CC/CXX through React Native's
-    # ccache wrappers, but only when `ccache` is on PATH at `pod install` time, so a machine
-    # without it builds exactly as before. Swift is not covered: ccache only wraps clang.
+    # Both platforms spend minutes compiling the same third-party C, C++ and Objective-C on every
+    # run: Xcode the pods, Gradle the React Native libraries' CMake builds (`buildCMake*` tasks,
+    # which Gradle's build cache does not cover). Swift and Kotlin are not covered: ccache only
+    # wraps C-family compilers.
+    #
+    # iOS: `ios.ccacheEnabled` (app.json) makes the Podfile route CC/CXX through React Native's
+    # ccache wrappers, and scripts/eas-build-post-install.sh pins the binary those wrappers run.
+    # Android: CMake reads CMAKE_<LANG>_COMPILER_LAUNCHER from the environment, which reaches every
+    # library's CMake configure through Gradle.
     #
     # Hits need no base_dir rewriting: the callers pin EAS_LOCAL_BUILD_WORKINGDIR, so every run
-    # compiles the same files at the same absolute paths. React Native's wrapper points
-    # CCACHE_CONFIGPATH at its own ccache.conf, so the cache lives in ccache's default macOS
-    # directory rather than anything set here.
+    # compiles the same files at the same absolute paths.
     - name: Install ccache
-      if: inputs.platform == 'ios' && inputs.native-dependency-cache == 'true'
+      if: inputs.native-dependency-cache == 'true'
       shell: bash
       env:
         CCACHE_VERSION: 4.14.2
-        CCACHE_SHA256: cf240009630b605b775c7c5c7b7105a3b196c79f31af322c1557969aa28003fc
+        PLATFORM: ${{ inputs.platform }}
       run: |
         set -euo pipefail
-        curl --fail --location --silent --show-error \
-          --output "$RUNNER_TEMP/ccache.tar.gz" \
-          "https://github.com/ccache/ccache/releases/download/v$CCACHE_VERSION/ccache-$CCACHE_VERSION-darwin.tar.gz"
-        echo "$CCACHE_SHA256  $RUNNER_TEMP/ccache.tar.gz" | shasum -a 256 --check
-        tar --extract --gzip --file "$RUNNER_TEMP/ccache.tar.gz" --directory "$RUNNER_TEMP"
-        sudo install -m 0755 "$RUNNER_TEMP/ccache-$CCACHE_VERSION-darwin/ccache" /usr/local/bin/ccache
+        if [[ "$PLATFORM" == ios ]]; then
+          build="darwin"
+          sha256="cf240009630b605b775c7c5c7b7105a3b196c79f31af322c1557969aa28003fc"
+        else
+          build="linux-x86_64-musl-static"
+          sha256="d540ba01f160addbd3dd5e18eda9bd34005591b095c09ac8ae9d0a1b655e7ef5"
+        fi
+        archive="$RUNNER_TEMP/ccache.tar.gz"
+        curl --fail --location --silent --show-error --output "$archive" \
+          "https://github.com/ccache/ccache/releases/download/v$CCACHE_VERSION/ccache-$CCACHE_VERSION-$build.tar.gz"
+        if command -v sha256sum > /dev/null; then
+          echo "$sha256  $archive" | sha256sum --check
+        else
+          echo "$sha256  $archive" | shasum -a 256 --check
+        fi
+        tar --extract --gzip --file "$archive" --directory "$RUNNER_TEMP"
+        sudo install -m 0755 "$RUNNER_TEMP/ccache-$CCACHE_VERSION-$build/ccache" /usr/local/bin/ccache
         ccache --version | head -1
+        if [[ "$PLATFORM" == android ]]; then
+          {
+            echo "CCACHE_DIR=$HOME/.cache/ccache"
+            echo "CMAKE_C_COMPILER_LAUNCHER=/usr/local/bin/ccache"
+            echo "CMAKE_CXX_COMPILER_LAUNCHER=/usr/local/bin/ccache"
+          } >> "$GITHUB_ENV"
+        fi
 
     # Keyed on what decides the native compile, so a push that changes only JS hits exactly and
     # saves nothing. A change falls back to the newest entry with this prefix: the same pull
-    # request's previous one, or the one the last release saved on main. The Xcode version is in
-    # the key because React Native's ccache.conf sets `system_headers` sloppiness, so an SDK change
-    # alone would not invalidate an entry.
-    - name: Restore the ccache
-      id: ccache
+    # request's previous one, or the one the last release saved on main. The toolchain version is
+    # in the key because React Native's ccache.conf sets `system_headers` sloppiness, so an SDK
+    # change alone would not invalidate an iOS entry.
+    - name: Restore the iOS ccache
+      id: ccache-ios
       if: inputs.platform == 'ios' && inputs.native-dependency-cache == 'true'
       uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
@@ -216,9 +240,19 @@ runs:
         restore-keys: |
           eas-local-ccache-ios-${{ runner.os }}-${{ runner.arch }}-xcode-27.1-
 
+    - name: Restore the Android ccache
+      id: ccache-android
+      if: inputs.platform == 'android' && inputs.native-dependency-cache == 'true'
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ~/.cache/ccache
+        key: eas-local-ccache-android-${{ runner.os }}-${{ runner.arch }}-ndk-27.1.12297006-${{ hashFiles('bun.lock', 'app.json', 'app.config.ts', 'patches/**', 'plugins/*.js', 'modules/*/android/**') }}
+        restore-keys: |
+          eas-local-ccache-android-${{ runner.os }}-${{ runner.arch }}-ndk-27.1.12297006-
+
     # Zeroed after the restore, so the caller's report counts this build, not the ones that filled it.
     - name: Reset ccache statistics
-      if: inputs.platform == 'ios' && inputs.native-dependency-cache == 'true'
+      if: inputs.native-dependency-cache == 'true'
       shell: bash
       run: ccache --zero-stats
 

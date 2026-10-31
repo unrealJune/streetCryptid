@@ -471,6 +471,22 @@ jobs:
           SC_WHAT_TO_TEST: ${{ needs.version.outputs.what_to_test }}
         run: bash scripts/submit-play.sh "$BUILD_ARTIFACT"
 
+      - name: Report ccache statistics
+        if: '!cancelled()'
+        run: |
+          {
+            printf '### ccache\n\n```\n'
+            ccache --show-stats --verbose 2>&1 || true
+            printf '```\n'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Save the ccache
+        if: "!cancelled() && steps.setup.outputs.ccache-hit != 'true'"
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/ccache
+          key: ${{ steps.setup.outputs.ccache-key }}
+
       # Only what this build's bundle used (see eas-local-build-setup), so the entry does not grow.
       # actions/cache folds the path into an entry's identity, so the output is moved to the path
       # the restore reads from; saved from the output directory itself, no restore ever matched.
