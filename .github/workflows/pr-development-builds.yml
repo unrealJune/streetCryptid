@@ -173,6 +173,13 @@ jobs:
               "$(find "$dir" -type f 2> /dev/null | wc -l | tr -d ' ')" \
               "$(du -sh "$dir" 2> /dev/null | cut -f1)"
           done | tee -a "$GITHUB_STEP_SUMMARY"
+          # An output entry whose name is also in the restored directory was served from it.
+          if [[ -d "${EXPO_METRO_CACHE_RESTORE_DIR:-}" && -d "${EXPO_METRO_CACHE_OUTPUT_DIR:-}" ]]; then
+            printf 'served from the restored cache: %s\n' "$(comm -12 \
+              <(cd "$EXPO_METRO_CACHE_RESTORE_DIR" && find . -type f | sort) \
+              <(cd "$EXPO_METRO_CACHE_OUTPUT_DIR" && find . -type f | sort) | wc -l | tr -d ' ')" |
+              tee -a "$GITHUB_STEP_SUMMARY"
+          fi
 
       # Only what this build's bundle used (see eas-local-build-setup), so the entry does not grow.
       # actions/cache folds the path into an entry's identity, so the output is moved to the path
@@ -181,6 +188,8 @@ jobs:
         if: "!cancelled() && steps.setup.outputs.metro-cache-hit != 'true'"
         run: |
           set -euo pipefail
+          # Absent when setup failed before pointing Metro at them; there is nothing to save.
+          [[ -d "${EXPO_METRO_CACHE_OUTPUT_DIR:-}" ]] || exit 0
           rm -rf -- "$EXPO_METRO_CACHE_RESTORE_DIR"
           mv -- "$EXPO_METRO_CACHE_OUTPUT_DIR" "$EXPO_METRO_CACHE_RESTORE_DIR"
 
@@ -410,6 +419,13 @@ jobs:
               "$(find "$dir" -type f 2> /dev/null | wc -l | tr -d ' ')" \
               "$(du -sh "$dir" 2> /dev/null | cut -f1)"
           done | tee -a "$GITHUB_STEP_SUMMARY"
+          # An output entry whose name is also in the restored directory was served from it.
+          if [[ -d "${EXPO_METRO_CACHE_RESTORE_DIR:-}" && -d "${EXPO_METRO_CACHE_OUTPUT_DIR:-}" ]]; then
+            printf 'served from the restored cache: %s\n' "$(comm -12 \
+              <(cd "$EXPO_METRO_CACHE_RESTORE_DIR" && find . -type f | sort) \
+              <(cd "$EXPO_METRO_CACHE_OUTPUT_DIR" && find . -type f | sort) | wc -l | tr -d ' ')" |
+              tee -a "$GITHUB_STEP_SUMMARY"
+          fi
 
       # Only what this build's bundle used (see eas-local-build-setup), so the entry does not grow.
       # actions/cache folds the path into an entry's identity, so the output is moved to the path
@@ -418,6 +434,8 @@ jobs:
         if: "!cancelled() && steps.setup.outputs.metro-cache-hit != 'true'"
         run: |
           set -euo pipefail
+          # Absent when setup failed before pointing Metro at them; there is nothing to save.
+          [[ -d "${EXPO_METRO_CACHE_OUTPUT_DIR:-}" ]] || exit 0
           rm -rf -- "$EXPO_METRO_CACHE_RESTORE_DIR"
           mv -- "$EXPO_METRO_CACHE_OUTPUT_DIR" "$EXPO_METRO_CACHE_RESTORE_DIR"
 

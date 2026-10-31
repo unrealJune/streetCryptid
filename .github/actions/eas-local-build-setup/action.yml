@@ -209,10 +209,12 @@ runs:
         archive="$RUNNER_TEMP/ccache.tar.gz"
         curl --fail --location --silent --show-error --output "$archive" \
           "https://github.com/ccache/ccache/releases/download/v$CCACHE_VERSION/ccache-$CCACHE_VERSION-$build.tar.gz"
-        if command -v sha256sum > /dev/null; then
-          echo "$sha256  $archive" | sha256sum --check
-        else
+        # Not `sha256sum` wherever it exists: macOS now ships a BSD one whose --check rejects
+        # this line format, and that failed every iOS job at setup.
+        if [[ "$PLATFORM" == ios ]]; then
           echo "$sha256  $archive" | shasum -a 256 --check
+        else
+          echo "$sha256  $archive" | sha256sum --check
         fi
         tar --extract --gzip --file "$archive" --directory "$RUNNER_TEMP"
         sudo install -m 0755 "$RUNNER_TEMP/ccache-$CCACHE_VERSION-$build/ccache" /usr/local/bin/ccache

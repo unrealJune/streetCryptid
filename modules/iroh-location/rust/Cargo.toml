@@ -210,3 +210,7 @@ strip = true
 # it take 8 minutes instead of 4 for no benefit.
 [profile.test.package."*"]
 opt-level = 2
+# No debug info for dependencies: twenty test binaries each linking every dependency's DWARF
+# made the link the largest disk and memory consumer of the job (one run's `ld` died of SIGBUS),
+# and a backtrace through a dependency needs no line numbers to be read. This crate keeps its own.
+debug = false

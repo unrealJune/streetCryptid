@@ -308,6 +308,8 @@ jobs:
         if: "!cancelled() && steps.setup.outputs.metro-cache-hit != 'true'"
         run: |
           set -euo pipefail
+          # Absent when setup failed before pointing Metro at them; there is nothing to save.
+          [[ -d "${EXPO_METRO_CACHE_OUTPUT_DIR:-}" ]] || exit 0
           rm -rf -- "$EXPO_METRO_CACHE_RESTORE_DIR"
           mv -- "$EXPO_METRO_CACHE_OUTPUT_DIR" "$EXPO_METRO_CACHE_RESTORE_DIR"
 
@@ -494,6 +496,8 @@ jobs:
         if: "!cancelled() && steps.setup.outputs.metro-cache-hit != 'true'"
         run: |
           set -euo pipefail
+          # Absent when setup failed before pointing Metro at them; there is nothing to save.
+          [[ -d "${EXPO_METRO_CACHE_OUTPUT_DIR:-}" ]] || exit 0
           rm -rf -- "$EXPO_METRO_CACHE_RESTORE_DIR"
           mv -- "$EXPO_METRO_CACHE_OUTPUT_DIR" "$EXPO_METRO_CACHE_RESTORE_DIR"
 
