@@ -2,6 +2,8 @@
 
 import type { SkImage } from '@shopify/react-native-skia';
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { Platform } from 'react-native';
+import { runOnUI } from 'react-native-worklets';
 
 import type { MapPalette } from '../core/types';
 import type { MapRegion } from '../engine/map-engine';
@@ -41,6 +43,17 @@ type RegionImages = { image: SkImage | null; cellImage: SkImage | null };
  * the native heap ~80 MB every 30 s and a Pixel 10 was killed at 3.5 GB.
  */
 function disposeImages(value: RegionImages): void {
+  if (Platform.OS === 'web') {
+    // Web recordings still read JS image handles in queued draws. Retire on
+    // the same queue, after those draws and the old mapper's stop.
+    runOnUI(() => {
+      'worklet';
+      value.image?.dispose();
+      value.cellImage?.dispose();
+    })();
+    return;
+  }
+  // Native recordings own the images, independently of these JS wrappers.
   value.image?.dispose();
   value.cellImage?.dispose();
 }

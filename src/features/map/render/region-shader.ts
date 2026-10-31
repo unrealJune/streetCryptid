@@ -153,7 +153,7 @@ export interface RegionImageInput {
   /** Draw building footprints and aeroway surfaces over the dot field (default false). */
   readonly structuresEnabled?: boolean;
   /**
-   * Resolution multiplier (default 1) for the final dot-compositing pass.
+   * Resolution multiplier (default 1) for the dot atlas and final bitmap.
    */
   readonly quality?: number;
 }
@@ -216,12 +216,7 @@ export function renderRegionImage({
   }
 
   const inputs = [
-    maskImage.makeShaderOptions(
-      TileMode.Clamp,
-      TileMode.Clamp,
-      FilterMode.Nearest,
-      MipmapMode.None
-    ),
+    maskImage.makeShaderOptions(TileMode.Clamp, TileMode.Clamp, FilterMode.Linear, MipmapMode.None),
     cellImage.makeShaderOptions(
       TileMode.Clamp,
       TileMode.Clamp,
@@ -250,7 +245,7 @@ export function renderRegionImage({
     return resource;
   };
   try {
-    const atlasSize = dotAtlasSize(region.spec);
+    const atlasSize = dotAtlasSize(region.spec, pixelRatio);
     const materialShader = own(materialEffect.makeShaderWithChildren(uniforms, inputs));
     const materialPaint = own(Skia.Paint());
     materialPaint.setShader(materialShader);

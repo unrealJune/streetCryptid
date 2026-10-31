@@ -235,10 +235,15 @@ async function main(): Promise<void> {
   const CanvasKit = await CanvasKitInit({
     locateFile: (file: string) => join(canvasKitDir, file),
   });
-  const effect = CanvasKit.RuntimeEffect.Make(DOT_FIELD_SKSL);
-  const materialEffect = CanvasKit.RuntimeEffect.Make(DOT_MATERIAL_SKSL);
-  if (!materialEffect) throw new Error('dot material shader failed to compile');
-  if (!effect) throw new Error('dot-field shader failed to compile under CanvasKit');
+  const effects = new Map<string, RuntimeEffect>();
+  const compile = (source: string): RuntimeEffect => {
+    const cached = effects.get(source);
+    if (cached) return cached;
+    const effect = CanvasKit.RuntimeEffect.Make(source);
+    if (!effect) throw new Error('map shader failed to compile under CanvasKit');
+    effects.set(source, effect);
+    return effect;
+  };
 
   const outDir = resolve(args.out ?? '/tmp/map-shots');
   await mkdir(outDir, { recursive: true });
@@ -316,8 +321,8 @@ async function main(): Promise<void> {
           : null;
       const png = renderShot({
         CanvasKit,
-        effect,
-        materialEffect,
+        effect: compile(DOT_FIELD_SKSL),
+        materialEffect: compile(DOT_MATERIAL_SKSL),
         lut,
         geometry,
         spec,
@@ -354,6 +359,7 @@ async function main(): Promise<void> {
       );
     }
   }
+  for (const effect of effects.values()) effect.delete();
 }
 
 // ─── geometry ────────────────────────────────────────────────────────────────
@@ -493,7 +499,7 @@ function renderShot({
     mask.makeShaderOptions(
       CanvasKit.TileMode.Clamp,
       CanvasKit.TileMode.Clamp,
-      CanvasKit.FilterMode.Nearest,
+      CanvasKit.FilterMode.Linear,
       CanvasKit.MipmapMode.None
     ),
     cells.makeShaderOptions(
@@ -521,7 +527,7 @@ function renderShot({
       CanvasKit.MipmapMode.None
     ),
   ];
-  const atlasSize = dotAtlasSize(spec);
+  const atlasSize = dotAtlasSize(spec, layout.pixelRatio);
   const atlasSurface = CanvasKit.MakeSurface(atlasSize.width, atlasSize.height);
   if (!atlasSurface) throw new Error('dot atlas surface failed');
   const atlasPaint = new CanvasKit.Paint();

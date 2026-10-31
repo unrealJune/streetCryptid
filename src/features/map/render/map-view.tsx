@@ -10,7 +10,7 @@ import {
   Shader,
   Skia,
 } from '@shopify/react-native-skia';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import {
   Platform,
   StyleSheet,
@@ -30,15 +30,20 @@ import {
   useSharedValue,
   withDecay,
   withTiming,
+  type SharedValue,
 } from 'react-native-reanimated';
 
 import {
   applyViewTransform,
   centerBeside,
+  drawAnchorFor,
+  drawOriginFor,
   scaleFor,
   viewTransformFor,
   visibleWorldRect,
   worldToScreen,
+  ZERO_DRAW_ORIGIN,
+  type DrawOrigin,
   type ViewTransform,
 } from '../core/camera';
 import { rgbToHex } from '../core/color';
@@ -221,6 +226,33 @@ function anchorRect(rect: WorldRect, anchor: CameraState, viewport: Viewport): S
   return { x, y, width: (rect.maxX - rect.minX) * s, height: (rect.maxY - rect.minY) * s };
 }
 
+/**
+ * The canvas layers under the live view transform, drawn relative to `origin`. Keyed by the origin
+ * in `MapView`: a new origin mounts a new group with its layers, so the two change in the same
+ * frame, where updating a mounted group's transform would land a frame after its children moved.
+ */
+function WorldLayers({
+  origin,
+  k,
+  tx,
+  ty,
+  children,
+}: {
+  origin: DrawOrigin;
+  k: SharedValue<number>;
+  tx: SharedValue<number>;
+  ty: SharedValue<number>;
+  children: ReactNode;
+}) {
+  // In doubles, where the origin cancels the translation: Skia only sees what is left.
+  const transform = useDerivedValue(() => [
+    { translateX: tx.value + k.value * origin.x },
+    { translateY: ty.value + k.value * origin.y },
+    { scale: k.value },
+  ]);
+  return <Group transform={transform}>{children}</Group>;
+}
+
 /** The view a region was built around (its rect minus the pad), in anchor space. */
 function regionViewRect(
   spec: { readonly rect: WorldRect; readonly zoom: number },
@@ -354,6 +386,12 @@ export function MapView({
     commit: commitCamera,
     prefetchAt,
   } = useMapEngine(viewport, initialCenter, selfFix, friendTargets);
+  // Everything on the canvas is laid out against this (see `DRAW_ORIGIN_RANGE_PX`); overlays
+  // outside it stay on `anchor`, because they add the transform in doubles before it reaches a view.
+  const [drawOrigin, setDrawOrigin] = useState(ZERO_DRAW_ORIGIN);
+  const nextDrawOrigin = drawOriginFor(anchor, camera, drawOrigin);
+  if (nextDrawOrigin !== drawOrigin) setDrawOrigin(nextDrawOrigin);
+  const drawAnchor = useMemo(() => drawAnchorFor(anchor, nextDrawOrigin), [anchor, nextDrawOrigin]);
   const [labelCamera, setLabelCamera] = useState<CameraState | null>(null);
   const commit = useCallback(
     (t: ViewTransform) => {
@@ -521,8 +559,9 @@ export function MapView({
   const revealEffect = useMemo(() => getRevealMaskEffect(), []);
 
   const curRect = useMemo(
-    () => (track.cur && viewport ? anchorRect(track.cur.region.spec.rect, anchor, viewport) : null),
-    [track.cur, anchor, viewport]
+    () =>
+      track.cur && viewport ? anchorRect(track.cur.region.spec.rect, drawAnchor, viewport) : null,
+    [track.cur, drawAnchor, viewport]
   );
   // Cell state follows the data rect; the bitmap has its own pixel-aligned bounds.
   const curRectSk = useMemo(
@@ -531,22 +570,22 @@ export function MapView({
   );
   const prevRect = useMemo(
     () =>
-      track.prev && viewport ? anchorRect(track.prev.region.spec.rect, anchor, viewport) : null,
-    [track.prev, anchor, viewport]
+      track.prev && viewport ? anchorRect(track.prev.region.spec.rect, drawAnchor, viewport) : null,
+    [track.prev, drawAnchor, viewport]
   );
   const curImageRect = useMemo(
     () =>
       track.cur && viewport
-        ? anchorRect(regionImageLayout(track.cur.region.spec).rect, anchor, viewport)
+        ? anchorRect(regionImageLayout(track.cur.region.spec).rect, drawAnchor, viewport)
         : null,
-    [track.cur, anchor, viewport]
+    [track.cur, drawAnchor, viewport]
   );
   const prevImageRect = useMemo(
     () =>
       track.prev && viewport
-        ? anchorRect(regionImageLayout(track.prev.region.spec).rect, anchor, viewport)
+        ? anchorRect(regionImageLayout(track.prev.region.spec).rect, drawAnchor, viewport)
         : null,
-    [track.prev, anchor, viewport]
+    [track.prev, drawAnchor, viewport]
   );
   const curImageRectSk = useMemo(
     () =>
@@ -602,14 +641,15 @@ export function MapView({
    */
   const loadingRect = useMemo(() => {
     if (!viewport) return null;
-    const [cx, cy] = worldToScreen(anchor, viewport, camera.center);
+    const [cx, cy] = worldToScreen(drawAnchor, viewport, camera.center);
     const width = (viewport.width / committedScale) * (1 + 2 * LOADING_VIEW_PAD);
     const height = (viewport.height / committedScale) * (1 + 2 * LOADING_VIEW_PAD);
     return { x: cx - width / 2, y: cy - height / 2, width, height };
-  }, [anchor, camera, viewport, committedScale]);
+  }, [drawAnchor, camera, viewport, committedScale]);
   const loadingLattice = useMemo(
-    () => (hexLattice && viewport ? projectHexLattice(hexLattice, anchor, camera, viewport) : null),
-    [hexLattice, anchor, camera, viewport]
+    () =>
+      hexLattice && viewport ? projectHexLattice(hexLattice, drawAnchor, camera, viewport) : null,
+    [hexLattice, drawAnchor, camera, viewport]
   );
   /**
    * The lattice the built map's edge is cut along (`hex-clip.ts`), so the loaded area ends on the
@@ -626,22 +666,22 @@ export function MapView({
       track.cur && curRect && viewport
         ? clipLatticeFor(
             curRect,
-            regionViewRect(track.cur.region.spec, anchor, viewport),
+            regionViewRect(track.cur.region.spec, drawAnchor, viewport),
             loadingLattice
           )
         : null,
-    [track.cur, curRect, anchor, viewport, loadingLattice]
+    [track.cur, curRect, drawAnchor, viewport, loadingLattice]
   );
   const prevClipLattice = useMemo(
     () =>
       track.prev && prevRect && viewport
         ? clipLatticeFor(
             prevRect,
-            regionViewRect(track.prev.region.spec, anchor, viewport),
+            regionViewRect(track.prev.region.spec, drawAnchor, viewport),
             loadingLattice
           )
         : null,
-    [track.prev, prevRect, anchor, viewport, loadingLattice]
+    [track.prev, prevRect, drawAnchor, viewport, loadingLattice]
   );
   // The skeleton may skip only what the clipped bitmap is sure to cover.
   const curCovered = useMemo(
@@ -665,10 +705,10 @@ export function MapView({
       viewport
         ? selfHistory.map(({ id, location }) => ({
             id,
-            screen: worldToScreen(anchor, viewport, latLonToWorld(location)),
+            screen: worldToScreen(drawAnchor, viewport, latLonToWorld(location)),
           }))
         : [],
-    [anchor, selfHistory, viewport]
+    [drawAnchor, selfHistory, viewport]
   );
   // Only our own trail is ever drawn: a friend is a single dot at their last known position with
   // nothing behind it to draw (FORWARD-SECRECY.md §4.4), so selecting one highlights their locator.
@@ -1126,12 +1166,6 @@ export function MapView({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [limits, commit]);
 
-  // The live transform as Skia ops (p → scale then translate).
-  const transform = useDerivedValue(() => [
-    { translateX: tx.value },
-    { translateY: ty.value },
-    { scale: k.value },
-  ]);
   // Derived (not the raw shared value): Skia's prop binding tracks derived
   // values reliably on every platform, including web.
   const curOpacityValue = useDerivedValue(() => curOpacity.value);
@@ -1171,7 +1205,13 @@ export function MapView({
           >
             {viewport && (
               <Canvas style={styles.fill}>
-                <Group transform={transform}>
+                <WorldLayers
+                  key={`${nextDrawOrigin.x},${nextDrawOrigin.y}`}
+                  origin={nextDrawOrigin}
+                  k={k}
+                  tx={tx}
+                  ty={ty}
+                >
                   {/* Under the region layers, always: the grid only shows where the map has
                       nothing yet — and the reveal wipe uncovers the real tiles over it rather
                       than flashing them onto bare background. The bitmaps are opaque, so it is
@@ -1249,7 +1289,7 @@ export function MapView({
                       ))}
                     </>
                   ) : null}
-                </Group>
+                </WorldLayers>
                 <SunlightLayer
                   anchor={anchor}
                   viewport={viewport}

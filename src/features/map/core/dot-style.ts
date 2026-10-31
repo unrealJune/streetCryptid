@@ -1,4 +1,4 @@
-/** Dot lattice step in region-logical px, shared by the field and line overlays. */
+/** Base pitch: bitmap pixels for the field, logical pixels for line overlays. */
 export const DOT_STEP = 2;
 
 /**
