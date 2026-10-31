@@ -566,6 +566,16 @@ Conventions when changing that code:
   itself is recorded as `bump.stage` (one span per stage change, with the reason a window closed)
   and every local cancel as `pair.cancel{reason}`, both from JS; `ble.probe` and `ble.pipe` cover
   the radio. See `infra/otel/README.md`.
+- **`blew` is vendored (`rust/third_party/blew`), because its CoreBluetooth backend dropped data.**
+  On Apple, `updateValue:forCharacteristic:onSubscribedCentrals:` returning `NO` (queue full) and
+  a write without response sent while `canSendWriteWithoutResponse` is false both lose the bytes
+  without an error, and upstream did both, so every iPhone GATT pipe leaned on the reliable layer's
+  ACK timeout (the "retransmitting oldest fragment" every ~0.5 s on 2026-10-30). Both now wait for
+  the ready callback, bounded at 2 s. The L2CAP reactor sleeps on a `CFRunLoopSource` instead of
+  polling every 50 ms, checks `hasSpaceAvailable` before a write and queues what the stream cannot
+  take, rather than closing the channel. None of this runs on Linux, so the transport's SimRadio
+  tests cannot cover it: change it only with an iPhone to test on, and record each change in its
+  NOTICE (AGPL §5). The Kotlin half is still `android/src/main/java/org/jakebot/blew`.
 - **Pairing telemetry is spans, not `tracing::info!`.** Loki's OTLP ingest keeps the message and
   drops the fields, so the core's `connect_ms` / `exchange_ms` / `ticket_ms` existed and answered
   nothing on the one night they were needed. `pair.dial`, `pair.handshake`, `pair.inbound`,

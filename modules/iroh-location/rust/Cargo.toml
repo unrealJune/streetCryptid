@@ -130,7 +130,8 @@ geo = { version = "0.33.1", default-features = false }
 # Android needs getrandom's std backend; harmless elsewhere.
 [target.'cfg(target_os = "android")'.dependencies]
 getrandom = { version = "0.2", features = ["std"] }
-blew = "0.3"
+# Vendored (AGPL-3.0-or-later; third_party/blew/NOTICE) for its CoreBluetooth flow-control fixes.
+blew = { path = "third_party/blew" }
 jni = "0.22"
 # Pipe iroh's internal `tracing` diagnostics (relay connection, net_report, magicsock socket
 # rebinds on network_change, gossip) to Android logcat — otherwise iroh emits NOTHING off-device,

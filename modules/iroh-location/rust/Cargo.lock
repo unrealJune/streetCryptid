@@ -465,8 +465,6 @@ dependencies = [
 [[package]]
 name = "blew"
 version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1fc26017c8941f033a5555555e12a69cfd7c6eb0353c5bc012eb3cabaa8e5490"
 dependencies = [
  "bitflags",
  "bluer",
@@ -477,6 +475,7 @@ dependencies = [
  "ndk-context",
  "objc2",
  "objc2-core-bluetooth",
+ "objc2-core-foundation",
  "objc2-foundation",
  "parking_lot",
  "serde_json",

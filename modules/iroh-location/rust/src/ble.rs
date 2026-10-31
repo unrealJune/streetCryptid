@@ -407,9 +407,13 @@ mod imp {
         .await
         .unwrap_or(false);
         span.record("rediscover_ms", step.elapsed().as_millis() as u64);
-        if !rediscovered {
-            return Err("identity probe peer was not rediscovered".to_string());
-        }
+        // Not seeing the peer advertise again within the window no longer fails a probe that has
+        // already read its identity. The read is the answer; rediscovery only lets the transport
+        // hear the peer again before the pairing dial, and the restarted scan keeps listening for
+        // that. A phone that stops advertising while it holds a connection (legacy connectable
+        // advertising ends on connect, and not every stack restarts it at once) made the probing
+        // phone's search fail outright here, so only the other phone's search could pair them.
+        span.record("rediscovered", rediscovered);
 
         let value = match read {
             Ok(Ok(value)) => value,
@@ -586,6 +590,7 @@ mod imp {
                         read_ms = tracing::field::Empty,
                         disconnect_ms = tracing::field::Empty,
                         rediscover_ms = tracing::field::Empty,
+                        rediscovered = tracing::field::Empty,
                     );
                     let probed = tracing::Instrument::instrument(
                         probe_endpoint_hint(&central, transport, &device, timeout - elapsed),
