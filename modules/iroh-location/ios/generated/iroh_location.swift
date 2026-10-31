@@ -1259,6 +1259,13 @@ public protocol LocationNodeProtocol: AnyObject, Sendable {
     
     /**
      * Cancel a pairing under SAS verification — terminal (requires a fresh attempt).
+     *
+     * Returns once the decision is RECORDED, not once the peer has heard it. Telling the peer is a
+     * dial, bounded only by `PAIR_CONNECT_TIMEOUT`, and every caller is a human pressing REJECT or
+     * leaving the screen: on 2026-10-31 a Pixel's REJECT sat 15 s behind a Reject that could not
+     * reach an iPhone over a congested BLE link, and the app read as frozen. The decision itself
+     * (and any contradiction error) lands within the first lock, well inside
+     * [`CANCEL_PAIR_WAIT`]; delivery carries on in the background after that.
      */
     func cancelPair(sessionId: Data) async throws 
     
@@ -2182,6 +2189,13 @@ open func bleHasScanHint(endpointId: Data)async  -> Bool  {
     
     /**
      * Cancel a pairing under SAS verification — terminal (requires a fresh attempt).
+     *
+     * Returns once the decision is RECORDED, not once the peer has heard it. Telling the peer is a
+     * dial, bounded only by `PAIR_CONNECT_TIMEOUT`, and every caller is a human pressing REJECT or
+     * leaving the screen: on 2026-10-31 a Pixel's REJECT sat 15 s behind a Reject that could not
+     * reach an iPhone over a congested BLE link, and the app read as frozen. The decision itself
+     * (and any contradiction error) lands within the first lock, well inside
+     * [`CANCEL_PAIR_WAIT`]; delivery carries on in the background after that.
      */
 open func cancelPair(sessionId: Data)async throws   {
     return
@@ -11471,7 +11485,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_iroh_location_checksum_method_locationnode_ble_has_scan_hint() != 33560) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_iroh_location_checksum_method_locationnode_cancel_pair() != 49013) {
+    if (uniffi_iroh_location_checksum_method_locationnode_cancel_pair() != 17903) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_method_locationnode_clear_outbox() != 61861) {

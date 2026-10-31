@@ -1565,7 +1565,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_iroh_location_checksum_method_locationnode_ble_has_scan_hint() != 33560) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_iroh_location_checksum_method_locationnode_cancel_pair() != 49013) {
+    if (lib.uniffi_iroh_location_checksum_method_locationnode_cancel_pair() != 17903) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_iroh_location_checksum_method_locationnode_clear_outbox() != 61861) {
@@ -3296,6 +3296,13 @@ public interface LocationNodeInterface {
     
     /**
      * Cancel a pairing under SAS verification — terminal (requires a fresh attempt).
+     *
+     * Returns once the decision is RECORDED, not once the peer has heard it. Telling the peer is a
+     * dial, bounded only by `PAIR_CONNECT_TIMEOUT`, and every caller is a human pressing REJECT or
+     * leaving the screen: on 2026-10-31 a Pixel's REJECT sat 15 s behind a Reject that could not
+     * reach an iPhone over a congested BLE link, and the app read as frozen. The decision itself
+     * (and any contradiction error) lands within the first lock, well inside
+     * [`CANCEL_PAIR_WAIT`]; delivery carries on in the background after that.
      */
     suspend fun `cancelPair`(`sessionId`: kotlin.ByteArray)
     
@@ -4224,6 +4231,13 @@ open class LocationNode: Disposable, AutoCloseable, LocationNodeInterface
     
     /**
      * Cancel a pairing under SAS verification — terminal (requires a fresh attempt).
+     *
+     * Returns once the decision is RECORDED, not once the peer has heard it. Telling the peer is a
+     * dial, bounded only by `PAIR_CONNECT_TIMEOUT`, and every caller is a human pressing REJECT or
+     * leaving the screen: on 2026-10-31 a Pixel's REJECT sat 15 s behind a Reject that could not
+     * reach an iPhone over a congested BLE link, and the app read as frozen. The decision itself
+     * (and any contradiction error) lands within the first lock, well inside
+     * [`CANCEL_PAIR_WAIT`]; delivery carries on in the background after that.
      */
     @Throws(LocationException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
