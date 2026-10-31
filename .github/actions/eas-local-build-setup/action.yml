@@ -212,7 +212,7 @@ runs:
       uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: ~/Library/Caches/ccache
-        key: eas-local-ccache-ios-${{ runner.os }}-${{ runner.arch }}-xcode-27.1-${{ hashFiles('bun.lock', 'package.json', 'app.json', 'app.config.ts', 'patches/**', 'plugins/*.js', 'modules/*/ios/**') }}
+        key: eas-local-ccache-ios-${{ runner.os }}-${{ runner.arch }}-xcode-27.1-${{ hashFiles('bun.lock', 'app.json', 'app.config.ts', 'patches/**', 'plugins/*.js', 'modules/*/ios/**') }}
         restore-keys: |
           eas-local-ccache-ios-${{ runner.os }}-${{ runner.arch }}-xcode-27.1-
 
@@ -233,7 +233,7 @@ runs:
       shell: bash
       run: |
         set -euo pipefail
-        restore_dir="$RUNNER_TEMP/metro-cache-restored"
+        restore_dir="$RUNNER_TEMP/metro-cache"
         output_dir="$RUNNER_TEMP/metro-cache-output"
         rm -rf -- "$output_dir"
         mkdir -p -- "$restore_dir" "$output_dir"
@@ -250,10 +250,10 @@ runs:
       if: inputs.native-dependency-cache == 'true'
       uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
-        path: ${{ runner.temp }}/metro-cache-restored
-        key: eas-local-metro-${{ inputs.platform }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('bun.lock', 'package.json', 'app.json', 'app.config.ts', 'metro.config.js', 'patches/**') }}-${{ hashFiles('src/**', 'assets/**', 'modules/*/index.ts', 'modules/*/src/**') }}
+        path: ${{ runner.temp }}/metro-cache
+        key: eas-local-metro-${{ inputs.platform }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('bun.lock', 'app.json', 'app.config.ts', 'metro.config.js', 'patches/**') }}-${{ hashFiles('src/**', 'assets/**', 'modules/*/index.ts', 'modules/*/src/**') }}
         restore-keys: |
-          eas-local-metro-${{ inputs.platform }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('bun.lock', 'package.json', 'app.json', 'app.config.ts', 'metro.config.js', 'patches/**') }}-
+          eas-local-metro-${{ inputs.platform }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('bun.lock', 'app.json', 'app.config.ts', 'metro.config.js', 'patches/**') }}-
           eas-local-metro-${{ inputs.platform }}-${{ runner.os }}-${{ runner.arch }}-
 
     - name: Install EAS CLI

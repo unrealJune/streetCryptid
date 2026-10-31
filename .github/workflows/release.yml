@@ -302,11 +302,20 @@ jobs:
           key: ${{ steps.setup.outputs.ccache-key }}
 
       # Only what this build's bundle used (see eas-local-build-setup), so the entry does not grow.
+      # actions/cache folds the path into an entry's identity, so the output is moved to the path
+      # the restore reads from; saved from the output directory itself, no restore ever matched.
+      - name: Stage the Metro transform cache
+        if: "!cancelled() && steps.setup.outputs.metro-cache-hit != 'true'"
+        run: |
+          set -euo pipefail
+          rm -rf -- "$EXPO_METRO_CACHE_RESTORE_DIR"
+          mv -- "$EXPO_METRO_CACHE_OUTPUT_DIR" "$EXPO_METRO_CACHE_RESTORE_DIR"
+
       - name: Save the Metro transform cache
         if: "!cancelled() && steps.setup.outputs.metro-cache-hit != 'true'"
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: ${{ runner.temp }}/metro-cache-output
+          path: ${{ runner.temp }}/metro-cache
           key: ${{ steps.setup.outputs.metro-cache-key }}
 
       - name: Save CocoaPods download cache
@@ -463,11 +472,20 @@ jobs:
         run: bash scripts/submit-play.sh "$BUILD_ARTIFACT"
 
       # Only what this build's bundle used (see eas-local-build-setup), so the entry does not grow.
+      # actions/cache folds the path into an entry's identity, so the output is moved to the path
+      # the restore reads from; saved from the output directory itself, no restore ever matched.
+      - name: Stage the Metro transform cache
+        if: "!cancelled() && steps.setup.outputs.metro-cache-hit != 'true'"
+        run: |
+          set -euo pipefail
+          rm -rf -- "$EXPO_METRO_CACHE_RESTORE_DIR"
+          mv -- "$EXPO_METRO_CACHE_OUTPUT_DIR" "$EXPO_METRO_CACHE_RESTORE_DIR"
+
       - name: Save the Metro transform cache
         if: "!cancelled() && steps.setup.outputs.metro-cache-hit != 'true'"
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: ${{ runner.temp }}/metro-cache-output
+          path: ${{ runner.temp }}/metro-cache
           key: ${{ steps.setup.outputs.metro-cache-key }}
 
       - name: Save Gradle dependency and build caches
