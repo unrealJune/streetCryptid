@@ -41,6 +41,10 @@ use crate::transport::transport::BLE_TRANSPORT_ID;
 
 const PIPE_TOMBSTONE_TTL: Duration = Duration::from_secs(30);
 const MAX_PIPE_TOMBSTONES: usize = 128;
+/// How long a retired id stays claimable by its peer's next pipe. Long enough for a pairing that
+/// was walked away from and retried; iroh forgets an idle remote well before this.
+const RETIRED_ID_TTL: Duration = Duration::from_secs(600);
+const MAX_RETIRED_IDS: usize = 128;
 
 /// Length in bytes of the opaque token payload embedded in a BLE
 /// `CustomAddr`. The token is a little-endian `u64`
@@ -82,7 +86,9 @@ pub fn parse_token_addr(addr: &CustomAddr) -> io::Result<u64> {
 
 /// Opaque handle iroh sees (wrapped in a `CustomAddr`) for a BLE pipe.
 ///
-/// Monotonic, minted fresh every time a pipe is opened, never reused.
+/// Monotonic and minted fresh for a new peer. Reused only for the SAME peer once its pipe is
+/// gone (`Routing::reserve_outbound`, `Routing::resurrect_for_send`), because iroh keeps dialling
+/// a peer on the id it was given.
 /// The numeric value is carried as the payload of a BLE-transport
 /// `CustomAddr` via [`token_custom_addr`] / [`parse_token_addr`] so
 /// iroh's Connections keep a stable id across the pipe's lifetime.
@@ -251,9 +257,67 @@ struct RoutingInner {
     /// endpoint. Keyed on endpoint so different resolvers don't wake
     /// each other spuriously.
     endpoint_wakers: HashMap<EndpointId, Vec<Waker>>,
+    /// The endpoint each promoted pipe served, for as long as the pipe lives. Moved into
+    /// `retired` when the pipe goes.
+    pipe_endpoints: HashMap<StableConnId, EndpointId>,
+    /// Ids whose pipes are gone, with the endpoint they served. iroh keeps a path to a peer
+    /// under the id it was given and keeps dialling that path after the pipe behind it is gone;
+    /// it does not move to a newer id the resolver yields. So the next pipe to the same peer is
+    /// opened under the SAME id (`reserve_outbound`, `resurrect_for_send`), and iroh's path simply
+    /// works again. See those for the 2026-10-29 failure this fixes.
+    retired: HashMap<StableConnId, (EndpointId, Instant)>,
 }
 
 impl RoutingInner {
+    fn prune_retired(&mut self, now: Instant) {
+        self.retired
+            .retain(|_, (_, at)| now.saturating_duration_since(*at) <= RETIRED_ID_TTL);
+        if self.retired.len() <= MAX_RETIRED_IDS {
+            return;
+        }
+        let mut by_age: Vec<(StableConnId, Instant)> = self
+            .retired
+            .iter()
+            .map(|(id, (_, at))| (*id, *at))
+            .collect();
+        by_age.sort_by_key(|(_, at)| *at);
+        let overflow = self.retired.len() - MAX_RETIRED_IDS;
+        for (id, _) in by_age.into_iter().take(overflow) {
+            self.retired.remove(&id);
+        }
+    }
+
+    /// Whether `endpoint_id` currently has a live route other than through a reservation.
+    fn has_live_route(&self, endpoint_id: &EndpointId) -> bool {
+        self.routable.contains_key(endpoint_id)
+            || self
+                .pending
+                .values()
+                .any(|p| p.target_endpoint.as_ref() == Some(endpoint_id))
+    }
+
+    /// Reserve `stable_id` (a retired id) again for `endpoint_id`, so iroh's path to it routes
+    /// to the next pipe opened to that peer.
+    fn reserve_retired(&mut self, stable_id: StableConnId, endpoint_id: EndpointId) {
+        let prefix = prefix_from_endpoint(&endpoint_id);
+        self.retired.remove(&stable_id);
+        self.pipe_tombstones.remove(&stable_id);
+        self.reservations.insert(
+            prefix,
+            Reservation {
+                stable_id,
+                endpoint_id,
+                reserved_at: Instant::now(),
+            },
+        );
+        self.reserved_stable_ids.insert(stable_id, prefix);
+        tracing::debug!(
+            %stable_id,
+            %endpoint_id,
+            "routing: retired id reserved again for the same peer"
+        );
+    }
+
     fn prune_pipe_tombstones(&mut self, now: Instant) {
         self.pipe_tombstones.retain(|_, tombstone| {
             now.saturating_duration_since(tombstone.evicted_at) <= PIPE_TOMBSTONE_TTL
@@ -350,6 +414,10 @@ impl Routing {
             let removed = inner.pipes.remove(&id);
             if let Some(pipe) = &removed {
                 let now = Instant::now();
+                if let Some(endpoint_id) = inner.pipe_endpoints.remove(&id) {
+                    inner.prune_retired(now);
+                    inner.retired.insert(id, (endpoint_id, now));
+                }
                 inner.prune_pipe_tombstones(now);
                 inner.pipe_tombstones.insert(
                     id,
@@ -755,12 +823,37 @@ impl Routing {
     /// If a reservation for this prefix already exists, return the
     /// existing id (idempotent). This keeps `CustomAddr`s stable
     /// across repeated resolve calls for the same peer.
+    ///
+    /// A peer this transport has had a pipe to before keeps the id iroh already knows it by:
+    /// while that pipe is still winding down its own id is the answer, and once it is gone the
+    /// id is reserved again for the next pipe (see `RoutingInner::retired`).
     pub fn reserve_outbound(&self, endpoint_id: EndpointId) -> StableConnId {
         let prefix = crate::transport::routing::prefix_from_endpoint(&endpoint_id);
         let mut inner = self.inner.lock();
-        inner.prune_pipe_tombstones(Instant::now());
+        let now = Instant::now();
+        inner.prune_pipe_tombstones(now);
+        inner.prune_retired(now);
         if let Some(existing) = inner.reservations.get(&prefix) {
             return existing.stable_id;
+        }
+        let winding_down = inner
+            .pipe_endpoints
+            .iter()
+            .filter(|(id, ep)| **ep == endpoint_id && inner.pipes.contains_key(id))
+            .map(|(id, _)| *id)
+            .max();
+        if let Some(stable_id) = winding_down {
+            return stable_id;
+        }
+        let retired = inner
+            .retired
+            .iter()
+            .filter(|(_, (ep, _))| *ep == endpoint_id)
+            .max_by_key(|(_, (_, at))| *at)
+            .map(|(id, _)| *id);
+        if let Some(stable_id) = retired {
+            inner.reserve_retired(stable_id, endpoint_id);
+            return stable_id;
         }
         let stable_id = StableConnId(self.next_id.fetch_add(1, Ordering::Relaxed).wrapping_add(1));
         inner.reservations.insert(
@@ -786,6 +879,32 @@ impl Routing {
         let prefix = *inner.reserved_stable_ids.get(&stable_id)?;
         let reservation = inner.reservations.get(&prefix)?;
         Some((reservation.endpoint_id, prefix))
+    }
+
+    /// iroh is sending on `stable_id`, a retired id: reserve it again for the peer it served, so
+    /// the send dials that peer. `poll_send` calls this before dropping a transmit to a gone pipe.
+    ///
+    /// Returns the reservation's target, as [`Self::reservation_target`] would, or `None` when the
+    /// id should stay dead: it never served a peer, the peer has a live route under another id
+    /// (a dedup loser's stragglers must not redial), another id is already reserved for it, or the
+    /// peer is not in scan range.
+    ///
+    /// On 2026-10-29 every nearby pairing message after a pipe teardown was dialled on the old id
+    /// and dropped here as a "recently-evicted BLE stable-conn token" until its connect timed out,
+    /// while the resolver had already yielded a fresh id that iroh never tried.
+    pub fn resurrect_for_send(&self, stable_id: StableConnId) -> Option<(EndpointId, KeyPrefix)> {
+        let mut inner = self.inner.lock();
+        inner.prune_retired(Instant::now());
+        let (endpoint_id, _) = *inner.retired.get(&stable_id)?;
+        let prefix = prefix_from_endpoint(&endpoint_id);
+        if inner.has_live_route(&endpoint_id) || inner.reservations.contains_key(&prefix) {
+            return None;
+        }
+        if !inner.scan_hint.contains_key(&prefix) {
+            return None;
+        }
+        inner.reserve_retired(stable_id, endpoint_id);
+        Some((endpoint_id, prefix))
     }
 
     /// Look up the reservation for this prefix, if any. Resolver calls
@@ -995,6 +1114,7 @@ impl Routing {
                         verified_at: Instant::now(),
                     },
                 );
+                inner.pipe_endpoints.insert(pipe_id, remote_endpoint);
                 (evicted, true)
             }
             Decision::Reject => (Vec::new(), false),
@@ -1847,6 +1967,110 @@ mod tests {
                 "same-category redial must evict old ({dialer:?})"
             );
         }
+    }
+
+    // ---------- a peer keeps its id across pipes ----------
+
+    /// A promoted pipe to `peer`, released the way the dedup hook releases an idle one.
+    fn released_pipe(r: &Routing, me: &EndpointId, peer: EndpointId) -> StableConnId {
+        let id = r.register_pipe(dev("peer-mac"), Direction::Outbound);
+        r.register_pending(id, Some(peer));
+        assert!(matches!(
+            r.promote(id, me, peer),
+            PromoteOutcome::Accepted { .. }
+        ));
+        let _ = r.evict_routable_if_pipe(&peer, id);
+        let _ = r.evict_pipe_state(id);
+        id
+    }
+
+    /// The 2026-10-29 failure, at the routing layer: after a pipe went, iroh kept dialling the
+    /// peer on that pipe's id and every transmit was dropped as "recently evicted", while the
+    /// resolver handed out a fresh id iroh never used.
+    #[test]
+    fn a_peer_keeps_its_id_after_its_pipe_is_gone() {
+        let me = test_endpoint(0x01);
+        let peer = test_endpoint(0xFE);
+        let r = Routing::new();
+        let _ = r.note_scan_hint(prefix_from_endpoint(&peer), dev("peer-mac"));
+        let id = released_pipe(&r, &me, peer);
+
+        // While the pipe winds down, its own id is still the answer.
+        assert_eq!(r.reserve_outbound(peer), id);
+        assert!(r.reservation_target(id).is_none(), "no reservation yet");
+
+        r.evict_pipe(id);
+        assert_eq!(
+            r.resurrect_for_send(id),
+            Some((peer, prefix_from_endpoint(&peer))),
+            "a send on the old id dials the same peer"
+        );
+        assert_eq!(r.reserve_outbound(peer), id, "the resolver agrees");
+        assert_eq!(
+            r.consume_reservation_for_endpoint(&peer)
+                .map(|res| res.stable_id),
+            Some(id),
+            "the next pipe opens under the id iroh already has"
+        );
+    }
+
+    #[test]
+    fn the_resolver_reuses_a_retired_id_too() {
+        let me = test_endpoint(0x01);
+        let peer = test_endpoint(0xFE);
+        let r = Routing::new();
+        let _ = r.note_scan_hint(prefix_from_endpoint(&peer), dev("peer-mac"));
+        let id = released_pipe(&r, &me, peer);
+        r.evict_pipe(id);
+
+        assert_eq!(r.reserve_outbound(peer), id);
+        assert_eq!(
+            r.reservation_target(id),
+            Some((peer, prefix_from_endpoint(&peer)))
+        );
+    }
+
+    /// A dedup loser's stragglers must not redial a peer that already has a live pipe.
+    #[test]
+    fn a_retired_id_stays_dead_while_its_peer_has_a_live_route() {
+        let me = test_endpoint(0x01);
+        let peer = test_endpoint(0xFE);
+        let r = Routing::new();
+        let _ = r.note_scan_hint(prefix_from_endpoint(&peer), dev("peer-mac"));
+        let old = released_pipe(&r, &me, peer);
+        r.evict_pipe(old);
+
+        let live = r.register_pipe(dev("peer-mac-2"), Direction::Inbound);
+        r.register_pending(live, Some(peer));
+        assert!(matches!(
+            r.promote(live, &me, peer),
+            PromoteOutcome::Accepted { .. }
+        ));
+
+        assert_eq!(r.resurrect_for_send(old), None);
+        assert!(r.reservation_target(old).is_none());
+    }
+
+    #[test]
+    fn an_id_that_never_served_a_peer_is_not_resurrected() {
+        let r = Routing::new();
+        let id = r.register_pipe(dev("never-promoted"), Direction::Inbound);
+        r.evict_pipe(id);
+        assert_eq!(r.resurrect_for_send(id), None);
+    }
+
+    #[test]
+    fn a_peer_out_of_scan_range_is_not_dialled() {
+        let me = test_endpoint(0x01);
+        let peer = test_endpoint(0xFE);
+        let r = Routing::new();
+        let id = released_pipe(&r, &me, peer);
+        r.evict_pipe(id);
+        assert_eq!(
+            r.resurrect_for_send(id),
+            None,
+            "no scan hint, nothing to dial"
+        );
     }
 
     // ---------- promote() integration ----------

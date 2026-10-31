@@ -11210,6 +11210,19 @@ public func flushTelemetry()async   {
             
         )
 }
+/**
+ * Where Rust telemetry that could not be sent waits for the collector (the app's caches
+ * directory). Until this is called it waits in memory, bounded, and dies with the process. Call it
+ * before [`configure_telemetry`]; calling it again moves future batches, not queued ones. Returns
+ * whether the directory is usable; always `false` without the `otel` feature.
+ */
+public func setTelemetrySpoolDir(dir: String) -> Bool  {
+    return try!  FfiConverterBool.lift(try! rustCall() {
+    uniffi_iroh_location_fn_func_set_telemetry_spool_dir(
+        FfiConverterString.lower(dir),$0
+    )
+})
+}
 
 private enum InitializationResult {
     case ok
@@ -11296,6 +11309,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_func_flush_telemetry() != 65035) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_iroh_location_checksum_func_set_telemetry_spool_dir() != 28941) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_method_devicesecrets_identity_secret() != 9294) {

@@ -520,12 +520,62 @@ Conventions when changing that code:
   / trail-sync to `connectNewFriend` WITHOUT awaiting it — a friend is a local decision, and nothing
   the network does may stand between a human saying "keep this one" and the app having kept them.
   `awaitFriendWiring()` is what shutdown and the tests use instead.
+- **A BLE pipe outlives its last connection by `PIPE_IDLE_LINGER` (30 s), a peer keeps its BLE id
+  across pipes, and a refusal is said out loud.** Every pairing message is its own short QUIC
+  connection, and the vendored transport tore its BLE pipe down the moment the last one closed; on
+  2026-10-29 a Pixel 10's Reveal was dialled 5 ms before the pipe under it went (Loki: "all watched
+  iroh connections closed; tearing BLE pipe down"). After any teardown iroh keeps dialling the peer
+  on the OLD pipe's `StableConnId` and never tries the fresh one the resolver yields, so every send
+  was dropped as a "recently-evicted BLE stable-conn token" until its connect timed out. The next
+  pipe to the same peer now opens under the same id (`Routing::reserve_outbound`,
+  `resurrect_for_send`), and a `Dead { Forgotten }` peer is redialled on demand. An inbound handler
+  that refuses (`NotListening` = Bump window shut, anything else) closes with
+  `PAIR_CLOSE_NOT_LISTENING` / `PAIR_CLOSE_REFUSED` before dropping, so the dialler ends with a
+  reason instead of 25 s of "did not answer" (`pair.dial{outcome=refused}`). Test transport changes
+  against `third_party/iroh-ble-transport/tests/sim_pairing.rs` (`just test-ble-transport`): real
+  iroh endpoints on BLE alone over `SimRadio`, which logs every link so a test can assert how many
+  pipes a pairing took. It reproduced the stale-id failure before anyone had read the iroh source.
+- **While a Bump window is open, BLE is for pairing alone, and a phone whose own search misses is
+  still listening.** A BLE link carries a few KB/s and every connection to a peer shares it: on
+  2026-10-30 a Pixel had just removed an iPhone to pair again, 13 friend-sync connections and a
+  gossip one between them took the new pipe the moment it came up, and the Hello never connected
+  (37.7 s). `PairCore::set_pairing_ready(true)` now holds BLE for `PAIR_ALPN`
+  (`BleTransport::reserve_links_for`): dials to a peer in BLE range are refused before they start,
+  and other protocols arriving over BLE are closed after the handshake. The hold ends at the nearby
+  SAS gate, when the window closes, or after `BLE_PAIRING_HOLD_MAX` — never let it outlive the
+  window, or friend sync between nearby phones stops. Each phone searches independently and only
+  one needs to succeed, so a `noPeers`/`probeFailed` search is the `waiting` Bump stage ("LISTENING"),
+  not a failure; the other phone's request takes the screen from there. `bump.resolve` records what
+  each search saw.
 - **`our_endpoint_ticket` pays the relay wait once per NODE, not once per message.** Four messages
   are built to reach the SAS gate (two per side) and each side's reply is built inside the other's
   dial, so an `Endpoint::online()` wait that is paid per message serializes across both phones.
   Measured 2026-09-17 at a bar: 44 s from arming Bump to the visual gate, which reads as slow BLE
   and is not BLE. `endpoint_was_online` latches; `pair.endpoint_ticket`'s `latched` is how you see
   it. The FIRST wait is still the full budget — that is where the invite-address argument lives.
+- **The core's telemetry is spooled, because pairing over BLE is exactly when a phone is offline.**
+  The SDK hands a batch to the exporter once; `opentelemetry-otlp` dropped it on a failed POST, so
+  on 2026-10-31 an offline iPhone's Rust spans for three Bump pairings (its own `bump.resolve`
+  included) were simply lost while its JS spans came back from the journal. The exporters in
+  `telemetry.rs` (`spool_export`) now hand every batch to `telemetry_spool::Shipper`: sent at once
+  when nothing is queued, otherwise written to `otel-spool/` in the app's caches (set by
+  `set_telemetry_spool_dir` from `TelemetryConfigurator` on both platforms, before the first
+  configure) and drained oldest first with backoff. Keep the rules its tests pin: a refused (4xx)
+  batch is dropped, never retried at the head; the spool is bounded; and nothing on the export
+  thread emits `tracing` except the one `telemetry.recovered` span after a backlog drains. Bump
+  itself is recorded as `bump.stage` (one span per stage change, with the reason a window closed)
+  and every local cancel as `pair.cancel{reason}`, both from JS; `ble.probe` and `ble.pipe` cover
+  the radio. See `infra/otel/README.md`.
+- **`blew` is vendored (`rust/third_party/blew`), because its CoreBluetooth backend dropped data.**
+  On Apple, `updateValue:forCharacteristic:onSubscribedCentrals:` returning `NO` (queue full) and
+  a write without response sent while `canSendWriteWithoutResponse` is false both lose the bytes
+  without an error, and upstream did both, so every iPhone GATT pipe leaned on the reliable layer's
+  ACK timeout (the "retransmitting oldest fragment" every ~0.5 s on 2026-10-30). Both now wait for
+  the ready callback, bounded at 2 s. The L2CAP reactor sleeps on a `CFRunLoopSource` instead of
+  polling every 50 ms, checks `hasSpaceAvailable` before a write and queues what the stream cannot
+  take, rather than closing the channel. None of this runs on Linux, so the transport's SimRadio
+  tests cannot cover it: change it only with an iPhone to test on, and record each change in its
+  NOTICE (AGPL §5). The Kotlin half is still `android/src/main/java/org/jakebot/blew`.
 - **Pairing telemetry is spans, not `tracing::info!`.** Loki's OTLP ingest keeps the message and
   drops the fields, so the core's `connect_ms` / `exchange_ms` / `ticket_ms` existed and answered
   nothing on the one night they were needed. `pair.dial`, `pair.handshake`, `pair.inbound`,

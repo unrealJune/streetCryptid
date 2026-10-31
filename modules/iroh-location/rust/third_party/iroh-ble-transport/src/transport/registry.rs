@@ -455,6 +455,16 @@ impl Registry {
         entry.last_adv = Some(now);
         entry.prefix = Some(prefix);
         entry.verified_live_suppressed_logged = false;
+        // Hearing a peer we only let go of makes it a fresh discovery (see `handle_send_datagram`).
+        if matches!(
+            entry.phase,
+            PeerPhase::Dead {
+                reason: crate::transport::peer::DeadReason::Forgotten,
+                ..
+            }
+        ) {
+            entry.phase = PeerPhase::Unknown;
+        }
         match &entry.phase {
             PeerPhase::Unknown => {
                 if entry.pending_sends.is_empty() {
@@ -530,6 +540,27 @@ impl Registry {
             .peers
             .entry(device_id.clone())
             .or_insert_with(|| PeerEntry::new(device_id.clone()));
+        // `target_endpoint` is set only when the send came through a reservation: iroh asking for
+        // a NEW pipe to a peer, not a straggler for a pipe that is gone (a dedup loser's, say).
+        //
+        // A peer that was merely let go — its pipe idled out or drained — is dialled again the
+        // moment iroh asks, as the drain-to-dead comment promises. Rejecting here left the device
+        // unreachable until the entry was garbage-collected 60 s later: on a phone the device id
+        // does not change, so no fresh advertisement creates a new entry, and every pairing attempt
+        // in that minute ran out its connect timeout (2026-10-29, Pixel 10). `MaxRetries` and
+        // `ProtocolMismatch` stay dead; dialling them again is the wrong answer.
+        let wants_new_pipe = target_endpoint.is_some();
+        if wants_new_pipe
+            && matches!(
+                entry.phase,
+                PeerPhase::Dead {
+                    reason: crate::transport::peer::DeadReason::Forgotten,
+                    ..
+                }
+            )
+        {
+            entry.phase = PeerPhase::Discovered { since: now };
+        }
         enum SendDecision {
             Enqueue,
             Reject,
@@ -555,6 +586,9 @@ impl Registry {
             | PeerPhase::Handshaking { .. }
             | PeerPhase::Reconnecting { .. }
             | PeerPhase::Restoring { .. } => SendDecision::Buffer,
+            // Held, and dialled when the drain ends (`handle_tick`), rather than refused for the
+            // five seconds the old channel takes to close.
+            PeerPhase::Draining { .. } if wants_new_pipe => SendDecision::Buffer,
             PeerPhase::Draining { .. } | PeerPhase::Dead { .. } => SendDecision::Reject,
         };
         let decision_tag = match &decision {
@@ -1192,6 +1226,19 @@ impl Registry {
                     });
                 }
                 TickAction::PendingDialExpired => {
+                    entry.phase = PeerPhase::Connecting {
+                        attempt: 0,
+                        started: tick_now,
+                        path: crate::transport::peer::ConnectPath::Gatt,
+                    };
+                    actions.push(PeerAction::StartConnect {
+                        device_id: device_id.clone(),
+                        attempt: 0,
+                    });
+                }
+                TickAction::DrainingToDead if !entry.pending_sends.is_empty() => {
+                    // iroh asked for a NEW pipe to this peer while the old one drained (see
+                    // `handle_send_datagram`): open it now that the old channel is closed.
                     entry.phase = PeerPhase::Connecting {
                         attempt: 0,
                         started: tick_now,
@@ -2069,12 +2116,17 @@ mod tests {
                     }
                     TargetLifecycleCommand::SendReserved { endpoint_seed } => {
                         let endpoint = iroh_base::SecretKey::from_bytes(&[endpoint_seed; 32]).public();
-                        if !matches!(
-                            phase_before,
-                            Some(PeerPhase::Connected { .. })
-                                | Some(PeerPhase::Draining { .. })
-                                | Some(PeerPhase::Dead { .. })
-                        ) {
+                        // A send asking for a new pipe is taken everywhere but a live pipe and a
+                        // peer that failed for good: a draining peer holds it for the redial, and
+                        // a forgotten one is dialled again.
+                        let takes_target = match phase_before {
+                            Some(PeerPhase::Connected { .. }) => false,
+                            Some(PeerPhase::Dead { reason, .. }) => {
+                                *reason == crate::transport::peer::DeadReason::Forgotten
+                            }
+                            _ => true,
+                        };
+                        if takes_target {
                             expected_target = Some(endpoint);
                         }
                         reg.handle(PeerCommand::SendDatagram {
@@ -2229,10 +2281,15 @@ mod tests {
                     MultiPeerCommand::SendReserved { device_idx, endpoint_seed } => {
                         let device_id = device_ids[usize::from(device_idx)].clone();
                         let endpoint = endpoint_from_seed(endpoint_seed);
-                        if !matches!(
-                            phase_before,
-                            Some(PhaseKind::Connected) | Some(PhaseKind::Draining) | Some(PhaseKind::Dead)
-                        ) {
+                        // Same rule as the single-peer model above.
+                        let takes_target = reg.peer(&device_id).is_none_or(|entry| match &entry.phase {
+                            PeerPhase::Connected { .. } => false,
+                            PeerPhase::Dead { reason, .. } => {
+                                *reason == crate::transport::peer::DeadReason::Forgotten
+                            }
+                            _ => true,
+                        });
+                        if takes_target {
                             expected_targets.insert(device_id.clone(), Some(endpoint));
                         }
                         reg.handle(PeerCommand::SendDatagram {
@@ -4714,6 +4771,181 @@ mod tests {
             a,
             PeerAction::CloseChannel { device_id: d, .. } if d == &device_id
         )));
+    }
+
+    fn dead_peer(
+        reg: &mut Registry,
+        name: &str,
+        reason: crate::transport::peer::DeadReason,
+    ) -> blew::DeviceId {
+        let device_id = blew::DeviceId::from(name);
+        let mut entry = PeerEntry::new(device_id.clone());
+        entry.phase = PeerPhase::Dead {
+            reason,
+            at: std::time::Instant::now(),
+        };
+        reg.peers.insert(device_id.clone(), entry);
+        device_id
+    }
+
+    /// A send that came through a reservation: iroh asking for a new pipe to this peer.
+    fn send_to(reg: &mut Registry, device_id: &blew::DeviceId) -> Vec<PeerAction> {
+        reg.handle(PeerCommand::SendDatagram {
+            device_id: device_id.clone(),
+            target_endpoint: Some(iroh_base::SecretKey::from_bytes(&[0x5au8; 32]).public()),
+            tx_gen: 0,
+            datagram: bytes::Bytes::from_static(b"reveal"),
+            waker: noop_waker(),
+        })
+    }
+
+    /// A straggler for a pipe that is gone: no target endpoint.
+    fn straggler_to(reg: &mut Registry, device_id: &blew::DeviceId) -> Vec<PeerAction> {
+        reg.handle(PeerCommand::SendDatagram {
+            device_id: device_id.clone(),
+            target_endpoint: None,
+            tx_gen: 0,
+            datagram: bytes::Bytes::from_static(b"late"),
+            waker: noop_waker(),
+        })
+    }
+
+    #[test]
+    fn a_straggler_does_not_revive_a_forgotten_peer() {
+        use crate::transport::peer::DeadReason;
+
+        let mut reg = Registry::new_for_test();
+        let device_id = dead_peer(&mut reg, "dev-straggler", DeadReason::Forgotten);
+        let actions = straggler_to(&mut reg, &device_id);
+        assert!(
+            !actions
+                .iter()
+                .any(|a| matches!(a, PeerAction::StartConnect { .. }))
+        );
+        assert!(matches!(
+            reg.peer(&device_id).unwrap().phase,
+            PeerPhase::Dead { .. }
+        ));
+    }
+
+    /// A new pipe asked for while the old one drains is held, then dialled as the drain ends —
+    /// not refused for the drain's five seconds.
+    #[test]
+    fn a_new_pipe_asked_for_while_draining_is_dialled_when_the_drain_ends() {
+        use crate::transport::peer::DisconnectReason;
+
+        let mut reg = Registry::new_for_test();
+        let device_id = blew::DeviceId::from("dev-draining");
+        let mut entry = PeerEntry::new(device_id.clone());
+        let drained_at = std::time::Instant::now();
+        entry.phase = PeerPhase::Draining {
+            since: drained_at,
+            reason: DisconnectReason::LinkDead,
+        };
+        reg.peers.insert(device_id.clone(), entry);
+
+        let actions = send_to(&mut reg, &device_id);
+        assert!(
+            actions
+                .iter()
+                .any(|a| matches!(a, PeerAction::AckSend { result: Ok(()), .. })),
+            "the send is held, not refused: {actions:?}"
+        );
+        assert_eq!(reg.peer(&device_id).unwrap().pending_sends.len(), 1);
+
+        let actions = reg.handle(PeerCommand::Tick(
+            drained_at + DRAINING_TIMEOUT + std::time::Duration::from_millis(1),
+        ));
+        assert!(
+            actions.iter().any(|a| matches!(
+                a,
+                PeerAction::StartConnect { device_id: d, .. } if d == &device_id
+            )),
+            "the held send dials when the drain ends: {actions:?}"
+        );
+        assert!(matches!(
+            reg.peer(&device_id).unwrap().phase,
+            PeerPhase::Connecting { .. }
+        ));
+    }
+
+    /// The 2026-10-29 Pixel 10 dead minute: a pipe released for idleness leaves its peer
+    /// `Dead { Forgotten }`, and the next pairing message must dial it again rather than be refused
+    /// until the entry is garbage-collected.
+    #[test]
+    fn a_send_to_a_forgotten_peer_dials_it_again() {
+        use crate::transport::peer::DeadReason;
+
+        let mut reg = Registry::new_for_test();
+        let device_id = dead_peer(&mut reg, "dev-let-go", DeadReason::Forgotten);
+
+        let actions = send_to(&mut reg, &device_id);
+
+        assert!(
+            actions.iter().any(|a| matches!(
+                a,
+                PeerAction::StartConnect { device_id: d, .. } if d == &device_id
+            )),
+            "expected a fresh dial, got {actions:?}"
+        );
+        let entry = reg.peer(&device_id).unwrap();
+        assert!(matches!(entry.phase, PeerPhase::Connecting { .. }));
+        assert_eq!(
+            entry.pending_sends.len(),
+            1,
+            "the message waits for the dial"
+        );
+    }
+
+    #[test]
+    fn a_send_to_a_peer_that_failed_stays_refused() {
+        use crate::transport::peer::DeadReason;
+
+        let mut reg = Registry::new_for_test();
+        for (name, reason) in [
+            ("dev-max-retries", DeadReason::MaxRetries),
+            (
+                "dev-mismatch",
+                DeadReason::ProtocolMismatch { got: 9, want: 1 },
+            ),
+        ] {
+            let device_id = dead_peer(&mut reg, name, reason);
+            let actions = send_to(&mut reg, &device_id);
+            assert!(
+                !actions
+                    .iter()
+                    .any(|a| matches!(a, PeerAction::StartConnect { .. })),
+                "{name} must not be redialled: {actions:?}"
+            );
+            assert!(matches!(
+                reg.peer(&device_id).unwrap().phase,
+                PeerPhase::Dead { .. }
+            ));
+        }
+    }
+
+    #[test]
+    fn hearing_a_forgotten_peer_again_rediscovers_it() {
+        use crate::transport::peer::DeadReason;
+
+        let mut reg = Registry::new_for_test();
+        let device_id = dead_peer(&mut reg, "dev-heard-again", DeadReason::Forgotten);
+
+        let _ = reg.handle(PeerCommand::Advertised {
+            prefix: [0x7e; crate::transport::peer::KEY_PREFIX_LEN],
+            device: blew::BleDevice {
+                id: device_id.clone(),
+                name: None,
+                rssi: Some(-50),
+                services: vec![],
+            },
+            rssi: Some(-50),
+        });
+
+        assert!(matches!(
+            reg.peer(&device_id).unwrap().phase,
+            PeerPhase::Discovered { .. }
+        ));
     }
 
     #[test]

@@ -33,16 +33,24 @@ the iOS XCFramework — therefore contains and executes this code.
 
 ## blew (Rust crate + vendored Android runtime)
 
-- **Rust crate:** `blew = "0.3"` from crates.io, an Android-target dependency of `iroh-location`
+- **Vendored Rust crate:** `modules/iroh-location/rust/third_party/blew/` (upstream 0.3.0), used by
+  `iroh-ble-transport` and, on Android, by `iroh-location` directly
+- **List of Rust modifications:** `modules/iroh-location/rust/third_party/blew/NOTICE`
 - **Vendored Android runtime:** `modules/iroh-location/android/src/main/java/org/jakebot/blew/`
 - **Notice/license:** `modules/iroh-location/android/third_party/blew/`
 - **Upstream:** <https://github.com/mcginty/blew>
 - **License:** GNU Affero General Public License v3.0 or later (**AGPL-3.0-or-later**)
 
 The Kotlin central/peripheral managers are the Android runtime half of the Rust `blew`
-dependency. They are vendored unchanged so Rust BLE threads can call into Android's
-Bluetooth APIs through JNI, and are reached from
-`com/unrealjune/irohlocation/IrohAndroidBootstrap.kt`.
+dependency. They are vendored so Rust BLE threads can call into Android's Bluetooth APIs
+through JNI (modified since: advertising no longer renames the phone's Bluetooth
+adapter, and the central asks for a high-priority connection; see that directory's
+NOTICE), and are reached from `com/unrealjune/irohlocation/IrohAndroidBootstrap.kt`.
+
+The Rust crate was vendored on 2026-10-31 to fix flow control in its CoreBluetooth
+backend (notifications and writes CoreBluetooth could not queue were dropped silently,
+and the L2CAP reactor polled every 50 ms and could close a busy channel); its NOTICE
+lists the changes.
 
 ## Distribution obligation
 

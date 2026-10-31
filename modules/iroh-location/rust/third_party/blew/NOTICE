@@ -1,0 +1,62 @@
+blew — vendored, modified copy
+==============================
+
+This directory contains a vendored copy of the Rust half of `blew`, a
+cross-platform async Bluetooth Low Energy library (Apple, Linux, Android).
+
+Upstream project : https://github.com/mcginty/blew
+Upstream version : 0.3.0 (crates.io; git tag `blew-v0.3.0`,
+                   commit dde4bdaa09b3ef60bb595dd1be360a54c17615d4, crates/blew)
+Original author  : Jake McGinty <me@jakebot.org>
+License          : GNU Affero General Public License v3.0 or later
+                   (AGPL-3.0-or-later) — see the `LICENSE` file in this
+                   directory for the full license text.
+
+This modified copy remains licensed under AGPL-3.0-or-later, the same license
+as the upstream project.
+
+The Android Kotlin half of blew was vendored separately, in July 2026, into
+modules/iroh-location/android/src/main/java/org/jakebot/blew/ (notice in
+modules/iroh-location/android/third_party/blew/). It is not duplicated here,
+and upstream's `android/`, `examples/` and `tests/` directories are omitted.
+
+
+Modifications by the streetCryptid project
+------------------------------------------
+
+In accordance with section 5 of the GNU AGPL, the changes made to the upstream
+0.3.0 source after it was vendored into this repository are dated and
+described below.
+
+2026-10-31 — Apple flow control (CoreBluetooth backend):
+
+  * Cargo.toml
+      - Added this vendoring header, `publish = false`, and removed the
+        `include` list. Added `objc2-core-foundation` (Apple targets) for the
+        L2CAP reactor's run-loop source.
+
+  * build.rs
+      - `android_dir` now points at the module's vendored Kotlin sources.
+
+  * src/platform/apple/peripheral.rs
+      - `notify_characteristic` no longer drops a notification when
+        CoreBluetooth's transmit queue is full. Upstream ignored the return
+        value of `updateValue:forCharacteristic:onSubscribedCentrals:`; it now
+        waits for `peripheralManagerIsReadyToUpdateSubscribers:` (new delegate
+        method) and sends the value again, for at most 2 s.
+
+  * src/platform/apple/central.rs
+      - A write without response is sent only when `canSendWriteWithoutResponse`
+        is true; otherwise it waits for
+        `peripheralIsReadyToSendWriteWithoutResponse:` (new delegate method),
+        for at most 2 s. Upstream wrote unconditionally, which CoreBluetooth may
+        drop silently.
+
+  * src/platform/apple/l2cap.rs
+      - The reactor thread no longer polls its run loop every 50 ms. Commands
+        signal a `CFRunLoopSource` attached to the run loop, which also stops
+        an idle reactor from spinning when no stream is scheduled.
+      - Writes check `hasSpaceAvailable` before `write:maxLength:`, keep bytes
+        the stream cannot take yet in a per-channel queue, and no longer close
+        the channel when a write returns 0. The Rust-side bridge stops reading
+        from the app while 64 KiB are queued (back-pressure).

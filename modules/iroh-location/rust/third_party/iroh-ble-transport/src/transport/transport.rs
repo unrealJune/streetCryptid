@@ -30,8 +30,9 @@ use crate::transport::events::{
     ProbeDisconnects, run_central_events, run_l2cap_accept, run_peripheral_requests,
     run_peripheral_state_events,
 };
-use crate::transport::hook::{BleDedupHook, HookEvent};
+use crate::transport::hook::{ActiveConnections, BleDedupHook, HookEvent};
 use crate::transport::peer::{ConnectPath, KEY_PREFIX_LEN, PeerCommand};
+use crate::transport::priority::LinkPriority;
 use crate::transport::registry::{PhaseKind, Registry, RegistryHandle, SnapshotMaps};
 use crate::transport::routing::{TOKEN_LEN, parse_token_addr, token_custom_addr};
 use crate::transport::store::{InMemoryPeerStore, PeerStore};
@@ -42,7 +43,7 @@ pub const BLE_TRANSPORT_ID: u64 = 0x42_4C_45;
 
 const IROH_SERVICE_UUID: Uuid = uuid!("69726f01-8e45-4c2c-b3a5-331f3098b5c2");
 const IROH_C2P_CHAR_UUID: Uuid = uuid!("69726f02-8e45-4c2c-b3a5-331f3098b5c2");
-const IROH_P2C_CHAR_UUID: Uuid = uuid!("69726f03-8e45-4c2c-b3a5-331f3098b5c2");
+pub(crate) const IROH_P2C_CHAR_UUID: Uuid = uuid!("69726f03-8e45-4c2c-b3a5-331f3098b5c2");
 pub(crate) const IROH_PSM_CHAR_UUID: Uuid = uuid!("69726f04-8e45-4c2c-b3a5-331f3098b5c2");
 pub(crate) const IROH_VERSION_CHAR_UUID: Uuid = uuid!("69726f05-8e45-4c2c-b3a5-331f3098b5c2");
 pub const IROH_IDENTITY_CHAR_UUID: Uuid = uuid!("69726f06-8e45-4c2c-b3a5-331f3098b5c2");
@@ -165,7 +166,7 @@ impl std::fmt::Debug for BleTransportBuilder {
     }
 }
 
-fn iroh_key_uuid(endpoint_id: &EndpointId) -> Uuid {
+pub(crate) fn iroh_key_uuid(endpoint_id: &EndpointId) -> Uuid {
     let key = endpoint_id.as_bytes();
     let mut bytes = [0u8; 16];
     bytes[..4].copy_from_slice(&KEY_UUID_PREFIX);
@@ -286,6 +287,13 @@ pub struct BleTransport {
     inbox_capacity_wakers: Arc<Mutex<Vec<Waker>>>,
     store: Arc<dyn PeerStore>,
     probe_disconnects: ProbeDisconnects,
+    /// Which iroh connections ride each pipe; shared by every hook from [`Self::dedup_hook`].
+    active_connections: Arc<ActiveConnections>,
+    /// How long a pipe outlives its last connection ([`crate::transport::hook::PIPE_IDLE_LINGER`]).
+    idle_linger: Duration,
+    /// Which protocols keep BLE to themselves, and when; shared by every hook. See
+    /// [`Self::reserve_links_for`].
+    link_priority: Arc<LinkPriority>,
 }
 
 impl std::fmt::Debug for BleTransport {
@@ -391,16 +399,6 @@ impl BleTransport {
         }
 
         let (inbox_tx, inbox_rx) = mpsc::channel::<PeerCommand>(256);
-        let (incoming_tx, incoming_rx) = mpsc::channel::<IncomingPacket>(256);
-        let snapshots = Arc::new(ArcSwap::from(Arc::new(SnapshotMaps::default())));
-
-        let tx_bytes = Arc::new(AtomicU64::new(0));
-        let rx_bytes = Arc::new(AtomicU64::new(0));
-        let retransmits = Arc::new(AtomicU64::new(0));
-        let truncations = Arc::new(AtomicU64::new(0));
-        let empty_frames = Arc::new(AtomicU64::new(0));
-        let inbox_capacity_wakers: Arc<Mutex<Vec<Waker>>> = Arc::new(Mutex::new(Vec::new()));
-
         let psm_atomic = Arc::new(AtomicU16::new(0));
         let probe_disconnects: ProbeDisconnects = Arc::new(Mutex::new(HashMap::new()));
         let iface = Arc::new(BlewDriver::new(
@@ -412,16 +410,6 @@ impl BleTransport {
             inbox_tx.clone(),
         ));
         let routing = Arc::new(crate::transport::routing::Routing::new());
-        let driver = Driver::new(
-            iface,
-            inbox_tx.clone(),
-            incoming_tx,
-            Arc::clone(&retransmits),
-            Arc::clone(&truncations),
-            Arc::clone(&empty_frames),
-            Arc::clone(&store),
-            Arc::clone(&routing),
-        );
 
         if l2cap_policy == L2capPolicy::PreferL2cap {
             match peripheral.l2cap_listener().await {
@@ -436,6 +424,73 @@ impl BleTransport {
                 }
             }
         }
+
+        tokio::spawn(run_central_events(
+            Arc::clone(&central),
+            Arc::clone(&routing),
+            inbox_tx.clone(),
+            Arc::clone(&probe_disconnects),
+        ));
+        tokio::spawn(run_peripheral_state_events(
+            Arc::clone(&peripheral),
+            Arc::clone(&routing),
+            inbox_tx.clone(),
+        ));
+        tokio::spawn(run_peripheral_requests(
+            Arc::clone(&peripheral),
+            inbox_tx.clone(),
+            psm_atomic,
+        ));
+
+        Ok(Self::assemble(
+            local_id,
+            iface,
+            inbox_tx,
+            inbox_rx,
+            routing,
+            store,
+            l2cap_policy,
+            probe_disconnects,
+            crate::transport::hook::PIPE_IDLE_LINGER,
+        ))
+    }
+
+    /// Everything below the radio: the registry actor and its driver, the dedup-hook forwarder,
+    /// and the watchdog. Shared by the real transport and by the simulated radio
+    /// ([`crate::transport::sim`]), so a simulation exercises exactly the code a phone runs from
+    /// the [`BleInterface`](crate::transport::interface::BleInterface) up.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn assemble<I: crate::transport::interface::BleInterface>(
+        local_id: EndpointId,
+        iface: Arc<I>,
+        inbox_tx: mpsc::Sender<PeerCommand>,
+        inbox_rx: mpsc::Receiver<PeerCommand>,
+        routing: Arc<crate::transport::routing::Routing>,
+        store: Arc<dyn PeerStore>,
+        l2cap_policy: L2capPolicy,
+        probe_disconnects: ProbeDisconnects,
+        idle_linger: Duration,
+    ) -> Arc<Self> {
+        let (incoming_tx, incoming_rx) = mpsc::channel::<IncomingPacket>(256);
+        let snapshots = Arc::new(ArcSwap::from(Arc::new(SnapshotMaps::default())));
+
+        let tx_bytes = Arc::new(AtomicU64::new(0));
+        let rx_bytes = Arc::new(AtomicU64::new(0));
+        let retransmits = Arc::new(AtomicU64::new(0));
+        let truncations = Arc::new(AtomicU64::new(0));
+        let empty_frames = Arc::new(AtomicU64::new(0));
+        let inbox_capacity_wakers: Arc<Mutex<Vec<Waker>>> = Arc::new(Mutex::new(Vec::new()));
+
+        let driver = Driver::new(
+            iface,
+            inbox_tx.clone(),
+            incoming_tx,
+            Arc::clone(&retransmits),
+            Arc::clone(&truncations),
+            Arc::clone(&empty_frames),
+            Arc::clone(&store),
+            Arc::clone(&routing),
+        );
 
         let registry = Registry::new(l2cap_policy, local_id);
         let snap_for_actor = Arc::clone(&snapshots);
@@ -470,25 +525,9 @@ impl BleTransport {
             }
         });
 
-        tokio::spawn(run_central_events(
-            Arc::clone(&central),
-            Arc::clone(&routing),
-            inbox_tx.clone(),
-            Arc::clone(&probe_disconnects),
-        ));
-        tokio::spawn(run_peripheral_state_events(
-            Arc::clone(&peripheral),
-            Arc::clone(&routing),
-            inbox_tx.clone(),
-        ));
-        tokio::spawn(run_peripheral_requests(
-            Arc::clone(&peripheral),
-            inbox_tx.clone(),
-            psm_atomic,
-        ));
         tokio::spawn(run_watchdog(inbox_tx.clone()));
 
-        Ok(Arc::new(Self {
+        Arc::new(Self {
             local_id,
             hook_tx,
             handle: RegistryHandle {
@@ -505,7 +544,10 @@ impl BleTransport {
             inbox_capacity_wakers,
             store,
             probe_disconnects,
-        }))
+            active_connections: Arc::new(ActiveConnections::default()),
+            idle_linger,
+            link_priority: Arc::new(LinkPriority::default()),
+        })
     }
 
     /// Mark the next central disconnect for `device_id` as cleanup from an app-owned identity
@@ -538,7 +580,25 @@ impl BleTransport {
             self.local_id,
             Arc::clone(&self.routing),
             self.hook_tx.clone(),
+            Arc::clone(&self.active_connections),
+            self.idle_linger,
+            Arc::clone(&self.link_priority),
         )
+    }
+
+    /// Keep this transport's links for `alpns` alone whenever `held()` returns true.
+    ///
+    /// While held, the hooks from [`Self::dedup_hook`] refuse every other protocol on BLE: a dial
+    /// to a peer in BLE range is rejected before it starts, and a connection that arrives over
+    /// BLE anyway is closed once its handshake identifies its protocol. Connections over IP or a
+    /// relay are untouched. `held` is asked once per connection, so it should be cheap; a later
+    /// call replaces the earlier policy. See [`crate::transport::priority`] for why.
+    pub fn reserve_links_for(
+        &self,
+        alpns: Vec<Vec<u8>>,
+        held: impl Fn() -> bool + Send + Sync + 'static,
+    ) {
+        self.link_priority.set(alpns, Arc::new(held));
     }
 
     /// Counts-only snapshot of the routing table (pipes / scan hints /
@@ -858,7 +918,13 @@ impl CustomSender for BleSender {
         let (device_id, target_endpoint) = if let Some(d) = self.routing.device_for_pipe(stable_id)
         {
             (d, None)
-        } else if let Some((endpoint, prefix)) = self.routing.reservation_target(stable_id) {
+        } else if let Some((endpoint, prefix)) = self
+            .routing
+            .reservation_target(stable_id)
+            // A gone pipe's id that iroh is still dialling its peer on: reserve it again, so
+            // this send opens the next pipe instead of being dropped.
+            .or_else(|| self.routing.resurrect_for_send(stable_id))
+        {
             // Reservation path: poll_send is iroh's *trigger* to start
             // the dial. scan_hint tells us which `DeviceId` is nearby
             // under this prefix right now; hand that to the registry

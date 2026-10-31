@@ -9,6 +9,7 @@ pub mod l2cap;
 pub mod mtu;
 pub mod peer;
 pub mod pipe;
+pub mod priority;
 pub mod registry;
 pub mod reliable;
 pub mod routing;
@@ -17,6 +18,8 @@ pub mod store;
 pub mod transport;
 pub mod watchdog;
 
+#[cfg(feature = "testing")]
+pub mod sim;
 #[cfg(feature = "testing")]
 pub mod test_util;
 

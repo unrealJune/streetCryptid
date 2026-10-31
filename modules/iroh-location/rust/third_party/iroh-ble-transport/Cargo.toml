@@ -19,7 +19,7 @@ publish = false
 testing = []
 
 [dependencies]
-blew = "0.3"
+blew = { path = "../blew" }
 uuid = { version = "1", features = ["v4"] }
 thiserror = "2"
 tracing = "0.1"
@@ -44,11 +44,11 @@ serde = { version = "1", features = ["derive"] }
 arc-swap = "1"
 
 [dev-dependencies]
-tokio = { version = "1", features = ["full"] }
+tokio = { version = "1", features = ["full", "test-util"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 anyhow = "1"
 rand = "0.9"
-blew = { version = "0.3", features = ["testing"] }
+blew = { path = "../blew", features = ["testing"] }
 proptest = "1"
 
 [profile.test.package.proptest]

@@ -846,6 +846,48 @@ describe('LocationSharingService — pairing / profile wiring', () => {
     expect(snap.current?.pairing.bump.error).toMatch(/more than one phone/i);
   });
 
+  /**
+   * 2026-10-30: an iPhone's own search found nothing and it said "No other streetCryptid phone
+   * answered", while the Pixel beside it had found it and was dialling. The window was still open
+   * the whole time, and the Pixel's Hello turned that "failure" straight into the SAS figures.
+   */
+  for (const status of ['noPeers', 'probeFailed'] as const) {
+    it(`keeps listening when its own search ends ${status}, and takes the other phone's request`, async () => {
+      const svc = newService();
+      const snap = watch(svc);
+      await svc.init('@me', 'mothman');
+      mockHolder.mod.bumpResolution = {
+        status,
+        endpointId: null,
+        deviceId: null,
+        rssi: null,
+        peerCount: status === 'noPeers' ? 0 : 1,
+        detail: status,
+      };
+
+      await svc.armBump();
+      await svc.commitBump();
+
+      expect(snap.current?.pairing.bump.stage).toBe('waiting');
+      expect(snap.current?.pairing.bump.error).toBeNull();
+      expect(mockHolder.mod.calls.setPairingReady.at(-1)).toBe(true);
+
+      mockHolder.mod.pairEvents = [
+        {
+          kind: 'pendingRequest',
+          sessionId: 'nearby-from-them',
+          peerEndpointId: 'peer-who-found-us',
+          nearby: true,
+        },
+      ];
+      await svc.refreshPairing();
+
+      // Picked up as this Bump's handshake, not parked as an unsolicited request.
+      expect(snap.current?.pairing.pendingRequests).toHaveLength(0);
+      expect(mockHolder.mod.calls.respondPair).toHaveLength(0);
+    });
+  }
+
   it('does not pair from a Bump result that arrives after cancellation', async () => {
     const svc = newService();
     const snap = watch(svc);
@@ -893,11 +935,43 @@ describe('LocationSharingService — pairing / profile wiring', () => {
     const committing = svc.commitBump();
     await Promise.resolve();
     await Promise.resolve();
+    // What leaving the screen does: close the radio and stand down the sessions it can name,
+    // which cannot include one whose initiation has not returned yet.
     await svc.cancelBump();
+    await svc.standDownPairing([]);
     resolveSession('sess-too-late');
     await committing;
 
     expect(mockHolder.mod.calls.cancelPair).toContain('sess-too-late');
+  });
+
+  // 2026-10-31: a Pixel 10 left the foreground for 1.6 s during its Hello, which closed the Bump
+  // window; the handshake reached the figures on the iPhone and was then cancelled by the Pixel.
+  it('lets a handshake finish when the window closes because the app left the foreground', async () => {
+    const svc = newService();
+    await svc.init('@me', 'mothman');
+    mockHolder.mod.bumpResolution = {
+      status: 'resolved',
+      endpointId: 'peer-blip',
+      deviceId: 'ble-blip',
+      rssi: -32,
+      peerCount: 1,
+      detail: 'resolved',
+    };
+    let resolveSession!: (sessionId: string) => void;
+    mockHolder.mod.initiateNearbyPromise = new Promise((resolve) => {
+      resolveSession = resolve;
+    });
+
+    await svc.armBump();
+    const committing = svc.commitBump();
+    await Promise.resolve();
+    await Promise.resolve();
+    await svc.cancelBump();
+    resolveSession('sess-blip');
+    await committing;
+
+    expect(mockHolder.mod.calls.cancelPair).not.toContain('sess-blip');
   });
 
   it('does not cancel a simultaneous nearby session that reaches verification before initiation returns', async () => {

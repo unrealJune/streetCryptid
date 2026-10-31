@@ -13,3 +13,13 @@ License: AGPL-3.0-or-later (see LICENSE in this directory).
 The files are copied into the IrohLocation Expo module because the Rust `blew`
 backend requires Android Kotlin managers and JNI callbacks in the application
 classloader. No functional modifications were made when vendored in July 2026.
+
+Modified by the streetCryptid project (2026-10-31): BlePeripheralManager.startAdvertising
+no longer renames the Bluetooth adapter to the advertised local name, and the scan
+response no longer includes the device name.
+
+Modified by the streetCryptid project (2026-10-31): BleCentralManager requests
+CONNECTION_PRIORITY_HIGH on every connection, after the MTU exchange.
+
+The Rust half of blew is vendored too, since 2026-10-31, at
+modules/iroh-location/rust/third_party/blew/ (with its own NOTICE).

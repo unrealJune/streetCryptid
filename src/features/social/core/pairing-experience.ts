@@ -1,5 +1,6 @@
 import type { PairStateRecord } from 'iroh-location';
 
+import type { BumpStage } from '../net/location-sharing';
 import type { Friend } from './types';
 
 export type PairingExperienceStage =
@@ -13,7 +14,7 @@ export type PairingExperienceStage =
   | 'failed';
 
 export interface PairingExperienceInput {
-  bumpStage: 'idle' | 'armed' | 'searching' | 'contact' | 'failed';
+  bumpStage: BumpStage;
   sessions: readonly PairStateRecord[];
   discoveredFriend: Friend | null;
   /** Whether a pairing that had started has broken and not yet been dismissed. */

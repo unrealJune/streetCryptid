@@ -1,0 +1,78 @@
+# VENDORED THIRD-PARTY CRATE — AGPL-3.0-or-later. See ./LICENSE and ./NOTICE.
+# Upstream: https://github.com/mcginty/blew tag blew-v0.3.0 (crates.io blew 0.3.0,
+# commit dde4bdaa09b3ef60bb595dd1be360a54c17615d4, crates/blew).
+# Modified by the streetCryptid project (2026-10-31): Apple flow control. See ./NOTICE.
+# The Android Kotlin half lives in modules/iroh-location/android (see build.rs).
+[package]
+name = "blew"
+version = "0.3.0"
+edition = "2024"
+authors = ["Jake McGinty <me@jakebot.org>"]
+license = "AGPL-3.0-or-later"
+description = "Cross-platform async BLE library for Rust (Apple, Linux, Android)"
+repository = "https://github.com/mcginty/blew"
+keywords = ["bluetooth", "ble", "gatt", "l2cap"]
+categories = ["hardware-support", "network-programming"]
+links = "blew"
+publish = false
+
+[features]
+testing = []
+
+[dependencies]
+uuid = { version = "1", features = ["v4"] }
+bitflags = "2"
+thiserror = "2"
+tracing = "0.1"
+tokio = { version = "1", features = [
+    "sync",
+    "rt",
+    "io-util",
+    "macros",
+    "time",
+] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+futures-core = "0.3"
+bytes = "1"
+parking_lot = "0.12"
+
+[dev-dependencies]
+proptest = { version = "1", default-features = false, features = ["std"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[target.'cfg(target_vendor = "apple")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = [
+    "NSData",
+    "NSDate",
+    "NSString",
+    "NSUUID",
+    "NSArray",
+    "NSDictionary",
+    "NSObject",
+    "NSError",
+    "NSRunLoop",
+    "NSValue",
+    "NSStream",
+] }
+objc2-core-bluetooth = { version = "0.3", features = ["CBError", "CBCentralManagerConstants"] }
+dispatch2 = { version = "0.3", features = ["alloc", "objc2"] }
+# The L2CAP reactor's wake-up source (`CFRunLoopSource`); already in the tree via objc2-foundation.
+objc2-core-foundation = { version = "0.3", features = ["CFRunLoop"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+bluer = { version = "0.17", features = ["full"] }
+
+[target.'cfg(target_os = "android")'.dependencies]
+jni = "0.22"
+ndk-context = "0.1"
+serde_json = "1"
+
+[lints.clippy]
+unseparated_literal_suffix = "warn"
+pedantic = { level = "warn", priority = -1 }
+doc_markdown = "allow"
+used_underscore_items = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+default_trait_access = "allow"

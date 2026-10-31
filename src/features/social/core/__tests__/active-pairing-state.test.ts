@@ -45,6 +45,21 @@ function stage(
 }
 
 describe('deriveActivePairingStage', () => {
+  describe('a search that found nothing on this phone is not a miss', () => {
+    it('listens rather than reporting nothing found while the window is open', () => {
+      expect(stage({ bumpStage: 'waiting' })).toBe('bump-waiting');
+    });
+
+    it("gives way to the other phone's request the moment it lands", () => {
+      expect(stage({ bumpStage: 'waiting', hasActiveSession: true })).toBe('handshaking');
+      expect(stage({ bumpStage: 'waiting', hasVerification: true })).toBe('verifying');
+    });
+
+    it('still reports a real failure as one', () => {
+      expect(stage({ bumpStage: 'failed', bumpError: 'More than one phone' })).toBe('bump-failed');
+    });
+  });
+
   describe('the service has to be up before any channel can be', () => {
     /**
      * 2026-10-03: init rejected, Bump's arm threw "Friend sync is not ready yet.", and the screen

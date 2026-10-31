@@ -239,6 +239,41 @@ jobs:
           echo "Run 'just bindgen-android' and 'just bindgen-ios' to refresh them." >&2
           exit 1
 
+  # The vendored BLE transport's suite, including real iroh endpoints pairing over a simulated
+  # radio. Its own job because it compiles iroh a second time (the app crate leaves BLE out on
+  # Linux) and would not fit in `native`'s budget beside the app's tests.
+  ble-transport:
+    name: BLE transport
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # `blew`'s Linux backend (bluer) links libdbus even though the tests never touch a radio.
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes build-essential clang cmake libdbus-1-dev libssl-dev perl pkg-config
+
+      - name: Install Rust build tools
+        uses: taiki-e/install-action@a6b2e2dcd845ddd7f509ce4f3ed3d922b80cc5d9 # v2.84.0
+        with:
+          tool: |
+            rust@1.97.0
+            just@1.57.0
+          fallback: none
+
+      - name: Restore Rust compilation cache
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          workspaces: modules/iroh-location/rust/third_party/iroh-ble-transport -> target
+          key: ble-transport
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+
+      - name: Run BLE transport tests
+        run: just test-ble-transport
+
   required:
     name: Required
     if: always()
@@ -246,6 +281,7 @@ jobs:
       - quality
       - typecheck
       - native
+      - ble-transport
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -254,8 +290,9 @@ jobs:
           QUALITY_RESULT: ${{ needs.quality.result }}
           TYPECHECK_RESULT: ${{ needs.typecheck.result }}
           NATIVE_RESULT: ${{ needs.native.result }}
+          BLE_TRANSPORT_RESULT: ${{ needs.ble-transport.result }}
         run: |
-          for result in "$QUALITY_RESULT" "$TYPECHECK_RESULT" "$NATIVE_RESULT"; do
+          for result in "$QUALITY_RESULT" "$TYPECHECK_RESULT" "$NATIVE_RESULT" "$BLE_TRANSPORT_RESULT"; do
             if [[ "$result" != "success" ]]; then
               echo "A required CI job did not succeed." >&2
               exit 1

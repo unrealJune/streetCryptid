@@ -302,6 +302,14 @@ object BleCentralManager {
                         if (mtuResult.isFailure) {
                             Log.w(TAG, "MTU negotiation failed for $addr: ${mtuResult.exceptionOrNull()?.message}")
                         }
+                        // streetCryptid (2026-10-31): ask for the short connection interval
+                        // (11.25-15 ms) instead of Android's balanced default. Every link here is
+                        // a short pairing or sync exchange on a few-KB/s radio, and the link
+                        // lingers only 30 s idle. An iPhone peripheral accepts 15 ms; the request
+                        // is a hint and has no callback, so a refusal is just logged.
+                        if (!gatt.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_HIGH)) {
+                            Log.d(TAG, "connection priority request refused for $addr")
+                        }
                         nativeOnConnectionStateChanged(addr, true, 0)
                     }
                 } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
