@@ -753,6 +753,8 @@ external fun uniffi_iroh_location_checksum_func_configure_telemetry(
 ): Int
 external fun uniffi_iroh_location_checksum_func_flush_telemetry(
 ): Int
+external fun uniffi_iroh_location_checksum_func_set_telemetry_spool_dir(
+): Int
 external fun uniffi_iroh_location_checksum_method_devicesecrets_identity_secret(
 ): Int
 external fun uniffi_iroh_location_checksum_method_devicesecrets_recv_secret(
@@ -1333,6 +1335,8 @@ external fun uniffi_iroh_location_fn_func_configure_telemetry(`endpoint`: RustBu
 ): Byte
 external fun uniffi_iroh_location_fn_func_flush_telemetry(
 ): Long
+external fun uniffi_iroh_location_fn_func_set_telemetry_spool_dir(`dir`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): Byte
 external fun ffi_iroh_location_rustbuffer_alloc(`size`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
 external fun ffi_iroh_location_rustbuffer_from_bytes(`bytes`: ForeignBytes.ByValue,uniffi_out_err: UniffiRustCallStatus, 
@@ -1522,6 +1526,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_iroh_location_checksum_func_flush_telemetry() != 65035) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_iroh_location_checksum_func_set_telemetry_spool_dir() != 28941) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_iroh_location_checksum_method_devicesecrets_identity_secret() != 9294) {
@@ -13011,5 +13018,21 @@ public object FfiConverterSequenceTypeTransportAddressDiagnostic: FfiConverterRu
         UniffiNullRustCallStatusErrorHandler,
     )
     }
+
+        /**
+         * Where Rust telemetry that could not be sent waits for the collector (the app's caches
+         * directory). Until this is called it waits in memory, bounded, and dies with the process. Call it
+         * before [`configure_telemetry`]; calling it again moves future batches, not queued ones. Returns
+         * whether the directory is usable; always `false` without the `otel` feature.
+         */ fun `setTelemetrySpoolDir`(`dir`: kotlin.String): kotlin.Boolean {
+            return FfiConverterBoolean.lift(
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_iroh_location_fn_func_set_telemetry_spool_dir(
+    
+        FfiConverterString.lower(`dir`),_status)
+}
+    )
+    }
+    
 
 
