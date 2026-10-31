@@ -58,6 +58,7 @@ runs:
         {
           echo "CARGO_TARGET_DIR=$GITHUB_WORKSPACE/modules/iroh-location/rust/target"
           echo "RUSTUP_TOOLCHAIN=stable"
+          echo "SC_EAS_RUST_CACHE_SAVE=${{ inputs.save }}"
         } >> "$GITHUB_ENV"
 
     - name: Install the Rust toolchain
@@ -81,4 +82,10 @@ runs:
         # rust-cache's post step is `success() || env.CACHE_ON_FAILURE == 'true'`; without this a
         # build that fails after 40 minutes of compiling saves nothing.
         cache-on-failure: 'true'
-        save-if: ${{ inputs.save }}
+        # NOT `${{ inputs.save }}`: rust-cache reads save-if again in its post step, and a post step
+        # of an action nested in a composite action sees an empty `inputs` context, so the input
+        # fell back to rust-cache's default of true. Every pull request saved a 0.9-1.9 GB entry
+        # into its own scope (logged "save-if: false", then "Saving cache" in the post step),
+        # which pushed the repository past its 10 GB budget and evicted main's warm entries --
+        # the ones every pull request build depends on. The job environment survives into post.
+        save-if: ${{ env.SC_EAS_RUST_CACHE_SAVE == 'true' }}
