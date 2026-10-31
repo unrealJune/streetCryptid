@@ -2,12 +2,16 @@ import {
   applyViewTransform,
   centerBeside,
   clampCamera,
+  DRAW_ORIGIN_RANGE_PX,
+  drawAnchorFor,
+  drawOriginFor,
   scaleFor,
   screenToWorld,
   viewTransformFor,
   visibleWorldRect,
   worldToScreen,
   TILE_SIZE,
+  ZERO_DRAW_ORIGIN,
 } from '../camera';
 import type { CameraState, Viewport, WorldPoint } from '../types';
 
@@ -141,5 +145,70 @@ describe('centerBeside', () => {
     expect(centerBeside(camera, 0)).toBe(camera);
     const back = centerBeside(centerBeside(camera, 300), -300);
     expect(back.center[0]).toBeCloseTo(camera.center[0], 12);
+  });
+});
+
+describe('drawOriginFor', () => {
+  // Home in Seattle, looking at Tokyo: the case float32 could not hold.
+  const anchor: CameraState = { center: [0.1603, 0.3498], zoom: 12 };
+  const tokyo: CameraState = { center: [0.888, 0.4032], zoom: 16 };
+  const k = 2 ** (tokyo.zoom - anchor.zoom);
+
+  it('keeps every canvas coordinate and translation near zero far from the anchor', () => {
+    const origin = drawOriginFor(anchor, tokyo, ZERO_DRAW_ORIGIN);
+    const drawAnchor = drawAnchorFor(anchor, origin);
+    const point: WorldPoint = [tokyo.center[0] + 1e-4, tokyo.center[1] - 1e-4];
+    const [x, y] = worldToScreen(drawAnchor, viewport, point);
+    expect(Math.abs(x)).toBeLessThan(2 * DRAW_ORIGIN_RANGE_PX);
+    expect(Math.abs(y)).toBeLessThan(2 * DRAW_ORIGIN_RANGE_PX);
+
+    const t = viewTransformFor(anchor, viewport, tokyo);
+    expect(Math.abs(t.tx)).toBeGreaterThan(1e7);
+    expect(Math.abs(t.tx + k * origin.x)).toBeLessThan(k * 2 * DRAW_ORIGIN_RANGE_PX);
+  });
+
+  it('puts a point on the same screen pixel as the anchor-space draw', () => {
+    const origin = drawOriginFor(anchor, tokyo, ZERO_DRAW_ORIGIN);
+    const drawAnchor = drawAnchorFor(anchor, origin);
+    const t = viewTransformFor(anchor, viewport, tokyo);
+    const point: WorldPoint = [tokyo.center[0] + 1e-4, tokyo.center[1] - 1e-4];
+    const [ax, ay] = worldToScreen(anchor, viewport, point);
+    const [dx, dy] = worldToScreen(drawAnchor, viewport, point);
+    expect(dx * k + (t.tx + k * origin.x)).toBeCloseTo(ax * k + t.tx, 5);
+    expect(dy * k + (t.ty + k * origin.y)).toBeCloseTo(ay * k + t.ty, 5);
+  });
+
+  it('keeps a slow drag in Tokyo smooth through a float32 canvas, where anchor space shakes', () => {
+    // What Skia does with a point: float32 coordinates, float32 scale and translation.
+    const drawn = (point: number, scale: number, translate: number) =>
+      Math.fround(Math.fround(Math.fround(point) * Math.fround(scale)) + Math.fround(translate));
+    const origin = drawOriginFor(anchor, tokyo, ZERO_DRAW_ORIGIN);
+    const drawAnchor = drawAnchorFor(anchor, origin);
+    const start = viewTransformFor(anchor, viewport, tokyo);
+    const point: WorldPoint = tokyo.center;
+    const [anchorX] = worldToScreen(anchor, viewport, point);
+    const [localX] = worldToScreen(drawAnchor, viewport, point);
+
+    let anchorError = 0;
+    let localError = 0;
+    for (let frame = 0; frame < 240; frame++) {
+      const tx = start.tx + frame * 0.37;
+      const truth = anchorX * k + tx;
+      anchorError = Math.max(anchorError, Math.abs(drawn(anchorX, k, tx) - truth));
+      localError = Math.max(localError, Math.abs(drawn(localX, k, tx + k * origin.x) - truth));
+    }
+    expect(anchorError).toBeGreaterThan(0.5);
+    expect(localError).toBeLessThan(0.05);
+  });
+
+  it('holds still for ordinary panning, so layers do not remount with every commit', () => {
+    const origin = drawOriginFor(anchor, tokyo, ZERO_DRAW_ORIGIN);
+    const s = scaleFor(anchor.zoom);
+    const nudged: CameraState = {
+      ...tokyo,
+      center: [tokyo.center[0] + 500 / s, tokyo.center[1] - 500 / s],
+    };
+    expect(drawOriginFor(anchor, nudged, origin)).toBe(origin);
+    expect(drawOriginFor(anchor, anchor, ZERO_DRAW_ORIGIN)).toBe(ZERO_DRAW_ORIGIN);
   });
 });

@@ -499,7 +499,7 @@ function renderShot({
     mask.makeShaderOptions(
       CanvasKit.TileMode.Clamp,
       CanvasKit.TileMode.Clamp,
-      CanvasKit.FilterMode.Nearest,
+      CanvasKit.FilterMode.Linear,
       CanvasKit.MipmapMode.None
     ),
     cells.makeShaderOptions(

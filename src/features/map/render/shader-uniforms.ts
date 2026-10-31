@@ -27,8 +27,9 @@ export const LOD_COARSE_ZOOM = 11;
 
 /**
  * The dot-field simplification factor for a build zoom: 0 = full street-level
- * detail, 1 = maximally simplified (areas fill solid, background noise thinned,
- * ghost lattice faded) so a zoomed-out city view reads as terrain, not stipple.
+ * detail, 1 = maximally simplified (background noise thinned, ghost lattice faded)
+ * so a zoomed-out city view reads as terrain, not stipple. Areas stay out of it:
+ * their tone must not depend on which zoom a region was built at.
  */
 export function lodForZoom(zoom: number): number {
   return clamp((LOD_FULL_ZOOM - zoom) / (LOD_FULL_ZOOM - LOD_COARSE_ZOOM), 0, 1);

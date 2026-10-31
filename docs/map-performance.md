@@ -1,5 +1,57 @@
 # Map renderer performance over time
 
+## One tone per place, and a canvas that stays near zero
+
+Reported on #177 after the two-pixel grid landed: static on water and greenery at
+street zoom, static in unexplored ground, a lighter rectangular patch in forest, and
+a map that shook once you had travelled far from home.
+
+**Tone came from dot size.** Parks and water grew their dots with `uLod` until they
+merged, so a forest was about 32% ink in a z14 region and about 72% in the z12 region
+beside it. That was the lighter patch: two regions of one place, one over the other.
+The same Olympics ground measured `rgb(85,160,120)` at build zoom 11.3 and
+`rgb(167,204,187)` at 14.3. Removing the growth alone left every zoom pale. And to
+draw a tone at all the dots had to be loud, which was the static: on a phone the
+region bitmap is at 1x (`MAX_IMAGE_DIM`), so each dot is a pixel or two stretched
+three times over a 3x screen.
+
+An area is now a **wash**: constant ink blended between its four sites, stored per
+site in the atlas, with faint grain on top. That is not the rejected mean-area
+reconstruction: grain survives at every zoom (`retains grain` holds it above a local
+contrast of 1 even mid-zoom), and fog keeps its own, lighter wash. The same ground now
+measures `rgb(107..111,171..174,136..141)` across those four zooms. Bare ground
+dropped to 26% alpha for the same reason, since it covers more of a phone's screen than
+anything else. Roads keep their dots, their class values and their connected sampling.
+
+**A stretched DEM has creases.** The DEM stops at z12, so a street view stretches one
+DEM pixel over a hundred screen pixels, and the bilinear surface's creases drew
+contours as polygons and hillshade as blocks. Height is now a cubic B-spline through
+four bilinear taps, and the same taps give the slope. Contours are measured in px from
+the line rather than in metres, so a flat valley's line is as thin as a ridge's, and
+lines packed tighter than the lattice fade out. Value noise was rotated off its
+square grid, and water and park read the filtered mask while streets snap to texels.
+
+**Anchor space overflows float32.** Skia's matrices and rects are float32, and the
+anchor is home: Tokyo from a Seattle anchor is 760,000 px, and that translation at
+z16 is 12 million, where a float32 rounds to a pixel. Layers on the canvas now draw
+against a draw origin (`DRAW_ORIGIN_RANGE_PX`), and the group transform cancels it in
+doubles. Replaying Skia's arithmetic through `Math.fround` for a slow Tokyo drag gives
+over 0.5 px of error in anchor space and under 0.05 px from the draw origin. Overlays
+are unaffected: they add the transform in doubles before it reaches a view.
+
+Cost, iOS 27 simulator on a debug build, Seattle z12, interleaved by hot reload on the
+same camera and tiles, four samples each:
+
+| Shader       | Raster median | Total median |
+| ------------ | ------------: | -----------: |
+| PR head      |        105 ms |       303 ms |
+| Wash + cubic |        107 ms |       312 ms |
+
+That is no measurable change, on a host under heavy load. It is not a phone: thermals,
+frame pacing and native memory remain unmeasured, and the simulator cannot record
+video while receiving injected touches, so the drag figure above is arithmetic, not a
+capture.
+
 ## Keeping the pixel aesthetic without a screen-door pattern
 
 References: `0f84053` before the stability optimization, `829cdd2` with that
@@ -20,8 +72,8 @@ alone could not fix either problem.
 There is now one grid with a fixed **two-bitmap-pixel pitch**, registered to
 the final bitmap's global pixel grid. The logical pitch is `2 / pixelRatio`;
 atlas sizing receives that same actual density, including reduced-quality
-renders. There is no detail-grid crossfade and no area-coverage reconstruction.
-Park, water and ground cover retain real antialiased dot glyphs. A restrained
+renders. There is no detail-grid crossfade. Roads and bare ground retain real
+antialiased dot glyphs; areas are a wash with grain (see above). A restrained
 non-road glyph offset breaks coherent circle overlap without jittering the
 geometry samples. Site randomness uses a bounded non-trigonometric hash;
 geographic canopy/water noise keeps its own fixed-world coordinates.
@@ -35,8 +87,8 @@ The fixed footprint also makes the compositor cheaper. At registered bitmap
 pixel centres, only the four surrounding sites can contribute: the next site
 is at least 1.25 pitches away on one axis, beyond the glyph's radius,
 antialiasing and jitter combined. The compositor therefore visits **four
-sites instead of nine**, without changing a pixel. CPU image tests and seven
-GPU photo comparisons check it against the full nine-neighbour reference.
+sites instead of nine**, without changing a pixel. CPU image tests check it
+against a reference that visits every neighbouring site.
 This relies on the fixed two-pixel pitch, not an arbitrary configurable step.
 
 Terrain treatment no longer stops at a material boundary. Alpine forest and

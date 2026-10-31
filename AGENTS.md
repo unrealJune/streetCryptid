@@ -668,6 +668,17 @@ on web is noise. Use it for ratios and for finding work that should not happen a
   from a route or bake that is not live yet looks exactly like a sparse tile; the terrain store
   kept such answers for 30 days and drew relief in only some DEM tiles of a view (straight edges on
   tile boundaries). Terrain trusts an empty answer for a day; bump its `sourceId` to flush one.
+- **An area's tone is its wash, and nothing else, at every zoom** (`dot-field-sksl.ts`). Do not
+  put zoom into how much ink a park or water lays down. Dots that grew with `uLod` made one forest
+  more than twice as dark in a z12 region as in the z14 region over it, which read as a lighter
+  patch with hex edges, and the dots loud enough to carry a tone were the static. Grain sits on
+  top of the wash; `retains grain` is what stops it being smoothed away entirely.
+- **Canvas layers draw against the draw origin, never against the anchor** (`drawAnchorFor`).
+  Anchor space is planet-sized and Skia is float32: from a Seattle anchor, Tokyo at z16 needs a
+  translation of 12 million, which rounds to whole pixels and shakes differently every frame. Lay
+  a new canvas layer out with `drawAnchor`. `WorldLayers` is keyed by the origin so a move changes
+  the group and its children in the same frame. Overlays outside the canvas stay on `anchor`,
+  because they add the transform in doubles.
 - **Elevation is never resampled in JS.** The DEM crop goes to the GPU at its own resolution and the
   bilinear filter stretches it over the mask (`ElevationRaster.rect`). Per-mask-pixel sampling in JS
   cost 1.3–2.5 s of interpreter time per region build.

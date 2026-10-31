@@ -436,21 +436,15 @@ describe('real CanvasKit map shaders', () => {
 });
 
 describe('four-site compositing', () => {
-  const reference = DOT_FIELD_SKSL.replace(
-    /float3 fieldAt\(float2 frag\) \{[\s\S]*?\n\}/,
-    `float3 fieldAt(float2 frag) {
-      float3 col = uBg;
-      float baseIx = floor((frag.x - uGridPhase.x) / uStep + 0.5);
-      float baseIy = floor((frag.y - uGridPhase.y) / uStep + 0.5);
-      for (float dy = -1.0; dy <= 1.0; dy += 1.0) {
-        for (float dx = -1.0; dx <= 1.0; dx += 1.0) {
-          float4 d = dotAt(baseIx + dx, baseIy + dy, frag);
-          col = mix(col, d.rgb, d.a);
-        }
-      }
-      return col;
-    }`
-  );
+  // Every site that could reach a fragment: the wash stays on its four, so only a dot from the
+  // outer ring could change a pixel, and the claim is that none can.
+  const reference = DOT_FIELD_SKSL.replaceAll('= 0.0; dy <= 1.0;', '= -1.0; dy <= 2.0;')
+    .replaceAll('= 0.0; dx <= 1.0;', '= -1.0; dx <= 2.0;')
+    .replace(
+      'float w = mix(1.0 - f.x, f.x, dx) * mix(1.0 - f.y, f.y, dy);',
+      `float w = dx >= 0.0 && dx <= 1.0 && dy >= 0.0 && dy <= 1.0
+        ? mix(1.0 - f.x, f.x, dx) * mix(1.0 - f.y, f.y, dy) : 0.0;`
+    );
 
   it.each([
     { zoom: 13.16, quality: 0.25, fog: true, mask: [255, 0, 0, 255] },
@@ -460,7 +454,7 @@ describe('four-site compositing', () => {
     { zoom: 13.16, quality: 0.65, fog: false, mask: [0, 255, 0, 255] },
     { zoom: 12.25, quality: 1, fog: true, mask: [0, 0, 255, 255] },
     { zoom: 12.25, quality: 1, fog: false, mask: [0, 0, 0, 255], terrain: true },
-  ])('matches all nine neighbours at z$zoom, quality=$quality, fog=$fog', (c) => {
+  ])('matches every reachable neighbour at z$zoom, quality=$quality, fog=$fog', (c) => {
     expect(reference).not.toBe(DOT_FIELD_SKSL);
     const options = { terrain: false, ...c, explorationEnabled: c.fog, cells: [0, 0, 0, 255] };
     expect(render(options)).toEqual(render({ ...options, fieldSource: reference }));

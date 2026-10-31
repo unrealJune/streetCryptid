@@ -216,12 +216,7 @@ export function renderRegionImage({
   }
 
   const inputs = [
-    maskImage.makeShaderOptions(
-      TileMode.Clamp,
-      TileMode.Clamp,
-      FilterMode.Nearest,
-      MipmapMode.None
-    ),
+    maskImage.makeShaderOptions(TileMode.Clamp, TileMode.Clamp, FilterMode.Linear, MipmapMode.None),
     cellImage.makeShaderOptions(
       TileMode.Clamp,
       TileMode.Clamp,
