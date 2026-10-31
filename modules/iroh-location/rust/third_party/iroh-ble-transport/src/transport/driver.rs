@@ -157,13 +157,26 @@ impl<I: BleInterface> Driver<I> {
 
     pub async fn execute(&self, action: PeerAction) {
         match action {
-            PeerAction::StartConnect {
-                device_id,
-                attempt: _,
-            } => {
+            PeerAction::StartConnect { device_id, attempt } => {
                 let iface = Arc::clone(&self.iface);
                 let inbox = self.inbox.clone();
                 let dev_for_msg = device_id.clone();
+                // `ble.connect`: one span per central connect the transport makes, with the time
+                // at each step (`BlewDriver::connect` records them). On 2026-10-31 a Pixel's Bump
+                // dial to an iPhone timed out three times and nothing said whether a connect had
+                // even started, nor which step an iPhone's own connects died in.
+                let span = tracing::info_span!(
+                    "ble.connect",
+                    device = %device_id,
+                    attempt = u64::from(attempt),
+                    outcome = tracing::field::Empty,
+                    error = tracing::field::Empty,
+                    ms = tracing::field::Empty,
+                    connect_ms = tracing::field::Empty,
+                    discover_ms = tracing::field::Empty,
+                    subscribe_ms = tracing::field::Empty,
+                );
+                let started = std::time::Instant::now();
                 // blew enforces `CentralConfig::connect_timeout` itself
                 // (15 s default, overridable by the app). On expiry it
                 // refresh()+close()s the Android GATT client and
@@ -171,7 +184,19 @@ impl<I: BleInterface> Driver<I> {
                 // through the `Err` arm below into the registry's
                 // normal retry logic.
                 tokio::spawn(async move {
-                    match iface.connect(&device_id).await {
+                    let result =
+                        tracing::Instrument::instrument(iface.connect(&device_id), span.clone())
+                            .await;
+                    span.record("ms", started.elapsed().as_millis() as u64);
+                    match &result {
+                        Ok(_) => span.record("outcome", "ok"),
+                        Err(e) => {
+                            span.record("outcome", "failed");
+                            span.record("error", tracing::field::display(e))
+                        }
+                    };
+                    drop(span);
+                    match result {
                         Ok(channel) => {
                             let _ = inbox
                                 .send(PeerCommand::ConnectSucceeded {
@@ -220,11 +245,26 @@ impl<I: BleInterface> Driver<I> {
                 });
             }
 
-            PeerAction::CloseChannel { device_id, .. } => {
-                let iface = Arc::clone(&self.iface);
-                tokio::spawn(async move {
-                    let _ = iface.disconnect(&device_id).await;
-                });
+            PeerAction::CloseChannel {
+                device_id, role, ..
+            } => {
+                // Closing is a central disconnect, and only a central has a client connection to
+                // drop. When the peer dialled us there is none of ours, and on Android a remote
+                // phone has one address whichever side dialled, so the disconnect lands on
+                // whatever client connection that address has: on 2026-10-31 a Pixel draining a
+                // dead pipe an iPhone had opened tore down the iPhone's fresh connection 0.8 s
+                // later. The peer closes its own side when its pipe stops hearing from us.
+                if role == crate::transport::peer::ConnectRole::Peripheral {
+                    tracing::debug!(
+                        device = %device_id,
+                        "close: peer dialled us; leaving its connection to the peer"
+                    );
+                } else {
+                    let iface = Arc::clone(&self.iface);
+                    tokio::spawn(async move {
+                        let _ = iface.disconnect(&device_id).await;
+                    });
+                }
             }
 
             // TODO: Own these detached maintenance tasks in Driver so transport
@@ -500,14 +540,20 @@ impl BlewDriver {
 #[async_trait]
 impl BleInterface for BlewDriver {
     async fn connect(&self, device_id: &blew::DeviceId) -> crate::error::BleResult<ChannelHandle> {
+        // Step times land on the caller's `ble.connect` span, if there is one.
+        let span = tracing::Span::current();
+        let started = std::time::Instant::now();
         self.central.connect(device_id).await?;
+        span.record("connect_ms", started.elapsed().as_millis() as u64);
         // GATT is not usable until services are discovered and P2C notifications
         // are subscribed. Android/Apple both require this explicitly before
         // write_characteristic or delivering notifications.
         self.central.discover_services(device_id).await?;
+        span.record("discover_ms", started.elapsed().as_millis() as u64);
         self.central
             .subscribe_characteristic(device_id, P2C_CHAR_UUID)
             .await?;
+        span.record("subscribe_ms", started.elapsed().as_millis() as u64);
         let id = self.next_channel_id.fetch_add(1, Ordering::Relaxed);
         let handle = ChannelHandle {
             id,

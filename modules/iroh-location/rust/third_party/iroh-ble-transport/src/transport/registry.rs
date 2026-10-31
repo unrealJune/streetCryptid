@@ -753,6 +753,14 @@ impl Registry {
             return;
         }
         entry.consecutive_failures = 0;
+        // Our central connect landed, so on this pipe we are the central: we write C2P and
+        // receive P2C notifications. The entry may still say Peripheral from an earlier pipe the
+        // peer opened to us, because Android names a remote phone by one address whichever side
+        // dialled. Starting the pipe with that stale role sends every datagram as a notification
+        // on a characteristic the peer never subscribed to, where it vanishes without an error:
+        // on 2026-10-31 a Pixel's pipe to an iPhone sent 5 datagrams, retransmitted 4 times and
+        // received nothing until the link was declared dead, and Bump never paired offline.
+        entry.role = crate::transport::peer::ConnectRole::Central;
         // Kick off the VERSION probe in parallel with whatever
         // path the handshake takes below. A mismatch arriving
         // after StartDataPipe still Dead-s the peer and closes
@@ -1116,6 +1124,7 @@ impl Registry {
         if let Some(ch) = channel {
             actions.push(PeerAction::CloseChannel {
                 device_id: device_id.clone(),
+                role: entry.role,
                 channel: ch,
                 reason: reason.clone(),
             });
@@ -1281,6 +1290,7 @@ impl Registry {
                     if let Some(ch) = channel {
                         actions.push(PeerAction::CloseChannel {
                             device_id: device_id.clone(),
+                            role: entry.role,
                             channel: ch,
                             reason,
                         });
@@ -1354,6 +1364,7 @@ impl Registry {
         if let Some(ch) = channel {
             actions.push(PeerAction::CloseChannel {
                 device_id: device_id.clone(),
+                role: entry.role,
                 channel: ch,
                 reason,
             });
@@ -1382,6 +1393,7 @@ impl Registry {
         actions.extend(broken_pipe_acks);
         actions.push(PeerAction::CloseChannel {
             device_id: device_id.clone(),
+            role: entry.role,
             channel,
             reason,
         });
@@ -1748,6 +1760,7 @@ impl Registry {
         if let Some(ch) = channel {
             actions.push(PeerAction::CloseChannel {
                 device_id: device_id.clone(),
+                role: entry.role,
                 channel: ch,
                 reason: crate::transport::peer::DisconnectReason::ProtocolMismatch,
             });
@@ -2472,6 +2485,41 @@ mod tests {
             reg.peer(&device.id).unwrap().phase,
             PeerPhase::Connecting { .. }
         ));
+    }
+
+    #[test]
+    fn connect_succeeded_makes_a_former_peripheral_entry_central() {
+        use crate::transport::peer::{ChannelHandle, ConnectPath, ConnectRole};
+
+        // Android names a remote phone by one address whichever side dialled, so the entry that
+        // served the peer's own connection to us is the one our dial lands on.
+        let mut reg = Registry::new_for_test();
+        let device_id = blew::DeviceId::from("6D:3F:DA:FF:F0:9E");
+        reg.peers.insert(device_id.clone(), {
+            let mut e = PeerEntry::new(device_id.clone());
+            e.role = ConnectRole::Peripheral;
+            e.phase = PeerPhase::Connecting {
+                attempt: 0,
+                started: std::time::Instant::now(),
+                path: ConnectPath::Gatt,
+            };
+            e
+        });
+        let actions = reg.handle(PeerCommand::ConnectSucceeded {
+            device_id: device_id.clone(),
+            channel: ChannelHandle {
+                id: 7,
+                path: ConnectPath::Gatt,
+            },
+        });
+        assert!(
+            actions.iter().any(|a| matches!(
+                a,
+                PeerAction::StartDataPipe { device_id: d, role: ConnectRole::Central, .. } if *d == device_id
+            )),
+            "a pipe we dialled must write as the central; got {actions:?}"
+        );
+        assert_eq!(reg.peer(&device_id).unwrap().role, ConnectRole::Central);
     }
 
     #[test]

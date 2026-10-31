@@ -535,6 +535,15 @@ Conventions when changing that code:
   against `third_party/iroh-ble-transport/tests/sim_pairing.rs` (`just test-ble-transport`): real
   iroh endpoints on BLE alone over `SimRadio`, which logs every link so a test can assert how many
   pipes a pairing took. It reproduced the stale-id failure before anyone had read the iroh source.
+- **A BLE peer entry outlives its pipes, and so does its role, so every pipe must set its own.**
+  Android names a remote phone by one address whichever side dialled, so the entry that served an
+  iPhone's connection to a Pixel is the one the Pixel's own dial lands on. `handle_connect_succeeded`
+  started that pipe with the entry's stale `Peripheral` role, which sends every datagram as a
+  notification the iPhone never subscribed to: on 2026-10-31 no offline Bump ever moved a byte
+  (`ble.pipe` `datagrams_out=5 retransmits=4 gatt_fragments_in=0`, on both phones). A successful
+  central connect now makes the entry `Central`, and `CloseChannel` carries the role so closing a
+  pipe the peer dialled no longer issues a central disconnect, which on Android dropped the link the
+  peer had just opened. Read `ble.pipe.role` against `ble.connect` before trusting a pipe.
 - **While a Bump window is open, BLE is for pairing alone, and a phone whose own search misses is
   still listening.** A BLE link carries a few KB/s and every connection to a peer shares it: on
   2026-10-30 a Pixel had just removed an iPhone to pair again, 13 friend-sync connections and a

@@ -360,6 +360,8 @@ pub enum PeerAction {
     },
     CloseChannel {
         device_id: DeviceId,
+        /// Our role on the closing link. Only a central has a client connection to drop.
+        role: ConnectRole,
         channel: ChannelHandle,
         reason: DisconnectReason,
     },

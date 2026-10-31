@@ -332,11 +332,13 @@ mod imp {
         // name it (2026-10-31: an iPhone's search never resolved a Pixel beside it).
         let span = tracing::Span::current();
         let step = std::time::Instant::now();
+        let mut connected = false;
         let read = tokio::time::timeout(std::cmp::min(PROBE_TIMEOUT, budget), async {
             central
                 .connect(&device.id)
                 .await
                 .map_err(|error| format!("connect failed: {error}"))?;
+            connected = true;
             span.record("connect_ms", step.elapsed().as_millis() as u64);
             let services = central
                 .discover_services(&device.id)
@@ -366,26 +368,50 @@ mod imp {
             let _ = central.refresh(&device.id).await;
         }
 
+        // The probe's error is what the read said. A connect that never landed has nothing to
+        // disconnect, and waiting 2 s for a disconnect event that cannot come only replaced the
+        // real error ("connect already in flight", say) with "disconnect did not complete".
+        let read = match read {
+            Ok(Ok(value)) => Ok(value),
+            Ok(Err(error)) => Err(error),
+            Err(_) => Err("identity probe timed out".to_string()),
+        };
+        span.record("read_ok", read.is_ok());
+
         let mut events = central.events();
         transport.expect_probe_disconnect(device.id.clone());
         let _ = tokio::time::timeout(DISCONNECT_TIMEOUT, central.disconnect(&device.id)).await;
-        let disconnected = tokio::time::timeout(DISCONNECT_TIMEOUT, async {
-            while let Some(event) = events.next().await {
-                if matches!(
-                    event,
-                    CentralEvent::DeviceDisconnected { ref device_id, .. } if *device_id == device.id
-                ) {
-                    return true;
+        let disconnected = if connected {
+            tokio::time::timeout(DISCONNECT_TIMEOUT, async {
+                while let Some(event) = events.next().await {
+                    if matches!(
+                        event,
+                        CentralEvent::DeviceDisconnected { ref device_id, .. } if *device_id == device.id
+                    ) {
+                        return true;
+                    }
                 }
-            }
+                false
+            })
+            .await
+            .unwrap_or(false)
+        } else {
             false
-        })
-        .await
-        .unwrap_or(false);
+        };
         span.record("disconnect_ms", step.elapsed().as_millis() as u64);
-        if !disconnected {
-            return Err("identity probe disconnect did not complete".to_string());
-        }
+        span.record("disconnected", disconnected);
+        // A disconnect that is not reported no longer throws away an identity that was read. Two
+        // phones share one BLE link whichever side dialled, and while the other phone holds it
+        // iOS may not report our side closing: on 2026-10-31 an iPhone's probes failed with
+        // "disconnect did not complete" while the Pixel beside it was dialling it, and its own
+        // search never named the Pixel.
+        let value = match read {
+            Ok(value) => value,
+            Err(error) if connected && !disconnected => {
+                return Err(format!("{error} (and the disconnect did not complete)"));
+            }
+            Err(error) => return Err(error),
+        };
 
         let _ = central.stop_scan().await;
         central
@@ -415,11 +441,6 @@ mod imp {
         // phone's search fail outright here, so only the other phone's search could pair them.
         span.record("rediscovered", rediscovered);
 
-        let value = match read {
-            Ok(Ok(value)) => value,
-            Ok(Err(error)) => return Err(error),
-            Err(_) => return Err("identity probe timed out".to_string()),
-        };
         matching_endpoint_hint(device, &value)
             .ok_or_else(|| "identity did not match the advertised prefix".to_string())
     }
@@ -591,6 +612,8 @@ mod imp {
                         disconnect_ms = tracing::field::Empty,
                         rediscover_ms = tracing::field::Empty,
                         rediscovered = tracing::field::Empty,
+                        read_ok = tracing::field::Empty,
+                        disconnected = tracing::field::Empty,
                     );
                     let probed = tracing::Instrument::instrument(
                         probe_endpoint_hint(&central, transport, &device, timeout - elapsed),
