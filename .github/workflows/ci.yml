@@ -195,7 +195,7 @@ jobs:
           tool: |
             rust@1.97.0
             just@1.57.0
-            cargo-nextest@0.9.150
+            cargo-nextest@0.9.140
           fallback: none
 
       - name: Restore Rust compilation cache
