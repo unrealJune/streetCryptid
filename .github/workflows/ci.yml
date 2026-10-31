@@ -45,10 +45,35 @@ jobs:
         with:
           bun-version: 1.3.14
 
+      # One matrix job saves the shared Bun cache on main, so the four do not race to reserve it.
       - name: Install project dependencies
-        run: bun install --frozen-lockfile
+        uses: ./.github/actions/bun-install
+        with:
+          save: ${{ matrix.script == 'test' && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+
+      # Jest's transform cache, without which the first test of every suite pays for transforming
+      # its whole graph (see testTimeout in jest.config.js). Jest keys each entry by file content and
+      # config, so a hit on a changed source file is a miss, never a stale transform. What its key
+      # cannot see is a new babel preset behind the same path, so bun.lock is in ours, and there is
+      # deliberately no restore-key: a lockfile change starts empty instead of carrying every old
+      # entry forward forever. Saved on main only, for the scoping reason in bun-install.
+      - name: Restore the Jest transform cache
+        if: matrix.script == 'test' && !(github.event_name == 'push' && github.ref == 'refs/heads/main')
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/jest-cache
+          key: jest-transform-${{ runner.os }}-${{ hashFiles('bun.lock', 'jest.config.js') }}
+
+      - name: Restore and save the Jest transform cache
+        if: matrix.script == 'test' && github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/jest-cache
+          key: jest-transform-${{ runner.os }}-${{ hashFiles('bun.lock', 'jest.config.js') }}
 
       - name: Run ${{ matrix.name }}
+        env:
+          JEST_CACHE_DIRECTORY: ${{ runner.temp }}/jest-cache
         run: bun run "${{ matrix.script }}"
 
   typecheck:
@@ -113,7 +138,7 @@ jobs:
           bun-version: 1.3.14
 
       - name: Install project dependencies
-        run: bun install --frozen-lockfile
+        uses: ./.github/actions/bun-install
 
       - name: Generate Expo types
         run: |
