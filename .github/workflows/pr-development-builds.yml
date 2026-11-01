@@ -407,6 +407,21 @@ jobs:
               sed -E 's#/[^/]+$##' | sort | uniq -c | sort -rn | awk 'NR <= 8' || true
             printf '```\n'
           } | tee -a "$GITHUB_STEP_SUMMARY"
+          # One object's hashed inputs against the previous run's (kept inside the cache, so it
+          # rides the same entry). A miss on identical sources means one of these lines moved.
+          dbg="$RUNNER_TEMP/ccache-debug"
+          keep="$CCACHE_DIR/sc-debug"
+          cur="$(find "$dbg" -name '*.ccache-input-text' -path '*react-native-worklets*' 2> /dev/null | sort | awk 'NR == 1')"
+          if [[ -n "$cur" ]]; then
+            name="$(printf '%s' "${cur#"$dbg"}" | sed -E 's/\.[0-9_-]+\.ccache-input-text$//')"
+            if [[ -f "$keep/input.txt" && "$(cat "$keep/name")" == "$name" ]]; then
+              echo "ccache input diff for $name (previous run < > this run):"
+              diff "$keep/input.txt" "$cur" | cut -c1-200 | awk 'NR <= 60' || true
+            else
+              echo "ccache input diff: no previous dump of $name to compare"
+            fi
+            mkdir -p "$keep" && cp "$cur" "$keep/input.txt" && printf '%s' "$name" > "$keep/name"
+          fi
 
       - name: Save the ccache
         if: "!cancelled() && steps.setup.outputs.ccache-hit != 'true'"
@@ -462,9 +477,16 @@ jobs:
             ~/.gradle/caches/modules-2
             ~/.gradle/caches/jars-*
             ~/.gradle/caches/transforms-*
-            ~/.gradle/caches/build-cache-1
             ~/.gradle/wrapper
           key: ${{ steps.setup.outputs.native-cache-key }}
+
+      # Every run, unlike the entry above: see "Restore the Gradle build cache" for why.
+      - name: Save the Gradle build cache
+        if: '!cancelled()'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.gradle/caches/build-cache-1
+          key: ${{ steps.setup.outputs.gradle-build-cache-key }}
 
       # Same reasoning, and it matters more here: this is what a later run of THIS pull request
       # reads to skip the Rust build entirely. Cross-PR reuse comes from cache-warm.yml on main.

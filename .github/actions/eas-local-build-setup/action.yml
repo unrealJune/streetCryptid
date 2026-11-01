@@ -54,6 +54,12 @@ outputs:
   artifact-cache-key:
     description: Primary key of the restored native artifact cache, for the caller's save step.
     value: ${{ steps.artifact-cache.outputs.cache-primary-key }}
+  gradle-build-cache-hit:
+    description: Whether Gradle's build cache was an exact hit (never, by construction; see the step).
+    value: ${{ steps.gradle-build-cache.outputs.cache-hit }}
+  gradle-build-cache-key:
+    description: Primary key of the restored Gradle build cache, for the caller's save step.
+    value: ${{ steps.gradle-build-cache.outputs.cache-primary-key }}
   ccache-hit:
     description: Whether the ccache was an exact hit.
     value: ${{ steps.ccache-ios.outputs.cache-hit }}${{ steps.ccache-android.outputs.cache-hit }}
@@ -164,7 +170,7 @@ runs:
     # it is the only entry that lets a compile task be skipped rather than repeated. It was missing,
     # which meant no Android build ever reused a task output from another run. It only fills when
     # org.gradle.caching is on -- see GRADLE_OPTS in the workflows.
-    - name: Restore the Gradle dependency and build caches
+    - name: Restore the Gradle dependency caches
       id: gradle-cache
       if: inputs.platform == 'android' && inputs.native-dependency-cache == 'true'
       uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -173,11 +179,25 @@ runs:
           ~/.gradle/caches/modules-2
           ~/.gradle/caches/jars-*
           ~/.gradle/caches/transforms-*
-          ~/.gradle/caches/build-cache-1
           ~/.gradle/wrapper
         key: eas-local-gradle-${{ runner.os }}-${{ hashFiles('bun.lock', 'package.json', 'app.json', 'app.config.ts', 'modules/iroh-location/android/build.gradle') }}
         restore-keys: |
           eas-local-gradle-${{ runner.os }}-
+
+    # The build cache is its own entry, saved by every run. Inside the dependency entry it shared
+    # that entry's key, and an exact hit skips the save -- so it was written once per lockfile and
+    # then frozen: a task whose inputs moved on (R8 took 267-270 s in each of the last three builds
+    # after coming from cache once) could never be cached again. Downloads keep the lockfile key;
+    # only the outputs that change with the code ride the run id. Gradle prunes its own entries.
+    - name: Restore the Gradle build cache
+      id: gradle-build-cache
+      if: inputs.platform == 'android' && inputs.native-dependency-cache == 'true'
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ~/.gradle/caches/build-cache-1
+        key: eas-local-gradle-build-cache-${{ runner.os }}-${{ github.run_id }}
+        restore-keys: |
+          eas-local-gradle-build-cache-${{ runner.os }}-
 
     # Both platforms spend minutes compiling the same third-party C, C++ and Objective-C on every
     # run: Xcode the pods, Gradle the React Native libraries' CMake builds (`buildCMake*` tasks,
@@ -238,6 +258,11 @@ runs:
             echo "CCACHE_SLOPPINESS=pch_defines,time_macros,include_file_mtime,include_file_ctime,system_headers"
             echo "CMAKE_C_COMPILER_LAUNCHER=/usr/local/bin/ccache"
             echo "CMAKE_CXX_COMPILER_LAUNCHER=/usr/local/bin/ccache"
+            # Per-compile input dumps, so the report can diff one object's hashed inputs against
+            # the previous run's: Android restores a warm cache and still misses ~97% of compiles
+            # with stable paths, so some input differs, and nothing else says which.
+            echo "CCACHE_DEBUG=1"
+            echo "CCACHE_DEBUGDIR=$RUNNER_TEMP/ccache-debug"
           } >> "$GITHUB_ENV"
         fi
 

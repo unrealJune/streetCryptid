@@ -516,9 +516,16 @@ jobs:
             ~/.gradle/caches/modules-2
             ~/.gradle/caches/jars-*
             ~/.gradle/caches/transforms-*
-            ~/.gradle/caches/build-cache-1
             ~/.gradle/wrapper
           key: ${{ steps.setup.outputs.native-cache-key }}
+
+      # Every run, unlike the entry above: see "Restore the Gradle build cache" for why.
+      - name: Save the Gradle build cache
+        if: '!cancelled()'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.gradle/caches/build-cache-1
+          key: ${{ steps.setup.outputs.gradle-build-cache-key }}
 
       # This one runs on main, so unlike the pull-request copy of this step its entry is readable
       # by every open pull request -- the same reason cache-warm.yml exists.
