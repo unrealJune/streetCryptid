@@ -584,6 +584,12 @@ Conventions when changing that code:
   quiet phone sits on its backlog: Settings → Debug → Push Logs (`pushAllTelemetry`) drains
   MetricKit, the JS journal and the Rust spool (`push_telemetry_now`) at once, ignoring backoff, and
   says what is still queued. Ask whoever holds the phone to press it after reproducing a bug.
+- **iroh 1.0.2 is patched (`rust/third_party/iroh`, `[patch.crates-io]`) for one bug.** Its
+  remote-state actor re-queued a path open once per refusing connection on every 333 ms retry, so
+  the queue multiplied by the connection count each retry; on 2026-11-01 an iPhone 16 Pro Max
+  aborted in `VecDeque::grow` a second into a Bump (`ios.diagnostic` SIGABRT, frames resolved by
+  hand against the PR IPA). Upstream dedups from 1.4: drop the patch when upgrading. A
+  `prev.last_state=active` relaunch during pairing is a crash until shown otherwise.
 - **`blew` is vendored (`rust/third_party/blew`), because its CoreBluetooth backend dropped data.**
   On Apple, `updateValue:forCharacteristic:onSubscribedCentrals:` returning `NO` (queue full) and
   a write without response sent while `canSendWriteWithoutResponse` is false both lose the bytes

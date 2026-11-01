@@ -201,3 +201,10 @@ opt-level = "z"
 # locally. If size regresses more than a percent or two, `lto = "fat"` restores the old behaviour.
 lto = "thin"
 strip = true
+
+# iroh 1.0.2 with one fix, vendored (MIT OR Apache-2.0; third_party/iroh/NOTICE): its remote-state
+# actor re-queued a path open once per refusing connection on every 333 ms retry, which grew without
+# bound and aborted an iPhone on an allocation failure. Upstream dedups from 1.4; drop this patch
+# when iroh is upgraded past it.
+[patch.crates-io]
+iroh = { path = "third_party/iroh" }

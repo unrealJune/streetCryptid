@@ -52,6 +52,17 @@ backend (notifications and writes CoreBluetooth could not queue were dropped sil
 and the L2CAP reactor polled every 50 ms and could close a busy channel); its NOTICE
 lists the changes.
 
+## iroh (vendored, modified)
+
+- **Location:** `modules/iroh-location/rust/third_party/iroh/`
+- **Upstream:** <https://github.com/n0-computer/iroh> (crates.io `iroh` 1.0.2)
+- **Copyright:** n0, inc. and the iroh contributors
+- **License:** MIT OR Apache-2.0
+- **List of modifications:** `modules/iroh-location/rust/third_party/iroh/NOTICE`
+
+Applied with `[patch.crates-io]` for a single fix to its path-open retry queue, which grew
+without bound and crashed an iPhone. Remove it once iroh is upgraded past 1.4.
+
 ## Distribution obligation
 
 Distributing a build — including to TestFlight and Play testers — obliges you to offer
