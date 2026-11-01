@@ -219,6 +219,15 @@ runs:
         tar --extract --gzip --file "$archive" --directory "$RUNNER_TEMP"
         sudo install -m 0755 "$RUNNER_TEMP/ccache-$CCACHE_VERSION-$build/ccache" /usr/local/bin/ccache
         ccache --version | head -1
+        # base_dir + nohashdir make every path under RUNNER_TEMP (EAS's working copy included)
+        # relative before hashing: the second Android build with a restored cache missed all 169
+        # compiles, so something in the absolute paths or working directory differs per run. The
+        # log is for the report, which prints only the working directories ccache saw.
+        {
+          echo "CCACHE_BASEDIR=$RUNNER_TEMP"
+          echo "CCACHE_NOHASHDIR=true"
+          echo "CCACHE_LOGFILE=$RUNNER_TEMP/ccache.log"
+        } >> "$GITHUB_ENV"
         if [[ "$PLATFORM" == android ]]; then
           {
             echo "CCACHE_DIR=$HOME/.cache/ccache"

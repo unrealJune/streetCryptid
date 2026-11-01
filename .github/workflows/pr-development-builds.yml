@@ -144,6 +144,9 @@ jobs:
           {
             printf '### ccache\n\n```\n'
             ccache --show-stats --verbose 2>&1 || true
+            # Where the compiles ran, to see whether a path differs between runs.
+            grep -o 'Working directory: .*' "$RUNNER_TEMP/ccache.log" 2> /dev/null |
+              sed -E 's#/[^/]+$##' | sort | uniq -c | sort -rn | awk 'NR <= 8' || true
             # Written by scripts/eas-build-post-install.sh, in fixed words only.
             cat "$RUNNER_TEMP/ccache-wiring.txt" 2> /dev/null || printf 'ccache-wiring: not recorded\n'
             calls="$RUNNER_TEMP/ccache-wrapper-calls"
@@ -399,6 +402,9 @@ jobs:
           {
             printf '### ccache\n\n```\n'
             ccache --show-stats --verbose 2>&1 || true
+            # Where the compiles ran, to see whether a path differs between runs.
+            grep -o 'Working directory: .*' "$RUNNER_TEMP/ccache.log" 2> /dev/null |
+              sed -E 's#/[^/]+$##' | sort | uniq -c | sort -rn | awk 'NR <= 8' || true
             printf '```\n'
           } | tee -a "$GITHUB_STEP_SUMMARY"
 

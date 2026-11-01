@@ -69,6 +69,7 @@ if [[ -n "$ccache_bin" && -f "$wrapper_dir/ccache.conf" ]]; then
 # Rewritten by scripts/eas-build-post-install.sh for this CI build only.
 if [ -n "\${CCACHE_BINARY:-}" ]; then printf b >> '$counter'; else printf n >> '$counter'; fi
 export CCACHE_CONFIGPATH="\${CCACHE_CONFIGPATH:-$conf}"
+export CCACHE_BASEDIR='$RUNNER_TEMP' CCACHE_NOHASHDIR=true CCACHE_LOGFILE='$RUNNER_TEMP/ccache.log'
 exec '$ccache_bin' $compiler "\$@"
 EOF
     chmod 0755 "$wrapper" 2> /dev/null || true
