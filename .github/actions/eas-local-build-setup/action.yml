@@ -254,8 +254,10 @@ runs:
           # diff of worklets' cmake_pch.hxx.pch differed between two runs in exactly one line, a
           # nanosecond timestamp, and every object compiled against that PCH then missed (338 of
           # 347). ccache's documented fix for clang is -fno-pch-timestamp, added here because the
-          # launcher is the one place every library's compile passes through.
-          printf '#!/bin/sh\nexec /usr/local/bin/ccache "$@" -Xclang -fno-pch-timestamp\n' |
+          # launcher is the one place every library's compile passes through. The flag goes right
+          # after the compiler, not at the end: appended, 67 compiles became "multiple source
+          # files" to ccache and the PCH input still carried its timestamp.
+          printf '#!/bin/sh\ncompiler="$1"\nshift\nexec /usr/local/bin/ccache "$compiler" -Xclang -fno-pch-timestamp "$@"\n' |
             sudo tee /usr/local/bin/sc-ccache-launcher > /dev/null
           sudo chmod 0755 /usr/local/bin/sc-ccache-launcher
           {
