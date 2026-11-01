@@ -407,21 +407,6 @@ jobs:
               sed -E 's#/[^/]+$##' | sort | uniq -c | sort -rn | awk 'NR <= 8' || true
             printf '```\n'
           } | tee -a "$GITHUB_STEP_SUMMARY"
-          # One object's hashed inputs against the previous run's (kept inside the cache, so it
-          # rides the same entry). A miss on identical sources means one of these lines moved.
-          dbg="$RUNNER_TEMP/ccache-debug"
-          keep="$CCACHE_DIR/sc-debug"
-          cur="$(find "$dbg" -name '*.ccache-input-text' -path '*react-native-worklets*' ! -path '*/CMakeFiles/CMakeTmp/*' ! -path '*/CMakeScratch/*' 2> /dev/null | sort | awk 'NR == 1')"
-          if [[ -n "$cur" ]]; then
-            name="$(printf '%s' "${cur#"$dbg"}" | sed -E 's/\.[0-9_-]+\.ccache-input-text$//')"
-            if [[ -f "$keep/input.txt" && "$(cat "$keep/name")" == "$name" ]]; then
-              echo "ccache input diff for $name (previous run < > this run):"
-              diff "$keep/input.txt" "$cur" | cut -c1-200 | awk 'NR <= 60' || true
-            else
-              echo "ccache input diff: no previous dump of $name to compare"
-            fi
-            mkdir -p "$keep" && cp "$cur" "$keep/input.txt" && printf '%s' "$name" > "$keep/name"
-          fi
 
       - name: Save the ccache
         if: "!cancelled() && steps.setup.outputs.ccache-hit != 'true'"

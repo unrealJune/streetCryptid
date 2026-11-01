@@ -263,10 +263,6 @@ runs:
             echo "CCACHE_COMPILERCHECK=string:ndk-27.1.12297006"
             echo "CMAKE_C_COMPILER_LAUNCHER=/usr/local/bin/ccache"
             echo "CMAKE_CXX_COMPILER_LAUNCHER=/usr/local/bin/ccache"
-            # Per-compile input dumps, so the report can diff one object's hashed inputs against
-            # the previous run's. Investigation only; removed once the hit rate is confirmed.
-            echo "CCACHE_DEBUG=1"
-            echo "CCACHE_DEBUGDIR=$RUNNER_TEMP/ccache-debug"
           } >> "$GITHUB_ENV"
         fi
 
