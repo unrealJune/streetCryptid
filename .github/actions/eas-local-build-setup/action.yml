@@ -249,17 +249,6 @@ runs:
           echo "CCACHE_LOGFILE=$RUNNER_TEMP/ccache.log"
         } >> "$GITHUB_ENV"
         if [[ "$PLATFORM" == android ]]; then
-          # Clang stamps a precompiled header with its inputs' mtimes, and the React Native
-          # libraries' CMake builds generate their PCH header afresh every configure: the input
-          # diff of worklets' cmake_pch.hxx.pch differed between two runs in exactly one line, a
-          # nanosecond timestamp, and every object compiled against that PCH then missed (338 of
-          # 347). ccache's documented fix for clang is -fno-pch-timestamp, added here because the
-          # launcher is the one place every library's compile passes through. The flag goes right
-          # after the compiler, not at the end: appended, 67 compiles became "multiple source
-          # files" to ccache and the PCH input still carried its timestamp.
-          printf '#!/bin/sh\ncompiler="$1"\nshift\nexec /usr/local/bin/ccache "$compiler" -Xclang -fno-pch-timestamp "$@"\n' |
-            sudo tee /usr/local/bin/sc-ccache-launcher > /dev/null
-          sudo chmod 0755 /usr/local/bin/sc-ccache-launcher
           {
             echo "CCACHE_DIR=$HOME/.cache/ccache"
             # The same sloppiness React Native's ccache.conf gives iOS. Without pch_defines and
@@ -267,11 +256,15 @@ runs:
             # the mtime/ctime pair keeps direct mode for headers the build generates just before
             # compiling them.
             echo "CCACHE_SLOPPINESS=pch_defines,time_macros,include_file_mtime,include_file_ctime,system_headers"
-            echo "CMAKE_C_COMPILER_LAUNCHER=/usr/local/bin/sc-ccache-launcher"
-            echo "CMAKE_CXX_COMPILER_LAUNCHER=/usr/local/bin/sc-ccache-launcher"
+            # ccache identifies the compiler by its mtime by default, and the NDK is installed
+            # afresh by sdkmanager on every run, so every run had a "new" clang: a cross-run diff
+            # of one compile's hashed inputs differed in exactly that line, and 97% of compiles
+            # missed a warm cache. The NDK version (also in the cache key) names the compiler.
+            echo "CCACHE_COMPILERCHECK=string:ndk-27.1.12297006"
+            echo "CMAKE_C_COMPILER_LAUNCHER=/usr/local/bin/ccache"
+            echo "CMAKE_CXX_COMPILER_LAUNCHER=/usr/local/bin/ccache"
             # Per-compile input dumps, so the report can diff one object's hashed inputs against
-            # the previous run's: Android restores a warm cache and still misses ~97% of compiles
-            # with stable paths, so some input differs, and nothing else says which.
+            # the previous run's. Investigation only; removed once the hit rate is confirmed.
             echo "CCACHE_DEBUG=1"
             echo "CCACHE_DEBUGDIR=$RUNNER_TEMP/ccache-debug"
           } >> "$GITHUB_ENV"
