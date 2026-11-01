@@ -1,5 +1,29 @@
 # Map renderer performance over time
 
+## A DEM pixel is not a tile
+
+Reported after #177: square tiles of tone about 42 pt across in forest, and ghost lines
+that ran along one elevation. Both were the terrain read, and neither is in the mask,
+park-edge or road data, which a debug view of those channels showed clean.
+
+**The tiles were the slope.** The spline's height stays continuous only as a weighted
+sum: the four taps themselves jump at every DEM pixel boundary, so differencing them gave
+a gradient that also jumped, and each DEM pixel got its own flat hillshade tone.
+
+**The ghost lines were the byte wrap.** The height is two bytes and the low one wraps every
+256 m. Filtered taps of that pair did not cancel exactly, which broke up the 768 m band and
+the contour inside it. Switching the DEM to nearest sampling and decoding before
+interpolating removed them. The exact shortfall in the GPU's filter was not measured.
+
+The shader now reads the sixteen texels around a point, decodes each, and evaluates the
+spline and its exact derivative itself. CanvasKit's software filter does not show the byte
+wrap, so that half is held by a sampler test rather than a pixel test.
+
+| Interleaved, 16 regions each, Quilcene z12-13, iOS 27 simulator Debug | raster median | p90 | total median |
+| --------------------------------------------------------------------- | ------------- | --- | ------------ |
+| Four bilinear taps (`main`)                                           | 24.5 ms       | 37  | 180 ms       |
+| Sixteen texels                                                        | 27 ms         | 36  | 187 ms       |
+
 ## One tone per place, and a canvas that stays near zero
 
 Reported on #177 after the two-pixel grid landed: static on water and greenery at
@@ -25,8 +49,8 @@ anything else. Roads keep their dots, their class values and their connected sam
 
 **A stretched DEM has creases.** The DEM stops at z12, so a street view stretches one
 DEM pixel over a hundred screen pixels, and the bilinear surface's creases drew
-contours as polygons and hillshade as blocks. Height is now a cubic B-spline through
-four bilinear taps, and the same taps give the slope. Contours are measured in px from
+contours as polygons and hillshade as blocks. Height is now a cubic B-spline (see
+above for how it is read). Contours are measured in px from
 the line rather than in metres, so a flat valley's line is as thin as a ridge's, and
 lines packed tighter than the lattice fade out. Value noise was rotated off its
 square grid, and water and park read the filtered mask while streets snap to texels.

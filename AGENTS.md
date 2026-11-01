@@ -679,9 +679,13 @@ on web is noise. Use it for ratios and for finding work that should not happen a
   a new canvas layer out with `drawAnchor`. `WorldLayers` is keyed by the origin so a move changes
   the group and its children in the same frame. Overlays outside the canvas stay on `anchor`,
   because they add the transform in doubles.
-- **Elevation is never resampled in JS.** The DEM crop goes to the GPU at its own resolution and the
-  bilinear filter stretches it over the mask (`ElevationRaster.rect`). Per-mask-pixel sampling in JS
-  cost 1.3–2.5 s of interpreter time per region build.
+- **Elevation is never resampled in JS, and never filtered by the GPU.** The DEM crop goes to the
+  GPU at its own resolution (`ElevationRaster.rect`), sampled nearest, and `terrainAt` evaluates the
+  cubic spline and its exact derivative over sixteen decoded texels. Per-mask-pixel sampling in JS
+  cost 1.3–2.5 s of interpreter time per region build. Filtered taps cost two artifacts: differencing
+  them makes a slope that jumps at every DEM pixel (square hillshade tiles), and the height's low
+  byte wraps every 256 m, which drew ghost lines along that elevation on the iOS GPU. CanvasKit's
+  software filter does not show the second, so a CPU pixel test cannot catch it coming back.
 
 ## Store screenshots
 

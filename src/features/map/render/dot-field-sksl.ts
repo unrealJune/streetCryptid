@@ -35,7 +35,7 @@ const DOT_WASH_SCALE = '0.9';
  *   - `groundTex`  R = ground-cover code, G = blurred park interior.
  *                  Codes are sampled at pixel centres so they cannot blend.
  *   - `terrainTex` R/G = absolute 16-bit elevation in metres, B = alpine weight,
- *                  sampled directly at DEM resolution (linear).
+ *                  read texel by texel at DEM resolution (nearest).
  *
  * The mask records every feature that covers a point, so a dot that is both
  * park and water has to pick one. Precedence is street > water > park > ground
@@ -139,12 +139,13 @@ float fbm(float2 p, float4 weights) {
   p = nextOctave(p);
   return v + weights.w * (vnoise(p) - 0.5);
 }
-float demHeight(float3 t) { return t.r * 65280.0 + t.g * 255.0; }
-// Cubic B-spline through four bilinear taps, decoded AFTER interpolation (never
-// after an intermediate RGBA8 rasterization). A street view stretches a DEM pixel
-// over a hundred screen px, and the bilinear surface's creases along those pixels
-// are what drew contours as polygons and hillshade as blocks. The taps' spread
-// gives the gradient (metres per DEM px), continuous for the same reason.
+// Cubic B-spline over the sixteen DEM texels around a point, and its exact derivative
+// (metres per DEM px). A street view stretches a DEM pixel over a hundred screen px, and
+// a bilinear surface's creases along those pixels drew contours as polygons and hillshade
+// as square tiles. The texels are read one by one, sampled nearest, because the height is
+// two bytes and a GPU's filter does not interpolate them exactly enough: the low byte
+// wraps every 256 m, its error no longer cancels against the high byte's, and that ground
+// grew ghost lines along its contour.
 float4 terrainAt(float2 s, out float2 slope) {
   slope = float2(0.0);
   if (uHasElev < 0.5) return float4(0.0);
@@ -158,20 +159,26 @@ float4 terrainAt(float2 s, out float2 slope) {
   float2 w0 = (1.0 - 3.0 * f + 3.0 * f2 - f3) / 6.0;
   float2 w1 = (4.0 - 6.0 * f2 + 3.0 * f3) / 6.0;
   float2 w3 = f3 / 6.0;
-  float2 g0 = w0 + w1;
-  float2 g1 = 1.0 - g0;
-  float2 t0 = i - 0.5 + w1 / g0;
-  float2 t1 = i + 1.5 + w3 / g1;
-  float3 a = terrainTex.eval(t0).rgb;
-  float3 b = terrainTex.eval(float2(t1.x, t0.y)).rgb;
-  float3 c = terrainTex.eval(float2(t0.x, t1.y)).rgb;
-  float3 d = terrainTex.eval(t1).rgb;
-  float3 t = mix(mix(a, b, g1.x), mix(c, d, g1.x), g1.y);
-  float2 span = t1 - t0;
-  slope = float2(
-    mix(demHeight(b) - demHeight(a), demHeight(d) - demHeight(c), g1.y) / span.x,
-    mix(demHeight(c) - demHeight(a), demHeight(d) - demHeight(b), g1.x) / span.y);
-  return float4(demHeight(t), t.b, 0.0, inside);
+  float4 wx = float4(w0.x, w1.x, 1.0 - w0.x - w1.x - w3.x, w3.x);
+  float4 wy = float4(w0.y, w1.y, 1.0 - w0.y - w1.y - w3.y, w3.y);
+  float2 d0 = -0.5 + f - 0.5 * f2;
+  float2 d1 = f * (1.5 * f - 2.0);
+  float2 d3 = 0.5 * f2;
+  float4 dx = float4(d0.x, d1.x, -d0.x - d1.x - d3.x, d3.x);
+  float4 dy = float4(d0.y, d1.y, -d0.y - d1.y - d3.y, d3.y);
+  float height = 0.0;
+  float alpine = 0.0;
+  for (int y = 0; y < 4; y++) {
+    for (int x = 0; x < 4; x++) {
+      float3 t = terrainTex.eval(i + float2(float(x), float(y)) - 0.5).rgb;
+      float m = floor(t.r * 255.0 + 0.5) * 256.0 + floor(t.g * 255.0 + 0.5);
+      float w = wx[x] * wy[y];
+      height += w * m;
+      alpine += w * t.b;
+      slope += float2(dx[x] * wy[y], wx[x] * dy[y]) * m;
+    }
+  }
+  return float4(height, alpine, 0.0, inside);
 }
 // Ground-cover kind: 0 none, 1.. = GROUND_KINDS index + 1 (nearest, never blended)
 float groundAt(float2 s) {

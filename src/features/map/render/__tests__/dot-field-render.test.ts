@@ -166,7 +166,7 @@ function render({
         im.makeShaderOptions(
           ck.TileMode.Clamp,
           ck.TileMode.Clamp,
-          i >= 2 ? ck.FilterMode.Linear : ck.FilterMode.Nearest,
+          i === 1 || i === 4 ? ck.FilterMode.Nearest : ck.FilterMode.Linear,
           ck.MipmapMode.None
         )
       )
@@ -651,6 +651,48 @@ describe('terrain continuity through material boundaries', () => {
       );
     }
   );
+
+  it('shades a coarse DEM without a step at its pixel boundaries', () => {
+    // A street region stretches one DEM pixel over tens of screen pixels, and
+    // curved ground is where a gradient that jumps between them would show.
+    const size = { width: 256, height: 48 };
+    const zoom = 16.5;
+    const step = 37 / scaleFor(zoom);
+    const width = 40;
+    const height = 12;
+    const halfX = (width * step) / 2;
+    const halfY = (height * step) / 2;
+    const pixels = render({
+      zoom,
+      size,
+      terrain: {
+        width,
+        height,
+        rect: {
+          minX: home[0] - halfX,
+          minY: home[1] - halfY,
+          maxX: home[0] + halfX,
+          maxY: home[1] + halfY,
+        },
+        metres: Float32Array.from(
+          { length: width * height },
+          (_, i) => 512.5 + 10 * Math.sin((i % width) / 1.3)
+        ),
+      },
+    });
+    const columns = Array.from({ length: size.width }, (_, x) => {
+      let sum = 0;
+      for (let y = 0; y < size.height; y++) sum += pixels[(y * size.width + x) * 4 + 1];
+      return sum / size.height;
+    });
+    // Second differences over a 6 px span: grain averages out, a step does not.
+    let worst = 0;
+    for (let x = 6; x < size.width - 6; x++) {
+      worst = Math.max(worst, Math.abs(columns[x + 6] - 2 * columns[x] + columns[x - 6]));
+    }
+    expect(Math.max(...columns) - Math.min(...columns)).toBeGreaterThan(4);
+    expect(worst).toBeLessThan(2.5);
+  });
 
   it('keeps alpine relief at street zoom even without a ground-cover polygon', () => {
     const options = {

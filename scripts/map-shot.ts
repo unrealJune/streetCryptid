@@ -189,6 +189,8 @@ const PLACES: readonly Place[] = [
   { id: 'olympics', label: 'Olympic Peninsula — Forks / Mount Olympus', lat: 47.85, lon: -123.75 },
   { id: 'rainier', label: 'Mount Rainier', lat: 46.8523, lon: -121.7603 },
   { id: 'olympic-coast', label: 'Northwest Olympic Peninsula', lat: 48.1, lon: -124.58 },
+  // Commercial forest behind Hood Canal: raster-derived landcover edges and logging roads.
+  { id: 'quilcene', label: 'Quilcene — forest roads', lat: 47.82, lon: -122.88 },
   // Open water at globe zoom: what `--cryptids` exists to show, and the one view
   // where the exploration ladder has deliberately gone dark.
   { id: 'pacific', label: 'North Pacific — open water', lat: 25, lon: -150 },
@@ -523,7 +525,7 @@ function renderShot({
     terrain.image.makeShaderOptions(
       CanvasKit.TileMode.Clamp,
       CanvasKit.TileMode.Clamp,
-      CanvasKit.FilterMode.Linear,
+      CanvasKit.FilterMode.Nearest,
       CanvasKit.MipmapMode.None
     ),
   ];
