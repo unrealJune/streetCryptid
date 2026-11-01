@@ -411,7 +411,7 @@ jobs:
           # rides the same entry). A miss on identical sources means one of these lines moved.
           dbg="$RUNNER_TEMP/ccache-debug"
           keep="$CCACHE_DIR/sc-debug"
-          cur="$(find "$dbg" -name '*.ccache-input-text' -path '*react-native-worklets*' 2> /dev/null | sort | awk 'NR == 1')"
+          cur="$(find "$dbg" -name '*.ccache-input-text' -path '*react-native-worklets*' ! -path '*/CMakeFiles/CMakeTmp/*' ! -path '*/CMakeScratch/*' 2> /dev/null | sort | awk 'NR == 1')"
           if [[ -n "$cur" ]]; then
             name="$(printf '%s' "${cur#"$dbg"}" | sed -E 's/\.[0-9_-]+\.ccache-input-text$//')"
             if [[ -f "$keep/input.txt" && "$(cat "$keep/name")" == "$name" ]]; then
