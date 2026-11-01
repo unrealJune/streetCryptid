@@ -231,23 +231,30 @@ runs:
         if [[ "$PLATFORM" == android ]]; then
           {
             echo "CCACHE_DIR=$HOME/.cache/ccache"
+            # The same sloppiness React Native's ccache.conf gives iOS. Without pch_defines and
+            # time_macros, 178 of 351 Android calls were "could not use precompiled header", and
+            # the mtime/ctime pair keeps direct mode for headers the build generates just before
+            # compiling them.
+            echo "CCACHE_SLOPPINESS=pch_defines,time_macros,include_file_mtime,include_file_ctime,system_headers"
             echo "CMAKE_C_COMPILER_LAUNCHER=/usr/local/bin/ccache"
             echo "CMAKE_CXX_COMPILER_LAUNCHER=/usr/local/bin/ccache"
           } >> "$GITHUB_ENV"
         fi
 
-    # Keyed on what decides the native compile, so a push that changes only JS hits exactly and
-    # saves nothing. A change falls back to the newest entry with this prefix: the same pull
-    # request's previous one, or the one the last release saved on main. The toolchain version is
-    # in the key because React Native's ccache.conf sets `system_headers` sloppiness, so an SDK
-    # change alone would not invalidate an iOS entry.
+    # Every run saves a new entry (the run id ends the key) and restores the newest one with the
+    # same native inputs, falling back to any entry for the toolchain: the same pull request's
+    # previous run, or the last release's on main. A fixed key would be saved once and then
+    # frozen, since an exact hit skips the save -- which is how a hashing change left the iOS cache
+    # serving entries nothing could hit. The cache is small, so per-run entries are cheap. The
+    # toolchain version is in the key because both configurations set `system_headers` sloppiness,
+    # so an SDK or NDK change alone would not invalidate an entry.
     - name: Restore the iOS ccache
       id: ccache-ios
       if: inputs.platform == 'ios' && inputs.native-dependency-cache == 'true'
       uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: ~/Library/Caches/ccache
-        key: eas-local-ccache-ios-${{ runner.os }}-${{ runner.arch }}-xcode-27.1-${{ hashFiles('bun.lock', 'app.json', 'app.config.ts', 'patches/**', 'plugins/*.js', 'modules/*/ios/**') }}
+        key: eas-local-ccache-ios-${{ runner.os }}-${{ runner.arch }}-xcode-27.1-${{ hashFiles('bun.lock', 'app.json', 'app.config.ts', 'patches/**', 'plugins/*.js', 'modules/*/ios/**') }}-${{ github.run_id }}
         restore-keys: |
           eas-local-ccache-ios-${{ runner.os }}-${{ runner.arch }}-xcode-27.1-
 
@@ -257,7 +264,7 @@ runs:
       uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: ~/.cache/ccache
-        key: eas-local-ccache-android-${{ runner.os }}-${{ runner.arch }}-ndk-27.1.12297006-${{ hashFiles('bun.lock', 'app.json', 'app.config.ts', 'patches/**', 'plugins/*.js', 'modules/*/android/**') }}
+        key: eas-local-ccache-android-${{ runner.os }}-${{ runner.arch }}-ndk-27.1.12297006-${{ hashFiles('bun.lock', 'app.json', 'app.config.ts', 'patches/**', 'plugins/*.js', 'modules/*/android/**') }}-${{ github.run_id }}
         restore-keys: |
           eas-local-ccache-android-${{ runner.os }}-${{ runner.arch }}-ndk-27.1.12297006-
 

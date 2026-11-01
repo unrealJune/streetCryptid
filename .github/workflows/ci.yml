@@ -203,9 +203,7 @@ jobs:
         with:
           workspaces: modules/iroh-location/rust -> target
           key: native
-          # TEMPORARY (PR #180 only, revert before merge): let this branch save its own Native cache so a
-          # second push can measure the warm compile against the old one.
-          save-if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.head_ref == 'ci/cache-bun-and-jest' }}
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
       # nextest, not `cargo test`: cargo runs test binaries one after another, and three of them
       # (restart_protocol, ratchet_conditions, pairing_integration) were ~280 s of that serially.
