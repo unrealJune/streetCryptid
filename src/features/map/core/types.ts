@@ -291,22 +291,13 @@ export interface MapPalette {
   readonly effects?: MapRenderEffects;
 }
 
-/** The compact "where you are" readout surfaced to the chrome each frame. */
-export interface MapReadout {
-  /** Discovered fraction of the hex sectors in view, 0–1. */
-  readonly coverage: number;
-  /**
-   * Whether the exploration layer is drawn at this zoom. When false, `coverage`
-   * is a placeholder 0 and chrome should hide the sector readout entirely
-   * rather than claim nothing has been explored.
-   */
-  readonly sectorsVisible: boolean;
-  /** Nearest prominent place name to the camera center, or null. */
-  readonly placeName: string | null;
-  /** A name resolved at this friend's fix, never at the camera center. */
-  readonly friendPlace?: {
-    readonly id: string;
-    readonly location: LatLon;
-    readonly name: string | null;
-  } | null;
+/**
+ * The selected friend's place name, resolved at their fix and never at the camera center. The
+ * camera-centred readouts (coverage, place, `sectorsVisible`) are a store instead — see
+ * `hooks/live-readout.ts` — because they change mid-gesture.
+ */
+export interface FriendPlace {
+  readonly id: string;
+  readonly location: LatLon;
+  readonly name: string | null;
 }

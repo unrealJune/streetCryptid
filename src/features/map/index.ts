@@ -20,4 +20,10 @@ export { sampleTrailForMap } from './core/trail-sampling';
 export { hexToRgb, rgbToHex } from './core/color';
 export { useMapColorScheme } from './hooks/use-map-color-scheme';
 export { useMapTheme } from './hooks/use-map-theme';
-export type { MapReadout, Rgb } from './core/types';
+export type { FriendPlace, Rgb } from './core/types';
+export {
+  createLiveReadoutStore,
+  useLiveReadout,
+  type LiveReadout,
+  type LiveReadoutStore,
+} from './hooks/live-readout';

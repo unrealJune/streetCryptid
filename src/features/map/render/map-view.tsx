@@ -53,6 +53,7 @@ import {
   clampTranslation,
   hasScaleMotion,
   shouldPrefetchScaleMotion,
+  shouldTrackScaleMotion,
   transformDistanceSq,
   translationRange,
 } from '../core/gesture';
@@ -60,8 +61,8 @@ import type { LocationFix } from '@/features/social/core/types';
 
 import type {
   CameraState,
+  FriendPlace,
   LatLon,
-  MapReadout,
   Rgb,
   ScreenPoint,
   Viewport,
@@ -72,6 +73,7 @@ import { projectHexLattice } from '../core/hex-lattice';
 import { locateCamera } from '../core/locate-camera';
 import { clusterMarkers } from '../core/marker-clusters';
 import { PLACED_OCEAN_CRYPTIDS } from '../core/ocean-cryptids';
+import type { LiveReadoutStore } from '../hooks/live-readout';
 import { useMapEngine } from '../hooks/use-map-engine';
 import { latLonToWorld } from '../core/mercator';
 import { placeNameInRegion } from '../core/readout';
@@ -284,7 +286,8 @@ function regionViewRect(
  * region swap reads as the world drawing itself in and the map is never blank.
  */
 export function MapView({
-  onReadout,
+  readouts,
+  onFriendPlace,
   initialCenter = null,
   selfLocation = null,
   selfFix = null,
@@ -305,8 +308,13 @@ export function MapView({
   locateTarget = null,
   obscuredLeft = 0,
 }: {
-  /** Surfaces the coverage/place readout to the surrounding chrome. */
-  onReadout?: (readout: MapReadout) => void;
+  /**
+   * Where the camera-centred readouts (coverage, place name, `sectorsVisible`) are written, live
+   * through gestures. The map never reads it back, so updating it re-renders only its subscribers.
+   */
+  readouts?: LiveReadoutStore;
+  /** The selected friend's place name, resolved at their fix. */
+  onFriendPlace?: (place: FriendPlace | null) => void;
   initialCenter?: LatLon | null;
   selfLocation?: LatLon | null;
   /** The full live self fix (accuracy + ts) — feeds live exploration. */
@@ -379,13 +387,11 @@ export function MapView({
     camera,
     anchor,
     limits,
-    coverage,
-    sectorsVisible,
-    placeName,
     hexLattice,
     commit: commitCamera,
+    track: trackCamera,
     prefetchAt,
-  } = useMapEngine(viewport, initialCenter, selfFix, friendTargets);
+  } = useMapEngine(viewport, initialCenter, selfFix, friendTargets, readouts);
   // Everything on the canvas is laid out against this (see `DRAW_ORIGIN_RANGE_PX`); overlays
   // outside it stay on `anchor`, because they add the transform in doubles before it reaches a view.
   const [drawOrigin, setDrawOrigin] = useState(ZERO_DRAW_ORIGIN);
@@ -427,6 +433,9 @@ export function MapView({
   /** UI-side backpressure: never enqueue a second JS prefetch behind a blocked build. */
   const prefetchInFlight = useSharedValue(false);
   const cameraUpdateInFlight = useSharedValue(false);
+  /** Pinch-only readout updates: the transform last measured, and one JS hop at a time. */
+  const lastTracked = useSharedValue<ViewTransform>({ k: 1, tx: 0, ty: 0 });
+  const trackInFlight = useSharedValue(false);
   const trailStrokeWidth = useDerivedValue(() => 2.5 / Math.max(0.001, k.value));
   const trailDotRadius = useDerivedValue(() => 2.8 / Math.max(0.001, k.value));
 
@@ -734,8 +743,8 @@ export function MapView({
     };
   }, [friends, region, selectedFriendId]);
   useEffect(() => {
-    onReadout?.({ coverage, sectorsVisible, placeName, friendPlace });
-  }, [coverage, sectorsVisible, placeName, friendPlace, onReadout]);
+    onFriendPlace?.(friendPlace);
+  }, [friendPlace, onFriendPlace]);
 
   // Viewport resize (rotation, window resize): anchor-space px depend on the
   // viewport, so re-express the current camera in the new space. The only place
@@ -896,13 +905,22 @@ export function MapView({
   const requestPrefetch = useCallback(
     (future: ViewTransform | null, current: ViewTransform) => {
       if (viewport) setLabelCamera(applyViewTransform(anchor, viewport, current));
+      // The island's readouts ride the same throttled hop as the labels.
+      trackCamera(current);
       cameraUpdateInFlight.value = false;
       if (!future) return;
       void prefetchAt(future).finally(() => {
         prefetchInFlight.value = false;
       });
     },
-    [prefetchAt, prefetchInFlight, cameraUpdateInFlight, viewport, anchor]
+    [prefetchAt, prefetchInFlight, cameraUpdateInFlight, viewport, anchor, trackCamera]
+  );
+  const trackReadout = useCallback(
+    (t: ViewTransform) => {
+      trackCamera(t);
+      trackInFlight.value = false;
+    },
+    [trackCamera, trackInFlight]
   );
 
   // Mid-pan/fling prefetch: request a region about one build latency ahead of
@@ -915,6 +933,11 @@ export function MapView({
       if (!limits || !prev || locateProgress.value < 1) return;
       if (hasScaleMotion(t, prev)) {
         wasScaling.value = true;
+        if (!trackInFlight.value && shouldTrackScaleMotion(t, lastTracked.value)) {
+          lastTracked.value = t;
+          trackInFlight.value = true;
+          runOnJS(trackReadout)(t);
+        }
         if (shouldPrefetchScaleMotion(t, prev, lastPrefetch.value)) {
           lastPrefetch.value = t;
           if (!cameraUpdateInFlight.value) {
@@ -957,7 +980,7 @@ export function MapView({
         t
       );
     },
-    [requestPrefetch, limits]
+    [requestPrefetch, trackReadout, limits]
   );
 
   const composedGesture = useMemo(() => {

@@ -5,8 +5,8 @@ import type { H3Grid } from './h3-grid';
 import { latLonToWorld } from './mercator';
 import type {
   CameraState,
+  FriendPlace,
   LatLon,
-  MapReadout,
   Place,
   Viewport,
   WorldPoint,
@@ -32,7 +32,7 @@ export function placeNameInRegion(
 
 /** Selection and fix can change before the map's next readout effect runs. */
 export function friendPlaceName(
-  place: MapReadout['friendPlace'],
+  place: FriendPlace | null | undefined,
   id: string,
   location: LatLon | null
 ): string | null {

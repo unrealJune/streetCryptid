@@ -10,11 +10,16 @@ import {
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
+import type { CryptidTheme } from '@/constants/cryptid-theme';
 import { resolveSignalColor } from '@/constants/signal-colors';
 import { Spacing } from '@/constants/theme';
 import { useCryptidProfile } from '@/features/account/hooks/use-cryptid-profile';
 import {
   CoverageIsland,
+  createLiveReadoutStore,
+  useLiveReadout,
+  type LiveReadout,
+  type LiveReadoutStore,
   FriendsIsland,
   IslandColumn,
   hexToRgb,
@@ -29,7 +34,7 @@ import {
   type IslandTab,
   type MapFriendLocation,
   type MapTrailLocation,
-  type MapReadout,
+  type FriendPlace,
   type MapLayerId,
   type MapLayerToggles,
   type MapRosterFriend,
@@ -149,11 +154,14 @@ export default function MapScreenBody() {
     requestId: number;
     location: MapFriendLocation['location'];
   } | null>(null);
-  const [readout, setReadout] = useState<MapReadout>({
-    placeName: null,
-    coverage: 0,
-    sectorsVisible: true,
-  });
+  // The camera-centred readouts change mid-gesture, so they live in a store the map writes and the
+  // chrome subscribes to field by field (`live-readout.ts`): this screen re-renders when the place
+  // name or the measurable band changes, and the live percentage re-renders only `MeIsland`.
+  const [readouts] = useState(createLiveReadoutStore);
+  const placeName = useLiveReadout(readouts, selectPlaceName);
+  const sectorsVisible = useLiveReadout(readouts, selectSectorsVisible);
+  const settledPct = useLiveReadout(readouts, selectSettledPct);
+  const [friendPlace, setFriendPlace] = useState<FriendPlace | null>(null);
 
   const onScreenLayout = useCallback((event: LayoutChangeEvent) => {
     const height = Math.round(event.nativeEvent.layout.height);
@@ -162,22 +170,14 @@ export default function MapScreenBody() {
     setScreenWidth((current) => (current === width ? current : width));
   }, []);
 
-  const onReadout = useCallback((next: MapReadout) => {
-    setReadout((current) =>
-      current.placeName === next.placeName &&
-      current.coverage === next.coverage &&
-      current.sectorsVisible === next.sectorsVisible &&
-      current.friendPlace?.id === next.friendPlace?.id &&
-      current.friendPlace?.name === next.friendPlace?.name &&
-      current.friendPlace?.location.lat === next.friendPlace?.location.lat &&
-      current.friendPlace?.location.lon === next.friendPlace?.location.lon
+  const onFriendPlace = useCallback((next: FriendPlace | null) => {
+    setFriendPlace((current) =>
+      current?.id === next?.id &&
+      current?.name === next?.name &&
+      current?.location.lat === next?.location.lat &&
+      current?.location.lon === next?.location.lon
         ? current
-        : {
-            placeName: next.placeName,
-            coverage: next.coverage,
-            sectorsVisible: next.sectorsVisible,
-            friendPlace: next.friendPlace,
-          }
+        : next
     );
   }, []);
 
@@ -433,7 +433,6 @@ export default function MapScreenBody() {
     });
   }, [devCommand, devCommandId, router, runDevCommand, snapshot?.ready]);
 
-  const pct = Math.round(readout.coverage * 100);
   const friendNames = mapFriends.map((friend) => friend.handle).join(', ');
   const locationCopy =
     locationStatus === 'running'
@@ -441,8 +440,10 @@ export default function MapScreenBody() {
         ? 'Your current location is shown.'
         : 'Finding your location.'
       : 'Your location is not available.';
-  const mapAccessibilityLabel = readout.placeName
-    ? `Map near ${readout.placeName}. ${pct} percent of visible sectors explored. ${
+  // The SETTLED percentage: this label is a prop on the map, and a live one would re-render the
+  // whole map at every step of a pan.
+  const mapAccessibilityLabel = placeName
+    ? `Map near ${placeName}. ${settledPct} percent of visible sectors explored. ${
         explorationEnabled ? 'Exploration overlay on.' : 'Exploration overlay off.'
       } ${layers.highways ? 'Highways shown.' : 'Highways hidden.'} ${
         layers.transit ? 'Transit overlay on.' : 'Transit overlay off.'
@@ -518,7 +519,7 @@ export default function MapScreenBody() {
     ? 'mid'
     : rosterOpen
       ? 'full'
-      : readout.sectorsVisible
+      : sectorsVisible
         ? 'peek'
         : 'collapsed';
   // ...and how far down. ME and FRIENDS both collapse to their one-line summary; a friend's pane
@@ -567,15 +568,7 @@ export default function MapScreenBody() {
   );
 
   // The bodies, shared by the drawer (one at a time, behind the tabs) and the wide column (both).
-  const meBody = () => (
-    <CoverageIsland
-      coverage={readout.coverage}
-      placeName={readout.placeName}
-      sectorsVisible={readout.sectorsVisible}
-      signal={selfSignal}
-      theme={theme}
-    />
-  );
+  const meBody = () => <MeIsland readouts={readouts} signal={selfSignal} theme={theme} />;
   const friendsBody = (bodyDetent: DrawerDetent, bodyMinimized: boolean) =>
     detailPresence ? (
       <FriendDetailIsland
@@ -591,7 +584,7 @@ export default function MapScreenBody() {
         }}
         peers={snapshot?.friends}
         placeName={friendPlaceName(
-          readout.friendPlace,
+          friendPlace,
           detailPresence.friend.endpointId,
           detailPresence.fix
         )}
@@ -630,7 +623,8 @@ export default function MapScreenBody() {
             structuresEnabled={layers.structures}
             peaksEnabled={layers.peaks}
             key={mapSessionKey}
-            onReadout={onReadout}
+            readouts={readouts}
+            onFriendPlace={onFriendPlace}
             initialCenter={initialCenter}
             locateTarget={locateTarget}
             obscuredLeft={island.obscuredLeft}
@@ -739,7 +733,8 @@ function MapSession({
   transitEnabled,
   structuresEnabled,
   peaksEnabled,
-  onReadout,
+  readouts,
+  onFriendPlace,
   onSelectFriend,
   onSelectSelf,
   onInteraction,
@@ -760,7 +755,8 @@ function MapSession({
   transitEnabled: boolean;
   structuresEnabled: boolean;
   peaksEnabled: boolean;
-  onReadout(readout: MapReadout): void;
+  readouts: LiveReadoutStore;
+  onFriendPlace(place: FriendPlace | null): void;
   onSelectFriend(friendId: string): void;
   onSelectSelf(): void;
   onInteraction(): void;
@@ -778,7 +774,8 @@ function MapSession({
       transitEnabled={transitEnabled}
       structuresEnabled={structuresEnabled}
       peaksEnabled={peaksEnabled}
-      onReadout={onReadout}
+      readouts={readouts}
+      onFriendPlace={onFriendPlace}
       initialCenter={sessionCenter}
       locateTarget={locateTarget}
       obscuredLeft={obscuredLeft}
@@ -792,6 +789,35 @@ function MapSession({
       selfFix={selfFix}
       selfSelected={selfSelected}
       selfColor={selfColor}
+    />
+  );
+}
+
+const selectPlaceName = (readout: LiveReadout) => readout.placeName;
+const selectSectorsVisible = (readout: LiveReadout) => readout.sectorsVisible;
+const selectSettledPct = (readout: LiveReadout) => Math.round(readout.settledCoverage * 100);
+const selectCoverage = (readout: LiveReadout) => readout.coverage;
+
+/**
+ * The ME body, subscribed to the live readouts itself: the percentage changes at every step of a
+ * pan, and this is the only component that re-renders for it.
+ */
+function MeIsland({
+  readouts,
+  signal,
+  theme,
+}: {
+  readouts: LiveReadoutStore;
+  signal: string;
+  theme: CryptidTheme;
+}) {
+  return (
+    <CoverageIsland
+      coverage={useLiveReadout(readouts, selectCoverage)}
+      placeName={useLiveReadout(readouts, selectPlaceName)}
+      sectorsVisible={useLiveReadout(readouts, selectSectorsVisible)}
+      signal={signal}
+      theme={theme}
     />
   );
 }
