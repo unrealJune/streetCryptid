@@ -222,8 +222,25 @@ async fn bootstrap_and_prime(
         )
         .await
         .expect("priming publish");
-    replicate(first, stash, second).await;
-    second.read_latest_ratcheted().await.expect("prime read");
+    // Delivered like every other envelope here: reconciled until it can be opened, not once.
+    // A single pass used to be enough, and since iroh 1.4 the first reconcile right after three
+    // nodes start does not always land; when the second node is the follower, a prime it never
+    // read leaves it with no sending chain, and the test then fails as a ratchet bug
+    // (`no_sending_chain`) that is really a delivery that was never retried.
+    let first_id = first.endpoint_id();
+    let deadline = std::time::Instant::now() + DELIVERY_DEADLINE;
+    loop {
+        replicate(first, stash, second).await;
+        let read = second.read_latest_ratcheted().await.expect("prime read");
+        if read.iter().any(|e| e.author == first_id) {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the priming envelope never reached the second node in {DELIVERY_DEADLINE:?}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
 }
 
 /// How long to keep reconciling before calling a delivery genuinely lost.
