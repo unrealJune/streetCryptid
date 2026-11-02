@@ -135,6 +135,74 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
+      # The hit rate is the whole point of the ccache, so it goes in the summary and the log (job
+      # summaries cannot be read back through the API). ccache's stats name nothing but its own
+      # counters, its cache directory, and -- verbose -- why a call was uncacheable.
+      - name: Report ccache statistics
+        if: '!cancelled()'
+        run: |
+          {
+            printf '### ccache\n\n```\n'
+            ccache --show-stats --verbose 2>&1 || true
+            # Where the compiles ran, to see whether a path differs between runs.
+            grep -o 'Working directory: .*' "$RUNNER_TEMP/ccache.log" 2> /dev/null |
+              sed -E 's#/[^/]+$##' | sort | uniq -c | sort -rn | awk 'NR <= 8' || true
+            # Written by scripts/eas-build-post-install.sh, in fixed words only.
+            cat "$RUNNER_TEMP/ccache-wiring.txt" 2> /dev/null || printf 'ccache-wiring: not recorded\n'
+            calls="$RUNNER_TEMP/ccache-wrapper-calls"
+            if [[ -f "$calls" ]]; then
+              printf 'wrapper_calls=%s (CCACHE_BINARY set: %s, unset: %s)\n' \
+                "$(wc -c < "$calls" | tr -d ' ')" \
+                "$(tr -cd b < "$calls" | wc -c | tr -d ' ')" \
+                "$(tr -cd n < "$calls" | wc -c | tr -d ' ')"
+            fi
+            printf '```\n'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Save the ccache
+        if: "!cancelled() && steps.setup.outputs.ccache-hit != 'true'"
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/Library/Caches/ccache
+          key: ${{ steps.setup.outputs.ccache-key }}
+
+      # Entries in and out are the Metro cache's hit evidence: after a JS-only change, an output
+      # directory nearly as large as the restored one is a cache that was read.
+      - name: Report Metro cache size
+        if: '!cancelled()'
+        run: |
+          for dir in "$EXPO_METRO_CACHE_RESTORE_DIR" "$EXPO_METRO_CACHE_OUTPUT_DIR"; do
+            printf '%s: %s files, %s\n' "$(basename "$dir")" \
+              "$(find "$dir" -type f 2> /dev/null | wc -l | tr -d ' ')" \
+              "$(du -sh "$dir" 2> /dev/null | cut -f1)"
+          done | tee -a "$GITHUB_STEP_SUMMARY"
+          # An output entry whose name is also in the restored directory was served from it.
+          if [[ -d "${EXPO_METRO_CACHE_RESTORE_DIR:-}" && -d "${EXPO_METRO_CACHE_OUTPUT_DIR:-}" ]]; then
+            printf 'served from the restored cache: %s\n' "$(comm -12 \
+              <(cd "$EXPO_METRO_CACHE_RESTORE_DIR" && find . -type f | sort) \
+              <(cd "$EXPO_METRO_CACHE_OUTPUT_DIR" && find . -type f | sort) | wc -l | tr -d ' ')" |
+              tee -a "$GITHUB_STEP_SUMMARY"
+          fi
+
+      # Only what this build's bundle used (see eas-local-build-setup), so the entry does not grow.
+      # actions/cache folds the path into an entry's identity, so the output is moved to the path
+      # the restore reads from; saved from the output directory itself, no restore ever matched.
+      - name: Stage the Metro transform cache
+        if: "!cancelled() && steps.setup.outputs.metro-cache-hit != 'true'"
+        run: |
+          set -euo pipefail
+          # Absent when setup failed before pointing Metro at them; there is nothing to save.
+          [[ -d "${EXPO_METRO_CACHE_OUTPUT_DIR:-}" ]] || exit 0
+          rm -rf -- "$EXPO_METRO_CACHE_RESTORE_DIR"
+          mv -- "$EXPO_METRO_CACHE_OUTPUT_DIR" "$EXPO_METRO_CACHE_RESTORE_DIR"
+
+      - name: Save the Metro transform cache
+        if: "!cancelled() && steps.setup.outputs.metro-cache-hit != 'true'"
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/metro-cache
+          key: ${{ steps.setup.outputs.metro-cache-key }}
+
       # actions/cache's own post step is `post-if: success()`, so a 40-minute build that fails
       # would otherwise discard the pod downloads it just made and leave the retry cold.
       - name: Save CocoaPods download cache
@@ -328,6 +396,62 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
+      - name: Report ccache statistics
+        if: '!cancelled()'
+        run: |
+          {
+            printf '### ccache\n\n```\n'
+            ccache --show-stats --verbose 2>&1 || true
+            # Where the compiles ran, to see whether a path differs between runs.
+            grep -o 'Working directory: .*' "$RUNNER_TEMP/ccache.log" 2> /dev/null |
+              sed -E 's#/[^/]+$##' | sort | uniq -c | sort -rn | awk 'NR <= 8' || true
+            printf '```\n'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Save the ccache
+        if: "!cancelled() && steps.setup.outputs.ccache-hit != 'true'"
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/ccache
+          key: ${{ steps.setup.outputs.ccache-key }}
+
+      # Entries in and out are the Metro cache's hit evidence: after a JS-only change, an output
+      # directory nearly as large as the restored one is a cache that was read.
+      - name: Report Metro cache size
+        if: '!cancelled()'
+        run: |
+          for dir in "$EXPO_METRO_CACHE_RESTORE_DIR" "$EXPO_METRO_CACHE_OUTPUT_DIR"; do
+            printf '%s: %s files, %s\n' "$(basename "$dir")" \
+              "$(find "$dir" -type f 2> /dev/null | wc -l | tr -d ' ')" \
+              "$(du -sh "$dir" 2> /dev/null | cut -f1)"
+          done | tee -a "$GITHUB_STEP_SUMMARY"
+          # An output entry whose name is also in the restored directory was served from it.
+          if [[ -d "${EXPO_METRO_CACHE_RESTORE_DIR:-}" && -d "${EXPO_METRO_CACHE_OUTPUT_DIR:-}" ]]; then
+            printf 'served from the restored cache: %s\n' "$(comm -12 \
+              <(cd "$EXPO_METRO_CACHE_RESTORE_DIR" && find . -type f | sort) \
+              <(cd "$EXPO_METRO_CACHE_OUTPUT_DIR" && find . -type f | sort) | wc -l | tr -d ' ')" |
+              tee -a "$GITHUB_STEP_SUMMARY"
+          fi
+
+      # Only what this build's bundle used (see eas-local-build-setup), so the entry does not grow.
+      # actions/cache folds the path into an entry's identity, so the output is moved to the path
+      # the restore reads from; saved from the output directory itself, no restore ever matched.
+      - name: Stage the Metro transform cache
+        if: "!cancelled() && steps.setup.outputs.metro-cache-hit != 'true'"
+        run: |
+          set -euo pipefail
+          # Absent when setup failed before pointing Metro at them; there is nothing to save.
+          [[ -d "${EXPO_METRO_CACHE_OUTPUT_DIR:-}" ]] || exit 0
+          rm -rf -- "$EXPO_METRO_CACHE_RESTORE_DIR"
+          mv -- "$EXPO_METRO_CACHE_OUTPUT_DIR" "$EXPO_METRO_CACHE_RESTORE_DIR"
+
+      - name: Save the Metro transform cache
+        if: "!cancelled() && steps.setup.outputs.metro-cache-hit != 'true'"
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/metro-cache
+          key: ${{ steps.setup.outputs.metro-cache-key }}
+
       # actions/cache's own post step is `post-if: success()`, so a 40-minute build that fails
       # would otherwise discard the Gradle downloads it just made and leave the retry cold.
       - name: Save Gradle dependency and build caches
@@ -338,9 +462,16 @@ jobs:
             ~/.gradle/caches/modules-2
             ~/.gradle/caches/jars-*
             ~/.gradle/caches/transforms-*
-            ~/.gradle/caches/build-cache-1
             ~/.gradle/wrapper
           key: ${{ steps.setup.outputs.native-cache-key }}
+
+      # Every run, unlike the entry above: see "Restore the Gradle build cache" for why.
+      - name: Save the Gradle build cache
+        if: '!cancelled()'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.gradle/caches/build-cache-1
+          key: ${{ steps.setup.outputs.gradle-build-cache-key }}
 
       # Same reasoning, and it matters more here: this is what a later run of THIS pull request
       # reads to skip the Rust build entirely. Cross-PR reuse comes from cache-warm.yml on main.

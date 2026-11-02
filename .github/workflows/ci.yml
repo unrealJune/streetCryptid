@@ -45,10 +45,35 @@ jobs:
         with:
           bun-version: 1.3.14
 
+      # One matrix job saves the shared Bun cache on main, so the four do not race to reserve it.
       - name: Install project dependencies
-        run: bun install --frozen-lockfile
+        uses: ./.github/actions/bun-install
+        with:
+          save: ${{ matrix.script == 'test' && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+
+      # Jest's transform cache, without which the first test of every suite pays for transforming
+      # its whole graph (see testTimeout in jest.config.js). Jest keys each entry by file content and
+      # config, so a hit on a changed source file is a miss, never a stale transform. What its key
+      # cannot see is a new babel preset behind the same path, so bun.lock is in ours, and there is
+      # deliberately no restore-key: a lockfile change starts empty instead of carrying every old
+      # entry forward forever. Saved on main only, for the scoping reason in bun-install.
+      - name: Restore the Jest transform cache
+        if: matrix.script == 'test' && !(github.event_name == 'push' && github.ref == 'refs/heads/main')
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/jest-cache
+          key: jest-transform-${{ runner.os }}-${{ hashFiles('bun.lock', 'jest.config.js') }}
+
+      - name: Restore and save the Jest transform cache
+        if: matrix.script == 'test' && github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/jest-cache
+          key: jest-transform-${{ runner.os }}-${{ hashFiles('bun.lock', 'jest.config.js') }}
 
       - name: Run ${{ matrix.name }}
+        env:
+          JEST_CACHE_DIRECTORY: ${{ runner.temp }}/jest-cache
         run: bun run "${{ matrix.script }}"
 
   typecheck:
@@ -113,7 +138,7 @@ jobs:
           bun-version: 1.3.14
 
       - name: Install project dependencies
-        run: bun install --frozen-lockfile
+        uses: ./.github/actions/bun-install
 
       - name: Generate Expo types
         run: |
@@ -170,6 +195,7 @@ jobs:
           tool: |
             rust@1.97.0
             just@1.57.0
+            cargo-nextest@0.9.140
           fallback: none
 
       - name: Restore Rust compilation cache
@@ -179,8 +205,14 @@ jobs:
           key: native
           save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
+      # nextest, not `cargo test`: cargo runs test binaries one after another, and three of them
+      # (restart_protocol, ratchet_conditions, pairing_integration) were ~280 s of that serially.
+      # nextest runs every test as its own process across all binaries at once. The crate has no
+      # doctests, which nextest would skip. `.config/nextest.toml` keeps the loopback-network
+      # scenarios serialized, as their own in-process lock did under `cargo test`.
       - name: Run Rust tests
-        run: just test-rust
+        working-directory: modules/iroh-location/rust
+        run: cargo nextest run --profile ci
 
       # A change to the Rust UniFFI surface leaves the tracked Kotlin/Swift bindings stale, which
       # used to fail CI until someone ran `just bindgen-android` / `just bindgen-ios` by hand.
