@@ -77,6 +77,7 @@ pub(super) fn spawn_l2cap_io_tasks<R, W>(
     last_rx_at: crate::transport::peer::LivenessClock,
     tearing_down: Arc<AtomicBool>,
     empty_frames_counter: Arc<AtomicU64>,
+    rx_tally: Option<Arc<super::pipe::PathTally>>,
 ) -> (
     mpsc::Sender<Vec<u8>>,
     JoinHandle<()>,
@@ -121,6 +122,9 @@ where
             match read_framed_datagram(&mut reader).await {
                 Ok(Some(data)) => {
                     last_rx_at.bump();
+                    if let Some(tally) = &rx_tally {
+                        tally.note_in();
+                    }
                     // Keep empty L2CAP frames out of QUIC. iroh 0.98.2 no
                     // longer panics on these, but they still indicate either
                     // a mixed-version peer or malformed transport input.
@@ -263,6 +267,7 @@ mod tests {
             crate::transport::peer::LivenessClock::new(),
             Arc::new(AtomicBool::new(false)),
             Arc::new(AtomicU64::new(0)),
+            None,
         );
 
         let (mut b_rd, mut b_wr) = split(peripheral_side);
@@ -302,6 +307,7 @@ mod tests {
             crate::transport::peer::LivenessClock::new(),
             Arc::new(AtomicBool::new(false)),
             Arc::new(AtomicU64::new(0)),
+            None,
         );
 
         let (_b_rd, mut b_wr) = split(peripheral_side);
@@ -336,6 +342,7 @@ mod tests {
             crate::transport::peer::LivenessClock::new(),
             Arc::new(AtomicBool::new(false)),
             Arc::new(AtomicU64::new(0)),
+            None,
         );
 
         drop(b);
@@ -363,6 +370,7 @@ mod tests {
             crate::transport::peer::LivenessClock::new(),
             Arc::new(AtomicBool::new(false)),
             Arc::clone(&empty_frames),
+            None,
         );
 
         // Peer writes a zero-length framed datagram (`[0x00, 0x00]`), then a
@@ -401,6 +409,7 @@ mod tests {
             crate::transport::peer::LivenessClock::new(),
             Arc::new(AtomicBool::new(false)),
             Arc::new(AtomicU64::new(0)),
+            None,
         );
 
         send_task.abort();

@@ -79,3 +79,12 @@ described below.
         CoreBluetooth answers (a caller's own timeout), the guard removes the request and
         cancels the connection. Upstream left the request behind, so every later connect to
         that peripheral failed with `ConnectInFlight`.
+
+2026-11-02 — Android L2CAP close reaches the channel:
+
+  * src/platform/android/l2cap_state.rs
+      - When Kotlin reports a socket closed, the Kotlin->Rust bridge task now
+        shuts down its write half, so the app's `L2capChannel` reads EOF.
+        Before, dropping that split half closed nothing while the other half
+        lived, and `writeL2cap` on a forgotten socket returns without error,
+        so a closed channel read as open forever.

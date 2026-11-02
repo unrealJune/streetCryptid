@@ -120,6 +120,12 @@ pub(crate) fn on_channel_opened(device_addr: &str, socket_id: i32, from_server: 
                 break;
             }
         }
+        // `data_rx` ends when Kotlin reports the socket closed (`on_channel_closed`). Say so to
+        // the app half: dropping this split half alone closes nothing while the other half lives,
+        // and `writeL2cap` on a socket Kotlin has already forgotten returns without an error, so
+        // the channel used to read as open forever — reads pending, writes vanishing — and the
+        // pipe kept sending everything down it in preference to a working GATT path.
+        let _ = bridge_writer.shutdown().await;
     });
 
     let is_server = from_server;

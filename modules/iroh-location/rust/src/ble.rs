@@ -574,10 +574,24 @@ mod imp {
             let mut probes = 0u64;
             for device in devices {
                 let key = device.id.to_string();
+                // A phone we already hold a verified link to is known by its ENDPOINT, not by the
+                // address it advertises now: Android re-advertises under a new address the moment
+                // a central connects, so the advertisement an iPhone hears is never the device its
+                // live pipe to that Pixel is on. Matching by device id alone sent the iPhone to
+                // probe the new address (a second connect to a phone it was already connected
+                // to), which timed out every time (2026-11-01 21:32, 2026-11-02 17:23) while the
+                // Pixel resolved the iPhone as known in a second and a half.
                 let known = transport_peers
                     .iter()
                     .find(|peer| peer.device_id == device.id)
                     .and_then(|peer| peer.verified_endpoint)
+                    .or_else(|| {
+                        let key_uuid = advertised_key_uuid(&device)?;
+                        transport_peers
+                            .iter()
+                            .filter_map(|peer| peer.verified_endpoint)
+                            .find(|endpoint| key_uuid_matches_endpoint(&key_uuid, endpoint))
+                    })
                     .map(|endpoint| endpoint.as_bytes().to_vec())
                     .or_else(|| self.probe_cache.cached(&key));
                 if let Some(endpoint_id) = known {
