@@ -250,6 +250,15 @@ impl ConnectionRegistry {
         true
     }
 
+    /// streetCryptid: a new pipe now runs under `pipe`. A peer keeps its stable id across pipes
+    /// (`Routing::reserve_outbound` / `resurrect_for_send`, because iroh keeps dialling a peer on
+    /// the id it last resolved), so the id of a pipe closed a moment ago is routinely the id of
+    /// the next one. Without this, the closed-pipe memory below closed every connection
+    /// handshaking on the replacement for `CLOSED_PIPE_TTL`.
+    pub fn reopen_pipe(&self, pipe: StableConnId) {
+        self.inner.lock().closed.remove(&pipe);
+    }
+
     /// Close every connection whose last path rides `pipe`, and return
     /// how many were closed. Buckets for all endpoints are considered:
     /// the pipe is going away regardless of who authenticated over it.
@@ -407,6 +416,24 @@ mod tests {
                 )]
             );
         }
+    }
+
+    /// A peer keeps its stable id across pipes, so a connection on the pipe that replaced a
+    /// closed one must not be closed as a late arrival on the dead one.
+    #[test]
+    fn a_reopened_pipe_id_accepts_new_connections() {
+        let registry = ConnectionRegistry::default();
+        let pipe = StableConnId::for_test(1);
+        registry.close_pipe(
+            pipe,
+            VarInt::from_u32(BLE_CLOSE_CODE_RETRY),
+            BLE_CLOSE_REASON_PIPE_CLOSED,
+        );
+        registry.reopen_pipe(pipe);
+
+        let conn = FakeConn::new();
+        registry.insert(endpoint(1), pipe, Arc::clone(&conn) as Arc<dyn ConnHandle>);
+        assert!(conn.closes().is_empty());
     }
 
     #[test]

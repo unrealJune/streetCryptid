@@ -163,7 +163,11 @@ No other upstream source files were modified (src/transport/mod.rs gained the `s
   * Cargo.toml — `blew` is the vendored path crate; `noq-proto` dropped (the
     hook takes `VarInt` from `iroh::endpoint`); `rand` follows upstream.
   * src/transport/conns.rs — the connection registry also remembers which
-    watch left a pipe idle (`take_still_idle`), for the linger below.
+    watch left a pipe idle (`take_still_idle`), for the linger below, and
+    forgets a closed pipe when a new pipe opens under its id (`reopen_pipe`,
+    called from the driver's StartDataPipe): a peer keeps its stable id across
+    pipes here, so upstream's closed-pipe memory closed every connection on the
+    replacement pipe.
   * src/transport/hook.rs — `PIPE_IDLE_LINGER`: a pipe is released only after
     its last connection has closed and it then stayed unused for 30 s. The
     link-priority hold (`before_connect` refusal, `after_handshake` refusal,

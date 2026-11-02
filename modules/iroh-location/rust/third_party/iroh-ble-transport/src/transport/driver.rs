@@ -712,6 +712,7 @@ impl<I: BleInterface> Driver<I> {
                     None => (routing.register_pipe(device_id.clone(), direction), None),
                 };
                 routing.register_pending(stable_id, reservation_endpoint);
+                connections.reopen_pipe(stable_id);
                 tokio::spawn(async move {
                     run_data_pipe(
                         iface,
