@@ -508,16 +508,23 @@ export default function MapScreenBody() {
   // at `peek`; the roster is the one body that genuinely grows with its content and may go to
   // `full`. A friend's pane tops out at `mid`: it says everything it has by then, and `full`
   // docked it edge-to-edge with a screen of empty island under the last row.
-  const drawerMax: DrawerDetent = detailPresence ? 'mid' : rosterOpen ? 'full' : 'peek';
+  //
+  // The one thing zoom decides: once the camera is pulled back past the band where coverage is
+  // measurable (`sectorsVisible`), ME has nothing to expand INTO, so it is pinned at `collapsed`
+  // and, with one stop, shows no grip. The pin is drawn, never stored (see `onDetentChange`
+  // below), so zooming back in returns whatever size the user left. Everywhere else the size is
+  // the user's — zoom never moves it.
+  const drawerMax: DrawerDetent = detailPresence
+    ? 'mid'
+    : rosterOpen
+      ? 'full'
+      : readout.sectorsVisible
+        ? 'peek'
+        : 'collapsed';
   // ...and how far down. ME and FRIENDS both collapse to their one-line summary; a friend's pane
   // does not, because its top line is a header for the rest of the pane rather than a summary that
-  // stands on its own. Neither does ME past the exploration cutoff, where the expanded body IS the
-  // one line already — offering a grip that moves nothing is worse than offering none.
-  const drawerMin: DrawerDetent = detailPresence
-    ? 'peek'
-    : rosterOpen || readout.sectorsVisible
-      ? 'collapsed'
-      : 'peek';
+  // stands on its own.
+  const drawerMin: DrawerDetent = detailPresence ? 'peek' : 'collapsed';
   const detailSharing = detailPresence
     ? (snapshot?.sharingWith ?? []).includes(detailPresence.friend.endpointId)
     : false;
@@ -560,10 +567,9 @@ export default function MapScreenBody() {
   );
 
   // The bodies, shared by the drawer (one at a time, behind the tabs) and the wide column (both).
-  const meBody = (bodyMinimized: boolean) => (
+  const meBody = () => (
     <CoverageIsland
       coverage={readout.coverage}
-      minimized={bodyMinimized}
       placeName={readout.placeName}
       sectorsVisible={readout.sectorsVisible}
       signal={selfSignal}
@@ -682,7 +688,7 @@ export default function MapScreenBody() {
               },
             ]}
           >
-            <IslandColumn me={meBody(false)} theme={theme}>
+            <IslandColumn me={meBody()} theme={theme}>
               {friendsBody('mid', false)}
             </IslandColumn>
           </View>
@@ -700,6 +706,9 @@ export default function MapScreenBody() {
             maxDetent={drawerMax}
             minDetent={drawerMin}
             onDetentChange={(next) => {
+              // The zoom pin is temporary: the drawer draws `collapsed` whatever `detent` says, so
+              // its correction is not stored, and zooming back in returns the size the user left.
+              if (drawerMax === 'collapsed' && next === 'collapsed') return;
               closeLayers();
               setDetent(next);
             }}
@@ -708,7 +717,7 @@ export default function MapScreenBody() {
             signal={selfSignal}
             theme={theme}
           >
-            {detailPresence || rosterOpen ? friendsBody(detent, minimized) : meBody(minimized)}
+            {detailPresence || rosterOpen ? friendsBody(detent, minimized) : meBody()}
           </MapDrawer>
         </View>
       )}
