@@ -135,6 +135,7 @@ fn hex(bytes: &[u8]) -> String {
 }
 
 async fn start_node() -> Arc<LocationNode> {
+    trace_if_asked();
     let node = LocationNode::new(None, None).expect("construct node");
     node.start(
         vec!["https://127.0.0.1:1".into()],
@@ -1359,5 +1360,15 @@ async fn a_restarted_reader_receives_without_anyone_reimporting_its_friends() {
              author's namespace, which only a JS import used to open"
         );
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+}
+
+/// TEMPORARY (iroh 1.4 bump diagnosis): `SC_TEST_TRACE=<filter>` prints tracing for a failing test.
+fn trace_if_asked() {
+    if let Ok(filter) = std::env::var("SC_TEST_TRACE") {
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter(tracing_subscriber::EnvFilter::new(filter))
+            .with_test_writer()
+            .try_init();
     }
 }
