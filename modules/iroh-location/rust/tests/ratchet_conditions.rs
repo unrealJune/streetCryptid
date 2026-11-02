@@ -135,7 +135,6 @@ fn hex(bytes: &[u8]) -> String {
 }
 
 async fn start_node() -> Arc<LocationNode> {
-    trace_if_asked();
     let node = LocationNode::new(None, None).expect("construct node");
     node.start(
         vec!["https://127.0.0.1:1".into()],
@@ -223,25 +222,8 @@ async fn bootstrap_and_prime(
         )
         .await
         .expect("priming publish");
-    // Delivered like every other envelope here: reconciled until it can be opened, not once.
-    // A single pass used to be enough, and since iroh 1.4 the first reconcile right after three
-    // nodes start does not always land; when the second node is the follower, a prime it never
-    // read leaves it with no sending chain, and the test then fails as a ratchet bug
-    // (`no_sending_chain`) that is really a delivery that was never retried.
-    let first_id = first.endpoint_id();
-    let deadline = std::time::Instant::now() + DELIVERY_DEADLINE;
-    loop {
-        replicate(first, stash, second).await;
-        let read = second.read_latest_ratcheted().await.expect("prime read");
-        if read.iter().any(|e| e.author == first_id) {
-            return;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the priming envelope never reached the second node in {DELIVERY_DEADLINE:?}"
-        );
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    }
+    replicate(first, stash, second).await;
+    second.read_latest_ratcheted().await.expect("prime read");
 }
 
 /// How long to keep reconciling before calling a delivery genuinely lost.
@@ -1377,15 +1359,5 @@ async fn a_restarted_reader_receives_without_anyone_reimporting_its_friends() {
              author's namespace, which only a JS import used to open"
         );
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    }
-}
-
-/// TEMPORARY (iroh 1.4 bump diagnosis): `SC_TEST_TRACE=<filter>` prints tracing for a failing test.
-fn trace_if_asked() {
-    if let Ok(filter) = std::env::var("SC_TEST_TRACE") {
-        let _ = tracing_subscriber::fmt()
-            .with_env_filter(tracing_subscriber::EnvFilter::new(filter))
-            .with_test_writer()
-            .try_init();
     }
 }

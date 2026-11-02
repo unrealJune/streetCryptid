@@ -1033,12 +1033,24 @@ impl TrailDocs {
     ) -> Result<(Vec<([u8; 32], [u8; 32])>, SyncEnd)> {
         let doc = self.doc_for(ns).await?;
         let mut events = doc.subscribe().await?;
+        let asked: std::collections::HashSet<_> = peers.iter().map(|peer| peer.id).collect();
         doc.start_sync(peers).await?;
 
         // Bound the reconciliation: with no reachable peer `SyncFinished` may never arrive, which
         // would hang this call forever. The first event gets a longer grace period — a cold node's
         // dial (net_report + hole-punch or relay fallback) routinely outlasts the idle gap.
         let mut saw_event = false;
+        // `PendingContentReady` follows EVERY `SyncFinished`, including one for an exchange that
+        // was aborted or failed: iroh-docs emits it at once when nothing is queued. A namespace in
+        // the live engine is reconciled with gossip neighbours as well as the peers asked for, and
+        // two of those exchanges racing make one abort (`AlreadySyncing`), so the first
+        // `PendingContentReady` could arrive before the asked-for exchange had delivered anything.
+        // It is believed once an asked-for peer has finished an exchange cleanly, or once every
+        // asked-for peer has failed for a reason other than that race (so a pass that reached no
+        // one still ends as promptly as it used to). On the iroh 1.4 bump (2026-11-02) this race
+        // decided loopback tests a few milliseconds apart.
+        let mut asked_peer_synced = asked.is_empty();
+        let mut asked_failed = std::collections::HashSet::new();
         let mut delivered: Vec<([u8; 32], [u8; 32])> = Vec::new();
         loop {
             let remaining = deadline.map(|d| d.saturating_duration_since(Instant::now()));
@@ -1048,8 +1060,24 @@ impl TrailDocs {
             }
             match timeout(wait, events.next()).await {
                 // All reconciled entries have their content locally — the clean finish.
-                Ok(Some(Ok(LiveEvent::PendingContentReady))) => {
+                Ok(Some(Ok(LiveEvent::PendingContentReady)))
+                    if asked_peer_synced || asked_failed.len() == asked.len() =>
+                {
                     return Ok((delivered, SyncEnd::ContentReady))
+                }
+                Ok(Some(Ok(LiveEvent::SyncFinished(ev)))) => {
+                    saw_event = true;
+                    if asked.contains(&ev.peer) {
+                        match &ev.result {
+                            Ok(_) => asked_peer_synced = true,
+                            // The loser of two exchanges with the same peer; the winner reports
+                            // for it. (iroh-docs flattens the reason into the message.)
+                            Err(error) if error.contains("AlreadySyncing") => {}
+                            Err(_) => {
+                                asked_failed.insert(ev.peer);
+                            }
+                        }
+                    }
                 }
                 // The one place a peer is named per entry. `read_latest_sealed` reads the replica
                 // afterwards and cannot tell a freshly delivered slot from one that was already
