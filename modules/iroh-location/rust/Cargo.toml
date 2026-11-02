@@ -204,6 +204,13 @@ opt-level = "z"
 lto = "thin"
 strip = true
 
+# noq 1.4.0 with one fix, vendored (MIT OR Apache-2.0; third_party/noq/NOTICE): `read_to_end` on a
+# stream already read to its end failed with `ClosedStream`, which iroh-docs hits at the end of
+# every sync, so most syncs reported failure while their data had arrived. Drop the patch once a
+# noq release fixes it.
+[patch.crates-io]
+noq = { path = "third_party/noq" }
+
 # Optimize dependencies in test builds only; this crate itself stays at opt-level 0 so it keeps
 # fast rebuilds and full debuggability. The test suite is CPU-bound in dependency code it cannot
 # avoid -- x25519/ed25519, ChaCha, BLAKE3 and redb, all unoptimized by default -- and on CI

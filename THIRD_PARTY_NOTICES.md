@@ -50,6 +50,17 @@ The Rust crate was vendored on 2026-10-31 to fix flow control in its CoreBluetoo
 backend, and rebased onto upstream 0.5.1-beta.8 on 2026-11-02, which fixes most of the
 same problems itself; its NOTICE lists what is still ours.
 
+## noq (vendored, modified)
+
+- **Location:** `modules/iroh-location/rust/third_party/noq/`
+- **Upstream:** <https://github.com/n0-computer/noq> (crates.io `noq` 1.4.0)
+- **Copyright:** n0, inc. and the noq / Quinn contributors
+- **License:** MIT OR Apache-2.0
+- **List of modifications:** `modules/iroh-location/rust/third_party/noq/NOTICE`
+
+Applied with `[patch.crates-io]` for a single fix: `read_to_end` on a stream already read to its
+end failed, which made most iroh-docs syncs report failure. Remove it once noq fixes it.
+
 ## Distribution obligation
 
 Distributing a build — including to TestFlight and Play testers — obliges you to offer

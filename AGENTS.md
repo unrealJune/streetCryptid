@@ -588,7 +588,11 @@ Conventions when changing that code:
   open once per refusing connection on every 333 ms retry; on 2026-11-01 an iPhone 16 Pro Max
   aborted in `VecDeque::grow` a second into a Bump (`ios.diagnostic` SIGABRT). We patched it by
   hand until 1.4 bounded the queue (#4551). 1.4 also stops an Initial send waiting on a slow
-  transport (a full BLE inbox) from stalling that peer's actor (#4512). A
+  transport (a full BLE inbox) from stalling that peer's actor (#4512). Its noq 1.4 is patched
+  (`rust/third_party/noq`, `[patch.crates-io]`): `read_to_end` on a stream already read to its
+  FIN returned `ClosedStream`, and iroh-docs does that at the end of every sync, so most syncs
+  reported "Failed to close connection1" while their data had arrived and `PendingContentReady`
+  ended pulls before the content landed. Drop the patch when noq fixes it. A
   `prev.last_state=active` relaunch during pairing is a crash until shown otherwise.
 - **`iroh-ble-transport` and `blew` are vendored, rebased onto upstream 0.5.1-beta on 2026-11-02.**
   Most of what we fixed by hand on 0.3 (CoreBluetooth dropping notifications and writes without

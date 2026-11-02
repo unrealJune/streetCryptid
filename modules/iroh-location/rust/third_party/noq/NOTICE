@@ -1,0 +1,27 @@
+noq — vendored, modified copy
+=============================
+
+Upstream : https://github.com/n0-computer/noq (crates.io `noq` 1.4.0)
+License  : MIT OR Apache-2.0 (LICENSE-MIT, LICENSE-APACHE in this directory)
+
+Used through `[patch.crates-io]` in ../../Cargo.toml so iroh, iroh-docs and iroh-blobs all get
+this copy. Drop the patch and this directory once a noq release fixes the bug below.
+
+Modifications by the streetCryptid project
+------------------------------------------
+
+2026-11-02 — `read_to_end` on a stream already read to its end:
+
+  * src/recv_stream.rs
+      - `RecvStream::is_ordered` answers `Ok(true)` when `all_data_read` is set, instead of
+        asking the connection for a stream whose state it has already freed (which reports
+        `ClosedStream`). noq 1.4 (#794) made `read_to_end` call `is_ordered` first, so a
+        `read_to_end` after the data had been read to the FIN failed where 1.0 returned
+        empty. iroh-docs 0.101 does exactly that at the end of every sync
+        (`connect_and_sync` / `handle_connection`), and on iroh 1.4 most docs syncs reported
+        "Failed to close connection1: read error: closed stream" while their entries had
+        arrived; `PendingContentReady` still followed, so pulls returned before content landed.
+
+The crate's Cargo.lock, Cargo.toml.orig, .cargo_vcs_info.json, benches, examples and tests were
+not vendored, and their [[example]] / [[test]] / [[bench]] entries are removed from Cargo.toml.
+No other file differs from the published 1.4.0 crate.
