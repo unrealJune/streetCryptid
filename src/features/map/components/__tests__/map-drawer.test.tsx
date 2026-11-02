@@ -60,9 +60,11 @@ jest.mock('react-native-reanimated', () => {
     default: { View },
     useSharedValue: (value: number) => useRef({ value }).current,
     useAnimatedStyle: (factory: () => object) => factory(),
+    useDerivedValue: (factory: () => number) => ({ value: factory() }),
     interpolate: () => 0,
     runOnJS: (fn: () => void) => fn,
     withSpring: (value: number) => value,
+    withTiming: (value: number) => value,
   };
 });
 jest.mock('../island-tabs', () => ({ IslandTabs: () => null }));
@@ -292,3 +294,63 @@ describe('MapDrawer — the allowed range moving under a resting drawer', () => 
     expect(renderer.root.findByType(ScrollView).props.scrollEnabled).toBe(false);
   });
 });
+
+describe('MapDrawer — pinned at collapsed', () => {
+  let renderer: ReactTestRenderer;
+  afterEach(() => {
+    act(() => renderer?.unmount());
+    mockPans.length = 0;
+  });
+
+  function render(maxDetent: 'collapsed' | 'peek') {
+    act(() => {
+      renderer = create(
+        <MapDrawer
+          activeTab="me"
+          detent="collapsed"
+          minDetent="collapsed"
+          maxDetent={maxDetent}
+          insetBottom={34}
+          insetTop={59}
+          screenHeight={844}
+          signal="#2f9e6a"
+          theme={CryptidThemes.daybreak}
+          onDetentChange={jest.fn()}
+          onSelectTab={jest.fn()}
+        >
+          <Text>Washington</Text>
+        </MapDrawer>
+      );
+    });
+  }
+
+  // Zooming out past the band where coverage is measurable leaves ME with `collapsed` as its only
+  // stop. It must lose the grip — there is nowhere to drag to — but not the strip's height, or the
+  // bubble shrinks by a grip at the moment the map crosses the cutoff.
+  it('keeps the grip strip’s space but drops the control', () => {
+    render('collapsed');
+    expect(hosts(renderer, { accessibilityLabel: 'Panel size' })).toHaveLength(0);
+    expect(hosts(renderer, { testID: 'map-drawer-grip-space' })).toHaveLength(1);
+  });
+
+  it('has the control back as soon as there is somewhere to drag', () => {
+    render('peek');
+    expect(hosts(renderer, { accessibilityLabel: 'Panel size' })).toHaveLength(1);
+    expect(hosts(renderer, { testID: 'map-drawer-grip-space' })).toHaveLength(0);
+  });
+
+  it('does not let the clipped body scroll while pinned', () => {
+    render('collapsed');
+    act(() => {
+      measuredBody(renderer).props.onLayout({ nativeEvent: { layout: { height: 92 } } });
+    });
+    expect(renderer.root.findByType(ScrollView).props.scrollEnabled).toBe(false);
+  });
+});
+
+/** Host Views carrying `props` — `findAllByProps` also matches the composite wrapping each one. */
+function hosts(renderer: ReactTestRenderer, props: Record<string, string>) {
+  return renderer.root
+    .findAllByType(View)
+    .filter((node) => Object.entries(props).every(([key, value]) => node.props[key] === value));
+}

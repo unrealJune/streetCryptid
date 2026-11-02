@@ -1,11 +1,24 @@
-import { StyleSheet, Text, View } from 'react-native';
+import { useEffect, useState } from 'react';
+import { StyleSheet, Text, View, type LayoutChangeEvent } from 'react-native';
+import Animated, {
+  interpolate,
+  useAnimatedStyle,
+  useSharedValue,
+  withTiming,
+} from 'react-native-reanimated';
 
 import type { CryptidTheme } from '@/constants/cryptid-theme';
 import { Spacing } from '@/constants/theme';
 
+import { COLLAPSED_ROW_HEIGHT } from '../core/drawer-detents';
+import { useDrawerProgress } from './drawer-progress';
 import { islandBody } from './island-body';
 
 const SEGMENTS = 26;
+const HERO_SIZE = 28;
+const HERO_SIZE_COLLAPSED = 22;
+/** Width the percentage occupies, in both its homes — the bar row and the collapsed line. */
+const PCT_WIDTH = 40;
 
 interface CoverageIslandProps {
   readonly theme: CryptidTheme;
@@ -14,10 +27,10 @@ interface CoverageIslandProps {
   /** Discovered fraction of the visible sectors, 0–1. */
   readonly coverage: number;
   /**
-   * Whether the exploration layer is drawn at this zoom. When false the whole
-   * sector readout is suppressed — `coverage` would otherwise render a
-   * misleading 0%. The user's own minimize choice is kept untouched, so zooming
-   * back in restores whatever state they left it in.
+   * Whether a coverage percentage is measurable at this zoom (the display-resolution band). When
+   * false `coverage` is a placeholder 0, so the percentage is hidden rather than claim nothing has
+   * been explored — and the screen pins the drawer collapsed, so the readout is never on show
+   * without a number to put in it.
    */
   readonly sectorsVisible: boolean;
   /**
@@ -26,12 +39,6 @@ interface CoverageIslandProps {
    * to the frontier rim.
    */
   readonly signal: string;
-  /**
-   * Collapsed to the one-line summary. Owned by the drawer rather than by this
-   * body: minimizing is the `collapsed` detent, reached by the grip, and a body
-   * cannot resize the surface it is sitting in from in here.
-   */
-  readonly minimized: boolean;
 }
 
 /**
@@ -44,6 +51,13 @@ interface CoverageIslandProps {
  * practice it put a second panel over the map to say what this one already said well, and
  * the map is the thing the chrome is supposed to stay out of the way of.
  *
+ * ONE layout, morphed by the drawer's live height (`useDrawerProgress`) rather than swapped on
+ * the detent. The body always lays out expanded — that natural height is what `peek` measures —
+ * and as the island shrinks over it the readout slides out through the bottom edge, the hero eases
+ * down to the collapsed line's size, and the percentage travels up out of the bar row to sit at
+ * the end of that line. Swapping two layouts on release made all three jump in one frame at the
+ * end of a drag that had, until then, just been clipping the expanded one.
+ *
  * The card surface belongs to `MapDrawer`; this only supplies its own padding.
  */
 export function CoverageIsland({
@@ -52,91 +66,140 @@ export function CoverageIsland({
   coverage,
   sectorsVisible,
   signal,
-  minimized,
 }: CoverageIslandProps) {
   const { chrome } = theme;
-  const pct = Math.round(coverage * 100);
-  const lit = Math.round(coverage * SEGMENTS);
+  // Past the cutoff `coverage` drops to a placeholder 0 at the same moment the drawer starts
+  // springing shut — hold the last real number so the closing readout does not flash 0%.
+  const [held, setHeld] = useState(coverage);
+  if (sectorsVisible && held !== coverage) setHeld(coverage);
+  const shown = sectorsVisible ? coverage : held;
+  const pct = Math.round(shown * 100);
+  const lit = Math.round(shown * SEGMENTS);
   const hero = placeName ?? '—';
-  // Zooming past the exploration cutoff shows the same one line the collapsed
-  // detent does, WITHOUT the drawer changing detent — zooming back in restores
-  // whatever height the user left it at rather than a height the zoom picked.
-  const showSectors = sectorsVisible && !minimized;
   const summary = sectorsVisible
     ? `${hero}. ${pct} percent of visible sectors explored.`
     : `${hero}. Sector coverage is hidden at this zoom.`;
 
-  // The DETENT decides the body's shape; `sectorsVisible` only decides whether the bar is in it.
-  //
-  // These were one condition, and past the exploration cutoff that put the one-line body into
-  // `islandBody.minimized` — a height pinned to `COLLAPSED_BODY_HEIGHT`, which is the row PLUS one
-  // grip's worth of air, top-aligned because at `collapsed` the grip strip above supplies the
-  // matching margin. But the cutoff is not the collapsed detent: it takes `collapsed` away
-  // entirely, which leaves the drawer with a single stop and therefore no grip. So the body was
-  // reserving 16pt for a handle that was not rendered, and the place name sat hard against the top
-  // of the island with a band of dead surface under it.
+  const progress = useDrawerProgress();
+  // Where the two rows sit in the expanded layout, measured rather than derived from font
+  // metrics, which differ by platform. Shared values so a re-measure never re-renders.
+  const headerCenter = useSharedValue(0);
+  const readoutTop = useSharedValue(0);
+  const barCenter = useSharedValue(0);
+  // The percentage FADES when coverage stops being measurable rather than unmounting. Crossing the
+  // cutoff from `peek` springs the drawer shut at the same moment, and a number that vanished on
+  // that first frame left the readout closing around a hole; this way it fades as it rides up.
+  // Same duration as the drawer's grip fade, so both read as one change.
+  const measurable = useSharedValue(sectorsVisible ? 1 : 0);
+  useEffect(() => {
+    measurable.value = withTiming(sectorsVisible ? 1 : 0, { duration: 180 });
+    // `measurable` is a shared value — a stable ref.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sectorsVisible]);
+
+  // The collapsed line's center: the row `islandBody.minimized` lays out, top-aligned under the
+  // grip strip. Everything that stays visible when collapsed converges on it.
+  const lineCenter = COLLAPSED_ROW_HEIGHT / 2;
+
+  const heroStyle = useAnimatedStyle(() => ({
+    transform: [
+      { translateY: (1 - progress.value) * (lineCenter - headerCenter.value) },
+      { scale: interpolate(progress.value, [0, 1], [HERO_SIZE_COLLAPSED / HERO_SIZE, 1]) },
+    ],
+  }));
+  // Also gated on `measurable`: the wide column has no drawer to fold it away (progress reads a
+  // constant 1 there), and a bar with no number beside it would claim a coverage nobody measured.
+  const readoutStyle = useAnimatedStyle(() => ({
+    opacity: interpolate(progress.value, [0.35, 1], [0, 1], 'clamp') * measurable.value,
+  }));
+  const pctStyle = useAnimatedStyle(() => ({
+    opacity: measurable.value,
+    transform: [
+      {
+        translateY: progress.value * (readoutTop.value + barCenter.value - lineCenter),
+      },
+    ],
+  }));
+
+  const onHeaderLayout = (event: LayoutChangeEvent) => {
+    const { y, height } = event.nativeEvent.layout;
+    headerCenter.value = y + height / 2;
+  };
+  const onReadoutLayout = (event: LayoutChangeEvent) => {
+    readoutTop.value = event.nativeEvent.layout.y;
+  };
+  const onBarLayout = (event: LayoutChangeEvent) => {
+    const { y, height } = event.nativeEvent.layout;
+    barCenter.value = y + height / 2;
+  };
+
   return (
-    <View
-      style={minimized ? islandBody.minimized : islandBody.expanded}
-      testID="coverage-island-body"
-    >
-      <View style={islandBody.header}>
+    <View style={islandBody.expanded} testID="coverage-island-body">
+      <View style={[islandBody.header, styles.header]} onLayout={onHeaderLayout}>
         <View
           accessible
           accessibilityRole="summary"
           accessibilityLabel={summary}
           style={islandBody.summary}
         >
-          <Text
-            style={[styles.hero, !showSectors && styles.heroMinimized, { color: chrome.ink }]}
-            numberOfLines={1}
-          >
+          <Animated.Text style={[styles.hero, { color: chrome.ink }, heroStyle]} numberOfLines={1}>
             {hero}
-          </Text>
-          {sectorsVisible && minimized ? (
-            <Text style={[styles.compactPct, { color: chrome.ink }]}>{pct}%</Text>
-          ) : null}
+          </Animated.Text>
         </View>
       </View>
 
-      {showSectors ? (
-        <View accessibilityElementsHidden importantForAccessibility="no-hide-descendants">
-          <Text style={[styles.sub, { color: chrome.steel }]} numberOfLines={1}>
-            PERCENT EXPLORED
-          </Text>
-          <View style={styles.barRow}>
-            <View style={styles.bar}>
-              {Array.from({ length: SEGMENTS }, (_, i) => (
-                <View
-                  key={i}
-                  style={[styles.seg, { backgroundColor: i < lit ? signal : chrome.seg }]}
-                />
-              ))}
-            </View>
-            <Text style={[styles.pct, { color: chrome.ink }]}>{pct}%</Text>
+      <Animated.View
+        accessibilityElementsHidden
+        importantForAccessibility="no-hide-descendants"
+        onLayout={onReadoutLayout}
+        style={readoutStyle}
+      >
+        <Text style={[styles.sub, { color: chrome.steel }]} numberOfLines={1}>
+          PERCENT EXPLORED
+        </Text>
+        <View style={styles.barRow} onLayout={onBarLayout}>
+          <View style={styles.bar}>
+            {Array.from({ length: SEGMENTS }, (_, i) => (
+              <View
+                key={i}
+                style={[styles.seg, { backgroundColor: i < lit ? signal : chrome.seg }]}
+              />
+            ))}
           </View>
+          {/* The percentage's slot in the row, holding an invisible copy so the row keeps the
+              number's height. The visible one floats, so it can leave. */}
+          <Text style={[styles.pct, styles.pctSlot]}>{pct}%</Text>
         </View>
-      ) : null}
+      </Animated.View>
+
+      {/* One percentage with two homes: at the end of the collapsed line, and in the bar row's
+          slot. It rests at the line and is carried down to the slot as the drawer opens. */}
+      <Animated.View
+        accessibilityElementsHidden
+        importantForAccessibility="no-hide-descendants"
+        pointerEvents="none"
+        style={[styles.pctFloat, pctStyle]}
+        testID="coverage-island-pct"
+      >
+        <Text style={[styles.pct, { color: chrome.ink }]}>{pct}%</Text>
+      </Animated.View>
     </View>
   );
 }
 
 const styles = StyleSheet.create({
+  header: {
+    // Room for the percentage when it rides up onto this line, kept at every height so the place
+    // name truncates at one width rather than re-flowing mid-drag.
+    paddingRight: PCT_WIDTH + Spacing.two,
+  },
   hero: {
     flex: 1,
     fontFamily: 'Rajdhani_700Bold',
-    fontSize: 28,
+    fontSize: HERO_SIZE,
     lineHeight: 32,
-  },
-  heroMinimized: {
-    fontSize: 22,
-    lineHeight: 26,
-  },
-  compactPct: {
-    fontFamily: 'Rajdhani_600SemiBold',
-    fontSize: 16,
-    minWidth: 40,
-    textAlign: 'right',
+    // Shrinks toward its leading edge, so the name stays anchored where it starts.
+    transformOrigin: 'left center',
   },
   sub: {
     fontFamily: 'IBMPlexMono_500Medium',
@@ -161,10 +224,20 @@ const styles = StyleSheet.create({
     height: 8,
     borderRadius: 1.5,
   },
+  pctSlot: {
+    opacity: 0,
+  },
+  pctFloat: {
+    position: 'absolute',
+    right: Spacing.three,
+    top: 0,
+    height: COLLAPSED_ROW_HEIGHT,
+    justifyContent: 'center',
+  },
   pct: {
     fontFamily: 'Rajdhani_600SemiBold',
     fontSize: 16,
-    minWidth: 40,
+    minWidth: PCT_WIDTH,
     textAlign: 'right',
   },
 });

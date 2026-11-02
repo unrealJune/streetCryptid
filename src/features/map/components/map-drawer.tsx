@@ -7,8 +7,10 @@ import Animated, {
   interpolate,
   runOnJS,
   useAnimatedStyle,
+  useDerivedValue,
   useSharedValue,
   withSpring,
+  withTiming,
 } from 'react-native-reanimated';
 
 import type { CryptidTheme } from '@/constants/cryptid-theme';
@@ -24,6 +26,7 @@ import {
   TAB_BAR_HEIGHT,
   type DrawerDetent,
 } from '../core/drawer-detents';
+import { DrawerProgressContext } from './drawer-progress';
 import { GlassFill, useGlassAvailable } from './glass-surface';
 import { IslandTabs, type IslandTab } from './island-tabs';
 
@@ -136,16 +139,21 @@ export function MapDrawer({
   const detents = useMemo(() => allowedDetents(maxDetent, minDetent), [maxDetent, minDetent]);
   const topDetent = detents[detents.length - 1];
   // A body with a single detent gets no grip: there is nothing to drag it to, and the strip would
-  // be a handle on a surface that cannot move. Minimized, that is also what turns the drawer back
-  // into the bare bubble the island used to collapse to.
+  // be a handle on a surface that cannot move.
   const hasGrip = detents.length > 1;
+  // ...but a drawer that can REST at `collapsed` keeps the strip's height even when it has no grip
+  // in it. The collapsed body is laid out against the strip above it (`islandBody.minimized`), and
+  // the ME panel loses its other stops while it sits there — zooming out past the band where
+  // coverage is measurable pins it collapsed. Dropping the strip with the grip shrank the bubble by
+  // 16pt at that moment; keeping it means the only thing that changes is the bar fading out.
+  const gripSpace = hasGrip || detents[0] === 'collapsed' ? GRIP_HEIGHT : 0;
   // How far the whole surface floats above the screen's edge at rest. The inset is the system
   // bar's own band, so clearing it is what keeps that bar off the island entirely.
   const restMargin = Math.max(insetBottom, MIN_EDGE_GAP);
   // The tab row is flush with the drawer's bottom edge at rest — the clearance is the margin
   // underneath it now, which is outside the drawer and so costs the body nothing.
   const tabChrome = tabBarHeight;
-  const bodyChrome = drawerChrome(hasGrip ? GRIP_HEIGHT : 0, tabChrome);
+  const bodyChrome = drawerChrome(gripSpace, tabChrome);
   const heights = useMemo(
     () =>
       detentHeights({
@@ -154,10 +162,10 @@ export function MapDrawer({
         insetTop,
         insetBottom,
         margin: Spacing.three,
-        gripHeight: hasGrip ? GRIP_HEIGHT : 0,
+        gripHeight: gripSpace,
         tabBarHeight: tabChrome,
       }),
-    [peekBody, screenHeight, insetTop, insetBottom, hasGrip, tabChrome]
+    [peekBody, screenHeight, insetTop, insetBottom, gripSpace, tabChrome]
   );
   /**
    * The stop the drawer is ACTUALLY at, which is not always the one the caller thinks it is at.
@@ -184,8 +192,29 @@ export function MapDrawer({
    * That is the whole of the ME panel's remaining bounce: content 118, frame 117.6666, iOS bounce
    * turning a rounding error into a pull that springs back under your finger.
    */
-  const bodyIsList = effective === topDetent;
+  // `collapsed` is a one-line summary even when it is the only stop: a body pinned there is far
+  // taller than the row it shows, and treating it as a list would let that clipped readout scroll.
+  const bodyIsList = effective === topDetent && effective !== 'collapsed';
   const listScrolls = peekBody > resolved - bodyChrome + 1;
+
+  /**
+   * Where the drawer stands between `collapsed` and `peek`, frame by frame, for the body to morph
+   * along with (see `drawer-progress.ts`). Bodies with no `collapsed` stop rest above it and read 1.
+   */
+  const progress = useDerivedValue(() => {
+    const lo = heights.collapsed;
+    const hi = heights.peek;
+    return hi > lo ? interpolate(height.value, [lo, hi], [0, 1], 'clamp') : 1;
+  }, [heights]);
+  // The grip bar fades rather than popping, so the moment the drawer loses its other stops reads
+  // as the handle going away and not as the island redrawing.
+  const gripOpacity = useSharedValue(hasGrip ? 1 : 0);
+  useEffect(() => {
+    gripOpacity.value = withTiming(hasGrip ? 1 : 0, { duration: 180 });
+    // `gripOpacity` is a shared value — a stable ref.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hasGrip]);
+  const gripBarStyle = useAnimatedStyle(() => ({ opacity: gripOpacity.value }));
 
   // Settle whenever the resolved height changes: a detent change, a rotation, a body that grew a
   // row, or the first real measurement. An effect rather than a render-time write, because
@@ -371,9 +400,17 @@ export function MapDrawer({
               }
               style={styles.grip}
             >
-              <View style={[styles.gripBar, { backgroundColor: chrome.seg }]} />
+              <Animated.View
+                style={[styles.gripBar, { backgroundColor: chrome.seg }, gripBarStyle]}
+              />
             </View>
           </GestureDetector>
+        ) : gripSpace ? (
+          <View style={styles.grip} testID="map-drawer-grip-space">
+            <Animated.View
+              style={[styles.gripBar, { backgroundColor: chrome.seg }, gripBarStyle]}
+            />
+          </View>
         ) : null}
 
         <GestureDetector gesture={pans.body}>
@@ -398,7 +435,11 @@ export function MapDrawer({
                 contentContainerStyle={styles.bodyContent}
               >
                 {/* Measured at its natural height — that measurement is what `peek` derives from. */}
-                <View onLayout={measureBody}>{children}</View>
+                <View onLayout={measureBody}>
+                  <DrawerProgressContext.Provider value={progress}>
+                    {children}
+                  </DrawerProgressContext.Provider>
+                </View>
               </ScrollView>
             </GestureDetector>
           </View>
