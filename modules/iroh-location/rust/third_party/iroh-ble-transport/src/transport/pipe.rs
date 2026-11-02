@@ -773,6 +773,7 @@ async fn run_gatt_pipe(
         let _ = registry_tx
             .send(PeerCommand::Stalled {
                 device_id: device_id.clone(),
+                cause: crate::transport::peer::StallCause::LinkDead,
             })
             .await;
     }
@@ -874,6 +875,7 @@ async fn run_l2cap_pipe(
         let _ = registry_tx
             .send(PeerCommand::Stalled {
                 device_id: device_id.clone(),
+                cause: crate::transport::peer::StallCause::LinkDead,
             })
             .await;
     }

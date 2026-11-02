@@ -3,20 +3,22 @@ use crate::central::types::{CentralConfig, CentralEvent, DisconnectCause, ScanFi
 use crate::error::{BlewError, BlewResult};
 use crate::gatt::props::{AttributePermissions, CharacteristicProperties};
 use crate::gatt::service::{GattCharacteristic, GattService};
-use crate::l2cap::{L2capChannel, types::Psm};
-use crate::platform::linux::l2cap::bridge_l2cap;
+use crate::l2cap::{L2capChannel, L2capEncryption, types::Psm};
+use crate::platform::linux::l2cap::{apply_security, bridge_l2cap};
 use crate::types::{BleDevice, DeviceId};
 use crate::util::BroadcastEventStream;
 use bluer::gatt::CharacteristicFlags;
-use bluer::{Adapter, AdapterEvent, Session};
+use bluer::{Adapter, AdapterEvent, Device, DeviceEvent, DeviceProperty, Session};
 use bytes::Bytes;
-use std::collections::HashMap;
+use futures_core::Stream;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 
 use parking_lot::Mutex;
 use tokio::sync::broadcast;
-use tokio_stream::StreamExt as _;
+use tokio_stream::{StreamExt as _, StreamMap};
 use tracing::{debug, trace, warn};
 use uuid::Uuid;
 
@@ -28,8 +30,19 @@ struct CentralInner {
     event_tx: broadcast::Sender<CentralEvent>,
     scan_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
     notify_tasks: Mutex<HashMap<(DeviceId, Uuid), tokio::task::JoinHandle<()>>>,
+    /// Per-device `Connected` property watchers. BlueZ only reports
+    /// `DeviceRemoved` while a discovery session is live, so without these a
+    /// peer that drops out of range after `stop_scan` is never observed.
+    connection_tasks: Mutex<HashMap<DeviceId, tokio::task::JoinHandle<()>>>,
+    /// Devices with a live connection. Link-down can be observed from three
+    /// places (explicit `disconnect`, BlueZ `DeviceRemoved`, and the
+    /// `Connected` watcher); membership here makes `DeviceDisconnected`
+    /// exactly-once. The connect-timeout path reports its own failure
+    /// directly and is deliberately not routed through this.
+    connected: Mutex<HashSet<DeviceId>>,
     adapter_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
     connect_timeout: Mutex<Option<std::time::Duration>>,
+    l2cap_encryption: Mutex<L2capEncryption>,
     pending_connects: crate::util::request_map::KeyedRequestMap<DeviceId, ()>,
 }
 
@@ -67,16 +80,225 @@ async fn connect_inner(handle: Arc<CentralInner>, device_id: DeviceId) -> BlewRe
     }
     debug!(device_id = %device_id, "device connected");
     handle.clear_mtu(&device_id);
+    handle.connected.lock().insert(device_id.clone());
+    // Clone rather than move: `connect_fut` above borrows `device`, and
+    // `bluer::Device` is a cheap D-Bus proxy handle.
+    spawn_connection_watcher(&handle, device_id.clone(), device.clone());
     let _ = handle
         .event_tx
         .send(CentralEvent::DeviceConnected { device_id });
     Ok(())
 }
 
+/// Drop BlueZ's cached records for devices this scan has no business keeping.
+///
+/// BlueZ replays its device cache as `DeviceAdded` events at the start of every
+/// discovery session, using stale names and UUIDs from previous sessions.
+/// Dropping the cached record makes BlueZ treat the device as new and emit
+/// fresh advertisement data.
+///
+/// `remove_device` deletes the record outright, taking its bonding keys and
+/// trust flag with it — and the cache is shared with every other application on
+/// the host. Never evict a device that is connected, paired, or trusted: those
+/// belong to the user, not to this scan. Any property that cannot be read
+/// counts as a reason to keep the device.
+async fn evict_stale_cache_entries(adapter: &Adapter) {
+    let Ok(addrs) = adapter.device_addresses().await else {
+        return;
+    };
+    for addr in addrs {
+        let Ok(dev) = adapter.device(addr) else {
+            continue;
+        };
+        let keep = dev.is_connected().await.unwrap_or(true)
+            || dev.is_paired().await.unwrap_or(true)
+            || dev.is_trusted().await.unwrap_or(true);
+        if keep {
+            trace!(device_id = %addr, "keeping cached device out of scan-start eviction");
+            continue;
+        }
+        adapter.remove_device(addr).await.ok();
+    }
+}
+
+/// Stop the running discovery loop and wait for it to be dropped.
+///
+/// bluer's discovery session lives in the stream the task owns and is released
+/// only when that future is dropped, so `abort()` alone is not enough: it marks
+/// the task for cancellation but returns before it has run. Awaiting the handle
+/// is what guarantees the session is gone.
+async fn abort_scan_task(handle: &CentralInner) {
+    let task = handle.scan_task.lock().take();
+    if let Some(task) = task {
+        task.abort();
+        let _ = task.await;
+    }
+}
+
+fn addr_to_device_id(addr: bluer::Address) -> DeviceId {
+    DeviceId(addr.to_string())
+}
+
+async fn snapshot_advertisement(adapter: &Adapter, addr: bluer::Address) -> Option<BleDevice> {
+    let device = adapter.device(addr).ok()?;
+    // Independent D-Bus round trips, and discover_devices() replays the whole
+    // cache as DeviceAdded, so this runs once per known device at scan start.
+    let (name, rssi, services, manufacturer_data, service_data) = tokio::join!(
+        device.name(),
+        device.rssi(),
+        device.uuids(),
+        device.manufacturer_data(),
+        device.service_data(),
+    );
+    Some(BleDevice {
+        id: addr_to_device_id(addr),
+        name: name.ok().flatten(),
+        rssi: rssi.ok().flatten(),
+        services: services
+            .ok()
+            .flatten()
+            .unwrap_or_default()
+            .into_iter()
+            .collect(),
+        manufacturer_data: manufacturer_data.ok().flatten().unwrap_or_default(),
+        service_data: service_data.ok().flatten().unwrap_or_default(),
+    })
+}
+
+async fn run_discovery_loop(
+    handle: Arc<CentralInner>,
+    discovery: impl Stream<Item = AdapterEvent> + Send,
+) {
+    let mut discovery = Box::pin(discovery);
+    let mut watched_advertisements: StreamMap<
+        bluer::Address,
+        Pin<Box<dyn Stream<Item = DeviceEvent> + Send>>,
+    > = StreamMap::new();
+    loop {
+        tokio::select! {
+            event = discovery.next() => match event {
+                Some(AdapterEvent::DeviceAdded(addr)) => {
+                    // Subscribe before snapshotting: `Device::events()` replays no
+                    // current state, so a change arriving during the snapshot's D-Bus
+                    // round trips would be lost with no way to recover it.
+                    match watch_device_properties(&handle.adapter, addr).await {
+                        Ok(changes) => {
+                            watched_advertisements.insert(addr, changes);
+                        }
+                        Err(e) => {
+                            warn!(device_id = %addr, "failed to watch advertisement: {e}");
+                        }
+                    }
+                    let Some(device) =
+                        snapshot_advertisement(&handle.adapter, addr).await
+                    else {
+                        continue;
+                    };
+                    debug!(device_id = %device.id, name = ?device.name, rssi = ?device.rssi,
+                        "device discovered");
+                    handle.discovered.lock().insert(device.id.clone(), device.clone());
+                    let _ = handle.event_tx.send(CentralEvent::DeviceDiscovered(device));
+                }
+                Some(AdapterEvent::DeviceRemoved(addr)) => {
+                    let device_id = addr_to_device_id(addr);
+                    debug!(device_id = %device_id, "device removed");
+                    watched_advertisements.remove(&addr);
+                    handle.discovered.lock().remove(&device_id);
+                    handle.abort_connection_watcher(&device_id);
+                    // involuntary_cause() is a D-Bus round trip, and emit_disconnect
+                    // discards it for a device that was never connected -- which is
+                    // most of them during a scan.
+                    let was_connected = handle.connected.lock().contains(&device_id);
+                    if was_connected {
+                        let cause = handle.involuntary_cause().await;
+                        handle.emit_disconnect(&device_id, cause);
+                    }
+                }
+                Some(AdapterEvent::PropertyChanged(_)) => {}
+                None => break,
+            },
+            Some((addr, DeviceEvent::PropertyChanged(property))) = watched_advertisements.next(),
+                if !watched_advertisements.is_empty() =>
+            {
+                let device_id = addr_to_device_id(addr);
+                let mut discovered = handle.discovered.lock();
+                let Some(known) = discovered.get_mut(&device_id) else {
+                    continue;
+                };
+                if !apply_advertised_property(known, property) {
+                    continue;
+                }
+                let device = known.clone();
+                drop(discovered);
+                debug!(device_id = %device_id, name = ?device.name,
+                    service_data_keys = device.service_data.len(),
+                    "device advertises something new");
+                let _ = handle.event_tx.send(CentralEvent::DeviceDiscovered(device));
+            }
+        }
+    }
+}
+
+async fn watch_device_properties(
+    adapter: &Adapter,
+    addr: bluer::Address,
+) -> bluer::Result<Pin<Box<dyn Stream<Item = DeviceEvent> + Send>>> {
+    let changes = adapter.device(addr)?.events().await?;
+    Ok(Box::pin(changes))
+}
+
+fn apply_advertised_property(device: &mut BleDevice, property: DeviceProperty) -> bool {
+    match property {
+        DeviceProperty::Name(name) => device.name = Some(name),
+        DeviceProperty::Uuids(services) => device.services = services.into_iter().collect(),
+        DeviceProperty::ManufacturerData(data) => device.manufacturer_data = data,
+        DeviceProperty::ServiceData(data) => device.service_data = data,
+        DeviceProperty::Rssi(rssi) => {
+            device.rssi = Some(rssi);
+            return false;
+        }
+        _ => return false,
+    }
+    true
+}
+
+/// Watch a connected device's `Connected` property and report link loss.
+///
+/// bluer surfaces this over D-Bus independently of any discovery session, so
+/// unlike `AdapterEvent::DeviceRemoved` it still fires after `stop_scan`.
+fn spawn_connection_watcher(handle: &Arc<CentralInner>, device_id: DeviceId, device: Device) {
+    let inner = Arc::clone(handle);
+    let watched = device_id.clone();
+    let task = tokio::spawn(async move {
+        let events = match device.events().await {
+            Ok(events) => events,
+            Err(e) => {
+                warn!(device_id = %watched, "failed to watch connection state: {e}");
+                return;
+            }
+        };
+        let mut events = Box::pin(events);
+        while let Some(event) = events.next().await {
+            if let DeviceEvent::PropertyChanged(DeviceProperty::Connected(false)) = event {
+                let cause = inner.involuntary_cause().await;
+                debug!(device_id = %watched, ?cause, "connection watcher observed link down");
+                inner.emit_disconnect(&watched, cause);
+                return;
+            }
+        }
+    });
+    // Replacing a watcher for the same device means a reconnect raced an old
+    // link; the stale task is aborted rather than left to double-report.
+    if let Some(old) = handle.connection_tasks.lock().insert(device_id, task) {
+        old.abort();
+    }
+}
+
 impl LinuxCentral {
     pub async fn with_config(config: CentralConfig) -> crate::error::BlewResult<Self> {
         let this = Self::new().await?;
         *this.0.connect_timeout.lock() = config.connect_timeout;
+        *this.0.l2cap_encryption.lock() = config.l2cap.encryption;
         Ok(this)
     }
 }
@@ -102,6 +324,40 @@ impl CentralInner {
             if let Some(task) = tasks.remove(&key) {
                 task.abort();
             }
+        }
+    }
+
+    /// Emit `DeviceDisconnected` at most once per established connection.
+    ///
+    /// Returns `false` if the device was already reported as disconnected,
+    /// which happens whenever two observers race — e.g. the `Connected`
+    /// watcher and a BlueZ `DeviceRemoved` for the same link drop.
+    fn emit_disconnect(&self, device_id: &DeviceId, cause: DisconnectCause) -> bool {
+        let was_connected = self.connected.lock().remove(device_id);
+        if !was_connected {
+            return false;
+        }
+        self.clear_mtu(device_id);
+        self.drain_notify_tasks(device_id);
+        let _ = self.event_tx.send(CentralEvent::DeviceDisconnected {
+            device_id: device_id.clone(),
+            cause,
+        });
+        true
+    }
+
+    /// Cause to report for a link that went down without us asking.
+    async fn involuntary_cause(&self) -> DisconnectCause {
+        if self.adapter.is_powered().await.unwrap_or(true) {
+            DisconnectCause::LinkLoss
+        } else {
+            DisconnectCause::AdapterOff
+        }
+    }
+
+    fn abort_connection_watcher(&self, device_id: &DeviceId) {
+        if let Some(task) = self.connection_tasks.lock().remove(device_id) {
+            task.abort();
         }
     }
 
@@ -208,12 +464,15 @@ impl CentralBackend for LinuxCentral {
             _session: session,
             adapter,
             connect_timeout: Mutex::new(None),
+            l2cap_encryption: Mutex::new(L2capEncryption::default()),
             pending_connects: crate::util::request_map::KeyedRequestMap::new(),
             discovered: Mutex::new(HashMap::new()),
             mtu_cache: Mutex::new(HashMap::new()),
             event_tx,
             scan_task: Mutex::new(None),
             notify_tasks: Mutex::new(HashMap::new()),
+            connection_tasks: Mutex::new(HashMap::new()),
+            connected: Mutex::new(HashSet::new()),
             adapter_task: Mutex::new(None),
         });
         let inner_clone = Arc::clone(&inner);
@@ -255,35 +514,31 @@ impl CentralBackend for LinuxCentral {
         let handle = Arc::clone(&self.0);
         async move {
             debug!(service_filter = ?filter.services, "starting BLE scan");
-            // BlueZ replays its device cache as DeviceAdded events at the start of
-            // every discovery session, using stale names/UUIDs from previous sessions.
-            // Remove non-connected cached devices so BlueZ treats them as new and
-            // emits fresh advertisement data.
-            if let Ok(addrs) = handle.adapter.device_addresses().await {
-                for addr in addrs {
-                    if let Ok(dev) = handle.adapter.device(addr)
-                        && !dev.is_connected().await.unwrap_or(false)
-                    {
-                        handle.adapter.remove_device(addr).await.ok();
-                    }
-                }
-            }
 
-            if !filter.services.is_empty() {
-                let df = bluer::DiscoveryFilter {
-                    uuids: filter.services.into_iter().collect(),
-                    ..Default::default()
-                };
-                handle
-                    .adapter
-                    .set_discovery_filter(df)
-                    .await
-                    .map_err(|e| BlewError::Central {
-                        source: Box::new(e),
-                    })?;
-            }
+            // Before anything else: bluer rejects set_discovery_filter with
+            // DiscoveryActive while a session is live, so a restart has to release
+            // the previous one first.
+            abort_scan_task(&handle).await;
 
-            let stream =
+            evict_stale_cache_entries(&handle.adapter).await;
+
+            // Set unconditionally: bluer caches the filter per adapter in its own
+            // Session and re-sends it on every StartDiscovery, so skipping this
+            // would silently reuse the previous scan's UUID list. An empty `uuids`
+            // matches any device.
+            let df = bluer::DiscoveryFilter {
+                uuids: filter.services.into_iter().collect(),
+                ..Default::default()
+            };
+            handle
+                .adapter
+                .set_discovery_filter(df)
+                .await
+                .map_err(|e| BlewError::Central {
+                    source: Box::new(e),
+                })?;
+
+            let discovery =
                 handle
                     .adapter
                     .discover_devices()
@@ -291,66 +546,8 @@ impl CentralBackend for LinuxCentral {
                     .map_err(|e| BlewError::Central {
                         source: Box::new(e),
                     })?;
-            let mut stream = Box::pin(stream);
 
-            // Dropping a JoinHandle only detaches; we must abort explicitly.
-            if let Some(old) = handle.scan_task.lock().take() {
-                old.abort();
-            }
-
-            let handle_task = Arc::clone(&handle);
-            let task = tokio::spawn(async move {
-                let handle = handle_task;
-                while let Some(event) = stream.next().await {
-                    match event {
-                        AdapterEvent::DeviceAdded(addr) => {
-                            let Ok(device) = handle.adapter.device(addr) else {
-                                continue;
-                            };
-                            let name = device.name().await.ok().flatten();
-                            let rssi = device.rssi().await.ok().flatten();
-                            let services = device
-                                .uuids()
-                                .await
-                                .ok()
-                                .flatten()
-                                .map(|s| s.into_iter().collect::<Vec<_>>())
-                                .unwrap_or_default();
-                            let device_id = DeviceId(addr.to_string());
-                            debug!(device_id = %device_id, name = ?name, rssi = ?rssi, "device discovered");
-                            let ble_device = BleDevice {
-                                id: device_id.clone(),
-                                name,
-                                rssi,
-                                services,
-                            };
-                            handle
-                                .discovered
-                                .lock()
-                                .insert(device_id, ble_device.clone());
-                            let _ = handle
-                                .event_tx
-                                .send(CentralEvent::DeviceDiscovered(ble_device));
-                        }
-                        AdapterEvent::DeviceRemoved(addr) => {
-                            let device_id = DeviceId(addr.to_string());
-                            debug!(device_id = %device_id, "device removed");
-                            handle.discovered.lock().remove(&device_id);
-                            handle.clear_mtu(&device_id);
-                            handle.drain_notify_tasks(&device_id);
-                            let cause = if handle.adapter.is_powered().await.unwrap_or(true) {
-                                DisconnectCause::LinkLoss
-                            } else {
-                                DisconnectCause::AdapterOff
-                            };
-                            let _ = handle
-                                .event_tx
-                                .send(CentralEvent::DeviceDisconnected { device_id, cause });
-                        }
-                        AdapterEvent::PropertyChanged(_) => {}
-                    }
-                }
-            });
+            let task = tokio::spawn(run_discovery_loop(Arc::clone(&handle), discovery));
 
             *handle.scan_task.lock() = Some(task);
             Ok(())
@@ -361,9 +558,7 @@ impl CentralBackend for LinuxCentral {
         let handle = Arc::clone(&self.0);
         async move {
             debug!("stopping BLE scan");
-            if let Some(task) = handle.scan_task.lock().take() {
-                task.abort();
-            }
+            abort_scan_task(&handle).await;
             Ok(())
         }
     }
@@ -403,16 +598,14 @@ impl CentralBackend for LinuxCentral {
                 .map_err(|e| BlewError::Central {
                     source: Box::new(e),
                 })?;
+            // Stop the watcher first so link-down from our own disconnect is
+            // reported as LocalClose rather than racing it as LinkLoss.
+            handle.abort_connection_watcher(&device_id);
             device.disconnect().await.map_err(|e| BlewError::Central {
                 source: Box::new(e),
             })?;
             debug!(device_id = %device_id, "device disconnected");
-            handle.clear_mtu(&device_id);
-            handle.drain_notify_tasks(&device_id);
-            let _ = handle.event_tx.send(CentralEvent::DeviceDisconnected {
-                device_id,
-                cause: DisconnectCause::LocalClose,
-            });
+            handle.emit_disconnect(&device_id, DisconnectCause::LocalClose);
             Ok(())
         }
     }
@@ -609,13 +802,17 @@ impl CentralBackend for LinuxCentral {
         }
     }
 
-    async fn mtu(&self, device_id: &DeviceId) -> u16 {
-        self.0
+    fn mtu(&self, device_id: &DeviceId) -> impl Future<Output = u16> + Send {
+        // Read the cache eagerly: the guard must not be held across the
+        // returned future, which would make it `!Send`.
+        let mtu = self
+            .0
             .mtu_cache
             .lock()
             .get(device_id)
             .copied()
-            .unwrap_or(23)
+            .unwrap_or(23);
+        std::future::ready(mtu)
     }
 
     fn open_l2cap_channel(
@@ -637,19 +834,12 @@ impl CentralBackend for LinuxCentral {
             let socket_addr = bluer::l2cap::SocketAddr::new(addr, addr_type, psm.0);
             // Brief delay to ensure ACL connection is ready before L2CAP CoC setup
             tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-            // Use low-level Socket API to explicitly set security to Low,
-            // preventing BlueZ from triggering a pairing request.
+            // Use the low-level Socket API so BT_SECURITY is set explicitly
+            // rather than left to BlueZ's default.
             let socket = bluer::l2cap::Socket::new_stream().map_err(|e| BlewError::L2cap {
                 source: Box::new(e),
             })?;
-            socket
-                .set_security(bluer::l2cap::Security {
-                    level: bluer::l2cap::SecurityLevel::Low,
-                    key_size: 0,
-                })
-                .map_err(|e| BlewError::L2cap {
-                    source: Box::new(e),
-                })?;
+            apply_security(&socket, *handle.l2cap_encryption.lock())?;
             // Advertise a large receive MPS so the peer can send bigger PDUs.
             socket.set_recv_mtu(65535).map_err(|e| BlewError::L2cap {
                 source: Box::new(e),
@@ -761,5 +951,49 @@ fn check_bluez_config() {
              [GATT]\n  Cache=no\n\n  \
              Then: sudo systemctl restart bluetooth"
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::apply_advertised_property;
+    use crate::types::{BleDevice, DeviceId};
+    use bluer::DeviceProperty;
+    use std::collections::HashMap;
+    use uuid::Uuid;
+
+    fn initial_snapshot() -> BleDevice {
+        BleDevice {
+            id: DeviceId::from("11:22:33:44:55:66"),
+            name: None,
+            rssi: None,
+            services: Vec::new(),
+            manufacturer_data: HashMap::new(),
+            service_data: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn late_service_data_emits_discovery() {
+        let service = Uuid::from_u128(0x0000_180f_0000_1000_8000_0080_5f9b_34fb);
+        let mut device = initial_snapshot();
+        let arrived = HashMap::from([(service, vec![0x64])]);
+
+        assert!(apply_advertised_property(
+            &mut device,
+            DeviceProperty::ServiceData(arrived.clone())
+        ));
+        assert_eq!(device.service_data, arrived);
+    }
+
+    #[test]
+    fn rssi_change_does_not_emit_discovery() {
+        let mut device = initial_snapshot();
+
+        assert!(!apply_advertised_property(
+            &mut device,
+            DeviceProperty::Rssi(-70)
+        ));
+        assert_eq!(device.rssi, Some(-70));
     }
 }

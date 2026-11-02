@@ -49,7 +49,9 @@ otel = [
 [dependencies]
 # --- iroh transport + live gossip (see docs/social/ARCHITECTURE.md §2) ---
 # NOTE: iroh-ffi 1.0 does NOT expose gossip/docs, which is exactly why this crate exists.
-iroh = "1"
+# 1.4: Initial sends no longer block the per-peer actor (#4512), and the path-open retry queue
+# is bounded (#4551) -- the crash we patched by hand in third_party/iroh until 2026-11-02.
+iroh = "1.4"
 iroh-gossip = "0.101"
 iroh-tickets = "1"
 irpc = { version = "0.17", optional = true }
@@ -144,7 +146,7 @@ paranoid-android = "0.2"
 # Gated to the platforms its `blew` BLE backend supports *and* that this module
 # ships natively (Android + Apple). Keeping it off the host target lets
 # `cargo test` / the `uniffi-bindgen` CLI still build on Windows/Linux, where
-# `blew` refuses to compile. Vendored + ported to iroh 1.0.2 and wired into the
+# `blew` refuses to compile. Vendored (rebased onto upstream 0.5.1-beta.7) and wired into the
 # endpoint by `LocationNode::start` via `src/ble.rs` (dedup hook + custom
 # transport + address lookup, alongside the N0 IP/relay transports).
 [target.'cfg(any(target_os = "android", target_vendor = "apple"))'.dependencies]
@@ -201,13 +203,6 @@ opt-level = "z"
 # locally. If size regresses more than a percent or two, `lto = "fat"` restores the old behaviour.
 lto = "thin"
 strip = true
-
-# iroh 1.0.2 with one fix, vendored (MIT OR Apache-2.0; third_party/iroh/NOTICE): its remote-state
-# actor re-queued a path open once per refusing connection on every 333 ms retry, which grew without
-# bound and aborted an iPhone on an allocation failure. Upstream dedups from 1.4; drop this patch
-# when iroh is upgraded past it.
-[patch.crates-io]
-iroh = { path = "third_party/iroh" }
 
 # Optimize dependencies in test builds only; this crate itself stays at opt-level 0 so it keeps
 # fast rebuilds and full debuggability. The test suite is CPU-bound in dependency code it cannot

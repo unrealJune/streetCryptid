@@ -584,28 +584,27 @@ Conventions when changing that code:
   quiet phone sits on its backlog: Settings → Debug → Push Logs (`pushAllTelemetry`) drains
   MetricKit, the JS journal and the Rust spool (`push_telemetry_now`) at once, ignoring backoff, and
   says what is still queued. Ask whoever holds the phone to press it after reproducing a bug.
-- **iroh 1.0.2 is patched (`rust/third_party/iroh`, `[patch.crates-io]`) for one bug.** Its
-  remote-state actor re-queued a path open once per refusing connection on every 333 ms retry, so
-  the queue multiplied by the connection count each retry; on 2026-11-01 an iPhone 16 Pro Max
-  aborted in `VecDeque::grow` a second into a Bump (`ios.diagnostic` SIGABRT, frames resolved by
-  hand against the PR IPA). Upstream dedups from 1.4: drop the patch when upgrading. A
+- **iroh is 1.4 or later, and that is load-bearing.** 1.0.2's remote-state actor re-queued a path
+  open once per refusing connection on every 333 ms retry; on 2026-11-01 an iPhone 16 Pro Max
+  aborted in `VecDeque::grow` a second into a Bump (`ios.diagnostic` SIGABRT). We patched it by
+  hand until 1.4 bounded the queue (#4551). 1.4 also stops an Initial send waiting on a slow
+  transport (a full BLE inbox) from stalling that peer's actor (#4512). A
   `prev.last_state=active` relaunch during pairing is a crash until shown otherwise.
-- **`blew` is vendored (`rust/third_party/blew`), because its CoreBluetooth backend dropped data.**
-  On Apple, `updateValue:forCharacteristic:onSubscribedCentrals:` returning `NO` (queue full) and
-  a write without response sent while `canSendWriteWithoutResponse` is false both lose the bytes
-  without an error, and upstream did both, so every iPhone GATT pipe leaned on the reliable layer's
-  ACK timeout (the "retransmitting oldest fragment" every ~0.5 s on 2026-10-30). Both now wait for
-  the ready callback, bounded at 2 s. The L2CAP reactor sleeps on a `CFRunLoopSource` instead of
-  polling every 50 ms, checks `hasSpaceAvailable` before a write and queues what the stream cannot
-  take, rather than closing the channel. None of this runs on Linux, so the transport's SimRadio
-  tests cannot cover it: change it only with an iPhone to test on, and record each change in its
-  NOTICE (AGPL §5). The Kotlin half is still `android/src/main/java/org/jakebot/blew`.
+- **`iroh-ble-transport` and `blew` are vendored, rebased onto upstream 0.5.1-beta on 2026-11-02.**
+  Most of what we fixed by hand on 0.3 (CoreBluetooth dropping notifications and writes without
+  response, the L2CAP reactor's polling, blocking Android L2CAP writes on the runtime, the stale
+  peer role, a late completion landing on a newer connect attempt) upstream had fixed too, its
+  own way; each NOTICE says which of our changes are still on top (`PIPE_IDLE_LINGER`, the
+  link-priority hold, the new-pipe revival of a drained peer, the `CloseChannel` role check, the
+  Apple connect guard, the Android L2CAP close→EOF, the `ble.*` spans). Before fixing a BLE bug,
+  check upstream (`mcginty/iroh-ble-transport`, `mcginty/blew`) for the fix first, and record
+  every change in the NOTICE (AGPL §5). The Apple and Android backends do not run on Linux, so
+  the SimRadio tests cannot cover them: change them only with a phone to test on. The Kotlin half
+  is `android/src/main/java/org/jakebot/blew` (whole upstream files, `BlewPlugin.kt` omitted).
   **Android: never call a blocking JNI method from a tokio task.** The core's runtime is one
   thread, and `BluetoothSocket` writes block until the peer grants credits: on 2026-10-31 an L2CAP
   write to an iPhone that had stopped reading froze every timer, socket and pipe in the Pixel for
-  30 s twice in a row (Loki silent, `LINK_DEAD_DEADLINE` reporting `elapsed_ms=33422` against a
-  6 s deadline), and the first Bump after an un-friend failed with `connect_timeout`. L2CAP writes
-  now go through a per-channel writer thread (`l2cap_state.rs`).
+  30 s twice in a row. Upstream's L2CAP writes run on `spawn_blocking`.
 - **Pairing telemetry is spans, not `tracing::info!`.** Loki's OTLP ingest keeps the message and
   drops the fields, so the core's `connect_ms` / `exchange_ms` / `ticket_ms` existed and answered
   nothing on the one night they were needed. `pair.dial`, `pair.handshake`, `pair.inbound`,

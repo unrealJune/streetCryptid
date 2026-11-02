@@ -313,7 +313,7 @@ async fn sync_arriving_over_a_held_link_is_turned_away() {
         iroh::endpoint::ConnectionError::ApplicationClosed(close) => {
             assert_eq!(
                 close.error_code,
-                noq_proto::VarInt::from_u32(BLE_HELD_CLOSE_CODE)
+                iroh::endpoint::VarInt::from_u32(BLE_HELD_CLOSE_CODE)
             );
         }
         other => panic!("expected the BLE-reserved close, got {other:?}"),

@@ -50,6 +50,15 @@ impl<K: Eq + Hash, V> KeyedRequestMap<K, V> {
     pub fn drain(&self) -> Vec<(K, V)> {
         self.inner.lock().drain().collect()
     }
+
+    /// Remove and return every entry whose key satisfies `pred`.
+    ///
+    /// Needed for maps under a compound key (e.g. `(DeviceId, Uuid)`) where
+    /// disconnect cleanup must fail one device's entries without disturbing
+    /// operations still in flight on other devices.
+    pub fn take_matching(&self, mut pred: impl FnMut(&K) -> bool) -> Vec<(K, V)> {
+        self.inner.lock().extract_if(|k, _| pred(k)).collect()
+    }
 }
 
 impl<K: Eq + Hash, V> Default for KeyedRequestMap<K, V> {
@@ -111,6 +120,28 @@ mod tests {
         assert_eq!(map.insert("a".into(), 1), None);
         assert_eq!(map.take(&"a".into()), Some(1));
         assert_eq!(map.take(&"a".into()), None);
+    }
+
+    #[test]
+    fn keyed_take_matching_scopes_to_predicate() {
+        let map = KeyedRequestMap::<(String, u32), &'static str>::new();
+        map.insert(("dev-a".into(), 1), "a1");
+        map.insert(("dev-a".into(), 2), "a2");
+        map.insert(("dev-b".into(), 1), "b1");
+
+        let mut taken = map.take_matching(|(dev, _)| dev == "dev-a");
+        taken.sort_by_key(|((_, ch), _)| *ch);
+        assert_eq!(
+            taken,
+            vec![
+                (("dev-a".to_string(), 1), "a1"),
+                (("dev-a".to_string(), 2), "a2"),
+            ]
+        );
+
+        // Other devices' entries survive, and the drained ones are gone.
+        assert_eq!(map.take(&("dev-b".into(), 1)), Some("b1"));
+        assert!(map.take_matching(|(dev, _)| dev == "dev-a").is_empty());
     }
 
     #[test]

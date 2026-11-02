@@ -1,5 +1,6 @@
 //! Transport layer module tree. `BleTransport` itself lives in `transport.rs`.
 
+pub mod conns;
 pub mod dedup;
 pub mod driver;
 pub mod events;
@@ -23,10 +24,14 @@ pub mod sim;
 #[cfg(feature = "testing")]
 pub mod test_util;
 
+pub use conns::{
+    BLE_CLOSE_CODE_CONFLICT, BLE_CLOSE_CODE_RETRY, BLE_CLOSE_REASON_CONFLICT,
+    BLE_CLOSE_REASON_EVICTED, BLE_CLOSE_REASON_PIPE_CLOSED,
+};
 pub use driver::IncomingPacket;
 pub use peer::{ConnectPath, KEY_PREFIX_LEN, KeyPrefix};
 pub use store::{InMemoryPeerStore, PeerSnapshot, PeerStore};
 pub use transport::{
-    BlePeerInfo, BlePeerPhase, BleTransport, BleTransportBuilder, IROH_IDENTITY_CHAR_UUID,
-    L2capPolicy, is_iroh_key_uuid, key_uuid_matches_endpoint,
+    BleAdapterState, BlePeerInfo, BlePeerPhase, BleTransport, BleTransportBuilder,
+    IROH_IDENTITY_CHAR_UUID, L2capPolicy, is_iroh_key_uuid, key_uuid_matches_endpoint,
 };

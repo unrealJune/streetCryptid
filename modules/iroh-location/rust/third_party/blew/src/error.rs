@@ -19,6 +19,12 @@ pub enum BlewError {
     #[error("required Android BLE permissions are not granted")]
     PermissionDenied,
 
+    #[error(
+        "Android BLE support is not initialised — register tauri-plugin-blew, \
+         or call blew::platform::android::init_jvm before constructing a role"
+    )]
+    NotInitialized,
+
     #[error("device not found: {0}")]
     DeviceNotFound(DeviceId),
 
@@ -91,6 +97,23 @@ pub enum BlewError {
         #[source]
         source: Box<dyn Error + Send + Sync>,
     },
+
+    /// The configured [`L2capEncryption`](crate::L2capEncryption) level has no
+    /// equivalent in this platform's L2CAP API. The backend refuses rather than
+    /// substituting a weaker level, which would hand back a channel that is
+    /// less protected than the caller asked for.
+    #[error("L2CAP encryption level '{requested}' is unavailable here: {reason}")]
+    L2capEncryptionUnsupported {
+        requested: crate::l2cap::L2capEncryption,
+        reason: &'static str,
+    },
+
+    /// The configured [`LocalName`](crate::peripheral::LocalName) can't be
+    /// advertised on this platform. The backend refuses rather than advertising
+    /// no name, which would leave a peer matching on the name unable to find
+    /// the peripheral.
+    #[error("advertising this local name is unavailable here: {reason}")]
+    LocalNameUnsupported { reason: &'static str },
 
     #[error("internal error: {0}")]
     Internal(String),

@@ -69,6 +69,16 @@ pub fn token_custom_addr(token: u64) -> CustomAddr {
     CustomAddr::from_parts(BLE_TRANSPORT_ID, &token.to_le_bytes())
 }
 
+/// Token reserved as the `local_addr` sentinel. Never minted for a peer.
+pub const LOCAL_ADDR_TOKEN: u64 = 0;
+
+/// The single `CustomAddr` the BLE transport publishes as its local
+/// address, and reports as the receiving address of every inbound packet.
+#[must_use]
+pub fn local_custom_addr() -> CustomAddr {
+    token_custom_addr(LOCAL_ADDR_TOKEN)
+}
+
 /// Parse a `CustomAddr` as a BLE-transport token. Returns an error
 /// if the address is for a different transport or has the wrong
 /// length.
@@ -1838,6 +1848,60 @@ mod tests {
     fn device_for_endpoint_none_when_unknown() {
         let r = Routing::new();
         assert!(r.device_for_endpoint(&test_endpoint(81)).is_none());
+    }
+
+    /// The redial seam behind #12. Resuming the registry after a local
+    /// teardown only helps if routing can still translate the endpoint back
+    /// into a `DeviceId` — otherwise the peer is dialable and nothing ever
+    /// asks it to dial. Walks the whole chain the way the real code does:
+    /// `handle_hook_event`'s `ConnectionClosed` arm evicts, the driver's
+    /// pipe-close path evicts the pipe, then `BleAddressLookup::resolve` and
+    /// `poll_send` have to find their way home.
+    #[test]
+    fn endpoint_still_resolves_to_its_device_after_a_local_teardown() {
+        let r = Routing::new();
+        let endpoint = test_endpoint(0x21);
+        let prefix = prefix_from_endpoint(&endpoint);
+        let device = dev("peer-teardown");
+
+        // Scan saw the peer, iroh dialled it, the pipe went routable.
+        r.note_scan_hint(prefix, device.clone());
+        let reserved = r.reserve_outbound(endpoint);
+        let consumed = r
+            .consume_reservation_for_prefix(&prefix)
+            .expect("driver consumes the reservation at pipe-open");
+        assert_eq!(consumed.stable_id, reserved);
+        r.register_pipe_with_id(reserved, device.clone(), Direction::Outbound);
+        r.insert_routable(endpoint, reserved, Dialer::Low);
+
+        // The teardown: what the `ConnectionClosed` arm does, plus the
+        // driver's pipe-close eviction.
+        assert!(r.evict_routable_if_pipe(&endpoint, reserved).is_some());
+        r.evict_pipe_state(reserved);
+        r.evict_pipe(reserved);
+
+        // Resolve, step by step. Every pipe-shaped source is gone...
+        assert!(r.routable_pipe_for(&endpoint).is_none());
+        assert!(r.pending_pipe_for(&endpoint).is_none());
+        assert!(r.reservation_for_prefix(&prefix).is_none());
+        // ...but the scan hint outlives the connection: no production path
+        // calls `forget_scan_hint`, which is exactly why a redial can find
+        // the peer without waiting for another advertisement.
+        assert_eq!(r.scan_hint_for_prefix(&prefix), Some(device.clone()));
+
+        let redial = r.reserve_outbound(endpoint);
+        assert_ne!(
+            redial, reserved,
+            "the redial gets a fresh id, not the dead pipe's"
+        );
+
+        // And `poll_send`'s translation of that CustomAddr back to a device.
+        assert!(r.device_for_pipe(redial).is_none());
+        let (target, target_prefix) = r
+            .reservation_target(redial)
+            .expect("the fresh reservation resolves");
+        assert_eq!(target, endpoint);
+        assert_eq!(r.scan_hint_for_prefix(&target_prefix), Some(device));
     }
 
     #[test]

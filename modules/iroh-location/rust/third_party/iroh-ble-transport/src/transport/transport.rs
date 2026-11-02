@@ -12,11 +12,13 @@ use std::time::{Duration, Instant};
 use arc_swap::ArcSwap;
 use blew::gatt::props::{AttributePermissions, CharacteristicProperties};
 use blew::gatt::service::{GattCharacteristic, GattService};
-use blew::peripheral::AdvertisingConfig;
+use blew::peripheral::{AdvertisingConfig, LocalName};
 use blew::{BlewError, Central, Peripheral};
 use bytes::Bytes;
 use iroh::address_lookup::{self, AddressLookup, EndpointData, EndpointInfo, Item};
-use iroh::endpoint::transports::{CustomEndpoint, CustomSender, CustomTransport, RecvInfo, Transmit};
+use iroh::endpoint::transports::{
+    CustomEndpoint, CustomSender, CustomTransport, RecvInfo, Transmit,
+};
 use iroh_base::{CustomAddr, EndpointId, TransportAddr};
 use n0_watcher::Watchable;
 use parking_lot::Mutex;
@@ -30,11 +32,13 @@ use crate::transport::events::{
     ProbeDisconnects, run_central_events, run_l2cap_accept, run_peripheral_requests,
     run_peripheral_state_events,
 };
-use crate::transport::hook::{ActiveConnections, BleDedupHook, HookEvent};
-use crate::transport::peer::{ConnectPath, KEY_PREFIX_LEN, PeerCommand};
+use crate::transport::hook::{BleDedupHook, HookEvent};
+use crate::transport::peer::{ConnectPath, KEY_PREFIX_LEN, PeerCommand, StallCause};
 use crate::transport::priority::LinkPriority;
 use crate::transport::registry::{PhaseKind, Registry, RegistryHandle, SnapshotMaps};
-use crate::transport::routing::{TOKEN_LEN, parse_token_addr, token_custom_addr};
+use crate::transport::routing::{
+    TOKEN_LEN, local_custom_addr, parse_token_addr, token_custom_addr,
+};
 use crate::transport::store::{InMemoryPeerStore, PeerStore};
 use crate::transport::watchdog::run_watchdog;
 
@@ -139,6 +143,15 @@ impl BleTransportBuilder {
     ///
     /// Propagates errors from bringing up the BLE radio (adapter not
     /// powered, GATT registration, advertising start).
+    ///
+    /// # Cancellation
+    ///
+    /// This future is **not** cancel-safe and must not be wrapped in a
+    /// `tokio::time::timeout`. Dropping it part-way can leave the adapter
+    /// advertising and scanning with no owner, because the registry actor that
+    /// holds the only teardown path is spawned last. Every step that can hang
+    /// is already bounded internally by `CONSTRUCT_STEP_TIMEOUT`, so a wedged
+    /// Bluetooth stack surfaces as `BleError::Timeout { stage }` instead.
     pub async fn build(self, endpoint_id: EndpointId) -> BleResult<Arc<BleTransport>> {
         let central = match self.central {
             Some(c) => c,
@@ -279,6 +292,10 @@ pub struct BleTransport {
     /// and the per-endpoint waker set. Exposed via
     /// `routing_snapshot()` for telemetry.
     routing: Arc<crate::transport::routing::Routing>,
+    /// Live iroh connections, indexed by the BLE pipe they route over.
+    /// The hook populates it; the hook (on dedup eviction) and the
+    /// driver (on pipe death) close through it.
+    connections: Arc<crate::transport::conns::ConnectionRegistry>,
     tx_bytes: Arc<AtomicU64>,
     rx_bytes: Arc<AtomicU64>,
     retransmits: Arc<AtomicU64>,
@@ -290,9 +307,8 @@ pub struct BleTransport {
     /// `AtomicWaker` (which would clobber prior registrations and leak wakeups).
     inbox_capacity_wakers: Arc<Mutex<Vec<Waker>>>,
     store: Arc<dyn PeerStore>,
+    adapter_state_rx: tokio::sync::watch::Receiver<BleAdapterState>,
     probe_disconnects: ProbeDisconnects,
-    /// Which iroh connections ride each pipe; shared by every hook from [`Self::dedup_hook`].
-    active_connections: Arc<ActiveConnections>,
     /// How long a pipe outlives its last connection ([`crate::transport::hook::PIPE_IDLE_LINGER`]).
     idle_linger: Duration,
     /// Which protocols keep BLE to themselves, and when; shared by every hook. See
@@ -325,7 +341,12 @@ async fn handle_hook_event(
             // pipe worker then exits, which evicts the lingering routing
             // pipe record.
             for device_id in evicted_devices {
-                inbox.send(PeerCommand::Stalled { device_id }).await?;
+                inbox
+                    .send(PeerCommand::Stalled {
+                        device_id,
+                        cause: StallCause::LinkDead,
+                    })
+                    .await?;
             }
             inbox
                 .send(PeerCommand::VerifiedEndpoint { endpoint_id, token })
@@ -348,10 +369,88 @@ async fn handle_hook_event(
                         device = %device_id,
                         "all watched iroh connections closed; tearing BLE pipe down"
                     );
-                    inbox.send(PeerCommand::Stalled { device_id }).await?;
+                    inbox
+                        .send(PeerCommand::Stalled {
+                            device_id,
+                            cause: StallCause::LocalClose,
+                        })
+                        .await?;
                 }
             }
             Ok(())
+        }
+    }
+}
+
+/// `Central::wait_ready` / `Peripheral::wait_ready` resolve as soon as the
+/// adapter reports powered, so the only way they time out is an adapter that
+/// never powers on — report that as [`BleError::AdapterOff`] rather than a
+/// generic stage timeout. Any other failure (a closed event stream) is a
+/// distinct condition and propagates unchanged.
+fn adapter_wait_error(err: BlewError) -> BleError {
+    match err {
+        BlewError::Timeout => BleError::AdapterOff,
+        other => BleError::Blew(other),
+    }
+}
+
+/// Per-step deadline for the adapter-touching parts of [`BleTransport::construct`].
+/// Each of these calls into the platform stack and can hang there indefinitely
+/// when that stack is wedged. They are bounded here rather than by the caller
+/// because `construct` cannot be rescued from outside: cancelling it drops the
+/// future mid-way, and everything it has already started is only reachable for
+/// teardown through the registry actor, which is spawned last.
+const CONSTRUCT_STEP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+async fn construct_step<T>(
+    stage: &'static str,
+    fut: impl std::future::Future<Output = BleResult<T>>,
+) -> BleResult<T> {
+    tokio::time::timeout(CONSTRUCT_STEP_TIMEOUT, fut)
+        .await
+        .unwrap_or(Err(BleError::Timeout { stage }))
+}
+
+/// What `construct` has switched on so far, so that a failure part-way through
+/// can switch it back off. Without this a failed `construct` leaves the adapter
+/// advertising and scanning with no owner — `Driver::stop_scan` and
+/// `stop_advertising` are reachable only through the registry actor, and on the
+/// error paths that actor never gets spawned.
+///
+/// Each flag is armed *before* its step runs, not after it succeeds: a step
+/// that trips `CONSTRUCT_STEP_TIMEOUT` has its future dropped mid-call, and the
+/// platform may well have started advertising or scanning before the call it
+/// was waiting on came back. Rolling back something that never started costs a
+/// warning; not rolling back something that did is the leak this exists to
+/// prevent.
+///
+/// GATT service registration has no entry here, and cannot: `blew::Peripheral`
+/// exposes `add_service` with no removal counterpart, so dropping the
+/// `Peripheral` *is* the removal (mcginty/blew#34). That holds when `construct`
+/// created it — the `Arc` dies with the failed build. It does not hold for a
+/// peripheral supplied through [`BleTransportBuilder::peripheral`], which
+/// outlives us still carrying the services we registered on it.
+#[derive(Default)]
+struct ConstructRollback {
+    advertising: bool,
+    scanning: bool,
+    l2cap_accept: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl ConstructRollback {
+    async fn run(self, central: &Central, peripheral: &Peripheral) {
+        if let Some(task) = self.l2cap_accept {
+            task.abort();
+        }
+        if self.scanning
+            && let Err(e) = central.stop_scan().await
+        {
+            warn!(error = %e, "construct rollback: stop_scan failed");
+        }
+        if self.advertising
+            && let Err(e) = peripheral.stop_advertising().await
+        {
+            warn!(error = %e, "construct rollback: stop_advertising failed");
         }
     }
 }
@@ -370,38 +469,82 @@ impl BleTransport {
         store: Arc<dyn PeerStore>,
         l2cap_policy: L2capPolicy,
     ) -> BleResult<Arc<Self>> {
+        let central_for_rollback = Arc::clone(&central);
+        let peripheral_for_rollback = Arc::clone(&peripheral);
+        let mut rollback = ConstructRollback::default();
+        match Self::construct_inner(
+            local_id,
+            central,
+            peripheral,
+            store,
+            l2cap_policy,
+            &mut rollback,
+        )
+        .await
+        {
+            Ok(transport) => Ok(transport),
+            Err(e) => {
+                rollback
+                    .run(&central_for_rollback, &peripheral_for_rollback)
+                    .await;
+                Err(e)
+            }
+        }
+    }
+
+    async fn construct_inner(
+        local_id: EndpointId,
+        central: Arc<Central>,
+        peripheral: Arc<Peripheral>,
+        store: Arc<dyn PeerStore>,
+        l2cap_policy: L2capPolicy,
+        rollback: &mut ConstructRollback,
+    ) -> BleResult<Arc<Self>> {
         central
             .wait_ready(std::time::Duration::from_secs(5))
             .await
-            .map_err(|_| BleError::Timeout {
-                stage: "wait_ready",
-            })?;
+            .map_err(adapter_wait_error)?;
         peripheral
             .wait_ready(std::time::Duration::from_secs(5))
             .await
-            .map_err(|_| BleError::Timeout {
-                stage: "wait_ready",
-            })?;
+            .map_err(adapter_wait_error)?;
 
         let key_uuid = iroh_key_uuid(&local_id);
         let services = build_gatt_services(key_uuid, &local_id);
-        register_gatt_services(&peripheral, &services).await?;
+        construct_step(
+            "register_gatt_services",
+            register_gatt_services(&peripheral, &services),
+        )
+        .await?;
         let advertising_config = AdvertisingConfig {
-            local_name: "iroh".to_string(),
+            local_name: LocalName::None,
             service_uuids: vec![key_uuid],
         };
-        peripheral.start_advertising(&advertising_config).await?;
+        rollback.advertising = true;
+        construct_step("start_advertising", async {
+            peripheral
+                .start_advertising(&advertising_config)
+                .await
+                .map_err(BleError::from)
+        })
+        .await?;
         info!(key_uuid = %key_uuid, "advertising started");
 
-        match central
-            .start_scan(blew::central::ScanFilter::default())
-            .await
-        {
-            Ok(()) => info!("scanning for iroh-ble peers"),
-            Err(BlewError::NotSupported) => {
-                warn!("central start_scan not supported; discovery disabled");
+        let scan_filter = blew::central::ScanFilter::default();
+        rollback.scanning = true;
+        let scanning = construct_step("start_scan", async {
+            match central.start_scan(scan_filter.clone()).await {
+                Ok(()) => Ok(true),
+                Err(BlewError::NotSupported) => Ok(false),
+                Err(e) => Err(BleError::from(e)),
             }
-            Err(e) => return Err(e.into()),
+        })
+        .await?;
+        if scanning {
+            info!("scanning for iroh-ble peers");
+        } else {
+            rollback.scanning = false;
+            warn!("central start_scan not supported; discovery disabled");
         }
 
         let (inbox_tx, inbox_rx) = mpsc::channel::<PeerCommand>(256);
@@ -412,18 +555,24 @@ impl BleTransport {
             Arc::clone(&peripheral),
             services,
             advertising_config,
+            scanning.then_some(scan_filter),
             Arc::clone(&psm_atomic),
             inbox_tx.clone(),
         ));
         let routing = Arc::new(crate::transport::routing::Routing::new());
 
         if l2cap_policy == L2capPolicy::PreferL2cap {
-            match peripheral.l2cap_listener().await {
+            match construct_step("l2cap_listener", async {
+                peripheral.l2cap_listener().await.map_err(BleError::from)
+            })
+            .await
+            {
                 Ok((assigned_psm, listener)) => {
                     let val = assigned_psm.value();
                     info!(psm = val, "L2CAP listener started");
                     psm_atomic.store(val, Ordering::Relaxed);
-                    tokio::spawn(run_l2cap_accept(listener, inbox_tx.clone()));
+                    rollback.l2cap_accept =
+                        Some(tokio::spawn(run_l2cap_accept(listener, inbox_tx.clone())));
                 }
                 Err(e) => {
                     warn!(error = %e, "L2CAP listener failed, falling back to GATT-only");
@@ -487,6 +636,7 @@ impl BleTransport {
         let empty_frames = Arc::new(AtomicU64::new(0));
         let inbox_capacity_wakers: Arc<Mutex<Vec<Waker>>> = Arc::new(Mutex::new(Vec::new()));
 
+        let connections = Arc::new(crate::transport::conns::ConnectionRegistry::default());
         let driver = Driver::new(
             iface,
             inbox_tx.clone(),
@@ -496,9 +646,14 @@ impl BleTransport {
             Arc::clone(&empty_frames),
             Arc::clone(&store),
             Arc::clone(&routing),
-        );
+        )
+        .with_connections(Arc::clone(&connections));
 
-        let registry = Registry::new(l2cap_policy, local_id);
+        // `wait_ready` (or the simulated radio) has both roles powered by now.
+        let (adapter_state_tx, adapter_state_rx) =
+            tokio::sync::watch::channel(BleAdapterState::PoweredOn);
+        let registry =
+            Registry::new(l2cap_policy, local_id).with_adapter_state_tx(adapter_state_tx);
         let snap_for_actor = Arc::clone(&snapshots);
         let wakers_for_actor = Arc::clone(&inbox_capacity_wakers);
         let routing_for_actor = Arc::clone(&routing);
@@ -542,6 +697,7 @@ impl BleTransport {
             },
             incoming_rx: tokio::sync::Mutex::new(Some(incoming_rx)),
             routing,
+            connections,
             tx_bytes,
             rx_bytes,
             retransmits,
@@ -549,8 +705,8 @@ impl BleTransport {
             empty_frames,
             inbox_capacity_wakers,
             store,
+            adapter_state_rx,
             probe_disconnects,
-            active_connections: Arc::new(ActiveConnections::default()),
             idle_linger,
             link_priority: Arc::new(LinkPriority::default()),
             hold_sweep_started: std::sync::atomic::AtomicBool::new(false),
@@ -587,7 +743,7 @@ impl BleTransport {
             self.local_id,
             Arc::clone(&self.routing),
             self.hook_tx.clone(),
-            Arc::clone(&self.active_connections),
+            Arc::clone(&self.connections),
             self.idle_linger,
             Arc::clone(&self.link_priority),
         )
@@ -691,6 +847,20 @@ impl BleTransport {
         self.routing.scan_hint_for_prefix(&prefix).is_some()
     }
 
+    /// Current power state of the local Bluetooth adapter.
+    #[must_use]
+    pub fn adapter_state(&self) -> BleAdapterState {
+        *self.adapter_state_rx.borrow()
+    }
+
+    /// Subscribe to adapter power transitions. The receiver starts at the
+    /// current state; each change is published once, after the transport has
+    /// moved its peers into (or out of) `Restoring`.
+    #[must_use]
+    pub fn adapter_state_changes(&self) -> tokio::sync::watch::Receiver<BleAdapterState> {
+        self.adapter_state_rx.clone()
+    }
+
     /// Public-facing peer snapshot. Filters out `Unknown` (pre-state internal
     /// construction) and `Dead` (tombstones kept around for `DEAD_GC_TTL`
     /// dedup) so the returned list only contains peers that are actionable
@@ -747,6 +917,14 @@ impl BlePeerInfo {
     }
 }
 
+/// Power state of the local Bluetooth adapter, as observed by the transport.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum BleAdapterState {
+    PoweredOn,
+    PoweredOff,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum BlePeerPhase {
@@ -788,8 +966,7 @@ impl CustomTransport for BleTransport {
             .take()
             .ok_or_else(|| io::Error::other("BleTransport bind() already called"))?;
 
-        let local_addr = token_custom_addr(0);
-        let watchable = Watchable::new(vec![local_addr]);
+        let watchable = Watchable::new(vec![local_custom_addr()]);
         let sender = Arc::new(BleSender {
             inbox: self.handle.inbox.clone(),
             snapshots: Arc::clone(&self.handle.snapshots),
@@ -891,10 +1068,8 @@ impl CustomEndpoint for BleEndpoint {
                     bufs[filled][..packet.data.len()].copy_from_slice(&packet.data);
                     metas[filled].len = packet.data.len();
                     metas[filled].stride = packet.data.len();
-                    // iroh 1.0: the per-packet recv slice is now `[RecvInfo]`
-                    // rather than `[Addr]`; construct it via `RecvInfo::new`
-                    // (remote custom addr, no identifiable local addr).
-                    recv_infos[filled] = RecvInfo::new(token_custom_addr(token), None);
+                    recv_infos[filled] =
+                        RecvInfo::new(token_custom_addr(token), Some(local_custom_addr()));
                     self.rx_bytes
                         .fetch_add(packet.data.len() as u64, Ordering::Relaxed);
                     filled += 1;
@@ -932,8 +1107,6 @@ impl CustomSender for BleSender {
         &self,
         cx: &mut Context<'_>,
         dst: &CustomAddr,
-        // iroh 1.0 added a source-address hint; this transport is
-        // single-homed per endpoint, so the local address is irrelevant.
         _src: Option<&CustomAddr>,
         transmit: &Transmit<'_>,
     ) -> Poll<io::Result<()>> {
@@ -1272,8 +1445,9 @@ mod tests {
         .expect("hook event should forward");
 
         match rx.try_recv().expect("Stalled emitted first") {
-            PeerCommand::Stalled { device_id } => {
+            PeerCommand::Stalled { device_id, cause } => {
                 assert_eq!(device_id, evicted);
+                assert_eq!(cause, StallCause::LinkDead);
             }
             other => panic!("expected Stalled, got {other:?}"),
         }
@@ -1310,8 +1484,9 @@ mod tests {
 
         assert_eq!(routing.routable_pipe_for(&endpoint_id), None);
         match rx.try_recv().expect("Stalled emitted") {
-            PeerCommand::Stalled { device_id } => {
+            PeerCommand::Stalled { device_id, cause } => {
                 assert_eq!(device_id, dev("close-current"));
+                assert_eq!(cause, StallCause::LocalClose);
             }
             other => panic!("expected Stalled, got {other:?}"),
         }
@@ -1694,6 +1869,128 @@ mod tests {
         assert!(wakers.lock().is_empty(), "drain must clear the list");
     }
 
+    fn test_ble_endpoint(
+        receiver: mpsc::Receiver<IncomingPacket>,
+        rx_bytes: Arc<AtomicU64>,
+    ) -> BleEndpoint {
+        let (inbox_tx, _inbox_rx) = mpsc::channel(8);
+        BleEndpoint {
+            receiver,
+            watchable: Watchable::new(vec![local_custom_addr()]),
+            sender: Arc::new(BleSender {
+                inbox: inbox_tx,
+                snapshots: Arc::new(ArcSwap::from_pointee(SnapshotMaps::default())),
+                routing: Arc::new(Routing::new()),
+                tx_bytes: Arc::new(AtomicU64::new(0)),
+                inbox_capacity_wakers: Arc::new(Mutex::new(Vec::new())),
+            }),
+            rx_bytes,
+        }
+    }
+
+    /// `RecvInfo`'s accessors are `pub(crate)` in iroh, so the only way to
+    /// inspect what we wrote is `Debug`. That is enough to catch the failure
+    /// this test exists for: a `RecvInfo` that never lands in the slot leaves
+    /// the default `Addr::Ip(..)` behind, and iroh's `process_datagrams`
+    /// silently takes its IP branch instead of resolving the BLE token.
+    fn recv_info_debug(remote_token: u64) -> String {
+        format!(
+            "{:?}",
+            RecvInfo::new(token_custom_addr(remote_token), Some(local_custom_addr()))
+        )
+    }
+
+    #[tokio::test]
+    async fn poll_recv_stamps_each_packet_with_its_stable_conn_token() {
+        let (tx, rx) = mpsc::channel(4);
+        let rx_bytes = Arc::new(AtomicU64::new(0));
+        let mut endpoint = test_ble_endpoint(rx, Arc::clone(&rx_bytes));
+
+        for (stable_id, payload) in [(7u64, &b"first"[..]), (9u64, &b"second-one"[..])] {
+            tx.send(IncomingPacket {
+                device_id: dev("recv-device"),
+                stable_conn_id: StableConnId::for_test(stable_id),
+                data: Bytes::copy_from_slice(payload),
+            })
+            .await
+            .expect("send");
+        }
+
+        let mut storage = [[0u8; 64]; 2];
+        let (first, second) = storage.split_at_mut(1);
+        let mut bufs = [
+            io::IoSliceMut::new(&mut first[0]),
+            io::IoSliceMut::new(&mut second[0]),
+        ];
+        let mut metas = [noq_udp::RecvMeta::default(); 2];
+        let mut recv_infos = [RecvInfo::default(), RecvInfo::default()];
+
+        let (_counter, waker) = counting_waker();
+        let mut cx = Context::from_waker(&waker);
+        let filled = match endpoint.poll_recv(&mut cx, &mut bufs, &mut metas, &mut recv_infos) {
+            Poll::Ready(Ok(n)) => n,
+            other => panic!("expected two packets, got {other:?}"),
+        };
+        assert_eq!(filled, 2);
+
+        assert_eq!(&bufs[0][..metas[0].len], b"first");
+        assert_eq!(&bufs[1][..metas[1].len], b"second-one");
+        assert_eq!(metas[0].stride, b"first".len());
+        assert_eq!(metas[1].stride, b"second-one".len());
+
+        // The point of the test: each slot carries its own peer's token, not
+        // a default-constructed `RecvInfo`.
+        assert_eq!(format!("{:?}", recv_infos[0]), recv_info_debug(7));
+        assert_eq!(format!("{:?}", recv_infos[1]), recv_info_debug(9));
+        assert_ne!(
+            format!("{:?}", recv_infos[0]),
+            format!("{:?}", RecvInfo::default()),
+            "a dropped RecvInfo would leave the default in place"
+        );
+
+        assert_eq!(
+            rx_bytes.load(Ordering::Relaxed),
+            (b"first".len() + b"second-one".len()) as u64
+        );
+    }
+
+    #[tokio::test]
+    async fn poll_recv_is_pending_until_a_packet_arrives() {
+        let (tx, rx) = mpsc::channel(4);
+        let mut endpoint = test_ble_endpoint(rx, Arc::new(AtomicU64::new(0)));
+
+        let mut storage = [0u8; 64];
+        let mut bufs = [io::IoSliceMut::new(&mut storage)];
+        let mut metas = [noq_udp::RecvMeta::default(); 1];
+        let mut recv_infos = [RecvInfo::default()];
+
+        let (counter, waker) = counting_waker();
+        let mut cx = Context::from_waker(&waker);
+        assert!(
+            endpoint
+                .poll_recv(&mut cx, &mut bufs, &mut metas, &mut recv_infos)
+                .is_pending()
+        );
+
+        tx.send(IncomingPacket {
+            device_id: dev("recv-device"),
+            stable_conn_id: StableConnId::for_test(3),
+            data: Bytes::from_static(b"late"),
+        })
+        .await
+        .expect("send");
+        assert!(
+            counter.0.load(AtomicOrdering::SeqCst) >= 1,
+            "sender must wake the parked poll"
+        );
+
+        match endpoint.poll_recv(&mut cx, &mut bufs, &mut metas, &mut recv_infos) {
+            Poll::Ready(Ok(1)) => {}
+            other => panic!("expected one packet, got {other:?}"),
+        }
+        assert_eq!(format!("{:?}", recv_infos[0]), recv_info_debug(3));
+    }
+
     #[cfg(feature = "testing")]
     #[tokio::test]
     async fn resolve_poll_send_and_start_data_pipe_preserve_reserved_token_after_scan_hint_flip() {
@@ -1703,9 +2000,10 @@ mod tests {
         use crate::transport::test_util::MockBleInterface;
 
         fn test_transmit(contents: &[u8]) -> Transmit<'_> {
-            // iroh 1.0 keeps `ecn` `pub(crate)` but `poll_send` only reads the
-            // public payload fields. Mirror the current layout in tests so the
-            // real `BleSender::poll_send` path can still be exercised.
+            // iroh keeps `Transmit::ecn` private and offers no public
+            // constructor, but `poll_send` only reads the public payload
+            // fields. Mirror the current layout in tests so the real
+            // `BleSender::poll_send` path can still be exercised.
             unsafe {
                 std::mem::transmute::<
                     (Option<noq_udp::EcnCodepoint>, &[u8], Option<usize>),
@@ -1749,12 +2047,7 @@ mod tests {
         let mut reg = Registry::new_for_test();
         reg.handle(PeerCommand::Advertised {
             prefix,
-            device: blew::BleDevice {
-                id: old_device.clone(),
-                name: None,
-                rssi: None,
-                services: vec![],
-            },
+            device_id: old_device.clone(),
             rssi: None,
         });
 
@@ -1762,7 +2055,7 @@ mod tests {
         let start_actions = reg.handle(send_cmd);
         assert!(matches!(
             start_actions.as_slice(),
-            [PeerAction::StartConnect { device_id, .. }] if device_id == &old_device
+            [PeerAction::RetireLifecycle { .. }, PeerAction::StartConnect { device_id, .. }] if device_id == &old_device
         ));
         assert_eq!(
             reg.peer(&old_device).unwrap().target_endpoint,
@@ -1773,6 +2066,7 @@ mod tests {
 
         let actions = reg.handle(PeerCommand::ConnectSucceeded {
             device_id: old_device.clone(),
+            lifecycle_id: reg.lifecycle_id(&old_device),
             channel: ChannelHandle {
                 id: 9,
                 path: ConnectPath::Gatt,
@@ -1783,6 +2077,7 @@ mod tests {
             .find_map(|action| match action {
                 PeerAction::StartDataPipe {
                     device_id,
+                    lifecycle_id,
                     tx_gen,
                     role,
                     target_endpoint,
@@ -1795,6 +2090,7 @@ mod tests {
                     target_endpoint,
                     path,
                     l2cap_channel,
+                    lifecycle_id,
                 )),
                 _ => None,
             })
@@ -1821,6 +2117,7 @@ mod tests {
         driver
             .execute(PeerAction::StartDataPipe {
                 device_id: start_pipe.0.clone(),
+                lifecycle_id: start_pipe.6,
                 tx_gen: start_pipe.1,
                 role: start_pipe.2,
                 target_endpoint: start_pipe.3,

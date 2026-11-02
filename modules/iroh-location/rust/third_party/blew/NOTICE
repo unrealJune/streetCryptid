@@ -5,8 +5,8 @@ This directory contains a vendored copy of the Rust half of `blew`, a
 cross-platform async Bluetooth Low Energy library (Apple, Linux, Android).
 
 Upstream project : https://github.com/mcginty/blew
-Upstream version : 0.3.0 (crates.io; git tag `blew-v0.3.0`,
-                   commit dde4bdaa09b3ef60bb595dd1be360a54c17615d4, crates/blew)
+Upstream version : 0.5.1-beta.8 (git tag `blew-v0.5.1-beta.8`, crates/blew);
+                   first vendored at 0.3.0, rebased onto 0.5.1-beta.8 on 2026-11-02
 Original author  : Jake McGinty <me@jakebot.org>
 License          : GNU Affero General Public License v3.0 or later
                    (AGPL-3.0-or-later) — see the `LICENSE` file in this
@@ -18,15 +18,17 @@ as the upstream project.
 The Android Kotlin half of blew was vendored separately, in July 2026, into
 modules/iroh-location/android/src/main/java/org/jakebot/blew/ (notice in
 modules/iroh-location/android/third_party/blew/). It is not duplicated here,
-and upstream's `android/`, `examples/` and `tests/` directories are omitted.
+and upstream's `android/` and `examples/` directories and its JNI parity test are
+omitted.
 
 
 Modifications by the streetCryptid project
 ------------------------------------------
 
 In accordance with section 5 of the GNU AGPL, the changes made to the upstream
-0.3.0 source after it was vendored into this repository are dated and
-described below.
+source after it was vendored into this repository are dated and described
+below. Entries before 2026-11-02 describe changes to 0.3.0; the 2026-11-02
+entry says which of them survive on top of 0.5.1-beta.8.
 
 2026-10-31 — Apple flow control (CoreBluetooth backend):
 
@@ -88,3 +90,21 @@ described below.
         Before, dropping that split half closed nothing while the other half
         lived, and `writeL2cap` on a forgotten socket returns without error,
         so a closed channel read as open forever.
+
+2026-11-02 — Rebased onto upstream 0.5.1-beta.8:
+
+  Upstream fixed most of what the 2026-10-31 entries above changed, in its own
+  way: notifications queue behind `peripheralManagerIsReady` (#54 and the
+  peripheral queue), writes without response wait for
+  `canSendWriteWithoutResponse` (#54), the Apple L2CAP reactor sleeps on a
+  `CFRunLoopSource` and queues behind `hasSpaceAvailable` (#55), and Android
+  L2CAP writes run on the blocking pool rather than the runtime. Those files
+  are upstream's now. What remains of ours:
+
+  * Cargo.toml — `publish = false`; vendoring header.
+  * build.rs — the Android Kotlin half is found in the Expo module.
+  * src/platform/apple/central.rs — the `PendingConnect` guard on `connect`
+    (a dropped connect future withdraws its request; upstream still leaves it,
+    and every later connect fails with `ConnectInFlight`).
+  * src/platform/android/l2cap_state.rs — a socket Kotlin reports closed reads
+    as EOF on the app's channel (shutdown of the inbound bridge's write half).

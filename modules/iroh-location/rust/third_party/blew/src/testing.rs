@@ -29,12 +29,16 @@ use crate::gatt::service::GattService;
 use crate::l2cap::{L2capChannel, types::Psm};
 use crate::peripheral::backend::{self as periph_backend, PeripheralBackend};
 use crate::peripheral::types::{
-    AdvertisingConfig, PeripheralRequest, PeripheralStateEvent, ReadResponder, WriteResponder,
+    AdvertisingConfig, Delivery, LocalName, PeripheralRequest, PeripheralStateEvent, ReadResponder,
+    WriteResponder,
 };
 use crate::types::{BleDevice, DeviceId};
 use crate::util::BroadcastEventStream;
 
 const MOCK_MTU: u16 = 512;
+
+/// The name a mock peripheral's adapter starts with.
+pub const MOCK_ADAPTER_NAME: &str = "blew mock adapter";
 /// Policy for injecting L2CAP failures in mock tests.
 #[derive(Debug, Clone, Default)]
 pub struct MockL2capPolicy {
@@ -140,6 +144,7 @@ impl MockLink {
             central_sender_keepalive: central_event_tx.clone(),
             powered: Arc::new(Mutex::new(true)),
             restored: Arc::new(Mutex::new(None)),
+            adapter_name: Arc::new(Mutex::new(Some(MOCK_ADAPTER_NAME.into()))),
         };
 
         (
@@ -288,12 +293,14 @@ impl CentralBackend for MockCentral {
         let tx = self.event_tx.clone();
         async move {
             if advertising {
-                let name = adv_config.map(|c| c.local_name);
+                let name = adv_config.and_then(|c| c.local_name.name().map(str::to_owned));
                 let _ = tx.send(CentralEvent::DeviceDiscovered(BleDevice {
                     id: DeviceId::from("mock-peripheral"),
                     name,
                     rssi: Some(-50),
                     services,
+                    manufacturer_data: HashMap::new(),
+                    service_data: HashMap::new(),
                 }));
             }
             Ok(())
@@ -447,6 +454,7 @@ impl CentralBackend for MockCentral {
                 client_id: DeviceId::from("mock-central"),
                 service_uuid: Uuid::nil(),
                 char_uuid,
+                offset: 0,
                 value,
                 responder,
             });
@@ -594,6 +602,7 @@ pub struct MockPeripheral {
     central_sender_keepalive: mpsc::UnboundedSender<CentralEvent>,
     powered: Arc<Mutex<bool>>,
     restored: Arc<Mutex<Option<Vec<Uuid>>>>,
+    adapter_name: Arc<Mutex<Option<String>>>,
 }
 
 impl Clone for MockPeripheral {
@@ -606,6 +615,7 @@ impl Clone for MockPeripheral {
             central_sender_keepalive: self.central_sender_keepalive.clone(),
             powered: Arc::clone(&self.powered),
             restored: Arc::clone(&self.restored),
+            adapter_name: Arc::clone(&self.adapter_name),
         }
     }
 }
@@ -640,6 +650,7 @@ impl MockPeripheral {
             central_sender_keepalive: central_event_tx,
             powered: Arc::new(Mutex::new(powered)),
             restored: Arc::new(Mutex::new(None)),
+            adapter_name: Arc::new(Mutex::new(Some(MOCK_ADAPTER_NAME.into()))),
         })
     }
 
@@ -658,6 +669,9 @@ impl MockPeripheral {
 
     /// Arm the next [`notify_characteristic`] call to silently drop the
     /// payload instead of delivering it. One-shot.
+    ///
+    /// A dropped notification still reports [`Delivery::Sent`], since nothing
+    /// acknowledges one. A dropped indication is never confirmed, so it fails.
     ///
     /// [`notify_characteristic`]: PeripheralBackend::notify_characteristic
     pub fn drop_next_notification(&self) {
@@ -704,6 +718,10 @@ impl PeripheralBackend for MockPeripheral {
         }
         link.advertising = true;
         link.adv_config = Some(config.clone());
+        // Modelled on Android, where a permanent name renames the adapter.
+        if let LocalName::AllowPermanent(name) = &config.local_name {
+            *self.adapter_name.lock() = Some(name.clone());
+        }
         std::future::ready(Ok(()))
     }
 
@@ -719,14 +737,39 @@ impl PeripheralBackend for MockPeripheral {
         _device_id: &crate::types::DeviceId,
         char_uuid: Uuid,
         value: Vec<u8>,
-    ) -> impl Future<Output = BlewResult<()>> + Send {
+    ) -> impl Future<Output = BlewResult<Delivery>> + Send {
+        use crate::gatt::props::CharacteristicProperties;
+
         let mut link = self.link.lock();
-        if std::mem::take(&mut link.drop_next_notification) {
-            // Silently discard the notification, as if it were lost in transit.
-        } else if let Some(tx) = link.subscriptions.get(&char_uuid) {
-            let _ = tx.send(Bytes::from(value));
-        }
-        async { Ok(()) }
+        // Mirrors the real backends, which confirm only what the central
+        // subscribed to as an indication: an indicate-only characteristic.
+        let indicate_only = link
+            .services
+            .iter()
+            .flat_map(|svc| &svc.characteristics)
+            .find(|ch| ch.uuid == char_uuid)
+            .is_some_and(|ch| {
+                ch.properties.contains(CharacteristicProperties::INDICATE)
+                    && !ch.properties.contains(CharacteristicProperties::NOTIFY)
+            });
+        let dropped = std::mem::take(&mut link.drop_next_notification);
+        let result = match link.subscriptions.get(&char_uuid) {
+            None => Ok(Delivery::NoSubscriber),
+            // Lost in transit: an indication is then never confirmed.
+            Some(_) if dropped && indicate_only => Err(BlewError::Peripheral {
+                source: "mock indication was not confirmed".into(),
+            }),
+            Some(_) if dropped => Ok(Delivery::Sent),
+            Some(tx) => {
+                let _ = tx.send(Bytes::from(value));
+                Ok(if indicate_only {
+                    Delivery::Confirmed
+                } else {
+                    Delivery::Sent
+                })
+            }
+        };
+        std::future::ready(result)
     }
 
     fn l2cap_listener(
@@ -828,6 +871,24 @@ impl crate::peripheral::Peripheral<MockPeripheral> {
     pub fn take_restored(&self) -> Option<Vec<Uuid>> {
         self.backend.take_restored()
     }
+
+    /// Mirrors the Android-only `Peripheral::adapter_name`. Starts as
+    /// [`MOCK_ADAPTER_NAME`], and advertising under
+    /// [`LocalName::AllowPermanent`] renames it, as on Android.
+    pub fn adapter_name(&self) -> BlewResult<Option<String>> {
+        Ok(self.backend.adapter_name.lock().clone())
+    }
+
+    /// Mirrors the Android-only `Peripheral::set_adapter_name`, including
+    /// renaming nothing until the returned future is polled.
+    pub fn set_adapter_name(&self, name: &str) -> impl Future<Output = BlewResult<()>> + Send {
+        let adapter_name = Arc::clone(&self.backend.adapter_name);
+        let name = name.to_owned();
+        async move {
+            *adapter_name.lock() = Some(name);
+            Ok(())
+        }
+    }
 }
 #[cfg(test)]
 mod tests {
@@ -835,7 +896,7 @@ mod tests {
     use crate::central::Central;
     use crate::gatt::props::{AttributePermissions, CharacteristicProperties};
     use crate::gatt::service::GattCharacteristic;
-    use crate::peripheral::Peripheral;
+    use crate::peripheral::{LocalName, Peripheral};
     use tokio_stream::StreamExt;
 
     #[tokio::test]
@@ -856,7 +917,7 @@ mod tests {
 
         peripheral
             .start_advertising(&AdvertisingConfig {
-                local_name: "test".into(),
+                local_name: LocalName::Temporary("test".into()),
                 service_uuids: vec![svc_uuid],
             })
             .await
@@ -878,6 +939,104 @@ mod tests {
             }
             other => panic!("expected DeviceDiscovered, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn test_mock_link_discovery_without_name() {
+        let (c, p) = MockLink::pair();
+        let central = Central::from_backend(c.central);
+        let peripheral = Peripheral::from_backend(p.peripheral);
+
+        let svc_uuid = Uuid::from_u128(0x1234);
+        peripheral
+            .start_advertising(&AdvertisingConfig {
+                service_uuids: vec![svc_uuid],
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        let mut events = central.events();
+        assert!(matches!(
+            events.next().await.unwrap(),
+            CentralEvent::AdapterStateChanged { powered: true }
+        ));
+        central.start_scan(ScanFilter::default()).await.unwrap();
+
+        match events.next().await.expect("should get discovery event") {
+            CentralEvent::DeviceDiscovered(device) => assert_eq!(device.name, None),
+            other => panic!("expected DeviceDiscovered, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_mock_link_discovery_with_permanent_name() {
+        let (c, p) = MockLink::pair();
+        let central = Central::from_backend(c.central);
+        let peripheral = Peripheral::from_backend(p.peripheral);
+
+        peripheral
+            .start_advertising(&AdvertisingConfig {
+                local_name: LocalName::AllowPermanent("lent".into()),
+                service_uuids: vec![Uuid::from_u128(0x1234)],
+            })
+            .await
+            .unwrap();
+
+        let mut events = central.events();
+        assert!(matches!(
+            events.next().await.unwrap(),
+            CentralEvent::AdapterStateChanged { powered: true }
+        ));
+        central.start_scan(ScanFilter::default()).await.unwrap();
+
+        match events.next().await.expect("should get discovery event") {
+            CentralEvent::DeviceDiscovered(device) => {
+                assert_eq!(device.name.as_deref(), Some("lent"));
+            }
+            other => panic!("expected DeviceDiscovered, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_mock_permanent_name_renames_adapter_until_the_app_restores_it() {
+        let (_c, p) = MockLink::pair();
+        let peripheral = Peripheral::from_backend(p.peripheral);
+
+        let theirs = peripheral.adapter_name().unwrap();
+        assert_eq!(theirs.as_deref(), Some(MOCK_ADAPTER_NAME));
+
+        peripheral
+            .start_advertising(&AdvertisingConfig {
+                local_name: LocalName::AllowPermanent("RO3JHAAY".into()),
+                service_uuids: vec![],
+            })
+            .await
+            .unwrap();
+        peripheral.stop_advertising().await.unwrap();
+        assert_eq!(
+            peripheral.adapter_name().unwrap().as_deref(),
+            Some("RO3JHAAY"),
+            "blew leaves the rename in place"
+        );
+
+        peripheral
+            .set_adapter_name(theirs.as_deref().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(peripheral.adapter_name().unwrap(), theirs);
+    }
+
+    #[tokio::test]
+    async fn test_mock_set_adapter_name_renames_nothing_until_polled() {
+        let (_c, p) = MockLink::pair();
+        let peripheral = Peripheral::from_backend(p.peripheral);
+
+        drop(peripheral.set_adapter_name("never-awaited"));
+        assert_eq!(
+            peripheral.adapter_name().unwrap().as_deref(),
+            Some(MOCK_ADAPTER_NAME)
+        );
     }
 
     #[tokio::test]
@@ -1130,7 +1289,7 @@ mod tests {
             .await
             .unwrap();
 
-        peripheral
+        let delivery = peripheral
             .notify_characteristic(
                 &crate::types::DeviceId::from("mock-central"),
                 char_uuid,
@@ -1138,6 +1297,7 @@ mod tests {
             )
             .await
             .unwrap();
+        assert_eq!(delivery, Delivery::Sent);
 
         let ev = tokio::time::timeout(std::time::Duration::from_millis(100), events.next())
             .await
@@ -1158,7 +1318,7 @@ mod tests {
         let peripheral = Peripheral::from_backend(p.peripheral);
 
         let config = AdvertisingConfig {
-            local_name: "test".into(),
+            local_name: LocalName::Temporary("test".into()),
             service_uuids: vec![],
         };
 
@@ -1476,7 +1636,7 @@ mod tests {
             CentralEvent::DeviceConnected { .. }
         ));
 
-        peripheral
+        let delivery = peripheral
             .notify_characteristic(
                 &crate::types::DeviceId::from("mock-central"),
                 char_uuid,
@@ -1484,6 +1644,7 @@ mod tests {
             )
             .await
             .unwrap();
+        assert_eq!(delivery, Delivery::NoSubscriber);
 
         let result =
             tokio::time::timeout(std::time::Duration::from_millis(50), events.next()).await;
@@ -1497,7 +1658,7 @@ mod tests {
             .await
             .unwrap();
 
-        peripheral
+        let delivery = peripheral
             .notify_characteristic(
                 &crate::types::DeviceId::from("mock-central"),
                 char_uuid,
@@ -1505,6 +1666,7 @@ mod tests {
             )
             .await
             .unwrap();
+        assert_eq!(delivery, Delivery::Sent);
 
         let ev = tokio::time::timeout(std::time::Duration::from_millis(100), events.next())
             .await
@@ -1524,7 +1686,7 @@ mod tests {
         let peripheral = Peripheral::from_backend(p.peripheral);
 
         let config = AdvertisingConfig {
-            local_name: "test".into(),
+            local_name: LocalName::Temporary("test".into()),
             service_uuids: vec![],
         };
 
@@ -1564,7 +1726,7 @@ mod tests {
         central.disconnect(&device_id).await.unwrap();
 
         let mut events = central.events();
-        peripheral
+        let delivery = peripheral
             .notify_characteristic(
                 &crate::types::DeviceId::from("mock-central"),
                 char_uuid,
@@ -1572,6 +1734,7 @@ mod tests {
             )
             .await
             .unwrap();
+        assert_eq!(delivery, Delivery::NoSubscriber);
 
         let result =
             tokio::time::timeout(std::time::Duration::from_millis(50), events.next()).await;
@@ -1939,6 +2102,8 @@ mod tests {
             name: Some("restored".into()),
             rssi: None,
             services: vec![],
+            manufacturer_data: HashMap::new(),
+            service_data: HashMap::new(),
         };
         central.backend.mock_set_restored(vec![device.clone()]);
 
@@ -2229,7 +2394,7 @@ mod tests {
         let mut events = central.events();
 
         peripheral_backend.drop_next_notification();
-        peripheral
+        let delivery = peripheral
             .notify_characteristic(
                 &DeviceId::from("mock-central"),
                 char_uuid,
@@ -2237,6 +2402,7 @@ mod tests {
             )
             .await
             .unwrap();
+        assert_eq!(delivery, Delivery::Sent);
         peripheral
             .notify_characteristic(
                 &DeviceId::from("mock-central"),
@@ -2257,6 +2423,86 @@ mod tests {
             }
         };
         assert_eq!(&delivered[..], b"delivered");
+    }
+
+    async fn indicating_pair(
+        char_uuid: Uuid,
+    ) -> (
+        Central<MockCentral>,
+        Peripheral<MockPeripheral>,
+        MockPeripheral,
+    ) {
+        let (c, p) = MockLink::pair();
+        let peripheral_backend = p.peripheral.clone();
+        let central = Central::from_backend(c.central);
+        let peripheral = Peripheral::from_backend(p.peripheral);
+        peripheral
+            .add_service(&GattService {
+                uuid: Uuid::from_u128(0x1234),
+                primary: true,
+                characteristics: vec![GattCharacteristic {
+                    uuid: char_uuid,
+                    properties: CharacteristicProperties::INDICATE,
+                    permissions: AttributePermissions::READ,
+                    value: vec![],
+                    descriptors: vec![],
+                }],
+            })
+            .await
+            .unwrap();
+        let device_id = DeviceId::from("mock-peripheral");
+        central.connect(&device_id).await.unwrap();
+        central
+            .subscribe_characteristic(&device_id, char_uuid)
+            .await
+            .unwrap();
+        (central, peripheral, peripheral_backend)
+    }
+
+    #[tokio::test]
+    async fn contract_indication_reports_confirmed() {
+        let char_uuid = Uuid::from_u128(0xF012);
+        let (central, peripheral, _p) = indicating_pair(char_uuid).await;
+        let mut events = central.events();
+
+        let delivery = peripheral
+            .notify_characteristic(&DeviceId::from("mock-central"), char_uuid, b"ind".to_vec())
+            .await
+            .unwrap();
+        assert_eq!(delivery, Delivery::Confirmed);
+
+        let value = loop {
+            match tokio::time::timeout(std::time::Duration::from_millis(100), events.next())
+                .await
+                .expect("timed out")
+                .expect("stream closed")
+            {
+                CentralEvent::CharacteristicNotification { value, .. } => break value,
+                _ => {}
+            }
+        };
+        assert_eq!(&value[..], b"ind");
+    }
+
+    #[tokio::test]
+    async fn fault_dropped_indication_is_an_error() {
+        let char_uuid = Uuid::from_u128(0xF013);
+        let (_central, peripheral, peripheral_backend) = indicating_pair(char_uuid).await;
+
+        peripheral_backend.drop_next_notification();
+        assert!(matches!(
+            peripheral
+                .notify_characteristic(&DeviceId::from("mock-central"), char_uuid, b"x".to_vec())
+                .await,
+            Err(BlewError::Peripheral { .. })
+        ));
+        assert_eq!(
+            peripheral
+                .notify_characteristic(&DeviceId::from("mock-central"), char_uuid, b"y".to_vec())
+                .await
+                .unwrap(),
+            Delivery::Confirmed
+        );
     }
 
     use proptest::collection::vec as prop_vec;

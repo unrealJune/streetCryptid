@@ -1,6 +1,6 @@
 bitflags::bitflags! {
     /// GATT characteristic properties, matching the BLE spec bit layout.
-    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
     pub struct CharacteristicProperties: u16 {
         const BROADCAST                   = 0x0001;
         const READ                        = 0x0002;
@@ -15,7 +15,7 @@ bitflags::bitflags! {
 
 bitflags::bitflags! {
     /// ATT attribute permissions.
-    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
     pub struct AttributePermissions: u16 {
         const READ               = 0x0001;
         const WRITE              = 0x0002;

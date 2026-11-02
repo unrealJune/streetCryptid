@@ -12,14 +12,11 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.os.ParcelUuid
 import android.util.Log
-import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.util.UUID
-import java.util.concurrent.ConcurrentHashMap
 
 /**
  * Singleton managing the Android BLE central role (scanner + GATT client).
@@ -39,45 +36,75 @@ import java.util.concurrent.ConcurrentHashMap
 object BleCentralManager {
     private const val TAG = "BleCentralManager"
 
-    // Status codes returned to Rust via JNI.
-    private const val STATUS_SUCCESS = 0
-    private const val STATUS_NOT_CONNECTED = 1
-    private const val STATUS_CHAR_NOT_FOUND = 2
-    private const val STATUS_GATT_BUSY = 3
-    private const val STATUS_GATT_FAILED = 4
-
     private var context: Context? = null
     private var bluetoothManager: BluetoothManager? = null
     private var adapter: BluetoothAdapter? = null
-
-    // Active GATT connections keyed by device address.
-    private val gattConnections = ConcurrentHashMap<String, BluetoothGatt>()
-
-    // Per-device MTU (default 23 until negotiated).
-    private val mtuMap = ConcurrentHashMap<String, Int>()
-
-    // Per-device GATT operation queues.
-    private val gattQueues = ConcurrentHashMap<String, GattOperationQueue>()
-
-    // Nonces for in-flight GATT operations. Callbacks consume these before
-    // completing the queue or notifying Rust so stale callbacks are ignored.
-    private val pendingNonces = ConcurrentHashMap<String, Long>()
-
-    // Device addresses with a write-without-response already completed from the
-    // kick lambda. onCharacteristicWrite may still fire on some devices; the
-    // entry here tells the callback to skip completeCurrent and the native
-    // notification (the coroutine has already delivered both).
-    private val noResponseHandled = ConcurrentHashMap<String, Boolean>()
-
-    // Coroutine scope for launching GATT operation coroutines.
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    private val connections =
+        GattConnections(
+            factory = { addr, callback ->
+                val ctx = context ?: error("context not initialized")
+                adapter?.getRemoteDevice(addr)?.connectGatt(ctx, false, callback, BluetoothDevice.TRANSPORT_LE)
+            },
+            scope = scope,
+            events =
+                object : GattEvents {
+                    override fun onConnectionStateChanged(
+                        deviceAddr: String,
+                        generation: Int,
+                        connected: Boolean,
+                        gattStatus: Int,
+                    ) = nativeOnConnectionStateChanged(deviceAddr, generation, connected, gattStatus)
+
+                    override fun onServicesDiscovered(
+                        deviceAddr: String,
+                        generation: Int,
+                        servicesJson: String,
+                    ) = nativeOnServicesDiscovered(deviceAddr, generation, servicesJson)
+
+                    override fun onCharacteristicRead(
+                        deviceAddr: String,
+                        generation: Int,
+                        charUuid: String,
+                        value: ByteArray,
+                        status: Int,
+                    ) = nativeOnCharacteristicRead(deviceAddr, generation, charUuid, value, status)
+
+                    override fun onCharacteristicWrite(
+                        deviceAddr: String,
+                        generation: Int,
+                        charUuid: String,
+                        status: Int,
+                    ) = nativeOnCharacteristicWrite(deviceAddr, generation, charUuid, status)
+
+                    override fun onDescriptorWrite(
+                        deviceAddr: String,
+                        generation: Int,
+                        charUuid: String,
+                        status: Int,
+                    ) = nativeOnDescriptorWrite(deviceAddr, generation, charUuid, status)
+
+                    override fun onCharacteristicChanged(
+                        deviceAddr: String,
+                        generation: Int,
+                        charUuid: String,
+                        value: ByteArray,
+                    ) = nativeOnCharacteristicChanged(deviceAddr, generation, charUuid, value)
+
+                    override fun onMtuChanged(
+                        deviceAddr: String,
+                        generation: Int,
+                        mtu: Int,
+                    ) = nativeOnMtuChanged(deviceAddr, generation, mtu)
+                },
+        )
 
     // ── L2CAP state ──
     private val l2cap =
         L2capSocketManager(
             tag = TAG,
             onData = { socketId, data -> nativeOnL2capChannelData(socketId, data) },
-            onClosed = { socketId -> nativeOnL2capChannelClosed(socketId) },
+            onClosed = { socketId, error -> nativeOnL2capChannelClosed(socketId, error) },
         )
 
     // ── JNI hooks (Kotlin → Rust) ──
@@ -88,11 +115,14 @@ object BleCentralManager {
         deviceName: String?,
         rssi: Int,
         serviceUuids: String,
+        manufacturerData: String,
+        serviceData: String,
     )
 
     @JvmStatic
     external fun nativeOnConnectionStateChanged(
         deviceAddr: String,
+        generation: Int,
         connected: Boolean,
         gattStatus: Int,
     )
@@ -100,12 +130,14 @@ object BleCentralManager {
     @JvmStatic
     external fun nativeOnServicesDiscovered(
         deviceAddr: String,
+        generation: Int,
         servicesJson: String,
     )
 
     @JvmStatic
     external fun nativeOnCharacteristicRead(
         deviceAddr: String,
+        generation: Int,
         charUuid: String,
         value: ByteArray,
         status: Int,
@@ -114,6 +146,15 @@ object BleCentralManager {
     @JvmStatic
     external fun nativeOnCharacteristicWrite(
         deviceAddr: String,
+        generation: Int,
+        charUuid: String,
+        status: Int,
+    )
+
+    @JvmStatic
+    external fun nativeOnDescriptorWrite(
+        deviceAddr: String,
+        generation: Int,
         charUuid: String,
         status: Int,
     )
@@ -121,6 +162,7 @@ object BleCentralManager {
     @JvmStatic
     external fun nativeOnCharacteristicChanged(
         deviceAddr: String,
+        generation: Int,
         charUuid: String,
         value: ByteArray,
     )
@@ -128,6 +170,7 @@ object BleCentralManager {
     @JvmStatic
     external fun nativeOnMtuChanged(
         deviceAddr: String,
+        generation: Int,
         mtu: Int,
     )
 
@@ -150,7 +193,10 @@ object BleCentralManager {
     )
 
     @JvmStatic
-    external fun nativeOnL2capChannelClosed(socketId: Int)
+    external fun nativeOnL2capChannelClosed(
+        socketId: Int,
+        error: String?,
+    )
 
     @JvmStatic
     external fun nativeOnL2capChannelError(
@@ -167,25 +213,42 @@ object BleCentralManager {
                 if (intent.action == BluetoothAdapter.ACTION_STATE_CHANGED) {
                     val state = intent.getIntExtra(BluetoothAdapter.EXTRA_STATE, BluetoothAdapter.ERROR)
                     when (state) {
-                        BluetoothAdapter.STATE_ON -> nativeOnAdapterStateChanged(true)
-                        BluetoothAdapter.STATE_OFF -> nativeOnAdapterStateChanged(false)
+                        BluetoothAdapter.STATE_ON -> {
+                            nativeOnAdapterStateChanged(true)
+                        }
+
+                        BluetoothAdapter.STATE_OFF -> {
+                            // The scan died with the stack instance that ran it.
+                            // Handing this callback back to the scanner the next
+                            // power-on brings up would stop a scan it never
+                            // started, so forget it rather than stopping it.
+                            scanCallback = null
+                            nativeOnAdapterStateChanged(false)
+                        }
                     }
                 }
             }
         }
 
+    @Volatile
+    private var receiverRegistered = false
+
+    @JvmStatic
     fun init(ctx: Context) {
         context = ctx
         bluetoothManager = ctx.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager
         adapter = bluetoothManager?.adapter
         Log.d(TAG, "initialized, adapter=${adapter != null}")
-        val filter = IntentFilter(BluetoothAdapter.ACTION_STATE_CHANGED)
-        ctx.registerReceiver(adapterStateReceiver, filter)
+        // Registering the same receiver twice delivers every adapter state
+        // change twice. init() runs again whenever the host activity is
+        // recreated -- a rotation or a dark-mode toggle is enough -- and
+        // nothing ever unregisters, so the duplicates would accumulate.
+        if (!receiverRegistered) {
+            val filter = IntentFilter(BluetoothAdapter.ACTION_STATE_CHANGED)
+            ctx.registerReceiver(adapterStateReceiver, filter)
+            receiverRegistered = true
+        }
     }
-
-    // ── Per-device queue helper ──
-
-    private fun queueFor(addr: String): GattOperationQueue = gattQueues.getOrPut(addr) { GattOperationQueue("gatt-$addr") }
 
     // ── Scanning ──
 
@@ -245,7 +308,23 @@ object BleCentralManager {
                             ?.joinToString(",") { it.uuid.toString() }
                             ?: ""
 
-                    nativeOnDeviceDiscovered(addr, name, rssi, uuids)
+                    // "<companyId>:<hex>" entries, comma separated, matching the
+                    // comma-joined encoding already used for service UUIDs.
+                    val manufacturerData =
+                        result.scanRecord?.manufacturerSpecificData?.let { sparse ->
+                            (0 until sparse.size()).joinToString(",") { i ->
+                                "${sparse.keyAt(i)}:${sparse.valueAt(i).toHex()}"
+                            }
+                        } ?: ""
+
+                    val serviceData =
+                        result.scanRecord
+                            ?.serviceData
+                            ?.entries
+                            ?.joinToString(",") { (uuid, bytes) -> "${uuid.uuid}:${bytes.toHex()}" }
+                            ?: ""
+
+                    nativeOnDeviceDiscovered(addr, name, rssi, uuids, manufacturerData, serviceData)
                 }
 
                 override fun onScanFailed(errorCode: Int) {
@@ -265,474 +344,68 @@ object BleCentralManager {
         }
     }
 
-    // ── GATT callback ──
-
-    private val gattCallback =
-        object : BluetoothGattCallback() {
-            override fun onConnectionStateChange(
-                gatt: BluetoothGatt,
-                status: Int,
-                newState: Int,
-            ) {
-                val addr = gatt.device.address
-
-                if (newState == BluetoothProfile.STATE_CONNECTED) {
-                    gattConnections[addr] = gatt
-                    // Capture the queue reference before launching so a racing
-                    // disconnect (which removes the entry from gattQueues) can't
-                    // cause this coroutine to create an orphaned queue.
-                    val q = queueFor(addr)
-                    scope.launch {
-                        // Enqueue MTU request so other ops queue behind it per device.
-                        val mtuResult =
-                            q.enqueue<Int>(
-                                name = "request-mtu",
-                                timeoutMs = 5000L,
-                                kick = {
-                                    val nonce = q.currentNonce() ?: return@enqueue false
-                                    val key = "$addr:mtu"
-                                    pendingNonces[key] = nonce
-                                    val started = gatt.requestMtu(512)
-                                    if (!started) {
-                                        pendingNonces.remove(key)
-                                    }
-                                    started
-                                },
-                            )
-                        if (mtuResult.isFailure) {
-                            Log.w(TAG, "MTU negotiation failed for $addr: ${mtuResult.exceptionOrNull()?.message}")
-                        }
-                        // streetCryptid (2026-10-31): ask for the short connection interval
-                        // (11.25-15 ms) instead of Android's balanced default. Every link here is
-                        // a short pairing or sync exchange on a few-KB/s radio, and the link
-                        // lingers only 30 s idle. An iPhone peripheral accepts 15 ms; the request
-                        // is a hint and has no callback, so a refusal is just logged.
-                        if (!gatt.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_HIGH)) {
-                            Log.d(TAG, "connection priority request refused for $addr")
-                        }
-                        nativeOnConnectionStateChanged(addr, true, 0)
-                    }
-                } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
-                    gattConnections.remove(addr)
-                    mtuMap.remove(addr)
-                    noResponseHandled.remove(addr)
-                    pendingNonces.keys.removeIf { it.startsWith("$addr:") }
-                    gattQueues.remove(addr)?.close(CancellationException("device $addr disconnected"))
-                    // Status 133 is the Android BLE zombie signal. Flush the
-                    // client-side service cache before close() so the next
-                    // connectGatt() on this address starts with a clean slate.
-                    if (status == 133) {
-                        if (refreshGatt(gatt)) {
-                            Log.d(TAG, "flushed GATT cache for $addr after status=133")
-                        }
-                    }
-                    gatt.close()
-                    nativeOnConnectionStateChanged(addr, false, status)
-                }
-            }
-
-            override fun onMtuChanged(
-                gatt: BluetoothGatt,
-                mtu: Int,
-                status: Int,
-            ) {
-                val addr = gatt.device.address
-                if (status == BluetoothGatt.GATT_SUCCESS) {
-                    mtuMap[addr] = mtu
-                    nativeOnMtuChanged(addr, mtu)
-                }
-                val nonce = pendingNonces.remove("$addr:mtu") ?: return
-                gattQueues[addr]?.completeCurrent<Int>(nonce, mtu)
-                // Do NOT call nativeOnConnectionStateChanged here; the coroutine in the CONNECTED branch does it.
-            }
-
-            override fun onServicesDiscovered(
-                gatt: BluetoothGatt,
-                status: Int,
-            ) {
-                val addr = gatt.device.address
-                val nonce = pendingNonces.remove("$addr:services") ?: return
-                gattQueues[addr]?.completeCurrent<Unit>(nonce, Unit)
-                if (status == BluetoothGatt.GATT_SUCCESS) {
-                    nativeOnServicesDiscovered(addr, servicesToJson(gatt.services))
-                } else {
-                    nativeOnServicesDiscovered(addr, "[]")
-                }
-            }
-
-            override fun onCharacteristicRead(
-                gatt: BluetoothGatt,
-                characteristic: BluetoothGattCharacteristic,
-                value: ByteArray,
-                status: Int,
-            ) {
-                val addr = gatt.device.address
-                val charUuid = characteristic.uuid.toString()
-                val nonce = pendingNonces.remove("$addr:read:$charUuid") ?: return
-                gattQueues[addr]?.completeCurrent<Unit>(nonce, Unit)
-                nativeOnCharacteristicRead(addr, charUuid, value, status)
-            }
-
-            override fun onCharacteristicWrite(
-                gatt: BluetoothGatt,
-                characteristic: BluetoothGattCharacteristic,
-                status: Int,
-            ) {
-                val addr = gatt.device.address
-                if (noResponseHandled.remove(addr) != null) {
-                    // Kick lambda already completed the queue and fired the
-                    // native callback for this no-response write.
-                    return
-                }
-                val charUuid = characteristic.uuid.toString()
-                val nonce = pendingNonces.remove("$addr:write:$charUuid") ?: return
-                gattQueues[addr]?.completeCurrent<Unit>(nonce, Unit)
-                nativeOnCharacteristicWrite(
-                    addr,
-                    charUuid,
-                    status,
-                )
-            }
-
-            override fun onDescriptorWrite(
-                gatt: BluetoothGatt,
-                descriptor: BluetoothGattDescriptor,
-                status: Int,
-            ) {
-                val addr = gatt.device.address
-                val charUuid = descriptor.characteristic.uuid.toString()
-                val nonce = pendingNonces.remove("$addr:cccd:$charUuid") ?: return
-                gattQueues[addr]?.completeCurrent<Unit>(nonce, Unit)
-            }
-
-            override fun onCharacteristicChanged(
-                gatt: BluetoothGatt,
-                characteristic: BluetoothGattCharacteristic,
-                value: ByteArray,
-            ) {
-                // Notifications are passive; don't touch the queue.
-                nativeOnCharacteristicChanged(
-                    gatt.device.address,
-                    characteristic.uuid.toString(),
-                    value,
-                )
-            }
-        }
-
-    // ── Connection management ──
-
     @JvmStatic
-    fun connect(deviceAddr: String) {
-        val ctx =
-            context ?: run {
-                Log.e(TAG, "context not initialized")
-                return
-            }
-
-        // Close any stale GATT connection to avoid leaking clientIf slots.
-        // Android has a limit of ~7 concurrent GATT clients. If we had a stale
-        // handle, flush its service cache and give the stack ~300ms to release
-        // the client-IF before the next connectGatt — back-to-back attempts on
-        // the same address can be silently dropped on some vendors.
-        val stale = gattConnections.remove(deviceAddr)
-        if (stale != null) {
-            refreshGatt(stale)
-            stale.disconnect()
-            stale.close()
-            Log.d(TAG, "closed stale GATT for $deviceAddr")
-            scope.launch {
-                delay(300)
-                openGatt(ctx, deviceAddr)
-            }
-            return
-        }
-
-        openGatt(ctx, deviceAddr)
-    }
-
-    private fun openGatt(
-        ctx: Context,
+    fun connect(
         deviceAddr: String,
-    ) {
-        val device =
-            adapter?.getRemoteDevice(deviceAddr) ?: run {
-                Log.e(TAG, "could not get remote device $deviceAddr")
-                nativeOnConnectionStateChanged(deviceAddr, false, 0)
-                return
-            }
-        // TRANSPORT_LE ensures we connect over BLE, not classic Bluetooth.
-        val gatt = device.connectGatt(ctx, false, gattCallback, BluetoothDevice.TRANSPORT_LE)
-        if (gatt == null) {
-            Log.e(TAG, "connectGatt returned null for $deviceAddr")
-            nativeOnConnectionStateChanged(deviceAddr, false, 0)
-            return
-        }
-        Log.d(TAG, "connecting to $deviceAddr")
-    }
+        generation: Int,
+    ) = connections.connect(deviceAddr, generation)
 
     @JvmStatic
-    fun disconnect(deviceAddr: String) {
-        gattConnections[deviceAddr]?.let { gatt ->
-            gatt.disconnect()
-            Log.d(TAG, "disconnecting from $deviceAddr")
-        }
-    }
-
-    /**
-     * Synchronously tear down the GATT handle for [deviceAddr] without waiting
-     * for [BluetoothGattCallback.onConnectionStateChange]. Called from Rust
-     * when the normal disconnect callback path cannot be trusted (connect
-     * timeout, disconnect whose callback never arrived, status-133 zombie).
-     *
-     * Flushes the client-side service cache with `refresh()` before closing
-     * so the next connectGatt() starts clean. Emits a synthetic
-     * [nativeOnConnectionStateChanged]`(addr, false, 0)` so any Rust-side
-     * state waiting on the disconnect callback unblocks.
-     */
-    @JvmStatic
-    fun forceClose(deviceAddr: String) {
-        val gatt = gattConnections.remove(deviceAddr)
-        mtuMap.remove(deviceAddr)
-        noResponseHandled.remove(deviceAddr)
-        pendingNonces.keys.removeIf { it.startsWith("$deviceAddr:") }
-        gattQueues.remove(deviceAddr)?.close(CancellationException("device $deviceAddr force-closed"))
-        if (gatt != null) {
-            refreshGatt(gatt)
-            try {
-                gatt.disconnect()
-            } catch (e: Exception) {
-                Log.w(TAG, "forceClose: disconnect threw for $deviceAddr: ${e.message}")
-            }
-            gatt.close()
-            Log.d(TAG, "forceClose: tore down GATT for $deviceAddr")
-        }
-        nativeOnConnectionStateChanged(deviceAddr, false, 0)
-    }
-
-    private fun refreshGatt(gatt: BluetoothGatt): Boolean =
-        try {
-            val method = gatt.javaClass.getMethod("refresh")
-            method.invoke(gatt) as Boolean
-        } catch (e: Exception) {
-            Log.w(TAG, "refresh failed: ${e.message}")
-            false
-        }
-
-    /**
-     * Clear the GATT service cache for [deviceAddr] by invoking the hidden
-     * `BluetoothGatt.refresh()` method via reflection. Returns false if no
-     * active GATT handle exists or the reflective call throws. Used to
-     * recover from stale cached service tables after peer reboots (status
-     * 133 errors).
-     */
-    @JvmStatic
-    fun refresh(deviceAddr: String): Boolean {
-        val gatt = gattConnections[deviceAddr] ?: return false
-        return refreshGatt(gatt)
-    }
-
-    // ── GATT operations (serialized via per-device queue) ──
+    fun disconnect(
+        deviceAddr: String,
+        generation: Int,
+    ) = connections.disconnect(deviceAddr, generation)
 
     @JvmStatic
-    fun discoverServices(deviceAddr: String): Int {
-        val gatt = gattConnections[deviceAddr] ?: return STATUS_NOT_CONNECTED
-        val q = queueFor(deviceAddr)
-        scope.launch {
-            val result =
-                q.enqueue<Unit>(
-                    name = "discover-services",
-                    timeoutMs = 10000L,
-                    kick = {
-                        val nonce = q.currentNonce() ?: return@enqueue false
-                        val key = "$deviceAddr:services"
-                        pendingNonces[key] = nonce
-                        val started = gatt.discoverServices()
-                        if (!started) {
-                            pendingNonces.remove(key)
-                        }
-                        started
-                    },
-                )
-            if (result.isFailure) {
-                Log.w(TAG, "discoverServices queue failed for $deviceAddr: ${result.exceptionOrNull()?.message}")
-                nativeOnServicesDiscovered(deviceAddr, "[]")
-            }
-        }
-        return STATUS_SUCCESS
-    }
+    fun forceClose(
+        deviceAddr: String,
+        generation: Int,
+    ) = connections.forceClose(deviceAddr, generation)
+
+    @JvmStatic
+    fun refresh(deviceAddr: String) = connections.refresh(deviceAddr)
+
+    @JvmStatic
+    fun discoverServices(
+        deviceAddr: String,
+        generation: Int,
+    ) = connections.discoverServices(deviceAddr, generation)
 
     @JvmStatic
     fun readCharacteristic(
         deviceAddr: String,
+        generation: Int,
         charUuid: String,
-    ): Int {
-        val gatt = gattConnections[deviceAddr] ?: return STATUS_NOT_CONNECTED
-        val char = findCharacteristic(gatt, charUuid) ?: return STATUS_CHAR_NOT_FOUND
-        val q = queueFor(deviceAddr)
-        scope.launch {
-            val result =
-                q.enqueue<Unit>(
-                    name = "read-$charUuid",
-                    timeoutMs = 5000L,
-                    kick = {
-                        val nonce = q.currentNonce() ?: return@enqueue false
-                        val key = "$deviceAddr:read:$charUuid"
-                        pendingNonces[key] = nonce
-                        val started = gatt.readCharacteristic(char)
-                        if (!started) {
-                            pendingNonces.remove(key)
-                        }
-                        started
-                    },
-                )
-            if (result.isFailure) {
-                Log.w(TAG, "read $charUuid queue failed: ${result.exceptionOrNull()?.message}")
-                nativeOnCharacteristicRead(deviceAddr, charUuid, byteArrayOf(), BluetoothGatt.GATT_FAILURE)
-            }
-        }
-        return STATUS_SUCCESS
-    }
+    ) = connections.readCharacteristic(deviceAddr, generation, charUuid)
 
     @JvmStatic
     fun writeCharacteristic(
         deviceAddr: String,
+        generation: Int,
         charUuid: String,
         value: ByteArray,
         writeType: Int,
-    ): Int {
-        val gatt = gattConnections[deviceAddr] ?: return STATUS_NOT_CONNECTED
-        val char = findCharacteristic(gatt, charUuid) ?: return STATUS_CHAR_NOT_FOUND
-        val q = queueFor(deviceAddr)
-        scope.launch {
-            val result =
-                q.enqueue<Int>(
-                    name = "write-$charUuid",
-                    timeoutMs = 5000L,
-                    kick = {
-                        val nonce = q.currentNonce() ?: return@enqueue false
-                        val nonceKey = "$deviceAddr:write:$charUuid"
-                        if (writeType == BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE) {
-                            // Mark before the framework can fire onCharacteristicWrite.
-                            noResponseHandled[deviceAddr] = true
-                        } else {
-                            pendingNonces[nonceKey] = nonce
-                        }
-                        val ret = gatt.writeCharacteristic(char, value, writeType)
-                        if (ret != BluetoothStatusCodes.SUCCESS) {
-                            noResponseHandled.remove(deviceAddr)
-                            pendingNonces.remove(nonceKey)
-                            return@enqueue false
-                        }
-                        if (writeType == BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE) {
-                            // Don't wait for a callback the platform may not deliver.
-                            q.completeCurrent<Int>(nonce, BluetoothGatt.GATT_SUCCESS)
-                            noResponseHandled.remove(deviceAddr)
-                        }
-                        true
-                    },
-                )
-            if (result.isFailure) {
-                Log.w(TAG, "write $charUuid queue failed: ${result.exceptionOrNull()?.message}")
-                nativeOnCharacteristicWrite(deviceAddr, charUuid, BluetoothGatt.GATT_FAILURE)
-            } else if (writeType == BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE) {
-                nativeOnCharacteristicWrite(deviceAddr, charUuid, BluetoothGatt.GATT_SUCCESS)
-            }
-            // For write-with-response, onCharacteristicWrite fires the native
-            // callback after calling completeCurrent — don't duplicate here.
-        }
-        return STATUS_SUCCESS
-    }
+    ) = connections.writeCharacteristic(deviceAddr, generation, charUuid, value, writeType)
 
     @JvmStatic
     fun subscribeCharacteristic(
         deviceAddr: String,
+        generation: Int,
         charUuid: String,
-    ): Int {
-        val gatt = gattConnections[deviceAddr] ?: return STATUS_NOT_CONNECTED
-        val char = findCharacteristic(gatt, charUuid) ?: return STATUS_CHAR_NOT_FOUND
-
-        if (!gatt.setCharacteristicNotification(char, true)) return STATUS_GATT_FAILED
-
-        // Write to CCCD to enable notifications on the remote device.
-        val cccdUuid = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
-        val descriptor = char.getDescriptor(cccdUuid) ?: return STATUS_CHAR_NOT_FOUND
-        val q = queueFor(deviceAddr)
-        scope.launch {
-            val result =
-                q.enqueue<Unit>(
-                    name = "subscribe-cccd-$charUuid",
-                    timeoutMs = 5000L,
-                    kick = {
-                        val nonce = q.currentNonce() ?: return@enqueue false
-                        val key = "$deviceAddr:cccd:$charUuid"
-                        pendingNonces[key] = nonce
-                        val ret =
-                            gatt.writeDescriptor(
-                                descriptor,
-                                BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE,
-                            )
-                        if (ret != BluetoothStatusCodes.SUCCESS) {
-                            pendingNonces.remove(key)
-                        }
-                        ret == BluetoothStatusCodes.SUCCESS
-                    },
-                )
-            if (result.isFailure) {
-                Log.w(TAG, "subscribe $charUuid queue failed: ${result.exceptionOrNull()?.message}")
-            }
-        }
-        return STATUS_SUCCESS
-    }
+    ) = connections.subscribeCharacteristic(deviceAddr, generation, charUuid)
 
     @JvmStatic
     fun unsubscribeCharacteristic(
         deviceAddr: String,
+        generation: Int,
         charUuid: String,
-    ): Int {
-        val gatt = gattConnections[deviceAddr] ?: return STATUS_NOT_CONNECTED
-        val char = findCharacteristic(gatt, charUuid) ?: return STATUS_CHAR_NOT_FOUND
+    ) = connections.unsubscribeCharacteristic(deviceAddr, generation, charUuid)
 
-        // Always disable local notification state first, even if the CCCD
-        // write below fails. The remote side will eventually notice via timeout.
-        gatt.setCharacteristicNotification(char, false)
-
-        val cccdUuid = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
-        val descriptor = char.getDescriptor(cccdUuid)
-        if (descriptor != null) {
-            val q = queueFor(deviceAddr)
-            scope.launch {
-                val result =
-                    q.enqueue<Unit>(
-                        name = "unsubscribe-cccd-$charUuid",
-                        timeoutMs = 5000L,
-                        kick = {
-                            val nonce = q.currentNonce() ?: return@enqueue false
-                            val key = "$deviceAddr:cccd:$charUuid"
-                            pendingNonces[key] = nonce
-                            val ret =
-                                gatt.writeDescriptor(
-                                    descriptor,
-                                    BluetoothGattDescriptor.DISABLE_NOTIFICATION_VALUE,
-                                )
-                            if (ret != BluetoothStatusCodes.SUCCESS) {
-                                pendingNonces.remove(key)
-                            }
-                            ret == BluetoothStatusCodes.SUCCESS
-                        },
-                    )
-                if (result.isFailure) {
-                    Log.w(TAG, "unsubscribe $charUuid queue failed: ${result.exceptionOrNull()?.message}")
-                }
-            }
-        }
-        return STATUS_SUCCESS
-    }
+    @JvmStatic
+    fun getMtu(deviceAddr: String) = connections.getMtu(deviceAddr)
 
     @JvmStatic
     fun isPowered(): Boolean = adapter?.isEnabled == true
-
-    @JvmStatic
-    fun getMtu(deviceAddr: String): Int = mtuMap[deviceAddr] ?: 23
 
     // ── L2CAP ──
 
@@ -740,6 +413,7 @@ object BleCentralManager {
     fun openL2capChannel(
         deviceAddr: String,
         psm: Int,
+        secure: Boolean,
     ) {
         if (android.os.Build.VERSION.SDK_INT < 29) {
             nativeOnL2capChannelError(deviceAddr, "L2CAP requires API 29+")
@@ -752,9 +426,16 @@ object BleCentralManager {
                 return
             }
 
-        Thread {
+        // connect() and the read loop are both blocking; they belong on the IO
+        // dispatcher rather than on a raw thread per channel.
+        scope.launch(Dispatchers.IO) {
             try {
-                val socket = device.createInsecureL2capChannel(psm)
+                val socket =
+                    if (secure) {
+                        device.createL2capChannel(psm)
+                    } else {
+                        device.createInsecureL2capChannel(psm)
+                    }
                 socket.connect()
                 val socketId = l2cap.register(socket)
                 nativeOnL2capChannelOpened(deviceAddr, socketId, false)
@@ -763,7 +444,7 @@ object BleCentralManager {
                 Log.e(TAG, "L2CAP connect failed: ${e.message}")
                 nativeOnL2capChannelError(deviceAddr, e.message ?: "connect failed")
             }
-        }.start()
+        }
     }
 
     @JvmStatic
@@ -775,43 +456,17 @@ object BleCentralManager {
     @JvmStatic
     fun closeL2cap(socketId: Int) = l2cap.close(socketId)
 
-    // ── Helpers ──
-
-    private fun findCharacteristic(
-        gatt: BluetoothGatt,
-        charUuid: String,
-    ): BluetoothGattCharacteristic? {
-        val uuid = UUID.fromString(charUuid)
-        for (service in gatt.services) {
-            val char = service.getCharacteristic(uuid)
-            if (char != null) return char
-        }
-        return null
+    /** Set from `L2capConfig::read_chunk_size` so socket reads match the configured size. */
+    @JvmStatic
+    fun setL2capReadBufferSize(bytes: Int) {
+        l2cap.readBufferSize = bytes
     }
 
-    /**
-     * Serialize discovered services to a JSON array. Each service is:
-     * {"uuid": "...", "characteristics": [{"uuid": "...", "properties": N}]}
-     *
-     * We build JSON manually to avoid pulling in a JSON library dependency.
-     */
-    private fun servicesToJson(services: List<BluetoothGattService>): String {
-        val sb = StringBuilder("[")
-        for ((i, svc) in services.withIndex()) {
-            if (i > 0) sb.append(",")
-            sb.append("{\"uuid\":\"").append(svc.uuid).append("\",\"characteristics\":[")
-            for ((j, ch) in svc.characteristics.withIndex()) {
-                if (j > 0) sb.append(",")
-                sb
-                    .append("{\"uuid\":\"")
-                    .append(ch.uuid)
-                    .append("\",\"properties\":")
-                    .append(ch.properties)
-                    .append("}")
-            }
-            sb.append("]}")
-        }
-        sb.append("]")
+    // ── Helpers ──
+
+    private fun ByteArray.toHex(): String {
+        val sb = StringBuilder(size * 2)
+        for (b in this) sb.append("%02x".format(b))
         return sb.toString()
     }
 }

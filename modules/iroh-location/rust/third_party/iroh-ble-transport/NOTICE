@@ -6,7 +6,8 @@ experimental Bluetooth Low Energy (BLE) transport for the iroh peer-to-peer
 networking stack.
 
 Upstream project : https://github.com/mcginty/iroh-ble-transport
-Upstream version : v0.3.1 (git tag `iroh-ble-transport-v0.3.1`)
+Upstream version : v0.5.1-beta.7 (git tag `iroh-ble-transport-v0.5.1-beta.7`);
+                   first vendored at v0.3.1, rebased onto v0.5.1-beta.7 on 2026-11-02
 Original author  : Jake McGinty <me@jakebot.org>
 License          : GNU Affero General Public License v3.0 or later
                    (AGPL-3.0-or-later) — see the `LICENSE` file in this
@@ -20,8 +21,9 @@ Modifications by the streetCryptid project
 ------------------------------------------
 
 In accordance with section 5 of the GNU AGPL, the changes made to the upstream
-v0.3.1 source after it was vendored into this repository are dated and
-described below.
+source after it was vendored into this repository are dated and described
+below. Entries before 2026-11-02 describe changes to v0.3.1; the 2026-11-02
+entry says which of them survive on top of v0.5.1-beta.7.
 
 2026-07 — Ported from iroh 0.98.2 to iroh 1.0.2, and made buildable as a
 standalone / path dependency:
@@ -149,3 +151,39 @@ demonstrates endpoint wiring that this checkpoint does not yet use.
 
 No other upstream source files were modified (src/transport/mod.rs gained the `sim` and
 `priority` modules).
+
+2026-11-02 — Rebased onto upstream v0.5.1-beta.7 (and iroh 1.4):
+
+  Upstream ported to iroh 1.0 itself, gave every peer connection a lifecycle
+  identity (#20), closes the iroh connections riding a pipe it takes away
+  (#18, `transport::conns`), and rebuilds a peer whose pipe we closed ourselves
+  instead of tombstoning it (`resume_after_drain`). Those replace the 2026-07
+  iroh 1.0 port and parts of the 2026-10 changes above. What remains of ours:
+
+  * Cargo.toml — `blew` is the vendored path crate; `noq-proto` dropped (the
+    hook takes `VarInt` from `iroh::endpoint`); `rand` follows upstream.
+  * src/transport/conns.rs — the connection registry also remembers which
+    watch left a pipe idle (`take_still_idle`), for the linger below.
+  * src/transport/hook.rs — `PIPE_IDLE_LINGER`: a pipe is released only after
+    its last connection has closed and it then stayed unused for 30 s. The
+    link-priority hold (`before_connect` refusal, `after_handshake` refusal,
+    tracking for the sweep) is re-applied on upstream's hook.
+  * src/transport/priority.rs, src/transport/sim.rs, tests/sim_pairing.rs —
+    unchanged in purpose; `sim.rs` follows the new `Advertised` shape and the
+    `restart_scan` interface method.
+  * src/transport/registry.rs — a send that asks for a new pipe revives a
+    `Drained` or `Forgotten` peer (upstream revives only on advertisement);
+    the role fix on a central connect, the probe-disconnect guard for a
+    `Discovered` peer, the verified-live suppression message, the new-pipe
+    send log and the live-devices set routing reads are kept. Our drain-end
+    redial of held sends is dropped: upstream holds sends only through a drain
+    that will resume, and that resume dials.
+  * src/transport/driver.rs — the `ble.connect` span wraps upstream's
+    lifecycle-dispatched connect; `CloseChannel` still skips the central
+    disconnect on a pipe the peer dialled (`role`).
+  * src/transport/transport.rs — construction keeps upstream's rollback and
+    bounded steps, and is split again into the radio part and `assemble`
+    (shared with the simulated radio); the identity characteristic, probe
+    disconnects, link reservation and linger are re-applied.
+  * src/transport/pipe.rs, src/transport/l2cap.rs — per-path traffic tallies
+    for the `ble.pipe` span (2026-11-02, before the rebase).

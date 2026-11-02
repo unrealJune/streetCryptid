@@ -31,10 +31,11 @@ use jni::objects::{JByteArray, JClass, JString};
 use jni::sys::{JNI_TRUE, jboolean, jint};
 use jni::{EnvUnowned, jni_sig, jni_str};
 use tokio::sync::oneshot;
-use tracing::trace;
+use tracing::{debug, trace};
 use uuid::Uuid;
 
 use crate::central::types::{CentralEvent, DisconnectCause};
+use crate::error::BlewError;
 use crate::l2cap::types::Psm;
 use crate::peripheral::types::{
     PeripheralRequest, PeripheralStateEvent, ReadResponder, WriteResponder,
@@ -158,6 +159,7 @@ pub unsafe extern "C" fn Java_org_jakebot_blew_BlePeripheralManager_nativeOnWrit
     device_addr: JString,
     service_uuid: JString,
     char_uuid: JString,
+    offset: jint,
     value: JByteArray,
     response_needed: jboolean,
 ) {
@@ -198,6 +200,7 @@ pub unsafe extern "C" fn Java_org_jakebot_blew_BlePeripheralManager_nativeOnWrit
                 client_id: DeviceId::from(addr.as_str()),
                 service_uuid: svc_uuid,
                 char_uuid: char_id,
+                offset: offset as u16,
                 value: data,
                 responder,
             };
@@ -280,8 +283,38 @@ pub unsafe extern "C" fn Java_org_jakebot_blew_BlePeripheralManager_nativeOnConn
                 connected = connected == JNI_TRUE,
                 "peripheral connection state changed"
             );
+            if connected != JNI_TRUE {
+                super::peripheral::notify_disconnected(&addr);
+            }
             // Not surfaced as a PeripheralEvent -- the transport discovers
             // connections via SubscriptionChanged events instead.
+            Ok(())
+        })
+        .into_outcome();
+    });
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn Java_org_jakebot_blew_BlePeripheralManager_nativeOnNotificationSent(
+    mut env: EnvUnowned,
+    _class: JClass,
+    device_addr: JString,
+    status: jint,
+) {
+    guard("nativeOnNotificationSent", || {
+        env.with_env(|env| {
+            let Some(addr) = jstring_to_string(env, &device_addr) else {
+                return Ok::<_, jni::errors::Error>(());
+            };
+            trace!(addr, status, "notification sent");
+            let result = if status == 0 {
+                Ok(())
+            } else {
+                Err(BlewError::Peripheral {
+                    source: format!("notification failed with GATT status {status}").into(),
+                })
+            };
+            super::peripheral::notify_completed(&addr, result);
             Ok(())
         })
         .into_outcome();
@@ -329,6 +362,8 @@ pub unsafe extern "C" fn Java_org_jakebot_blew_BleCentralManager_nativeOnDeviceD
     device_name: JString,
     rssi: jint,
     service_uuids_str: JString,
+    manufacturer_data_str: JString,
+    service_data_str: JString,
 ) {
     guard("nativeOnDeviceDiscovered", || {
         env.with_env(|env| {
@@ -344,11 +379,22 @@ pub unsafe extern "C" fn Java_org_jakebot_blew_BleCentralManager_nativeOnDeviceD
                 .filter_map(|s| s.parse().ok())
                 .collect();
 
+            let manufacturer_data = crate::util::adv_data::parse_keyed_hex(
+                &jstring_to_string(env, &manufacturer_data_str).unwrap_or_default(),
+                |k| k.parse::<u16>().ok(),
+            );
+            let service_data = crate::util::adv_data::parse_keyed_hex(
+                &jstring_to_string(env, &service_data_str).unwrap_or_default(),
+                |k| k.parse::<Uuid>().ok(),
+            );
+
             let device = BleDevice {
                 id: DeviceId::from(addr.as_str()),
                 name,
                 rssi: Some(rssi as i16),
                 services,
+                manufacturer_data,
+                service_data,
             };
 
             trace!(addr, "device discovered");
@@ -366,6 +412,7 @@ pub unsafe extern "C" fn Java_org_jakebot_blew_BleCentralManager_nativeOnConnect
     mut env: EnvUnowned,
     _class: JClass,
     device_addr: JString,
+    generation: jint,
     connected: jboolean,
     gatt_status: jint,
 ) {
@@ -374,38 +421,21 @@ pub unsafe extern "C" fn Java_org_jakebot_blew_BleCentralManager_nativeOnConnect
             let Some(addr) = jstring_to_string(env, &device_addr) else {
                 return Ok::<_, jni::errors::Error>(());
             };
-            let device_id = DeviceId::from(addr.as_str());
-
-            if connected == JNI_TRUE {
-                trace!(%device_id, "central: device connected");
-                super::central::send_event(CentralEvent::DeviceConnected {
-                    device_id: device_id.clone(),
-                });
-                super::central::complete_connect(&addr, Ok(()));
-            } else {
-                trace!(%device_id, "central: device disconnected");
-                // Fail any pending connect() call -- the connection dropped before
-                // MTU negotiation completed (nativeOnConnectionStateChanged(true)
-                // is deferred until onMtuChanged).
-                super::central::complete_connect(
-                    &addr,
-                    Err(crate::error::BlewError::NotConnected(device_id.clone())),
-                );
-                // Release any caller awaiting disconnect() completion.
-                super::central::complete_disconnect(&addr);
-                let cause = match gatt_status {
-                    // 0 = GATT_SUCCESS + local disconnect; 22 = GATT_CONN_TERMINATE_LOCAL_HOST.
-                    0 | 22 => DisconnectCause::LocalClose,
-                    8 => DisconnectCause::LinkLoss, // GATT_CONN_TIMEOUT
-                    19 => DisconnectCause::RemoteClose, // GATT_CONN_TERMINATE_PEER_USER
-                    133 => DisconnectCause::Gatt133, // the infamous
-                    other => DisconnectCause::Unknown(other),
-                };
-                super::central::send_event(CentralEvent::DeviceDisconnected {
-                    device_id: device_id.clone(),
-                    cause,
-                });
-            }
+            debug!(
+                addr,
+                generation,
+                connected = connected == JNI_TRUE,
+                gatt_status,
+                "GATT connection state changed"
+            );
+            let cause = match gatt_status {
+                0 | 22 => DisconnectCause::LocalClose,
+                8 => DisconnectCause::LinkLoss,
+                19 => DisconnectCause::RemoteClose,
+                133 => DisconnectCause::Gatt133,
+                other => DisconnectCause::Unknown(other),
+            };
+            super::central::connection_changed(&addr, generation, connected == JNI_TRUE, cause);
 
             Ok(())
         })
@@ -418,6 +448,7 @@ pub unsafe extern "C" fn Java_org_jakebot_blew_BleCentralManager_nativeOnService
     mut env: EnvUnowned,
     _class: JClass,
     device_addr: JString,
+    generation: jint,
     services_json: JString,
 ) {
     guard("nativeOnServicesDiscovered", || {
@@ -430,7 +461,12 @@ pub unsafe extern "C" fn Java_org_jakebot_blew_BleCentralManager_nativeOnService
             };
 
             let services = super::central::parse_services_json(&json);
-            super::central::complete_discover_services(&addr, Ok(services));
+            super::central::with_generation(&addr, generation, || {
+                super::central::complete_discover_services(
+                    &format!("{addr}:{generation}"),
+                    Ok(services),
+                );
+            });
 
             Ok(())
         })
@@ -443,6 +479,7 @@ pub unsafe extern "C" fn Java_org_jakebot_blew_BleCentralManager_nativeOnCharact
     mut env: EnvUnowned,
     _class: JClass,
     device_addr: JString,
+    generation: jint,
     char_uuid: JString,
     value: JByteArray,
     status: jint,
@@ -460,14 +497,17 @@ pub unsafe extern "C" fn Java_org_jakebot_blew_BleCentralManager_nativeOnCharact
             let result = if status == 0 {
                 Ok(data)
             } else {
+                debug!(addr, generation, char_uuid = %chr, status, "GATT read failed");
                 Err(crate::error::BlewError::Gatt {
                     device_id: DeviceId::from(addr.as_str()),
                     source: format!("GATT read failed: status {status}").into(),
                 })
             };
 
-            let key = format!("{addr}:read:{chr}");
-            super::central::complete_pending(&key, result);
+            let key = format!("{addr}:{generation}:read:{chr}");
+            super::central::with_generation(&addr, generation, || {
+                super::central::complete_pending(&key, result);
+            });
 
             Ok(())
         })
@@ -480,6 +520,7 @@ pub unsafe extern "C" fn Java_org_jakebot_blew_BleCentralManager_nativeOnCharact
     mut env: EnvUnowned,
     _class: JClass,
     device_addr: JString,
+    generation: jint,
     char_uuid: JString,
     status: jint,
 ) {
@@ -495,14 +536,56 @@ pub unsafe extern "C" fn Java_org_jakebot_blew_BleCentralManager_nativeOnCharact
             let result = if status == 0 {
                 Ok(vec![])
             } else {
+                debug!(addr, generation, char_uuid = %chr, status, "GATT write failed");
                 Err(crate::error::BlewError::Gatt {
                     device_id: DeviceId::from(addr.as_str()),
                     source: format!("GATT write failed: status {status}").into(),
                 })
             };
 
-            let key = format!("{addr}:write:{chr}");
-            super::central::complete_pending(&key, result);
+            let key = format!("{addr}:{generation}:write:{chr}");
+            super::central::with_generation(&addr, generation, || {
+                super::central::complete_pending(&key, result);
+            });
+
+            Ok(())
+        })
+        .into_outcome();
+    });
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn Java_org_jakebot_blew_BleCentralManager_nativeOnDescriptorWrite(
+    mut env: EnvUnowned,
+    _class: JClass,
+    device_addr: JString,
+    generation: jint,
+    char_uuid: JString,
+    status: jint,
+) {
+    guard("nativeOnDescriptorWrite", || {
+        env.with_env(|env| {
+            let Some(addr) = jstring_to_string(env, &device_addr) else {
+                return Ok::<_, jni::errors::Error>(());
+            };
+            let Some(chr) = jstring_to_string(env, &char_uuid) else {
+                return Ok::<_, jni::errors::Error>(());
+            };
+
+            let result = if status == 0 {
+                Ok(vec![])
+            } else {
+                debug!(addr, generation, char_uuid = %chr, status, "CCCD write failed");
+                Err(crate::error::BlewError::Gatt {
+                    device_id: DeviceId::from(addr.as_str()),
+                    source: format!("CCCD write failed: status {status}").into(),
+                })
+            };
+
+            let key = format!("{addr}:{generation}:cccd:{chr}");
+            super::central::with_generation(&addr, generation, || {
+                super::central::complete_pending(&key, result);
+            });
 
             Ok(())
         })
@@ -515,6 +598,7 @@ pub unsafe extern "C" fn Java_org_jakebot_blew_BleCentralManager_nativeOnCharact
     mut env: EnvUnowned,
     _class: JClass,
     device_addr: JString,
+    generation: jint,
     char_uuid: JString,
     value: JByteArray,
 ) {
@@ -530,11 +614,14 @@ pub unsafe extern "C" fn Java_org_jakebot_blew_BleCentralManager_nativeOnCharact
                 return Ok::<_, jni::errors::Error>(());
             };
             let data = jbytes_to_vec(env, &value);
+            trace!(addr, generation, %char_id, len = data.len(), "notification received");
 
-            super::central::send_event(CentralEvent::CharacteristicNotification {
-                device_id: DeviceId::from(addr.as_str()),
-                char_uuid: char_id,
-                value: data.into(),
+            super::central::with_generation(&addr, generation, || {
+                super::central::send_event(CentralEvent::CharacteristicNotification {
+                    device_id: DeviceId::from(addr.as_str()),
+                    char_uuid: char_id,
+                    value: data.into(),
+                });
             });
 
             Ok(())
@@ -548,6 +635,7 @@ pub unsafe extern "C" fn Java_org_jakebot_blew_BleCentralManager_nativeOnMtuChan
     mut env: EnvUnowned,
     _class: JClass,
     device_addr: JString,
+    generation: jint,
     mtu: jint,
 ) {
     guard("nativeOnMtuChanged", || {
@@ -556,7 +644,9 @@ pub unsafe extern "C" fn Java_org_jakebot_blew_BleCentralManager_nativeOnMtuChan
                 return Ok::<_, jni::errors::Error>(());
             };
             trace!(addr, mtu, "MTU changed");
-            super::central::set_mtu(&addr, mtu as u16);
+            super::central::with_generation(&addr, generation, || {
+                super::central::set_mtu(&addr, mtu as u16);
+            });
             Ok(())
         })
         .into_outcome();
@@ -681,25 +771,90 @@ pub unsafe extern "C" fn Java_org_jakebot_blew_BlePeripheralManager_nativeOnL2ca
 // Channel closed (one per Kotlin class)
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn Java_org_jakebot_blew_BleCentralManager_nativeOnL2capChannelClosed(
-    _env: EnvUnowned,
+    mut env: EnvUnowned,
     _class: JClass,
     socket_id: jint,
+    error: JString,
 ) {
     guard("nativeOnL2capChannelClosed", || {
-        trace!(socket_id, "L2CAP channel closed");
-        super::l2cap_state::on_channel_closed(socket_id);
+        // `error` is null for a close either side asked for, and a message
+        // when the channel died on its own.
+        // A null `error` fails to convert and lands as `None`, which is
+        // exactly the "closed deliberately" case.
+        let mut reason = None;
+        env.with_env(|env| {
+            reason = jstring_to_string(env, &error);
+            Ok::<_, jni::errors::Error>(())
+        })
+        .into_outcome();
+        trace!(socket_id, ?reason, "L2CAP channel closed");
+        super::l2cap_state::on_channel_closed(socket_id, reason);
+    });
+}
+
+/// Asynchronous outcome of `startAdvertising`, from the stack's
+/// `AdvertiseCallback`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn Java_org_jakebot_blew_BlePeripheralManager_nativeOnAdvertisingResult(
+    _env: EnvUnowned,
+    _class: JClass,
+    request_id: jint,
+    success: jboolean,
+    error_code: jint,
+) {
+    guard("nativeOnAdvertisingResult", || {
+        let result = if success {
+            Ok(())
+        } else if error_code == super::peripheral::ADVERTISE_FAILED_RENAME_UNCONFIRMED {
+            Err(crate::error::BlewError::Peripheral {
+                source: "the Bluetooth adapter rename didn't take effect, so advertising \
+                         would have carried the previous name"
+                    .into(),
+            })
+        } else {
+            Err(crate::error::BlewError::Peripheral {
+                source: format!("advertising failed (AdvertiseCallback error {error_code})").into(),
+            })
+        };
+        trace!(request_id, success, error_code, "advertising result");
+        super::peripheral::complete_advertise(request_id, result);
+    });
+}
+
+/// Asynchronous outcome of `setAdapterName`: whether the new name took effect.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn Java_org_jakebot_blew_BlePeripheralManager_nativeOnAdapterRenameResult(
+    _env: EnvUnowned,
+    _class: JClass,
+    request_id: jint,
+    success: jboolean,
+) {
+    guard("nativeOnAdapterRenameResult", || {
+        trace!(request_id, success, "adapter rename result");
+        super::peripheral::complete_rename(request_id, success);
     });
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn Java_org_jakebot_blew_BlePeripheralManager_nativeOnL2capChannelClosed(
-    _env: EnvUnowned,
+    mut env: EnvUnowned,
     _class: JClass,
     socket_id: jint,
+    error: JString,
 ) {
     guard("nativeOnL2capChannelClosed", || {
-        trace!(socket_id, "L2CAP channel closed (server)");
-        super::l2cap_state::on_channel_closed(socket_id);
+        // `error` is null for a close either side asked for, and a message
+        // when the channel died on its own.
+        // A null `error` fails to convert and lands as `None`, which is
+        // exactly the "closed deliberately" case.
+        let mut reason = None;
+        env.with_env(|env| {
+            reason = jstring_to_string(env, &error);
+            Ok::<_, jni::errors::Error>(())
+        })
+        .into_outcome();
+        trace!(socket_id, ?reason, "L2CAP channel closed (server)");
+        super::l2cap_state::on_channel_closed(socket_id, reason);
     });
 }
 

@@ -1,11 +1,11 @@
 # VENDORED THIRD-PARTY CRATE — AGPL-3.0-or-later. See ./LICENSE and ./NOTICE.
-# Upstream: https://github.com/mcginty/blew tag blew-v0.3.0 (crates.io blew 0.3.0,
-# commit dde4bdaa09b3ef60bb595dd1be360a54c17615d4, crates/blew).
-# Modified by the streetCryptid project (2026-10-31): Apple flow control. See ./NOTICE.
+# Upstream: https://github.com/mcginty/blew tag blew-v0.5.1-beta.8 (crates/blew); first
+# vendored at blew-v0.3.0 and rebased onto beta.8 on 2026-11-02.
+# Modified by the streetCryptid project: see ./NOTICE.
 # The Android Kotlin half lives in modules/iroh-location/android (see build.rs).
 [package]
 name = "blew"
-version = "0.3.0"
+version = "0.5.1-beta.8"
 edition = "2024"
 authors = ["Jake McGinty <me@jakebot.org>"]
 license = "AGPL-3.0-or-later"
@@ -39,6 +39,9 @@ parking_lot = "0.12"
 [dev-dependencies]
 proptest = { version = "1", default-features = false, features = ["std"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# `test-util` gives the tests a paused clock, so a 35 s bound is asserted
+# without spending 35 s or racing a loaded CI machine.
+tokio = { version = "1", features = ["test-util", "macros", "rt"] }
 
 [target.'cfg(target_vendor = "apple")'.dependencies]
 objc2 = "0.6"
@@ -57,7 +60,6 @@ objc2-foundation = { version = "0.3", features = [
 ] }
 objc2-core-bluetooth = { version = "0.3", features = ["CBError", "CBCentralManagerConstants"] }
 dispatch2 = { version = "0.3", features = ["alloc", "objc2"] }
-# The L2CAP reactor's wake-up source (`CFRunLoopSource`); already in the tree via objc2-foundation.
 objc2-core-foundation = { version = "0.3", features = ["CFRunLoop"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]

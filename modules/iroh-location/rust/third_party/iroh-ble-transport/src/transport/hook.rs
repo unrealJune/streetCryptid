@@ -1,13 +1,17 @@
-use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use blew::DeviceId;
-use iroh::endpoint::{AfterHandshakeOutcome, BeforeConnectOutcome, Connection, EndpointHooks};
+use iroh::endpoint::{
+    AfterHandshakeOutcome, BeforeConnectOutcome, Connection, EndpointHooks, VarInt,
+};
 use iroh_base::{EndpointAddr, EndpointId, TransportAddr};
 use tokio::sync::mpsc;
 
+use crate::transport::conns::{
+    BLE_CLOSE_CODE_CONFLICT, BLE_CLOSE_REASON_CONFLICT, ConnHandle, ConnectionRegistry,
+    close_evicted_pipes,
+};
 use crate::transport::priority::{LinkPriority, TrackedConnection};
 use crate::transport::routing::{PromoteOutcome, Routing, StableConnId};
 use crate::transport::routing::{parse_token_addr, prefix_from_endpoint};
@@ -78,7 +82,7 @@ pub struct BleDedupHook {
     self_endpoint: EndpointId,
     routing: Arc<Routing>,
     tx: mpsc::UnboundedSender<HookEvent>,
-    active_connections: Arc<ActiveConnections>,
+    connections: Arc<ConnectionRegistry>,
     idle_linger: Duration,
     link_priority: Arc<LinkPriority>,
 }
@@ -89,7 +93,7 @@ impl BleDedupHook {
         self_endpoint: EndpointId,
         routing: Arc<Routing>,
         tx: mpsc::UnboundedSender<HookEvent>,
-        active_connections: Arc<ActiveConnections>,
+        connections: Arc<ConnectionRegistry>,
         idle_linger: Duration,
         link_priority: Arc<LinkPriority>,
     ) -> Self {
@@ -97,98 +101,28 @@ impl BleDedupHook {
             self_endpoint,
             routing,
             tx,
-            active_connections,
+            connections,
             idle_linger,
             link_priority,
         }
     }
 }
 
-type ActiveConnectionKey = (EndpointId, StableConnId);
-
-/// Which iroh connections ride each BLE pipe, and since when a pipe has had none.
-///
-/// Owned by the transport and shared by every [`BleDedupHook`] it hands out, so two hooks can never
-/// disagree about whether a pipe is still in use.
-#[derive(Debug, Default)]
-pub(crate) struct ActiveConnections {
-    next_id: AtomicU64,
-    inner: parking_lot::Mutex<ActiveInner>,
-}
-
-#[derive(Debug, Default)]
-struct ActiveInner {
-    open: HashMap<ActiveConnectionKey, HashSet<u64>>,
-    /// The watch whose close left a pipe with no connections. A pipe is released only if the SAME
-    /// idle period is still running when that watch's linger ends: a connection that came and
-    /// went in the meantime started a newer period, with a full linger of its own.
-    idle_since: HashMap<ActiveConnectionKey, u64>,
-}
-
-impl ActiveConnections {
-    fn insert(&self, endpoint_id: EndpointId, stable_id: StableConnId) -> u64 {
-        let id = self.next_id.fetch_add(1, Ordering::Relaxed) + 1;
-        let key = (endpoint_id, stable_id);
-        let mut inner = self.inner.lock();
-        inner.idle_since.remove(&key);
-        inner.open.entry(key).or_default().insert(id);
-        id
-    }
-
-    fn remove_and_is_empty(
-        &self,
-        endpoint_id: EndpointId,
-        stable_id: StableConnId,
-        watch_id: u64,
-    ) -> bool {
-        let mut inner = self.inner.lock();
-        let key = (endpoint_id, stable_id);
-        let Some(ids) = inner.open.get_mut(&key) else {
-            return true;
-        };
-        ids.remove(&watch_id);
-        if ids.is_empty() {
-            inner.open.remove(&key);
-            inner.idle_since.insert(key, watch_id);
-            true
-        } else {
-            false
-        }
-    }
-
-    /// True, once, if the idle period `watch_id`'s close began is still running: nothing has
-    /// used the pipe since. Consumes the marker so a pipe is released exactly once.
-    fn take_still_idle(
-        &self,
-        endpoint_id: EndpointId,
-        stable_id: StableConnId,
-        watch_id: u64,
-    ) -> bool {
-        let mut inner = self.inner.lock();
-        let key = (endpoint_id, stable_id);
-        if inner.open.contains_key(&key) || inner.idle_since.get(&key) != Some(&watch_id) {
-            return false;
-        }
-        inner.idle_since.remove(&key);
-        true
-    }
-}
-
 /// Release a pipe once its last connection has closed AND it then stayed unused for `linger`.
 /// See [`PIPE_IDLE_LINGER`] for why the wait exists.
 async fn report_idle_after_linger(
-    active: &ActiveConnections,
+    connections: &ConnectionRegistry,
     tx: &mpsc::UnboundedSender<HookEvent>,
     endpoint_id: EndpointId,
     stable_id: StableConnId,
     watch_id: u64,
     linger: Duration,
 ) {
-    if !active.remove_and_is_empty(endpoint_id, stable_id, watch_id) {
+    if !connections.remove_and_is_empty(endpoint_id, stable_id, watch_id) {
         return;
     }
     tokio::time::sleep(linger).await;
-    if active.take_still_idle(endpoint_id, stable_id, watch_id) {
+    if connections.take_still_idle(endpoint_id, stable_id, watch_id) {
         let _ = tx.send(HookEvent::ConnectionClosed {
             endpoint_id,
             stable_id,
@@ -224,10 +158,7 @@ impl TrackedConnection for BleConnection {
             matches!(path.remote_addr(), TransportAddr::Custom(addr) if addr.id() == BLE_TRANSPORT_ID)
         });
         if on_ble {
-            conn.close(
-                noq_proto::VarInt::from_u32(BLE_HELD_CLOSE_CODE),
-                b"ble-reserved",
-            );
+            conn.close(VarInt::from_u32(BLE_HELD_CLOSE_CODE), b"ble-reserved");
         }
         on_ble
     }
@@ -268,12 +199,9 @@ impl EndpointHooks for BleDedupHook {
 
     async fn after_handshake<'a>(&'a self, conn: &'a Connection) -> AfterHandshakeOutcome {
         let remote_endpoint = conn.remote_id();
-        // iroh 1.0: `Connection::paths()` returns a snapshot of only the
-        // currently-open paths (closed paths are not retained), so the former
-        // `!path.is_closed()` filter is dropped — that method no longer exists
-        // on the 1.0 `Path` API.
-        let paths = conn.paths();
-        let token = paths
+        // `paths()` only ever lists open paths, so no closed-path filter here.
+        let token = conn
+            .paths()
             .iter()
             .find_map(|path| match path.remote_addr() {
                 TransportAddr::Custom(addr) if addr.id() == BLE_TRANSPORT_ID => {
@@ -309,8 +237,8 @@ impl EndpointHooks for BleDedupHook {
                         evicted_devices: Vec::new(),
                     });
                     return AfterHandshakeOutcome::Reject {
-                        error_code: noq_proto::VarInt::from_u32(0),
-                        reason: b"ble_conflict".to_vec(),
+                        error_code: VarInt::from_u32(BLE_CLOSE_CODE_CONFLICT),
+                        reason: BLE_CLOSE_REASON_CONFLICT.to_vec(),
                     };
                 }
                 PromoteOutcome::Accepted { evicted } => {
@@ -331,7 +259,16 @@ impl EndpointHooks for BleDedupHook {
                         evicted_devices = evicted_devices.len(),
                         "BleDedupHook: promoted to routable"
                     );
-                    let watch_id = self.active_connections.insert(remote_endpoint, stable_id);
+                    // Close the connections riding the evicted pipes
+                    // before the BLE teardown the forwarder kicks off
+                    // below: the pipe under them is about to disappear,
+                    // and iroh has no way to observe that.
+                    close_evicted_pipes(&self.connections, &evicted);
+                    let watch_id = self.connections.insert(
+                        remote_endpoint,
+                        stable_id,
+                        Arc::new(conn.weak_handle()) as Arc<dyn ConnHandle>,
+                    );
                     close_watch = Some((stable_id, watch_id));
                 }
             }
@@ -346,18 +283,16 @@ impl EndpointHooks for BleDedupHook {
             evicted_devices,
         });
         if let Some((stable_id, watch_id)) = close_watch {
-            // iroh 1.0: use a `WeakConnectionHandle` rather than cloning the
-            // `Connection`. A strong clone would disable close-on-drop and keep
-            // the connection alive; `weak_handle().closed()` observes closure
-            // without holding the connection open (see `EndpointHooks` docs).
-            let weak = conn.weak_handle();
+            // Never clone the `Connection` out of the hook: a strong handle
+            // keeps it alive and disables close-on-drop for its real owner.
+            let closed = conn.weak_handle().closed();
             let tx = self.tx.clone();
-            let active_connections = Arc::clone(&self.active_connections);
+            let connections = Arc::clone(&self.connections);
             let linger = self.idle_linger;
             tokio::spawn(async move {
-                let _ = weak.closed().await;
+                let _ = closed.await;
                 report_idle_after_linger(
-                    &active_connections,
+                    &connections,
                     &tx,
                     remote_endpoint,
                     stable_id,
@@ -376,7 +311,7 @@ impl EndpointHooks for BleDedupHook {
                 "BleDedupHook: turning a connection away from BLE (link reserved)"
             );
             return AfterHandshakeOutcome::Reject {
-                error_code: noq_proto::VarInt::from_u32(BLE_HELD_CLOSE_CODE),
+                error_code: VarInt::from_u32(BLE_HELD_CLOSE_CODE),
                 reason: b"ble-reserved".to_vec(),
             };
         }
@@ -393,19 +328,28 @@ impl EndpointHooks for BleDedupHook {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::transport::conns::RecordingConn;
 
     fn endpoint(seed: u8) -> EndpointId {
         iroh_base::SecretKey::from_bytes(&[seed; 32]).public()
     }
 
     #[test]
-    fn active_connections_only_reports_empty_after_last_watch_is_removed() {
-        let active = ActiveConnections::default();
+    fn registry_only_reports_empty_after_last_watch_is_removed() {
+        let active = ConnectionRegistry::default();
         let endpoint_id = endpoint(1);
         let stable_id = StableConnId::for_test(7);
 
-        let first = active.insert(endpoint_id, stable_id);
-        let second = active.insert(endpoint_id, stable_id);
+        let first = active.insert(
+            endpoint_id,
+            stable_id,
+            RecordingConn::new() as Arc<dyn ConnHandle>,
+        );
+        let second = active.insert(
+            endpoint_id,
+            stable_id,
+            RecordingConn::new() as Arc<dyn ConnHandle>,
+        );
 
         assert!(
             !active.remove_and_is_empty(endpoint_id, stable_id, first),
@@ -435,7 +379,7 @@ mod tests {
     }
 
     fn spawn_close(
-        active: &Arc<ActiveConnections>,
+        active: &Arc<ConnectionRegistry>,
         tx: &mpsc::UnboundedSender<HookEvent>,
         endpoint_id: EndpointId,
         stable_id: StableConnId,
@@ -457,11 +401,15 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn an_idle_pipe_is_released_only_after_the_linger() {
-        let active = Arc::new(ActiveConnections::default());
+        let active = Arc::new(ConnectionRegistry::default());
         let (tx, mut rx) = mpsc::unbounded_channel();
         let (endpoint_id, stable_id) = (endpoint(3), StableConnId::for_test(10));
 
-        let watch = active.insert(endpoint_id, stable_id);
+        let watch = active.insert(
+            endpoint_id,
+            stable_id,
+            RecordingConn::new() as Arc<dyn ConnHandle>,
+        );
         let task = spawn_close(&active, &tx, endpoint_id, stable_id, watch);
         settle().await;
         tokio::time::advance(PIPE_IDLE_LINGER - Duration::from_millis(1)).await;
@@ -481,15 +429,23 @@ mod tests {
     /// the same pipe 5 ms later. The pipe has to still be there when it arrives.
     #[tokio::test(start_paused = true)]
     async fn a_connection_inside_the_linger_keeps_the_pipe() {
-        let active = Arc::new(ActiveConnections::default());
+        let active = Arc::new(ConnectionRegistry::default());
         let (tx, mut rx) = mpsc::unbounded_channel();
         let (endpoint_id, stable_id) = (endpoint(4), StableConnId::for_test(11));
 
-        let hello = active.insert(endpoint_id, stable_id);
+        let hello = active.insert(
+            endpoint_id,
+            stable_id,
+            RecordingConn::new() as Arc<dyn ConnHandle>,
+        );
         let hello_closed = spawn_close(&active, &tx, endpoint_id, stable_id, hello);
         settle().await;
         tokio::time::advance(Duration::from_millis(5)).await;
-        let reveal = active.insert(endpoint_id, stable_id);
+        let reveal = active.insert(
+            endpoint_id,
+            stable_id,
+            RecordingConn::new() as Arc<dyn ConnHandle>,
+        );
 
         tokio::time::advance(PIPE_IDLE_LINGER).await;
         hello_closed.await.unwrap();
@@ -511,15 +467,23 @@ mod tests {
     /// earlier timer must not cut that one short.
     #[tokio::test(start_paused = true)]
     async fn only_the_latest_idle_period_can_release_the_pipe() {
-        let active = Arc::new(ActiveConnections::default());
+        let active = Arc::new(ConnectionRegistry::default());
         let (tx, mut rx) = mpsc::unbounded_channel();
         let (endpoint_id, stable_id) = (endpoint(5), StableConnId::for_test(12));
 
-        let first = active.insert(endpoint_id, stable_id);
+        let first = active.insert(
+            endpoint_id,
+            stable_id,
+            RecordingConn::new() as Arc<dyn ConnHandle>,
+        );
         let first_closed = spawn_close(&active, &tx, endpoint_id, stable_id, first);
         settle().await;
         tokio::time::advance(Duration::from_secs(10)).await;
-        let second = active.insert(endpoint_id, stable_id);
+        let second = active.insert(
+            endpoint_id,
+            stable_id,
+            RecordingConn::new() as Arc<dyn ConnHandle>,
+        );
         let second_closed = spawn_close(&active, &tx, endpoint_id, stable_id, second);
         settle().await;
 
@@ -539,14 +503,22 @@ mod tests {
     }
 
     #[test]
-    fn active_connections_buckets_by_stable_id() {
-        let active = ActiveConnections::default();
+    fn registry_buckets_by_stable_id() {
+        let active = ConnectionRegistry::default();
         let endpoint_id = endpoint(2);
         let old_id = StableConnId::for_test(8);
         let new_id = StableConnId::for_test(9);
 
-        let old_watch = active.insert(endpoint_id, old_id);
-        let _new_watch = active.insert(endpoint_id, new_id);
+        let old_watch = active.insert(
+            endpoint_id,
+            old_id,
+            RecordingConn::new() as Arc<dyn ConnHandle>,
+        );
+        let _new_watch = active.insert(
+            endpoint_id,
+            new_id,
+            RecordingConn::new() as Arc<dyn ConnHandle>,
+        );
 
         assert!(
             active.remove_and_is_empty(endpoint_id, old_id, old_watch),

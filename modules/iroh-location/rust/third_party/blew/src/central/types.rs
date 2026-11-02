@@ -1,3 +1,4 @@
+use crate::l2cap::L2capConfig;
 use crate::types::{BleDevice, DeviceId};
 use bytes::Bytes;
 use std::time::Duration;
@@ -9,6 +10,17 @@ use uuid::Uuid;
 pub const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Configuration for initialising the central role.
+///
+/// Construct with `..Default::default()` so a new field costs you one
+/// recompile rather than an edit at every call site:
+///
+/// ```rust
+/// use blew::central::CentralConfig;
+/// let config = CentralConfig {
+///     connect_timeout: None,
+///     ..Default::default()
+/// };
+/// ```
 #[derive(Debug, Clone)]
 pub struct CentralConfig {
     /// On Apple platforms, passed as `CBCentralManagerOptionRestoreIdentifierKey` to
@@ -20,6 +32,8 @@ pub struct CentralConfig {
     /// [`BlewError::ConnectTimedOut`](crate::error::BlewError::ConnectTimedOut)
     /// if the connection has not completed within `d`.
     pub connect_timeout: Option<Duration>,
+    /// Tuning applied to L2CAP channels opened by this central.
+    pub l2cap: L2capConfig,
 }
 
 impl Default for CentralConfig {
@@ -27,6 +41,7 @@ impl Default for CentralConfig {
         Self {
             restore_identifier: None,
             connect_timeout: Some(DEFAULT_CONNECT_TIMEOUT),
+            l2cap: L2capConfig::default(),
         }
     }
 }

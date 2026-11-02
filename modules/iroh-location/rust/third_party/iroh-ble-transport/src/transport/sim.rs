@@ -21,7 +21,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use blew::{BleDevice, DeviceId, DisconnectCause, L2capChannel};
+use blew::{DeviceId, DisconnectCause, L2capChannel};
 use bytes::Bytes;
 use iroh_base::EndpointId;
 use parking_lot::Mutex;
@@ -34,7 +34,7 @@ use crate::transport::peer::{ChannelHandle, ConnectPath, FragmentSource, PeerCom
 use crate::transport::routing::{Routing, ScanHintUpdate, prefix_from_endpoint};
 use crate::transport::store::InMemoryPeerStore;
 use crate::transport::transport::{
-    BleTransport, IROH_P2C_CHAR_UUID, L2capPolicy, PROTOCOL_VERSION, iroh_key_uuid,
+    BleTransport, IROH_P2C_CHAR_UUID, L2capPolicy, PROTOCOL_VERSION,
 };
 
 /// Per-node knobs for [`SimRadio::transport`].
@@ -256,12 +256,7 @@ impl SimRadio {
         let _ = inbox
             .send(PeerCommand::Advertised {
                 prefix,
-                device: BleDevice {
-                    id: advertiser,
-                    name: None,
-                    rssi: Some(-50),
-                    services: vec![iroh_key_uuid(&advertised)],
-                },
+                device_id: advertiser,
                 rssi: Some(-50),
             })
             .await;
@@ -428,6 +423,10 @@ impl BleInterface for SimInterface {
     }
 
     async fn restart_advertising(&self) -> BleResult<()> {
+        Ok(())
+    }
+
+    async fn restart_scan(&self) -> BleResult<()> {
         Ok(())
     }
 
