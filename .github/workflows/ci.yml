@@ -212,6 +212,9 @@ jobs:
       # scenarios serialized, as their own in-process lock did under `cargo test`.
       - name: Run Rust tests
         working-directory: modules/iroh-location/rust
+        # TEMPORARY: diagnosing loopback sync misses after the iroh 1.4 bump.
+        env:
+          SC_TEST_TRACE: iroh_docs=debug,iroh_blobs=debug,iroh::_events=debug,iroh::endpoint=debug,iroh::socket=debug,iroh_location=debug
         run: cargo nextest run --profile ci
 
       # A change to the Rust UniFFI surface leaves the tracked Kotlin/Swift bindings stale, which
