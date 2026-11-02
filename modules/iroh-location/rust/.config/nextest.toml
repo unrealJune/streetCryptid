@@ -1,0 +1,15 @@
+# cargo-nextest runs each test in its own process, so in-process locks no longer serialize
+# anything. ratchet_conditions' NETWORK_TEST_LOCK exists because its scenarios each stand up real
+# loopback QUIC endpoints, docs reconciliation and blob transfer, and running them alongside other
+# network work starved healthy exchanges on a loaded runner. Under `cargo test` its binary also ran
+# alone, since cargo runs binaries one at a time; a serial test group restored only the first half,
+# and on 2026-11-01 `sessions_survive_an_app_restart` ran beside pairing_integration's endpoints
+# and missed its 60 s delivery deadline. Requiring every slot runs each of these tests exclusively,
+# which is both halves of the old behaviour.
+[[profile.default.overrides]]
+filter = 'binary(ratchet_conditions)'
+threads-required = 'num-cpus'
+
+[profile.ci]
+# Report every failure in one run rather than stopping at the first.
+fail-fast = false

@@ -25,6 +25,21 @@ if (System.getenv('SC_GRADLE_PROFILE') == '1') {
 
     def starts = new ConcurrentHashMap<String, Long>()
 
+    // Configuration time, as one pseudo-task row: from this init script (before settings are
+    // evaluated) to the task graph being ready. It decides whether Gradle's configuration cache
+    // is worth its incompatibilities -- this script's own beforeTask/afterTask listeners among
+    // them -- and nothing else in the pipeline measures it.
+    def initAt = System.nanoTime()
+    gradle.taskGraph.whenReady {
+      try {
+        def ms = (long) ((System.nanoTime() - initAt) / 1000000L)
+        synchronized (starts) {
+          out.append(":configuration\tCONFIGURE\t${ms}\n")
+        }
+      } catch (Throwable ignored) {
+      }
+    }
+
     gradle.taskGraph.beforeTask { task ->
       try {
         starts.put(task.path, System.nanoTime())

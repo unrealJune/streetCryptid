@@ -5,6 +5,7 @@ import type { MapPalette } from '../../core/types';
 import type { MapRegion } from '../../engine/map-engine';
 import { EMPTY_PACKED } from '../../tiles/packed-geometry';
 import {
+  DOT_ATLAS_HALO,
   DOT_FIELD_UNIFORM_FLOATS,
   DOT_STEP,
   dotAtlasSize,
@@ -82,7 +83,7 @@ describe('packDotFieldUniforms', () => {
     expect(u[2]).toBeCloseTo(0.2, 12); // uRectSize.x
     expect(u[3]).toBeCloseTo(0.3, 12); // uRectSize.y
     expect(u.slice(4, 6)).toEqual([512, 768]); // uMaskSize
-    expect(u[6]).toBe(DOT_STEP); // uStep
+    expect(u[6]).toBe(DOT_STEP / base.pixelRatio); // uStep
     expect(u.slice(7, 10)).toEqual([10 / 255, 20 / 255, 30 / 255]); // uBg
     expect(u[10]).toBe(1); // uReveal defaults to 1 (fully shown)
     expect(u[11]).toBe(0); // uLod: build zoom 15 → full detail
@@ -104,9 +105,9 @@ describe('packDotFieldUniforms', () => {
     expect(otherZoom[19] * scaleFor(9.25)).toBeCloseTo(u[19] * scaleFor(15), 6);
   });
 
-  it('keeps each lattice fixed across pans, LOD handoffs and hash wraps', () => {
+  it('keeps the lattice fixed across pans and hash wraps', () => {
     const point = [0.162, 0.35];
-    const gridSample = (zoom: number, dx: number, dy: number, coarse = false) => {
+    const gridSample = (zoom: number, dx: number, dy: number) => {
       const spec = {
         ...region.spec,
         zoom,
@@ -116,9 +117,9 @@ describe('packDotFieldUniforms', () => {
       return [0, 1].map((axis) => {
         const origin = axis === 0 ? spec.rect.minX : spec.rect.minY;
         const local = (point[axis] - origin) * u[1];
-        const phase = coarse ? 42 : 22;
-        const originIndex = coarse ? 40 : 20;
-        const step = u[6] * (coarse ? 2 : 1);
+        const phase = 22;
+        const originIndex = 20;
+        const step = u[6];
         const index = Math.round((local - u[phase + axis]) / step);
         const key =
           (((index + u[originIndex + axis]) % DOT_HASH_PERIOD) + DOT_HASH_PERIOD) % DOT_HASH_PERIOD;
@@ -126,16 +127,14 @@ describe('packDotFieldUniforms', () => {
         return { key, world };
       });
     };
-    const first = gridSample(12.1, -0.0003, -0.0002);
-    for (const other of [
-      gridSample(12.1, -0.00021, 0.00013),
-      gridSample(12.7, -0.0004, -0.0001, true),
-      gridSample(12.7, -0.01, -0.02, true),
-    ]) {
-      other.forEach((dot, axis) => {
-        expect(dot.key).toBe(first[axis].key);
-        expect(dot.world).toBeCloseTo(first[axis].world, 12);
-      });
+    for (const zoom of [10.25, 12.1, 13.16, 16.5, 19]) {
+      const first = gridSample(zoom, -0.0003, -0.0002);
+      for (const other of [gridSample(zoom, -0.00021, 0.00013), gridSample(zoom, -0.01, -0.02)]) {
+        other.forEach((dot, axis) => {
+          expect(dot.key).toBe(first[axis].key);
+          expect(dot.world).toBeCloseTo(first[axis].world, 12);
+        });
+      }
     }
   });
 
@@ -161,7 +160,7 @@ describe('packDotFieldUniforms', () => {
   it('fades the last noise octave instead of normalizing it back to full contrast', () => {
     const at = (zoom: number) =>
       packDotFieldUniforms({ ...base, region: { spec: { ...region.spec, zoom } } });
-    const cutoff = 12 + Math.log2((DOT_STEP * 2 * 0.045) / 0.5);
+    const cutoff = 12 + Math.log2(((DOT_STEP / base.pixelRatio) * 2 * 0.045) / 0.5);
     expect(at(cutoff - 0.0001).slice(32, 36)).toEqual([0, 0, 0, 0]);
     expect(at(cutoff + 0.0001)[32]).toBeGreaterThan(0);
     expect(at(cutoff + 0.0001)[32]).toBeLessThan(0.000001);
@@ -176,20 +175,92 @@ describe('packDotFieldUniforms', () => {
     expect(packDotFieldUniforms({ ...base, hasElevation: true })[17]).toBe(1);
   });
 
-  it('honors a custom lattice step', () => {
-    expect(packDotFieldUniforms({ ...base, step: 3 })[6]).toBe(3);
+  it.each([0.5, 0.65, 1.0256410256410255, 1.5, 2])(
+    'sizes a single pixel-registered atlas at density %s',
+    (pixelRatio) => {
+      const spec = { ...region.spec, zoom: 12.5 };
+      const input = { ...base, region: { spec }, pixelRatio };
+      const u = packDotFieldUniforms(input);
+      const logical = regionLogicalSize(input.region);
+      const atlas = dotAtlasSize(spec, pixelRatio);
+      expect(atlas.width).toBe((Math.ceil(logical.width / u[6]) + 2 * DOT_ATLAS_HALO + 1) * 2);
+      expect(atlas.height).toBe(Math.ceil(logical.height / u[6]) + 2 * DOT_ATLAS_HALO + 1);
+      expect(u[6] * pixelRatio).toBeCloseTo(2, 12);
+    }
+  );
+
+  it('keeps two-bitmap-pixel dots instead of crossing two detail grids at fractional zooms', () => {
+    for (const zoom of [10.15, 10.25, 12.15, 12.85, 13.16, 13.5, 15.85, 19]) {
+      const spec = computeRegionSpec(
+        { center: [0.162, 0.35], zoom },
+        { width: 390, height: 780 },
+        { dataZooms: { min: 0, max: 14 } }
+      );
+      const layout = regionImageLayout(spec);
+      const u = packDotFieldUniforms({ ...base, region: { spec }, pixelRatio: layout.pixelRatio });
+      const pitch = u[6] * layout.pixelRatio;
+      expect(pitch).toBeCloseTo(Math.round(pitch), 12);
+      expect(pitch).toBeCloseTo(DOT_STEP, 12);
+      for (const axis of [0, 1]) {
+        const offset = axis === 0 ? layout.offsetX : layout.offsetY;
+        const phase = u[22 + axis] * layout.pixelRatio + offset - pitch / 2;
+        expect(phase).toBeCloseTo(Math.round(phase), 6);
+      }
+    }
   });
 
-  it('sizes both atlas levels from the same step and row split as the shader', () => {
-    const spec = { ...region.spec, zoom: 12.5 };
-    const input = { ...base, region: { spec }, step: 3 };
-    const u = packDotFieldUniforms(input);
-    const logical = regionLogicalSize(input.region);
-    const atlas = dotAtlasSize(spec, input.step);
-    expect(atlas.width).toBe((Math.ceil(logical.width / u[6]) + 3) * 2);
-    expect(atlas.height).toBe(u[44] + Math.ceil(logical.height / (u[6] * 2)) + 3);
-    expect(u[45]).toBeGreaterThan(0);
-    expect(u[45]).toBeLessThan(1);
+  it('covers glyph neighbours outside the aligned bitmap at minimum density', () => {
+    for (const zoom of [12.151, 13.16, 13.5, 14, 15.85])
+      for (const pan of [0, 0.1, 1.75, 17.25]) {
+        const scale = scaleFor(zoom);
+        const spec = computeRegionSpec(
+          { center: [0.162 + pan / scale, 0.35 + pan / 2 / scale], zoom },
+          { width: 390, height: 780 },
+          { dataZooms: { min: 0, max: 14 } }
+        );
+        const layout = regionImageLayout(spec, 0.25);
+        const u = packDotFieldUniforms({
+          ...base,
+          region: { spec },
+          pixelRatio: layout.pixelRatio,
+        });
+        const atlas = dotAtlasSize(spec, layout.pixelRatio);
+        for (const axis of [0, 1]) {
+          const phase = u[22 + axis];
+          const offset = axis === 0 ? layout.offsetX : layout.offsetY;
+          const extent = axis === 0 ? layout.width : layout.height;
+          for (const edge of [0, extent]) {
+            const frag = (edge - offset) / layout.pixelRatio;
+            const nearest = Math.floor((frag - phase) / u[6] + 0.5);
+            for (const index of [nearest - 1, nearest + 1]) {
+              const pixel =
+                axis === 0 ? (index + DOT_ATLAS_HALO) * 2 + 1.5 : index + DOT_ATLAS_HALO + 0.5;
+              expect(pixel).toBeGreaterThanOrEqual(0);
+              expect(pixel).toBeLessThan(axis === 0 ? atlas.width : atlas.height);
+            }
+          }
+        }
+      }
+  });
+
+  it.each([
+    { width: 430, height: 932, maxMiB: 8 },
+    { width: 932, height: 430, maxMiB: 8 },
+    { width: 1032, height: 1376, maxMiB: 26 },
+    { width: 1376, height: 1032, maxMiB: 26 },
+  ])('bounds atlas storage across zooms on a $width x $height viewport', (viewport) => {
+    let maxBytes = 0;
+    let maxAxis = 0;
+    for (let i = 100; i <= 1900; i++) {
+      const spec = computeRegionSpec({ center: [0.162, 0.35], zoom: i / 100 }, viewport, {
+        dataZooms: { min: 0, max: 14 },
+      });
+      const atlas = dotAtlasSize(spec);
+      maxBytes = Math.max(maxBytes, atlas.width * atlas.height * 4);
+      maxAxis = Math.max(maxAxis, atlas.width, atlas.height);
+    }
+    expect(maxBytes).toBeLessThan(viewport.maxMiB * 2 ** 20);
+    expect(maxAxis).toBeLessThan(8192);
   });
 
   it('passes the reveal fraction through', () => {

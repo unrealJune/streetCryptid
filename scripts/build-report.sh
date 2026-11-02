@@ -221,6 +221,8 @@ if [[ -s "$gradle_file" ]]; then
   # are camelCase identifiers, and the longest in an Expo build is around 24 characters
   # (`bundleReleaseJsAndAssets`), so a 40-character cap per segment is generous for anything real
   # and far too tight for anything that is secretly a base64 blob.
+  # A segment may end in one bracketed ABI, as CMake tasks do (`buildCMakeRelWithDebInfo[arm64-v8a]`);
+  # rejecting those dropped every native compile from the report.
   gradle_rows="$(
     awk -F'\t' '
       function ok_path(p,   n, parts, i) {
@@ -228,7 +230,7 @@ if [[ -s "$gradle_file" ]]; then
         n = split(substr(p, 2), parts, ":")
         if (n < 1 || n > 8) return 0
         for (i = 1; i <= n; i++) {
-          if (parts[i] !~ /^[A-Za-z][A-Za-z0-9_.-]{0,39}$/) return 0
+          if (parts[i] !~ /^[A-Za-z][A-Za-z0-9_.-]{0,39}(\[[A-Za-z0-9_-]{1,20}\])?$/) return 0
         }
         return 1
       }

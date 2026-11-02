@@ -96,6 +96,58 @@ export function centerBeside(camera: CameraState, obscuredLeft: number): CameraS
   return { ...camera, center: [camera.center[0] - obscuredLeft / 2 / s, camera.center[1]] };
 }
 
+/**
+ * How far the camera may stray from the canvas's draw origin, anchor-space px. Skia's matrices and
+ * rects are float32, and anchor space spans the whole planet: Seattle to Japan is 760,000 px at the
+ * anchor zoom, and that translation multiplied up to z16 is 12 million, where a float32 rounds to
+ * whole pixels and the map shakes by a different amount on every frame.
+ */
+export const DRAW_ORIGIN_RANGE_PX = 8192;
+
+/** Offset of the canvas's draw origin from the anchor, anchor-space px. */
+export interface DrawOrigin {
+  readonly x: number;
+  readonly y: number;
+}
+
+export const ZERO_DRAW_ORIGIN: DrawOrigin = { x: 0, y: 0 };
+
+/**
+ * The draw origin for `camera`: `previous` while the camera is in range of it, so ordinary panning
+ * never moves it, and otherwise the grid point nearest the camera.
+ */
+export function drawOriginFor(
+  anchor: CameraState,
+  camera: CameraState,
+  previous: DrawOrigin
+): DrawOrigin {
+  const s = scaleFor(anchor.zoom);
+  const x = (camera.center[0] - anchor.center[0]) * s;
+  const y = (camera.center[1] - anchor.center[1]) * s;
+  if (
+    Math.abs(x - previous.x) <= DRAW_ORIGIN_RANGE_PX &&
+    Math.abs(y - previous.y) <= DRAW_ORIGIN_RANGE_PX
+  ) {
+    return previous;
+  }
+  return {
+    x: Math.round(x / DRAW_ORIGIN_RANGE_PX) * DRAW_ORIGIN_RANGE_PX,
+    y: Math.round(y / DRAW_ORIGIN_RANGE_PX) * DRAW_ORIGIN_RANGE_PX,
+  };
+}
+
+/**
+ * `anchor` moved to the draw origin. Layers laid out against it hold small coordinates, and a layer
+ * drawn at p under the live transform belongs at `k·(p + origin) + t` on screen.
+ */
+export function drawAnchorFor(anchor: CameraState, origin: DrawOrigin): CameraState {
+  const s = scaleFor(anchor.zoom);
+  return {
+    center: [anchor.center[0] + origin.x / s, anchor.center[1] + origin.y / s],
+    zoom: anchor.zoom,
+  };
+}
+
 /** Inverse of {@link applyViewTransform}: the transform that shows `camera` over `base`. */
 export function viewTransformFor(
   base: CameraState,

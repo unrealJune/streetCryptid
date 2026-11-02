@@ -1,7 +1,7 @@
 {
   "name": "streetcryptid",
   "main": "expo-router/entry",
-  "version": "2.27.0",
+  "version": "2.27.2",
   "license": "AGPL-3.0-or-later",
   "dependencies": {
     "@expo-google-fonts/ibm-plex-mono": "^0.4.1",
@@ -70,6 +70,7 @@
   },
   "scripts": {
     "eas-build-pre-install": "bash ./scripts/eas-build-pre-install.sh",
+    "eas-build-post-install": "bash ./scripts/eas-build-post-install.sh",
     "start": "expo start",
     "android": "expo run:android",
     "ios": "expo run:ios",

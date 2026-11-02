@@ -1,4 +1,4 @@
-import { Skia, type SkImage } from '@shopify/react-native-skia';
+import { FilterMode, Skia, type SkImage } from '@shopify/react-native-skia';
 
 import { CryptidThemes } from '@/constants/cryptid-theme';
 
@@ -16,6 +16,7 @@ import {
 import type { MapRegion } from '../../engine/map-engine';
 import { packGeometry } from '../../tiles/packed-geometry';
 import { buildMaskPaths } from '../mask-paths';
+import { getDotFieldEffect, getDotMaterialEffect } from '../dot-field-shader';
 import { renderRegionImage } from '../region-shader';
 import { buildHatchPath } from '../structure-paths';
 import { linesSvg, TILE_PATH_UNITS } from '../tile-path-svg';
@@ -36,7 +37,10 @@ jest.mock('../dot-field-shader', () => {
   });
   const effect = makeEffect();
   const materialEffect = makeEffect();
-  return { getDotFieldEffect: () => effect, getDotMaterialEffect: () => materialEffect };
+  return {
+    getDotFieldEffect: jest.fn(() => effect),
+    getDotMaterialEffect: jest.fn(() => materialEffect),
+  };
 });
 
 // The "image" is the recording canvas, so a test can read back what was drawn.
@@ -222,6 +226,33 @@ describe('temporary shader resources', () => {
     draw(false, false);
     expect(mockResources.length).toBeGreaterThan(10);
     for (const resource of mockResources) expect(resource.dispose).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([13.16, 15])('uses the same dot compositor for streets and parks at z%s', (zoom) => {
+    for (const features of [geometry, packGeometry({ ...base, parks: [{ rings: [ring] }] })]) {
+      draw(false, false, { ...region, geometry: features, spec: { ...spec, zoom } });
+      expect(getDotFieldEffect).toHaveBeenLastCalledWith();
+      expect(getDotMaterialEffect).toHaveBeenLastCalledWith();
+    }
+  });
+
+  it('hands the shader DEM texels unfiltered, because their two bytes do not filter exactly', () => {
+    const makeShaderOptions = jest.fn(() => mockResource({}));
+    renderRegionImage({
+      region,
+      palette: CryptidThemes.daybreak.canvas,
+      maskImage: image,
+      groundImage: image,
+      terrainImage: { makeShaderOptions } as unknown as SkImage,
+      cellImage: image,
+      lutImage: image,
+    });
+    expect(makeShaderOptions).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.anything(),
+      FilterMode.Nearest,
+      expect.anything()
+    );
   });
 
   it('reports allocation failure and releases the material pass even without an atlas', () => {

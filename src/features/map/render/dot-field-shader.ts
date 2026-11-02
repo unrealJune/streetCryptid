@@ -8,7 +8,7 @@ import { DOT_FIELD_SKSL, DOT_MATERIAL_SKSL } from './dot-field-sksl';
  * screenshotter in scripts/map-shot.ts) runs the exact same SkSL through
  * CanvasKit, and importing Skia here would drag react-native into node.
  */
-export { DOT_FIELD_SKSL };
+export { DOT_FIELD_SKSL } from './dot-field-sksl';
 
 let cached: SkRuntimeEffect | null | undefined;
 let material: SkRuntimeEffect | null | undefined;

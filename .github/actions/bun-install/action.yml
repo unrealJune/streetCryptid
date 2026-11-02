@@ -1,0 +1,49 @@
+name: Install JavaScript dependencies
+description: Restore the Bun download cache (saving it on main) and run a frozen `bun install`.
+
+# Same scoping rule as eas-js-cache: a cache is only restorable from the ref that wrote it plus its
+# parents, so the entry every pull request can hit is the one main writes. A pull_request run that
+# saved would write into its own refs/pull/<n>/merge scope, which no other pull request can read,
+# and spend the repository's cache quota doing it.
+#
+# Bun's cache is content-addressed, so a restore-key hit after a lockfile change is still correct:
+# `bun install` fetches what is missing and links the rest.
+inputs:
+  save:
+    description: >-
+      Whether to write the cache. Callers pass true from exactly one job on a push to main, so
+      parallel jobs do not race to reserve the same key.
+    required: false
+    default: 'false'
+
+outputs:
+  cache-hit:
+    description: Whether the Bun cache was an exact hit.
+    value: ${{ steps.restore.outputs.cache-hit }}${{ steps.restore-and-save.outputs.cache-hit }}
+
+runs:
+  using: composite
+  steps:
+    - name: Restore the Bun download cache
+      id: restore
+      if: inputs.save != 'true'
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ~/.bun/install/cache
+        key: bun-install-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('bun.lock') }}
+        restore-keys: |
+          bun-install-${{ runner.os }}-${{ runner.arch }}-
+
+    - name: Restore and save the Bun download cache
+      id: restore-and-save
+      if: inputs.save == 'true'
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ~/.bun/install/cache
+        key: bun-install-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('bun.lock') }}
+        restore-keys: |
+          bun-install-${{ runner.os }}-${{ runner.arch }}-
+
+    - name: Install project dependencies
+      shell: bash
+      run: bun install --frozen-lockfile

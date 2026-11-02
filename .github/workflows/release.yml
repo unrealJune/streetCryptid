@@ -282,6 +282,44 @@ jobs:
           SC_WHAT_TO_TEST: ${{ needs.version.outputs.what_to_test }}
         run: bash scripts/submit-testflight.sh "$BUILD_ARTIFACT"
 
+      # Saved here on main, where every pull request's restore can fall back to it.
+      # The hit rate is the whole point of the ccache, so it goes in the summary. ccache's stats name
+      # nothing but its own counters and cache directory.
+      - name: Report ccache statistics
+        if: '!cancelled()'
+        run: |
+          {
+            printf '### ccache\n\n```\n'
+            ccache --show-stats 2>&1 || true
+            printf '```\n'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Save the ccache
+        if: "!cancelled() && steps.setup.outputs.ccache-hit != 'true'"
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/Library/Caches/ccache
+          key: ${{ steps.setup.outputs.ccache-key }}
+
+      # Only what this build's bundle used (see eas-local-build-setup), so the entry does not grow.
+      # actions/cache folds the path into an entry's identity, so the output is moved to the path
+      # the restore reads from; saved from the output directory itself, no restore ever matched.
+      - name: Stage the Metro transform cache
+        if: "!cancelled() && steps.setup.outputs.metro-cache-hit != 'true'"
+        run: |
+          set -euo pipefail
+          # Absent when setup failed before pointing Metro at them; there is nothing to save.
+          [[ -d "${EXPO_METRO_CACHE_OUTPUT_DIR:-}" ]] || exit 0
+          rm -rf -- "$EXPO_METRO_CACHE_RESTORE_DIR"
+          mv -- "$EXPO_METRO_CACHE_OUTPUT_DIR" "$EXPO_METRO_CACHE_RESTORE_DIR"
+
+      - name: Save the Metro transform cache
+        if: "!cancelled() && steps.setup.outputs.metro-cache-hit != 'true'"
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/metro-cache
+          key: ${{ steps.setup.outputs.metro-cache-key }}
+
       - name: Save CocoaPods download cache
         if: "!cancelled() && steps.setup.outputs.native-cache-hit != 'true'"
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -435,6 +473,41 @@ jobs:
           SC_WHAT_TO_TEST: ${{ needs.version.outputs.what_to_test }}
         run: bash scripts/submit-play.sh "$BUILD_ARTIFACT"
 
+      - name: Report ccache statistics
+        if: '!cancelled()'
+        run: |
+          {
+            printf '### ccache\n\n```\n'
+            ccache --show-stats --verbose 2>&1 || true
+            printf '```\n'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Save the ccache
+        if: "!cancelled() && steps.setup.outputs.ccache-hit != 'true'"
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/ccache
+          key: ${{ steps.setup.outputs.ccache-key }}
+
+      # Only what this build's bundle used (see eas-local-build-setup), so the entry does not grow.
+      # actions/cache folds the path into an entry's identity, so the output is moved to the path
+      # the restore reads from; saved from the output directory itself, no restore ever matched.
+      - name: Stage the Metro transform cache
+        if: "!cancelled() && steps.setup.outputs.metro-cache-hit != 'true'"
+        run: |
+          set -euo pipefail
+          # Absent when setup failed before pointing Metro at them; there is nothing to save.
+          [[ -d "${EXPO_METRO_CACHE_OUTPUT_DIR:-}" ]] || exit 0
+          rm -rf -- "$EXPO_METRO_CACHE_RESTORE_DIR"
+          mv -- "$EXPO_METRO_CACHE_OUTPUT_DIR" "$EXPO_METRO_CACHE_RESTORE_DIR"
+
+      - name: Save the Metro transform cache
+        if: "!cancelled() && steps.setup.outputs.metro-cache-hit != 'true'"
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/metro-cache
+          key: ${{ steps.setup.outputs.metro-cache-key }}
+
       - name: Save Gradle dependency and build caches
         if: "!cancelled() && steps.setup.outputs.native-cache-hit != 'true'"
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -443,9 +516,16 @@ jobs:
             ~/.gradle/caches/modules-2
             ~/.gradle/caches/jars-*
             ~/.gradle/caches/transforms-*
-            ~/.gradle/caches/build-cache-1
             ~/.gradle/wrapper
           key: ${{ steps.setup.outputs.native-cache-key }}
+
+      # Every run, unlike the entry above: see "Restore the Gradle build cache" for why.
+      - name: Save the Gradle build cache
+        if: '!cancelled()'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.gradle/caches/build-cache-1
+          key: ${{ steps.setup.outputs.gradle-build-cache-key }}
 
       # This one runs on main, so unlike the pull-request copy of this step its entry is readable
       # by every open pull request -- the same reason cache-warm.yml exists.

@@ -208,3 +208,18 @@ strip = true
 # when iroh is upgraded past it.
 [patch.crates-io]
 iroh = { path = "third_party/iroh" }
+
+# Optimize dependencies in test builds only; this crate itself stays at opt-level 0 so it keeps
+# fast rebuilds and full debuggability. The test suite is CPU-bound in dependency code it cannot
+# avoid -- x25519/ed25519, ChaCha, BLAKE3 and redb, all unoptimized by default -- and on CI
+# `cargo test` spent ~5 minutes running against ~80 s compiling (2026-10-31: restart_protocol
+# 150 s, ratchet_conditions 69 s, pairing_integration 57 s; 104 s for the whole suite at
+# opt-level 2). `test`, not `dev`: the dev profile also builds the host library UniFFI generates
+# bindings from in every EAS build, and optimizing its dependencies there made a cold build of
+# it take 8 minutes instead of 4 for no benefit.
+[profile.test.package."*"]
+opt-level = 2
+# No debug info for dependencies: twenty test binaries each linking every dependency's DWARF
+# made the link the largest disk and memory consumer of the job (one run's `ld` died of SIGBUS),
+# and a backtrace through a dependency needs no line numbers to be read. This crate keeps its own.
+debug = false

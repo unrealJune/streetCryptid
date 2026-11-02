@@ -54,6 +54,27 @@ outputs:
   artifact-cache-key:
     description: Primary key of the restored native artifact cache, for the caller's save step.
     value: ${{ steps.artifact-cache.outputs.cache-primary-key }}
+  gradle-build-cache-hit:
+    description: Whether Gradle's build cache was an exact hit (never, by construction; see the step).
+    value: ${{ steps.gradle-build-cache.outputs.cache-hit }}
+  gradle-build-cache-key:
+    description: Primary key of the restored Gradle build cache, for the caller's save step.
+    value: ${{ steps.gradle-build-cache.outputs.cache-primary-key }}
+  ccache-hit:
+    description: Whether the ccache was an exact hit.
+    value: ${{ steps.ccache-ios.outputs.cache-hit }}${{ steps.ccache-android.outputs.cache-hit }}
+  ccache-key:
+    description: Primary key of the restored ccache, for the caller's save step.
+    value: ${{ steps.ccache-ios.outputs.cache-primary-key }}${{ steps.ccache-android.outputs.cache-primary-key }}
+  ccache-path:
+    description: Directory the ccache lives in on this platform, for the caller's save step.
+    value: ${{ inputs.platform == 'ios' && '~/Library/Caches/ccache' || '~/.cache/ccache' }}
+  metro-cache-hit:
+    description: Whether the Metro transform cache was an exact hit.
+    value: ${{ steps.metro-cache.outputs.cache-hit }}
+  metro-cache-key:
+    description: Primary key of the restored Metro transform cache, for the caller's save step.
+    value: ${{ steps.metro-cache.outputs.cache-primary-key }}
 
 runs:
   using: composite
@@ -149,7 +170,7 @@ runs:
     # it is the only entry that lets a compile task be skipped rather than repeated. It was missing,
     # which meant no Android build ever reused a task output from another run. It only fills when
     # org.gradle.caching is on -- see GRADLE_OPTS in the workflows.
-    - name: Restore the Gradle dependency and build caches
+    - name: Restore the Gradle dependency caches
       id: gradle-cache
       if: inputs.platform == 'android' && inputs.native-dependency-cache == 'true'
       uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -158,11 +179,159 @@ runs:
           ~/.gradle/caches/modules-2
           ~/.gradle/caches/jars-*
           ~/.gradle/caches/transforms-*
-          ~/.gradle/caches/build-cache-1
           ~/.gradle/wrapper
         key: eas-local-gradle-${{ runner.os }}-${{ hashFiles('bun.lock', 'package.json', 'app.json', 'app.config.ts', 'modules/iroh-location/android/build.gradle') }}
         restore-keys: |
           eas-local-gradle-${{ runner.os }}-
+
+    # The build cache is its own entry, saved by every run. Inside the dependency entry it shared
+    # that entry's key, and an exact hit skips the save -- so it was written once per lockfile and
+    # then frozen: a task whose inputs moved on (R8 took 267-270 s in each of the last three builds
+    # after coming from cache once) could never be cached again. Downloads keep the lockfile key;
+    # only the outputs that change with the code ride the run id. Gradle prunes its own entries.
+    - name: Restore the Gradle build cache
+      id: gradle-build-cache
+      if: inputs.platform == 'android' && inputs.native-dependency-cache == 'true'
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ~/.gradle/caches/build-cache-1
+        key: eas-local-gradle-build-cache-${{ runner.os }}-${{ github.run_id }}
+        restore-keys: |
+          eas-local-gradle-build-cache-${{ runner.os }}-
+
+    # Both platforms spend minutes compiling the same third-party C, C++ and Objective-C on every
+    # run: Xcode the pods, Gradle the React Native libraries' CMake builds (`buildCMake*` tasks,
+    # which Gradle's build cache does not cover). Swift and Kotlin are not covered: ccache only
+    # wraps C-family compilers.
+    #
+    # iOS: `ios.ccacheEnabled` (app.json) makes the Podfile route CC/CXX through React Native's
+    # ccache wrappers, and scripts/eas-build-post-install.sh pins the binary those wrappers run.
+    # Android: CMake reads CMAKE_<LANG>_COMPILER_LAUNCHER from the environment, which reaches every
+    # library's CMake configure through Gradle.
+    #
+    # Hits need no base_dir rewriting: the callers pin EAS_LOCAL_BUILD_WORKINGDIR, so every run
+    # compiles the same files at the same absolute paths.
+    - name: Install ccache
+      if: inputs.native-dependency-cache == 'true'
+      shell: bash
+      env:
+        CCACHE_VERSION: 4.14.2
+        PLATFORM: ${{ inputs.platform }}
+      run: |
+        set -euo pipefail
+        if [[ "$PLATFORM" == ios ]]; then
+          build="darwin"
+          sha256="cf240009630b605b775c7c5c7b7105a3b196c79f31af322c1557969aa28003fc"
+        else
+          build="linux-x86_64-musl-static"
+          sha256="d540ba01f160addbd3dd5e18eda9bd34005591b095c09ac8ae9d0a1b655e7ef5"
+        fi
+        archive="$RUNNER_TEMP/ccache.tar.gz"
+        curl --fail --location --silent --show-error --output "$archive" \
+          "https://github.com/ccache/ccache/releases/download/v$CCACHE_VERSION/ccache-$CCACHE_VERSION-$build.tar.gz"
+        # Not `sha256sum` wherever it exists: macOS now ships a BSD one whose --check rejects
+        # this line format, and that failed every iOS job at setup.
+        if [[ "$PLATFORM" == ios ]]; then
+          echo "$sha256  $archive" | shasum -a 256 --check
+        else
+          echo "$sha256  $archive" | sha256sum --check
+        fi
+        tar --extract --gzip --file "$archive" --directory "$RUNNER_TEMP"
+        sudo install -m 0755 "$RUNNER_TEMP/ccache-$CCACHE_VERSION-$build/ccache" /usr/local/bin/ccache
+        ccache --version | head -1
+        # base_dir + nohashdir make every path under RUNNER_TEMP (EAS's working copy included)
+        # relative before hashing: the second Android build with a restored cache missed all 169
+        # compiles, so something in the absolute paths or working directory differs per run. The
+        # log is for the report, which prints only the working directories ccache saw.
+        {
+          echo "CCACHE_BASEDIR=$RUNNER_TEMP"
+          echo "CCACHE_NOHASHDIR=true"
+          echo "CCACHE_LOGFILE=$RUNNER_TEMP/ccache.log"
+        } >> "$GITHUB_ENV"
+        if [[ "$PLATFORM" == android ]]; then
+          {
+            echo "CCACHE_DIR=$HOME/.cache/ccache"
+            # The same sloppiness React Native's ccache.conf gives iOS. Without pch_defines and
+            # time_macros, 178 of 351 Android calls were "could not use precompiled header", and
+            # the mtime/ctime pair keeps direct mode for headers the build generates just before
+            # compiling them.
+            echo "CCACHE_SLOPPINESS=pch_defines,time_macros,include_file_mtime,include_file_ctime,system_headers"
+            # ccache identifies the compiler by its mtime by default, and the NDK is installed
+            # afresh by sdkmanager on every run, so every run had a "new" clang: a cross-run diff
+            # of one compile's hashed inputs differed in exactly that line, and 97% of compiles
+            # missed a warm cache. The NDK version (also in the cache key) names the compiler.
+            echo "CCACHE_COMPILERCHECK=string:ndk-27.1.12297006"
+            echo "CMAKE_C_COMPILER_LAUNCHER=/usr/local/bin/ccache"
+            echo "CMAKE_CXX_COMPILER_LAUNCHER=/usr/local/bin/ccache"
+          } >> "$GITHUB_ENV"
+        fi
+
+    # Every run saves a new entry (the run id ends the key) and restores the newest one with the
+    # same native inputs, falling back to any entry for the toolchain: the same pull request's
+    # previous run, or the last release's on main. A fixed key would be saved once and then
+    # frozen, since an exact hit skips the save -- which is how a hashing change left the iOS cache
+    # serving entries nothing could hit. The cache is small, so per-run entries are cheap. The
+    # toolchain version is in the key because both configurations set `system_headers` sloppiness,
+    # so an SDK or NDK change alone would not invalidate an entry.
+    - name: Restore the iOS ccache
+      id: ccache-ios
+      if: inputs.platform == 'ios' && inputs.native-dependency-cache == 'true'
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ~/Library/Caches/ccache
+        key: eas-local-ccache-ios-${{ runner.os }}-${{ runner.arch }}-xcode-27.1-${{ hashFiles('bun.lock', 'app.json', 'app.config.ts', 'patches/**', 'plugins/*.js', 'modules/*/ios/**') }}-${{ github.run_id }}
+        restore-keys: |
+          eas-local-ccache-ios-${{ runner.os }}-${{ runner.arch }}-xcode-27.1-
+
+    - name: Restore the Android ccache
+      id: ccache-android
+      if: inputs.platform == 'android' && inputs.native-dependency-cache == 'true'
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ~/.cache/ccache
+        key: eas-local-ccache-android-${{ runner.os }}-${{ runner.arch }}-ndk-27.1.12297006-${{ hashFiles('bun.lock', 'app.json', 'app.config.ts', 'patches/**', 'plugins/*.js', 'modules/*/android/**') }}-${{ github.run_id }}
+        restore-keys: |
+          eas-local-ccache-android-${{ runner.os }}-${{ runner.arch }}-ndk-27.1.12297006-
+
+    # Zeroed after the restore, so the caller's report counts this build, not the ones that filled it.
+    - name: Reset ccache statistics
+      if: inputs.native-dependency-cache == 'true'
+      shell: bash
+      run: ccache --zero-stats
+
+    # Expo's Metro config has a build-runner mode: with both variables set it reads entries from
+    # RESTORE and writes every entry the bundle used -- hits included -- to OUTPUT, so saving OUTPUT
+    # stores exactly this build's working set and an entry nothing uses any more is dropped instead
+    # of carried forward. Metro keys each transform by file content and transformer config, so a
+    # stale entry is a miss, never a wrong transform. Gradle (`createBundleReleaseJsAndAssets`) and
+    # Xcode's bundle phase both inherit the variables through `eas build --local`.
+    - name: Point Metro at the build cache directories
+      if: inputs.native-dependency-cache == 'true'
+      shell: bash
+      run: |
+        set -euo pipefail
+        restore_dir="$RUNNER_TEMP/metro-cache"
+        output_dir="$RUNNER_TEMP/metro-cache-output"
+        rm -rf -- "$output_dir"
+        mkdir -p -- "$restore_dir" "$output_dir"
+        {
+          echo "EXPO_METRO_CACHE_RESTORE_DIR=$restore_dir"
+          echo "EXPO_METRO_CACHE_OUTPUT_DIR=$output_dir"
+        } >> "$GITHUB_ENV"
+
+    # The second hash covers the JS the bundle is built from, so a push that changes only native
+    # code hits exactly and saves nothing; any JS change falls back to the newest entry for the
+    # same dependency set, then to any entry at all.
+    - name: Restore the Metro transform cache
+      id: metro-cache
+      if: inputs.native-dependency-cache == 'true'
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ${{ runner.temp }}/metro-cache
+        key: eas-local-metro-${{ inputs.platform }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('bun.lock', 'app.json', 'app.config.ts', 'metro.config.js', 'patches/**') }}-${{ hashFiles('src/**', 'assets/**', 'modules/*/index.ts', 'modules/*/src/**') }}
+        restore-keys: |
+          eas-local-metro-${{ inputs.platform }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('bun.lock', 'app.json', 'app.config.ts', 'metro.config.js', 'patches/**') }}-
+          eas-local-metro-${{ inputs.platform }}-${{ runner.os }}-${{ runner.arch }}-
 
     - name: Install EAS CLI
       shell: bash
