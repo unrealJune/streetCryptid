@@ -29,6 +29,14 @@ enum TelemetryConfigurator {
   private static let lock = NSLock()
   private static var applied: (endpoint: String, instanceId: String)?
   private static var lastResult = false
+  private static var spoolDirSet = false
+
+  /// Where the Rust exporter keeps batches it could not send (`telemetry_spool.rs`). Caches: not
+  /// backed up, and losing it to a purge costs telemetry, nothing else.
+  private static var spoolDirectory: URL? {
+    FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first?
+      .appendingPathComponent("otel-spool", isDirectory: true)
+  }
 
   /// Point the Rust core's exporter at `endpoint`, unless that is already where it points.
   ///
@@ -50,6 +58,12 @@ enum TelemetryConfigurator {
       return lastResult
     }
     applied = (endpoint, instanceId)
+    // Before the first configure, so a phone that is offline from launch keeps what it records
+    // (on 2026-10-31 an offline iPhone's Rust spans for three Bump pairings were lost outright).
+    if !spoolDirSet, let dir = spoolDirectory {
+      spoolDirSet = true
+      _ = setTelemetrySpoolDir(dir: dir.path)
+    }
     lastResult = configureTelemetry(endpoint: endpoint, instanceId: instanceId)
     return lastResult
   }

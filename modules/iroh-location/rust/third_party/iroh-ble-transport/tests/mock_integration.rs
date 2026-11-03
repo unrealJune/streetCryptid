@@ -14,7 +14,7 @@ use iroh_ble_transport::transport::{
     registry::{Registry, SnapshotMaps},
     store::InMemoryPeerStore,
     test_util::{CallKind, MockBleInterface},
-    transport::L2capPolicy,
+    transport::{BleAdapterState, L2capPolicy},
 };
 use tokio::sync::mpsc;
 
@@ -94,12 +94,7 @@ async fn mid_session_disconnect_drains_and_closes_channel() {
     let prefix: KeyPrefix = [2u8; KEY_PREFIX_LEN];
     tx.send(PeerCommand::Advertised {
         prefix,
-        device: blew::BleDevice {
-            id: device_id.clone(),
-            name: None,
-            rssi: None,
-            services: vec![],
-        },
+        device_id: device_id.clone(),
         rssi: None,
     })
     .await
@@ -155,6 +150,112 @@ async fn mid_session_disconnect_drains_and_closes_channel() {
         connect_count, 1,
         "registry must not auto-reconnect after disconnect; reconnect is now app-driven"
     );
+}
+
+/// A teardown we asked for ourselves (the last watched iroh connection closed,
+/// so `handle_hook_event` raises `Stalled { LocalClose }`) must not tombstone
+/// the peer. Before this, the entry went `Draining` → `Dead` and sat there for
+/// `DEAD_GC_TTL`, giving a hard 65 s floor on redialing a peer a foot away.
+#[tokio::test]
+async fn local_teardown_lets_the_peer_be_redialed_immediately() {
+    let iface = Arc::new(MockBleInterface::new());
+    let device_id = blew::DeviceId::from("dev-teardown");
+    for id in [1u64, 2] {
+        iface.on_connect(
+            device_id.clone(),
+            Ok(ChannelHandle {
+                id,
+                path: ConnectPath::Gatt,
+            }),
+        );
+    }
+
+    let (tx, rx) = mpsc::channel::<PeerCommand>(256);
+    let (incoming_tx, _incoming_rx) = mpsc::channel::<IncomingPacket>(16);
+    let snapshots = Arc::new(ArcSwap::from(Arc::new(SnapshotMaps::default())));
+    let (retransmits, truncations, empty_frames) = zero_counters();
+    let routing_local = Arc::new(iroh_ble_transport::transport::routing::Routing::new());
+    let driver = Driver::new(
+        iface.clone(),
+        tx.clone(),
+        incoming_tx,
+        retransmits,
+        truncations,
+        empty_frames,
+        Arc::new(InMemoryPeerStore::new()),
+        Arc::clone(&routing_local),
+    );
+    let reg = Registry::new_for_test_with_policy(L2capPolicy::Disabled);
+    let snap_for_actor = snapshots.clone();
+    tokio::spawn(async move {
+        reg.run(
+            rx,
+            driver,
+            snap_for_actor,
+            test_wakers(),
+            Arc::clone(&routing_local),
+        )
+        .await;
+    });
+
+    let prefix: KeyPrefix = [7u8; KEY_PREFIX_LEN];
+    let advertise = || PeerCommand::Advertised {
+        prefix,
+        device_id: device_id.clone(),
+        rssi: None,
+    };
+    let (waker_tx, _waker_rx) = mpsc::channel::<()>(4);
+    let send = |datagram: &'static [u8]| PeerCommand::SendDatagram {
+        device_id: device_id.clone(),
+        target_endpoint: None,
+        tx_gen: 0,
+        datagram: bytes::Bytes::from_static(datagram),
+        waker: waker_from_channel(waker_tx.clone()),
+    };
+
+    tx.send(advertise()).await.unwrap();
+    tx.send(send(b"ping")).await.unwrap();
+    wait_for_call_count(
+        &iface,
+        CallKindMatcher::Connect,
+        1,
+        std::time::Duration::from_secs(5),
+    )
+    .await;
+
+    // The application hangs up: the pipe is torn down on purpose.
+    tx.send(PeerCommand::Stalled {
+        device_id: device_id.clone(),
+        cause: iroh_ble_transport::transport::peer::StallCause::LocalClose,
+    })
+    .await
+    .unwrap();
+    wait_for_call_count(
+        &iface,
+        CallKindMatcher::Disconnect,
+        1,
+        std::time::Duration::from_secs(2),
+    )
+    .await;
+    // The disconnect callback confirms the close landed, which resolves the
+    // drain without waiting out DRAINING_TIMEOUT.
+    tx.send(PeerCommand::CentralDisconnected {
+        device_id: device_id.clone(),
+        cause: blew::DisconnectCause::LocalClose,
+    })
+    .await
+    .unwrap();
+
+    // The application redials. No tick, no GC wait: the entry is dialable now.
+    tx.send(advertise()).await.unwrap();
+    tx.send(send(b"ping-again")).await.unwrap();
+    wait_for_call_count(
+        &iface,
+        CallKindMatcher::Connect,
+        2,
+        std::time::Duration::from_secs(5),
+    )
+    .await;
 }
 
 #[tokio::test]
@@ -214,12 +315,7 @@ async fn adapter_toggle_reconnects_all_peers_with_single_purge() {
         let device_id = blew::DeviceId::from(format!("dev-{i}").as_str());
         tx.send(PeerCommand::Advertised {
             prefix,
-            device: blew::BleDevice {
-                id: device_id.clone(),
-                name: None,
-                rssi: None,
-                services: vec![],
-            },
+            device_id: device_id.clone(),
             rssi: None,
         })
         .await
@@ -291,25 +387,41 @@ async fn adapter_on_rebuilds_server_and_restarts_advertising_and_l2cap() {
         .await
         .unwrap();
 
-    tokio::time::timeout(Duration::from_secs(2), async {
+    let restore_calls = tokio::time::timeout(Duration::from_secs(2), async {
         loop {
             let calls = iface.calls();
-            let has_rebuild = calls.iter().any(|c| matches!(c, CallKind::RebuildServer));
-            let has_restart_adv = calls
-                .iter()
-                .any(|c| matches!(c, CallKind::RestartAdvertising));
-            let has_restart_l2cap = calls
-                .iter()
-                .any(|c| matches!(c, CallKind::RestartL2capListener));
-            if has_rebuild && has_restart_adv && has_restart_l2cap {
-                return;
+            let has_restart_scan = calls.iter().any(|c| matches!(c, CallKind::RestartScan));
+            let restore_calls: Vec<CallKind> = calls
+                .into_iter()
+                .filter(|c| {
+                    matches!(
+                        c,
+                        CallKind::RebuildServer
+                            | CallKind::RestartAdvertising
+                            | CallKind::RestartL2capListener
+                    )
+                })
+                .collect();
+            if restore_calls.len() >= 3 && has_restart_scan {
+                return restore_calls;
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
     })
     .await
     .expect(
-        "expected rebuild_server + restart_advertising + restart_l2cap_listener after adapter-on",
+        "expected rebuild_server + restart_advertising + restart_l2cap_listener + restart_scan after adapter-on",
+    );
+    assert!(
+        matches!(
+            restore_calls.as_slice(),
+            [
+                CallKind::RebuildServer,
+                CallKind::RestartL2capListener,
+                CallKind::RestartAdvertising,
+            ]
+        ),
+        "peripheral restore must rebuild the server and re-open L2CAP before advertising: {restore_calls:?}"
     );
 }
 
@@ -361,12 +473,7 @@ async fn version_mismatch_deads_peer_and_closes_channel() {
     let prefix: KeyPrefix = [0x77; KEY_PREFIX_LEN];
     tx.send(PeerCommand::Advertised {
         prefix,
-        device: blew::BleDevice {
-            id: device_id.clone(),
-            name: None,
-            rssi: None,
-            services: vec![],
-        },
+        device_id: device_id.clone(),
         rssi: None,
     })
     .await
@@ -459,12 +566,7 @@ async fn version_match_lets_data_pipe_start() {
     let prefix: KeyPrefix = [0x78; KEY_PREFIX_LEN];
     tx.send(PeerCommand::Advertised {
         prefix,
-        device: blew::BleDevice {
-            id: device_id.clone(),
-            name: None,
-            rssi: None,
-            services: vec![],
-        },
+        device_id: device_id.clone(),
         rssi: None,
     })
     .await
@@ -560,12 +662,7 @@ async fn mock_fabric_handles_bidirectional_traffic() {
     central_inbox_tx
         .send(PeerCommand::Advertised {
             prefix,
-            device: blew::BleDevice {
-                id: fabric.peripheral_as_device.clone(),
-                name: None,
-                rssi: None,
-                services: vec![],
-            },
+            device_id: fabric.peripheral_as_device.clone(),
             rssi: None,
         })
         .await
@@ -703,12 +800,7 @@ async fn forget_then_gc_then_rediscover_creates_fresh_peer() {
     let prefix: KeyPrefix = [7u8; KEY_PREFIX_LEN];
     tx.send(PeerCommand::Advertised {
         prefix,
-        device: blew::BleDevice {
-            id: device_id.clone(),
-            name: None,
-            rssi: None,
-            services: vec![],
-        },
+        device_id: device_id.clone(),
         rssi: None,
     })
     .await
@@ -754,12 +846,7 @@ async fn forget_then_gc_then_rediscover_creates_fresh_peer() {
     // get blocked by any stale state.
     tx.send(PeerCommand::Advertised {
         prefix,
-        device: blew::BleDevice {
-            id: device_id.clone(),
-            name: None,
-            rssi: None,
-            services: vec![],
-        },
+        device_id: device_id.clone(),
         rssi: None,
     })
     .await
@@ -828,12 +915,7 @@ async fn connect_failure_retries_on_next_tick() {
     let prefix: KeyPrefix = [9u8; KEY_PREFIX_LEN];
     tx.send(PeerCommand::Advertised {
         prefix,
-        device: blew::BleDevice {
-            id: device_id.clone(),
-            name: None,
-            rssi: None,
-            services: vec![],
-        },
+        device_id: device_id.clone(),
         rssi: None,
     })
     .await
@@ -927,4 +1009,106 @@ async fn wait_for_call_count(
     })
     .await
     .expect("timed out waiting for calls");
+}
+
+/// Both the central and peripheral event streams report every adapter power
+/// transition, so the registry sees each one twice. Subscribers must see one
+/// edge per transition, published after the registry has acted on it.
+#[tokio::test]
+async fn adapter_state_changes_publish_once_per_transition() {
+    let iface = Arc::new(MockBleInterface::new());
+    let (tx, rx) = mpsc::channel::<PeerCommand>(256);
+    let (incoming_tx, _incoming_rx) = mpsc::channel::<IncomingPacket>(16);
+    let snapshots = Arc::new(ArcSwap::from(Arc::new(SnapshotMaps::default())));
+    let (retransmits, truncations, empty_frames) = zero_counters();
+    let routing_local = Arc::new(iroh_ble_transport::transport::routing::Routing::new());
+    let driver = Driver::new(
+        iface.clone(),
+        tx.clone(),
+        incoming_tx,
+        retransmits,
+        truncations,
+        empty_frames,
+        Arc::new(InMemoryPeerStore::new()),
+        Arc::clone(&routing_local),
+    );
+    let (state_tx, mut state_rx) = tokio::sync::watch::channel(BleAdapterState::PoweredOn);
+    let reg =
+        Registry::new_for_test_with_policy(L2capPolicy::Disabled).with_adapter_state_tx(state_tx);
+    let snap_for_actor = snapshots.clone();
+    tokio::spawn(async move {
+        reg.run(
+            rx,
+            driver,
+            snap_for_actor,
+            test_wakers(),
+            Arc::clone(&routing_local),
+        )
+        .await;
+    });
+
+    // An advertisement from a fresh device lands in the snapshot one actor
+    // iteration after every command queued ahead of it has been published.
+    let mut barrier_seq = 0u8;
+    let mut barrier = async || {
+        barrier_seq += 1;
+        let device_id = blew::DeviceId::from(format!("barrier-{barrier_seq}"));
+        tx.send(PeerCommand::Advertised {
+            prefix: [barrier_seq; KEY_PREFIX_LEN],
+            device_id: device_id.clone(),
+            rssi: None,
+        })
+        .await
+        .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !snapshots.load().peer_states.contains_key(&device_id) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("barrier advertisement never reached the snapshot");
+    };
+
+    tx.send(PeerCommand::AdapterStateChanged { powered: true })
+        .await
+        .unwrap();
+    barrier().await;
+    assert!(
+        !state_rx.has_changed().unwrap(),
+        "powered-on while already on must not publish"
+    );
+
+    tx.send(PeerCommand::AdapterStateChanged { powered: false })
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), state_rx.changed())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(*state_rx.borrow_and_update(), BleAdapterState::PoweredOff);
+
+    tx.send(PeerCommand::AdapterStateChanged { powered: false })
+        .await
+        .unwrap();
+    barrier().await;
+    assert!(
+        !state_rx.has_changed().unwrap(),
+        "duplicate powered-off report must not publish"
+    );
+
+    tx.send(PeerCommand::AdapterStateChanged { powered: true })
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), state_rx.changed())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(*state_rx.borrow_and_update(), BleAdapterState::PoweredOn);
+    assert!(
+        iface
+            .calls()
+            .iter()
+            .any(|c| matches!(c, CallKind::RestartScan)),
+        "the power-on edge is published after the registry has acted on it"
+    );
 }

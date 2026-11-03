@@ -108,9 +108,18 @@ pub fn record_process_memory(sample: ProcessMemorySample) {
         memory.open_spans = tracing::field::Empty,
         memory.open_span_events = tracing::field::Empty,
         memory.heaviest_open_span = tracing::field::Empty,
+        telemetry.backlog_batches = tracing::field::Empty,
+        telemetry.backlog_bytes = tracing::field::Empty,
+        telemetry.spooled_total = tracing::field::Empty,
+        telemetry.replayed_total = tracing::field::Empty,
+        telemetry.dropped_total = tracing::field::Empty,
     );
     let rust = crate::alloc_stats::snapshot();
     let ledger = crate::telemetry::ledger::snapshot();
+    // The core's own export backlog (`telemetry_spool`). A batch replayed late keeps its original
+    // timestamps, so a backlog that drains is invisible in the spans themselves; this is where it
+    // shows.
+    let spool = crate::telemetry_spool::snapshot();
     let u64s = [
         ("memory.rss_bytes", sample.rss_bytes),
         ("memory.rss_anon_bytes", sample.rss_anon_bytes),
@@ -141,6 +150,11 @@ pub fn record_process_memory(sample: ProcessMemorySample) {
         ),
         ("memory.open_spans", Some(ledger.open_spans)),
         ("memory.open_span_events", Some(ledger.open_span_events)),
+        ("telemetry.backlog_batches", Some(spool.backlog_batches)),
+        ("telemetry.backlog_bytes", Some(spool.backlog_bytes)),
+        ("telemetry.spooled_total", Some(spool.spooled_total)),
+        ("telemetry.replayed_total", Some(spool.replayed_total)),
+        ("telemetry.dropped_total", Some(spool.dropped_total)),
     ];
     for (field, value) in u64s {
         if let Some(value) = value {

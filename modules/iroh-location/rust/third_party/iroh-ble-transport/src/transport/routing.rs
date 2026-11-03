@@ -26,7 +26,7 @@
 //!   the BLE transport id. Tokens are [`StableConnId`] values
 //!   round-tripped through iroh's `CustomAddr` carrier.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::task::Waker;
@@ -41,6 +41,10 @@ use crate::transport::transport::BLE_TRANSPORT_ID;
 
 const PIPE_TOMBSTONE_TTL: Duration = Duration::from_secs(30);
 const MAX_PIPE_TOMBSTONES: usize = 128;
+/// How long a retired id stays claimable by its peer's next pipe. Long enough for a pairing that
+/// was walked away from and retried; iroh forgets an idle remote well before this.
+const RETIRED_ID_TTL: Duration = Duration::from_secs(600);
+const MAX_RETIRED_IDS: usize = 128;
 
 /// Length in bytes of the opaque token payload embedded in a BLE
 /// `CustomAddr`. The token is a little-endian `u64`
@@ -65,6 +69,16 @@ pub fn token_custom_addr(token: u64) -> CustomAddr {
     CustomAddr::from_parts(BLE_TRANSPORT_ID, &token.to_le_bytes())
 }
 
+/// Token reserved as the `local_addr` sentinel. Never minted for a peer.
+pub const LOCAL_ADDR_TOKEN: u64 = 0;
+
+/// The single `CustomAddr` the BLE transport publishes as its local
+/// address, and reports as the receiving address of every inbound packet.
+#[must_use]
+pub fn local_custom_addr() -> CustomAddr {
+    token_custom_addr(LOCAL_ADDR_TOKEN)
+}
+
 /// Parse a `CustomAddr` as a BLE-transport token. Returns an error
 /// if the address is for a different transport or has the wrong
 /// length.
@@ -82,7 +96,9 @@ pub fn parse_token_addr(addr: &CustomAddr) -> io::Result<u64> {
 
 /// Opaque handle iroh sees (wrapped in a `CustomAddr`) for a BLE pipe.
 ///
-/// Monotonic, minted fresh every time a pipe is opened, never reused.
+/// Monotonic and minted fresh for a new peer. Reused only for the SAME peer once its pipe is
+/// gone (`Routing::reserve_outbound`, `Routing::resurrect_for_send`), because iroh keeps dialling
+/// a peer on the id it was given.
 /// The numeric value is carried as the payload of a BLE-transport
 /// `CustomAddr` via [`token_custom_addr`] / [`parse_token_addr`] so
 /// iroh's Connections keep a stable id across the pipe's lifetime.
@@ -251,9 +267,71 @@ struct RoutingInner {
     /// endpoint. Keyed on endpoint so different resolvers don't wake
     /// each other spuriously.
     endpoint_wakers: HashMap<EndpointId, Vec<Waker>>,
+    /// The endpoint each promoted pipe served, for as long as the pipe lives. Moved into
+    /// `retired` when the pipe goes.
+    pipe_endpoints: HashMap<StableConnId, EndpointId>,
+    /// Ids whose pipes are gone, with the endpoint they served. iroh keeps a path to a peer
+    /// under the id it was given and keeps dialling that path after the pipe behind it is gone;
+    /// it does not move to a newer id the resolver yields. So the next pipe to the same peer is
+    /// opened under the SAME id (`reserve_outbound`, `resurrect_for_send`), and iroh's path simply
+    /// works again. See those for the 2026-10-29 failure this fixes.
+    retired: HashMap<StableConnId, (EndpointId, Instant)>,
+    /// Devices the registry is connecting to, handshaking with or connected to (central or
+    /// peripheral), refreshed after every registry command. A scan must not move a prefix off one
+    /// of these: see [`Routing::note_scan_hint`].
+    live_devices: HashSet<DeviceId>,
 }
 
 impl RoutingInner {
+    fn prune_retired(&mut self, now: Instant) {
+        self.retired
+            .retain(|_, (_, at)| now.saturating_duration_since(*at) <= RETIRED_ID_TTL);
+        if self.retired.len() <= MAX_RETIRED_IDS {
+            return;
+        }
+        let mut by_age: Vec<(StableConnId, Instant)> = self
+            .retired
+            .iter()
+            .map(|(id, (_, at))| (*id, *at))
+            .collect();
+        by_age.sort_by_key(|(_, at)| *at);
+        let overflow = self.retired.len() - MAX_RETIRED_IDS;
+        for (id, _) in by_age.into_iter().take(overflow) {
+            self.retired.remove(&id);
+        }
+    }
+
+    /// Whether `endpoint_id` currently has a live route other than through a reservation.
+    fn has_live_route(&self, endpoint_id: &EndpointId) -> bool {
+        self.routable.contains_key(endpoint_id)
+            || self
+                .pending
+                .values()
+                .any(|p| p.target_endpoint.as_ref() == Some(endpoint_id))
+    }
+
+    /// Reserve `stable_id` (a retired id) again for `endpoint_id`, so iroh's path to it routes
+    /// to the next pipe opened to that peer.
+    fn reserve_retired(&mut self, stable_id: StableConnId, endpoint_id: EndpointId) {
+        let prefix = prefix_from_endpoint(&endpoint_id);
+        self.retired.remove(&stable_id);
+        self.pipe_tombstones.remove(&stable_id);
+        self.reservations.insert(
+            prefix,
+            Reservation {
+                stable_id,
+                endpoint_id,
+                reserved_at: Instant::now(),
+            },
+        );
+        self.reserved_stable_ids.insert(stable_id, prefix);
+        tracing::debug!(
+            %stable_id,
+            %endpoint_id,
+            "routing: retired id reserved again for the same peer"
+        );
+    }
+
     fn prune_pipe_tombstones(&mut self, now: Instant) {
         self.pipe_tombstones.retain(|_, tombstone| {
             now.saturating_duration_since(tombstone.evicted_at) <= PIPE_TOMBSTONE_TTL
@@ -350,6 +428,10 @@ impl Routing {
             let removed = inner.pipes.remove(&id);
             if let Some(pipe) = &removed {
                 let now = Instant::now();
+                if let Some(endpoint_id) = inner.pipe_endpoints.remove(&id) {
+                    inner.prune_retired(now);
+                    inner.retired.insert(id, (endpoint_id, now));
+                }
                 inner.prune_pipe_tombstones(now);
                 inner.pipe_tombstones.insert(
                     id,
@@ -415,8 +497,50 @@ impl Routing {
     /// replaces the v1 `pinned` mechanism and the registry-side
     /// `publish_active_prefixes` plumbing.
     pub fn note_scan_hint(&self, prefix: KeyPrefix, device: DeviceId) -> ScanHintUpdate {
+        self.update_scan_hint(prefix, device, true)
+    }
+
+    /// [`Self::note_scan_hint`] for a device a handshake has just VERIFIED: authoritative, so a
+    /// link still coming up on another device does not hold the prefix (a routable pipe still
+    /// does).
+    pub(crate) fn note_verified_scan_hint(
+        &self,
+        prefix: KeyPrefix,
+        device: DeviceId,
+    ) -> ScanHintUpdate {
+        self.update_scan_hint(prefix, device, false)
+    }
+
+    fn update_scan_hint(
+        &self,
+        prefix: KeyPrefix,
+        device: DeviceId,
+        respect_live_links: bool,
+    ) -> ScanHintUpdate {
         let update = {
             let mut inner = self.inner.lock();
+            // The same rule while a link is still coming up, before any pipe is routable. An
+            // Android peripheral re-advertises under a fresh random address the moment a central
+            // connects to it, so the scan reports the peer under a new DeviceId within a second
+            // of every connect. Moving the prefix there Forgot the link that was just made and
+            // dialled an address the phone could not connect to again while that link was up:
+            // on 2026-10-31 an iPhone did this on every launch, its connect to the Pixel
+            // succeeded and was abandoned, and the Pixel served the orphaned link for 45 s with
+            // nothing on it while refusing to dial the iPhone itself ("already holds a verified
+            // connection"). No pairing message crossed in ten attempts.
+            if respect_live_links
+                && let Some(current) = inner.scan_hint.get(&prefix).cloned()
+                && current != device
+                && inner.live_devices.contains(&current)
+            {
+                tracing::trace!(
+                    ?prefix,
+                    scan_device = %device,
+                    bound_device = %current,
+                    "routing: scan_hint ignored — the current device has a live link"
+                );
+                return ScanHintUpdate::ActivelyBound { bound: current };
+            }
             // Anti-MAC-rotation: if any routable pipe's endpoint maps
             // to this prefix, and its device_id differs from the new
             // scan, reject the update.
@@ -454,6 +578,15 @@ impl Routing {
             self.wake_endpoint_waiters_for_prefix(&prefix);
         }
         update
+    }
+
+    /// Replace the set of devices with a link coming up or up. Called by the registry after every
+    /// command it handles.
+    pub(crate) fn set_live_devices(&self, devices: HashSet<DeviceId>) {
+        let mut inner = self.inner.lock();
+        if inner.live_devices != devices {
+            inner.live_devices = devices;
+        }
     }
 
     fn wake_endpoint_waiters_for_prefix(&self, prefix: &KeyPrefix) {
@@ -755,12 +888,37 @@ impl Routing {
     /// If a reservation for this prefix already exists, return the
     /// existing id (idempotent). This keeps `CustomAddr`s stable
     /// across repeated resolve calls for the same peer.
+    ///
+    /// A peer this transport has had a pipe to before keeps the id iroh already knows it by:
+    /// while that pipe is still winding down its own id is the answer, and once it is gone the
+    /// id is reserved again for the next pipe (see `RoutingInner::retired`).
     pub fn reserve_outbound(&self, endpoint_id: EndpointId) -> StableConnId {
         let prefix = crate::transport::routing::prefix_from_endpoint(&endpoint_id);
         let mut inner = self.inner.lock();
-        inner.prune_pipe_tombstones(Instant::now());
+        let now = Instant::now();
+        inner.prune_pipe_tombstones(now);
+        inner.prune_retired(now);
         if let Some(existing) = inner.reservations.get(&prefix) {
             return existing.stable_id;
+        }
+        let winding_down = inner
+            .pipe_endpoints
+            .iter()
+            .filter(|(id, ep)| **ep == endpoint_id && inner.pipes.contains_key(id))
+            .map(|(id, _)| *id)
+            .max();
+        if let Some(stable_id) = winding_down {
+            return stable_id;
+        }
+        let retired = inner
+            .retired
+            .iter()
+            .filter(|(_, (ep, _))| *ep == endpoint_id)
+            .max_by_key(|(_, (_, at))| *at)
+            .map(|(id, _)| *id);
+        if let Some(stable_id) = retired {
+            inner.reserve_retired(stable_id, endpoint_id);
+            return stable_id;
         }
         let stable_id = StableConnId(self.next_id.fetch_add(1, Ordering::Relaxed).wrapping_add(1));
         inner.reservations.insert(
@@ -786,6 +944,32 @@ impl Routing {
         let prefix = *inner.reserved_stable_ids.get(&stable_id)?;
         let reservation = inner.reservations.get(&prefix)?;
         Some((reservation.endpoint_id, prefix))
+    }
+
+    /// iroh is sending on `stable_id`, a retired id: reserve it again for the peer it served, so
+    /// the send dials that peer. `poll_send` calls this before dropping a transmit to a gone pipe.
+    ///
+    /// Returns the reservation's target, as [`Self::reservation_target`] would, or `None` when the
+    /// id should stay dead: it never served a peer, the peer has a live route under another id
+    /// (a dedup loser's stragglers must not redial), another id is already reserved for it, or the
+    /// peer is not in scan range.
+    ///
+    /// On 2026-10-29 every nearby pairing message after a pipe teardown was dialled on the old id
+    /// and dropped here as a "recently-evicted BLE stable-conn token" until its connect timed out,
+    /// while the resolver had already yielded a fresh id that iroh never tried.
+    pub fn resurrect_for_send(&self, stable_id: StableConnId) -> Option<(EndpointId, KeyPrefix)> {
+        let mut inner = self.inner.lock();
+        inner.prune_retired(Instant::now());
+        let (endpoint_id, _) = *inner.retired.get(&stable_id)?;
+        let prefix = prefix_from_endpoint(&endpoint_id);
+        if inner.has_live_route(&endpoint_id) || inner.reservations.contains_key(&prefix) {
+            return None;
+        }
+        if !inner.scan_hint.contains_key(&prefix) {
+            return None;
+        }
+        inner.reserve_retired(stable_id, endpoint_id);
+        Some((endpoint_id, prefix))
     }
 
     /// Look up the reservation for this prefix, if any. Resolver calls
@@ -995,6 +1179,7 @@ impl Routing {
                         verified_at: Instant::now(),
                     },
                 );
+                inner.pipe_endpoints.insert(pipe_id, remote_endpoint);
                 (evicted, true)
             }
             Decision::Reject => (Vec::new(), false),
@@ -1587,6 +1772,33 @@ mod tests {
     }
 
     #[test]
+    fn note_scan_hint_keeps_a_device_whose_link_is_still_coming_up() {
+        let r = Routing::new();
+        let prefix: KeyPrefix = [11u8; 12];
+        let connecting = dev("first-address");
+        let readvertised = dev("address-after-connect");
+        r.note_scan_hint(prefix, connecting.clone());
+        r.set_live_devices(HashSet::from([connecting.clone()]));
+
+        assert_eq!(
+            r.note_scan_hint(prefix, readvertised.clone()),
+            ScanHintUpdate::ActivelyBound {
+                bound: connecting.clone()
+            }
+        );
+        assert_eq!(r.scan_hint_for_prefix(&prefix).as_ref(), Some(&connecting));
+
+        // Once that link is gone, a rotated address is followed as before.
+        r.set_live_devices(HashSet::new());
+        assert_eq!(
+            r.note_scan_hint(prefix, readvertised.clone()),
+            ScanHintUpdate::Replaced {
+                previous: connecting
+            }
+        );
+    }
+
+    #[test]
     fn note_scan_hint_allows_same_device_while_actively_bound() {
         // Re-noting the same device while pinned is Unchanged, not
         // ActivelyBound. This models the common case of a peer
@@ -1636,6 +1848,60 @@ mod tests {
     fn device_for_endpoint_none_when_unknown() {
         let r = Routing::new();
         assert!(r.device_for_endpoint(&test_endpoint(81)).is_none());
+    }
+
+    /// The redial seam behind #12. Resuming the registry after a local
+    /// teardown only helps if routing can still translate the endpoint back
+    /// into a `DeviceId` — otherwise the peer is dialable and nothing ever
+    /// asks it to dial. Walks the whole chain the way the real code does:
+    /// `handle_hook_event`'s `ConnectionClosed` arm evicts, the driver's
+    /// pipe-close path evicts the pipe, then `BleAddressLookup::resolve` and
+    /// `poll_send` have to find their way home.
+    #[test]
+    fn endpoint_still_resolves_to_its_device_after_a_local_teardown() {
+        let r = Routing::new();
+        let endpoint = test_endpoint(0x21);
+        let prefix = prefix_from_endpoint(&endpoint);
+        let device = dev("peer-teardown");
+
+        // Scan saw the peer, iroh dialled it, the pipe went routable.
+        r.note_scan_hint(prefix, device.clone());
+        let reserved = r.reserve_outbound(endpoint);
+        let consumed = r
+            .consume_reservation_for_prefix(&prefix)
+            .expect("driver consumes the reservation at pipe-open");
+        assert_eq!(consumed.stable_id, reserved);
+        r.register_pipe_with_id(reserved, device.clone(), Direction::Outbound);
+        r.insert_routable(endpoint, reserved, Dialer::Low);
+
+        // The teardown: what the `ConnectionClosed` arm does, plus the
+        // driver's pipe-close eviction.
+        assert!(r.evict_routable_if_pipe(&endpoint, reserved).is_some());
+        r.evict_pipe_state(reserved);
+        r.evict_pipe(reserved);
+
+        // Resolve, step by step. Every pipe-shaped source is gone...
+        assert!(r.routable_pipe_for(&endpoint).is_none());
+        assert!(r.pending_pipe_for(&endpoint).is_none());
+        assert!(r.reservation_for_prefix(&prefix).is_none());
+        // ...but the scan hint outlives the connection: no production path
+        // calls `forget_scan_hint`, which is exactly why a redial can find
+        // the peer without waiting for another advertisement.
+        assert_eq!(r.scan_hint_for_prefix(&prefix), Some(device.clone()));
+
+        let redial = r.reserve_outbound(endpoint);
+        assert_ne!(
+            redial, reserved,
+            "the redial gets a fresh id, not the dead pipe's"
+        );
+
+        // And `poll_send`'s translation of that CustomAddr back to a device.
+        assert!(r.device_for_pipe(redial).is_none());
+        let (target, target_prefix) = r
+            .reservation_target(redial)
+            .expect("the fresh reservation resolves");
+        assert_eq!(target, endpoint);
+        assert_eq!(r.scan_hint_for_prefix(&target_prefix), Some(device));
     }
 
     #[test]
@@ -1847,6 +2113,110 @@ mod tests {
                 "same-category redial must evict old ({dialer:?})"
             );
         }
+    }
+
+    // ---------- a peer keeps its id across pipes ----------
+
+    /// A promoted pipe to `peer`, released the way the dedup hook releases an idle one.
+    fn released_pipe(r: &Routing, me: &EndpointId, peer: EndpointId) -> StableConnId {
+        let id = r.register_pipe(dev("peer-mac"), Direction::Outbound);
+        r.register_pending(id, Some(peer));
+        assert!(matches!(
+            r.promote(id, me, peer),
+            PromoteOutcome::Accepted { .. }
+        ));
+        let _ = r.evict_routable_if_pipe(&peer, id);
+        let _ = r.evict_pipe_state(id);
+        id
+    }
+
+    /// The 2026-10-29 failure, at the routing layer: after a pipe went, iroh kept dialling the
+    /// peer on that pipe's id and every transmit was dropped as "recently evicted", while the
+    /// resolver handed out a fresh id iroh never used.
+    #[test]
+    fn a_peer_keeps_its_id_after_its_pipe_is_gone() {
+        let me = test_endpoint(0x01);
+        let peer = test_endpoint(0xFE);
+        let r = Routing::new();
+        let _ = r.note_scan_hint(prefix_from_endpoint(&peer), dev("peer-mac"));
+        let id = released_pipe(&r, &me, peer);
+
+        // While the pipe winds down, its own id is still the answer.
+        assert_eq!(r.reserve_outbound(peer), id);
+        assert!(r.reservation_target(id).is_none(), "no reservation yet");
+
+        r.evict_pipe(id);
+        assert_eq!(
+            r.resurrect_for_send(id),
+            Some((peer, prefix_from_endpoint(&peer))),
+            "a send on the old id dials the same peer"
+        );
+        assert_eq!(r.reserve_outbound(peer), id, "the resolver agrees");
+        assert_eq!(
+            r.consume_reservation_for_endpoint(&peer)
+                .map(|res| res.stable_id),
+            Some(id),
+            "the next pipe opens under the id iroh already has"
+        );
+    }
+
+    #[test]
+    fn the_resolver_reuses_a_retired_id_too() {
+        let me = test_endpoint(0x01);
+        let peer = test_endpoint(0xFE);
+        let r = Routing::new();
+        let _ = r.note_scan_hint(prefix_from_endpoint(&peer), dev("peer-mac"));
+        let id = released_pipe(&r, &me, peer);
+        r.evict_pipe(id);
+
+        assert_eq!(r.reserve_outbound(peer), id);
+        assert_eq!(
+            r.reservation_target(id),
+            Some((peer, prefix_from_endpoint(&peer)))
+        );
+    }
+
+    /// A dedup loser's stragglers must not redial a peer that already has a live pipe.
+    #[test]
+    fn a_retired_id_stays_dead_while_its_peer_has_a_live_route() {
+        let me = test_endpoint(0x01);
+        let peer = test_endpoint(0xFE);
+        let r = Routing::new();
+        let _ = r.note_scan_hint(prefix_from_endpoint(&peer), dev("peer-mac"));
+        let old = released_pipe(&r, &me, peer);
+        r.evict_pipe(old);
+
+        let live = r.register_pipe(dev("peer-mac-2"), Direction::Inbound);
+        r.register_pending(live, Some(peer));
+        assert!(matches!(
+            r.promote(live, &me, peer),
+            PromoteOutcome::Accepted { .. }
+        ));
+
+        assert_eq!(r.resurrect_for_send(old), None);
+        assert!(r.reservation_target(old).is_none());
+    }
+
+    #[test]
+    fn an_id_that_never_served_a_peer_is_not_resurrected() {
+        let r = Routing::new();
+        let id = r.register_pipe(dev("never-promoted"), Direction::Inbound);
+        r.evict_pipe(id);
+        assert_eq!(r.resurrect_for_send(id), None);
+    }
+
+    #[test]
+    fn a_peer_out_of_scan_range_is_not_dialled() {
+        let me = test_endpoint(0x01);
+        let peer = test_endpoint(0xFE);
+        let r = Routing::new();
+        let id = released_pipe(&r, &me, peer);
+        r.evict_pipe(id);
+        assert_eq!(
+            r.resurrect_for_send(id),
+            None,
+            "no scan hint, nothing to dial"
+        );
     }
 
     // ---------- promote() integration ----------

@@ -72,6 +72,7 @@ mod relay;
 /// iroh's DNS through the OS resolver on Apple and Android, never a nameserver list.
 mod system_dns;
 mod telemetry;
+mod telemetry_spool;
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
@@ -99,7 +100,10 @@ use pairing::{
     PairStateData, SasChallengeData, SasRole,
 };
 use profile::{ProfileDocs, ProfileFields, ProfileRecord, ProfileSink};
-pub use telemetry::{configure_telemetry, flush_telemetry};
+pub use telemetry::{
+    configure_telemetry, flush_telemetry, push_telemetry_now, set_telemetry_spool_dir,
+    TelemetryPush,
+};
 
 uniffi::setup_scaffolding!();
 
@@ -162,6 +166,10 @@ const TOPIC_PREFIX: &[u8] = b"streetcryptid.loc";
 /// the wait finite: `start` is on the launch path, so anything unbounded there is a hung splash
 /// screen rather than a slow one.
 const ENDPOINT_BIND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// How long [`LocationNode::cancel_pair`] waits for the peer to hear about a cancel before it
+/// returns and lets delivery finish in the background.
+const CANCEL_PAIR_WAIT: std::time::Duration = std::time::Duration::from_millis(1500);
 
 #[derive(Debug, thiserror::Error, uniffi::Error)]
 pub enum LocationError {
@@ -2590,7 +2598,9 @@ impl LocationNode {
 
         #[cfg(any(target_os = "android", target_vendor = "apple"))]
         let ble = if ble_enabled {
-            let (b, handle) = ble::attach(builder, endpoint_id).await;
+            let pair = Arc::clone(&self.pair);
+            let (b, handle) =
+                ble::attach(builder, endpoint_id, move || pair.holds_ble_for_pairing()).await;
             builder = b;
             handle
         } else {
@@ -4311,12 +4321,22 @@ impl LocationNode {
     }
 
     /// Cancel a pairing under SAS verification — terminal (requires a fresh attempt).
+    ///
+    /// Returns once the decision is RECORDED, not once the peer has heard it. Telling the peer is a
+    /// dial, bounded only by `PAIR_CONNECT_TIMEOUT`, and every caller is a human pressing REJECT or
+    /// leaving the screen: on 2026-10-31 a Pixel's REJECT sat 15 s behind a Reject that could not
+    /// reach an iPhone over a congested BLE link, and the app read as frozen. The decision itself
+    /// (and any contradiction error) lands within the first lock, well inside
+    /// [`CANCEL_PAIR_WAIT`]; delivery carries on in the background after that.
     pub async fn cancel_pair(&self, session_id: Vec<u8>) -> Result<(), LocationError> {
         let sid = session_id_arr(&session_id)?;
-        self.pair
-            .cancel_sas(&sid)
-            .await
-            .map_err(|e| LocationError::Network(e.to_string()))
+        let pair = self.pair.clone();
+        let mut cancel = tokio::spawn(async move { pair.cancel_sas(&sid).await });
+        match tokio::time::timeout(CANCEL_PAIR_WAIT, &mut cancel).await {
+            Ok(Ok(result)) => result.map_err(|e| LocationError::Network(e.to_string())),
+            Ok(Err(join)) => Err(LocationError::Network(join.to_string())),
+            Err(_) => Ok(()),
+        }
     }
 
     /// Drain pairing events (pending requests, peer responses, ready, rejects) since the last poll.
@@ -4516,6 +4536,7 @@ impl LocationNode {
     /// prefix. No friendship is granted here; the returned endpoint still enters the authenticated
     /// nearby pairing + mandatory SAS flow.
     pub async fn resolve_bump_peer(&self, timeout_ms: u64) -> BumpResolution {
+        use tracing::Instrument;
         let handle = {
             match self.live_opt().await {
                 Some(started) => started.ble,
@@ -4532,48 +4553,52 @@ impl LocationNode {
             }
         };
         let timeout = std::time::Duration::from_millis(timeout_ms.clamp(2_000, 12_000));
-        match handle.resolve_bump_peer(timeout).await {
-            Ok(peer) => BumpResolution {
-                status: "resolved".into(),
-                endpoint_id: Some(peer.endpoint_id),
-                device_id: Some(peer.device_id),
-                rssi: peer.rssi,
-                peer_count: peer.peer_count,
-                detail: "Nearby phone resolved.".into(),
-            },
-            Err(ble::BumpResolveError::Unavailable) => BumpResolution {
-                status: "unavailable".into(),
-                endpoint_id: None,
-                device_id: None,
-                rssi: None,
-                peer_count: 0,
-                detail: "BLE is unavailable in this build or on this device.".into(),
-            },
-            Err(ble::BumpResolveError::NoPeers) => BumpResolution {
-                status: "noPeers".into(),
-                endpoint_id: None,
-                device_id: None,
-                rssi: None,
-                peer_count: 0,
-                detail: "No fresh streetCryptid signal was found.".into(),
-            },
-            Err(ble::BumpResolveError::Ambiguous { peer_count }) => BumpResolution {
-                status: "ambiguous".into(),
-                endpoint_id: None,
-                device_id: None,
-                rssi: None,
-                peer_count,
-                detail: "More than one equally close signal was found.".into(),
-            },
-            Err(ble::BumpResolveError::ProbeFailed { peer_count, detail }) => BumpResolution {
-                status: "probeFailed".into(),
-                endpoint_id: None,
-                device_id: None,
-                rssi: None,
-                peer_count,
-                detail,
-            },
+        // `bump.resolve`: what one phone's search saw and how it ended. On 2026-10-30 an iPhone said
+        // "No other streetCryptid phone answered" while a Pixel beside it had found it and was
+        // dialling, and nothing recorded why its own search came back empty. `linked_peers` is the
+        // transport's view at the end (a peer it already holds a link to can stop showing up as a
+        // fresh advertisement), and `pairing_holds_ble` whether this phone's window was open.
+        let span = tracing::info_span!(
+            "bump.resolve",
+            timeout_ms = timeout.as_millis() as u64,
+            outcome = tracing::field::Empty,
+            peer_count = tracing::field::Empty,
+            rssi = tracing::field::Empty,
+            detail = tracing::field::Empty,
+            linked_peers = tracing::field::Empty,
+            pairing_holds_ble = self.pair.holds_ble_for_pairing(),
+            ms = tracing::field::Empty,
+            // Filled by `BleHandle::resolve_bump_peer`: what the scan heard at all (`heard`), how
+            // many of those advertised an iroh key, their RSSIs strongest first, and whether the
+            // winner was named from what the transport already knew or by a GATT probe (each
+            // probe is its own `ble.probe` span).
+            scan_ms = tracing::field::Empty,
+            scan_started = tracing::field::Empty,
+            heard = tracing::field::Empty,
+            iroh_devices = tracing::field::Empty,
+            candidate_rssi = tracing::field::Empty,
+            resolved_via = tracing::field::Empty,
+            probes = tracing::field::Empty,
+        );
+        let started = std::time::Instant::now();
+        let resolution = resolve_bump_with(&handle, timeout)
+            .instrument(span.clone())
+            .await;
+        let linked = handle
+            .nearby_peers()
+            .await
+            .iter()
+            .filter(|peer| peer.phase == "connected")
+            .count();
+        span.record("ms", started.elapsed().as_millis() as u64);
+        span.record("outcome", resolution.status.as_str());
+        span.record("peer_count", resolution.peer_count);
+        span.record("detail", resolution.detail.as_str());
+        span.record("linked_peers", linked as u64);
+        if let Some(rssi) = resolution.rssi {
+            span.record("rssi", i64::from(rssi));
         }
+        resolution
     }
 
     /// Passive proximity hint: has this peer's BLE advertisement been seen this session? This is
@@ -5857,6 +5882,52 @@ impl Subscription {
         }
         .instrument(span)
         .await
+    }
+}
+
+/// One Bump search, as the app's [`BumpResolution`] (see [`LocationNode::resolve_bump_peer`]).
+async fn resolve_bump_with(handle: &BleHandle, timeout: std::time::Duration) -> BumpResolution {
+    match handle.resolve_bump_peer(timeout).await {
+        Ok(peer) => BumpResolution {
+            status: "resolved".into(),
+            endpoint_id: Some(peer.endpoint_id),
+            device_id: Some(peer.device_id),
+            rssi: peer.rssi,
+            peer_count: peer.peer_count,
+            detail: "Nearby phone resolved.".into(),
+        },
+        Err(ble::BumpResolveError::Unavailable) => BumpResolution {
+            status: "unavailable".into(),
+            endpoint_id: None,
+            device_id: None,
+            rssi: None,
+            peer_count: 0,
+            detail: "BLE is unavailable in this build or on this device.".into(),
+        },
+        Err(ble::BumpResolveError::NoPeers) => BumpResolution {
+            status: "noPeers".into(),
+            endpoint_id: None,
+            device_id: None,
+            rssi: None,
+            peer_count: 0,
+            detail: "No fresh streetCryptid signal was found.".into(),
+        },
+        Err(ble::BumpResolveError::Ambiguous { peer_count }) => BumpResolution {
+            status: "ambiguous".into(),
+            endpoint_id: None,
+            device_id: None,
+            rssi: None,
+            peer_count,
+            detail: "More than one equally close signal was found.".into(),
+        },
+        Err(ble::BumpResolveError::ProbeFailed { peer_count, detail }) => BumpResolution {
+            status: "probeFailed".into(),
+            endpoint_id: None,
+            device_id: None,
+            rssi: None,
+            peer_count,
+            detail,
+        },
     }
 }
 

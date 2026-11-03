@@ -21,6 +21,7 @@ export type ActivePairingStage =
   | 'radio-off'
   | 'radio-unsupported'
   | 'bump-failed'
+  | 'bump-waiting'
   | 'bump-searching'
   | 'bump-contact'
   | 'bump-starting'
@@ -90,6 +91,7 @@ export function deriveActivePairingStage(input: ActivePairingStateInput): Active
   if (input.radio === 'poweredOff') return 'radio-off';
   if (input.radio === 'unsupported') return 'radio-unsupported';
   if (input.bumpStage === 'failed' || input.bumpError) return 'bump-failed';
+  if (input.bumpStage === 'waiting') return 'bump-waiting';
   if (input.bumpStage === 'searching') return 'bump-searching';
   if (input.bumpStage === 'contact') return 'bump-contact';
   if (input.bumpStage === 'armed') return 'bump-armed';

@@ -1,4 +1,4 @@
-import { markShipped, takeUnshipped, type EventLogEntry } from './event-log';
+import { markShipped, takeUnshipped, unshippedCount, type EventLogEntry } from './event-log';
 import {
   fetchTransport,
   logPayload,
@@ -55,6 +55,22 @@ export const SHIP_MAX_BATCHES = 3;
 export const SHIP_BACKOFF_BASE_MS = 30_000;
 export const SHIP_BACKOFF_MAX_MS = 30 * 60_000;
 
+/**
+ * How many batches one {@link Shipper.pushNow} may send: 50k rows, far past any journal's bound,
+ * so in practice "all of it" while still guaranteed to end.
+ */
+export const PUSH_MAX_BATCHES = 200;
+
+/** What one {@link Shipper.pushNow} did. */
+export interface ShipperPush {
+  /** Journal rows the collector took (or refused for good, which also clears them). */
+  sent: number;
+  /** The collector answered every send. `false` means it was unreachable and rows stay queued. */
+  reachable: boolean;
+  /** Rows still unshipped afterwards. */
+  remaining: number;
+}
+
 export interface ShipperOptions {
   endpoint: string;
   /**
@@ -78,6 +94,11 @@ export interface Shipper {
    * not. Never rejects: telemetry must not be able to fail the code it is describing.
    */
   drain(): Promise<void>;
+  /**
+   * Send the whole journal now, ignoring the backoff and the per-drain budget — the debug
+   * screen's push button. Never rejects.
+   */
+  pushNow(): Promise<ShipperPush>;
   /** Whether the circuit breaker is currently holding sends back, for `device.health`. */
   isBackingOff(): boolean;
 }
@@ -231,19 +252,30 @@ export function createShipper(options: ShipperOptions): Shipper {
     }
   }
 
+  /** Rows sent (or dropped as refused), and whether the collector could be reached. */
+  interface DrainResult {
+    sent: number;
+    reachable: boolean;
+  }
+
   async function runDrain(): Promise<void> {
     if (now() < nextAttemptAt) return;
-    for (let batch = 0; batch < maxBatches; batch += 1) {
+    await drainBatches(maxBatches);
+  }
+
+  async function drainBatches(budget: number): Promise<DrainResult> {
+    let sent = 0;
+    for (let batch = 0; batch < budget; batch += 1) {
       let entries: EventLogEntry[];
       try {
         entries = await takeUnshipped(batchSize);
       } catch {
-        return;
+        return { sent, reachable: true };
       }
       if (entries.length === 0) {
         consecutiveFailures = 0;
         nextAttemptAt = 0;
-        return;
+        return { sent, reachable: true };
       }
       try {
         await sendBatch(entries);
@@ -257,6 +289,7 @@ export function createShipper(options: ShipperOptions): Shipper {
             `[dev-telemetry] collector rejected ${entries.length} journal rows (HTTP ${error.status}); dropping them so the rows behind can ship`
           );
           await markShipped(entries.map((entry) => entry.id));
+          sent += entries.length;
           continue;
         }
         consecutiveFailures += 1;
@@ -268,15 +301,28 @@ export function createShipper(options: ShipperOptions): Shipper {
             error
           );
         }
-        return;
+        return { sent, reachable: false };
       }
       // Only now, and only for what the collector actually took.
       await markShipped(entries.map((entry) => entry.id));
+      sent += entries.length;
       consecutiveFailures = 0;
       nextAttemptAt = 0;
       // A short batch means the queue is empty; stop rather than spend another round-trip.
-      if (entries.length < batchSize) return;
+      if (entries.length < batchSize) return { sent, reachable: true };
     }
+    return { sent, reachable: true };
+  }
+
+  async function runPush(): Promise<ShipperPush> {
+    const result = await drainBatches(PUSH_MAX_BATCHES);
+    let remaining = 0;
+    try {
+      remaining = await unshippedCount();
+    } catch {
+      // A count we cannot read is not worth failing the push over.
+    }
+    return { ...result, remaining };
   }
 
   return {
@@ -291,6 +337,14 @@ export function createShipper(options: ShipperOptions): Shipper {
       // rejection with nobody left to catch it.
       inflight = inflight.then(runDrain, runDrain).catch(() => {});
       return inflight;
+    },
+    pushNow(): Promise<ShipperPush> {
+      // Same chain as `drain`, so a push and a background drain never take the same rows.
+      const push = inflight
+        .then(runPush, runPush)
+        .catch((): ShipperPush => ({ sent: 0, reachable: false, remaining: -1 }));
+      inflight = push.then(() => {});
+      return push;
     },
     isBackingOff(): boolean {
       return now() < nextAttemptAt;

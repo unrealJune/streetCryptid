@@ -34,6 +34,7 @@ import {
   BLUETOOTH_OFF_MESSAGE,
   BLUETOOTH_UNSUPPORTED_MESSAGE,
   LocationSharingService,
+  type BumpCloseReason,
   type InviteCancellation,
   type PairingSnapshot,
   type SharingSnapshot,
@@ -86,7 +87,8 @@ interface LocationSharingContextValue {
   acknowledgeLocationDisclosure(accepted: boolean): Promise<void>;
   armBump(): Promise<void>;
   commitBump(): Promise<void>;
-  cancelBump(): Promise<void>;
+  /** `reason` lands on the closing `bump.stage` span; see {@link BumpCloseReason}. */
+  cancelBump(reason?: BumpCloseReason): Promise<void>;
   createPairInvite(ttlSecs?: number): Promise<string | undefined>;
   /**
    * Withdraw the invite this phone is offering. Reports which of three things happened —
@@ -609,10 +611,13 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
     setServiceError(null);
     return run((service) => service.commitBump());
   }, [run]);
-  const cancelBump = useCallback(() => {
-    setServiceError(null);
-    return run((service) => service.cancelBump());
-  }, [run]);
+  const cancelBump = useCallback(
+    (reason?: BumpCloseReason) => {
+      setServiceError(null);
+      return run((service) => service.cancelBump(reason));
+    },
+    [run]
+  );
   const pairFromInput = useCallback(async (input: string) => {
     const service = serviceRef.current;
     if (!service) {

@@ -1,15 +1,15 @@
 # VENDORED THIRD-PARTY CRATE — AGPL-3.0-or-later. See ./LICENSE and ./NOTICE.
-# Upstream: https://github.com/mcginty/iroh-ble-transport tag iroh-ble-transport-v0.3.1
-# Modified by the streetCryptid project (2026-07): ported from iroh 0.98.2 to iroh 1.0.2
-# and standalone-ized (no workspace inheritance). See ./NOTICE for the list of changes.
+# Upstream: https://github.com/mcginty/iroh-ble-transport tag iroh-ble-transport-v0.5.1-beta.7
+# (first vendored at v0.3.1, rebased onto 0.5.1-beta.7 on 2026-11-02). Modified by the
+# streetCryptid project and standalone-ized (no workspace inheritance). See ./NOTICE.
 [package]
 name = "iroh-ble-transport"
-version = "0.3.1"
+version = "0.5.1-beta.7"
 edition = "2024"
 rust-version = "1.95"
 authors = ["Jake McGinty <me@jakebot.org>"]
 license = "AGPL-3.0-or-later"
-description = "BLE transport for the iroh peer-to-peer networking stack (vendored, ported to iroh 1.0)"
+description = "BLE transport for the iroh peer-to-peer networking stack (vendored)"
 repository = "https://github.com/mcginty/iroh-ble-transport"
 keywords = ["bluetooth", "ble", "iroh", "p2p", "transport"]
 categories = ["network-programming"]
@@ -19,7 +19,7 @@ publish = false
 testing = []
 
 [dependencies]
-blew = "0.3"
+blew = { path = "../blew" }
 uuid = { version = "1", features = ["v4"] }
 thiserror = "2"
 tracing = "0.1"
@@ -27,16 +27,14 @@ tokio = { version = "1", features = ["sync", "rt", "time"] }
 tokio-stream = "0.1"
 bytes = "1"
 atomic-waker = "1"
-iroh = { version = "1.0.2", features = ["unstable-custom-transports"] }
-iroh-base = "1.0.2"
+iroh = { version = "1.4", features = ["unstable-custom-transports"] }
+iroh-base = "1"
 n0-watcher = "1"
 n0-future = "0.3"
-noq-udp = "1"
-# Used for `VarInt`, which iroh 1.0 takes in `AfterHandshakeOutcome::Reject`
-# but does not re-export from its public API (iroh's `quic` module is
-# `pub(crate)`), so depending on noq-proto directly is still the supported
-# shape. Resolves to the same noq-proto version iroh 1.0.2 depends on.
-noq-proto = "1"
+# Tracks iroh's own `noq-udp` requirement: `RecvMeta` appears in the
+# `CustomEndpoint::poll_recv` signature, so this is an unsealed public
+# dependency and the two must resolve to the same version.
+noq-udp = "1.1"
 async-stream = "0.3"
 parking_lot = "0.12"
 async-trait = "0.1"
@@ -44,11 +42,11 @@ serde = { version = "1", features = ["derive"] }
 arc-swap = "1"
 
 [dev-dependencies]
-tokio = { version = "1", features = ["full"] }
+tokio = { version = "1", features = ["full", "test-util"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 anyhow = "1"
-rand = "0.9"
-blew = { version = "0.3", features = ["testing"] }
+rand = "0.10"
+blew = { path = "../blew", features = ["testing"] }
 proptest = "1"
 
 [profile.test.package.proptest]

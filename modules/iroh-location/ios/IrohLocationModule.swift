@@ -1136,6 +1136,16 @@ public final class IrohLocationModule: Module {
       await flushTelemetry()
     }
 
+    // Debug screen: send every queued Rust span and log now, ignoring the spool's backoff.
+    AsyncFunction("pushTelemetryNow") { () async -> [String: Any] in
+      let r = await pushTelemetryNow()
+      return [
+        "configured": r.configured, "delivered": r.delivered, "dropped": r.dropped,
+        "reachable": r.reachable, "remainingBatches": r.remainingBatches,
+        "remainingBytes": r.remainingBytes,
+      ]
+    }
+
     // ── Profiles — see docs/social/ARCHITECTURE.md §3 ─────────────────────────────────────
 
     AsyncFunction("publishProfile") {

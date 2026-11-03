@@ -6,13 +6,16 @@ pub use blew::central::{CentralEvent, ScanFilter, WriteType};
 pub use blew::gatt::props::{AttributePermissions, CharacteristicProperties};
 pub use blew::gatt::service::{GattCharacteristic, GattService};
 pub use blew::peripheral::{
-    AdvertisingConfig, PeripheralRequest, PeripheralStateEvent, ReadResponder, WriteResponder,
+    AdvertisingConfig, Delivery, LocalName, PeripheralRequest, PeripheralStateEvent, ReadResponder,
+    WriteResponder,
 };
 pub use blew::{BleDevice, Central, CentralConfig, DeviceId, Peripheral};
 pub use error::{BleError, BleResult};
 pub use transport::hook::BleDedupHook;
 pub use transport::{
-    BlePeerInfo, BlePeerPhase, BleTransport, BleTransportBuilder, ConnectPath, InMemoryPeerStore,
-    IROH_IDENTITY_CHAR_UUID, IncomingPacket, KEY_PREFIX_LEN, KeyPrefix, L2capPolicy, PeerSnapshot,
+    BLE_CLOSE_CODE_CONFLICT, BLE_CLOSE_CODE_RETRY, BLE_CLOSE_REASON_CONFLICT,
+    BLE_CLOSE_REASON_EVICTED, BLE_CLOSE_REASON_PIPE_CLOSED, BleAdapterState, BlePeerInfo,
+    BlePeerPhase, BleTransport, BleTransportBuilder, ConnectPath, IROH_IDENTITY_CHAR_UUID,
+    InMemoryPeerStore, IncomingPacket, KEY_PREFIX_LEN, KeyPrefix, L2capPolicy, PeerSnapshot,
     PeerStore, is_iroh_key_uuid, key_uuid_matches_endpoint,
 };

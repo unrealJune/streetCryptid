@@ -230,8 +230,8 @@ describe('post-ready work runs alongside everything else', () => {
     const svc = makeService();
     await svc.init('@me', 'mothman');
     await svc.awaitPostReadyWork();
-    // The next poll reads a newer profile, then waits on transport diagnostics before applying it.
-    const diagnostics = mockHolder.mod.hold('transportDiagnostics');
+    // The next poll reads a newer profile, then waits on the BLE reads before applying it.
+    const diagnostics = mockHolder.mod.hold('nearbyBlePeers');
     mockHolder.mod.profileEvents = [profile('ff00', 500, '@after-shutdown')];
     void svc.refreshPairing();
     await settleMany();

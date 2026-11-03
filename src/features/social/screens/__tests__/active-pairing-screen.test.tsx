@@ -340,6 +340,17 @@ describe('ActivePairingScreen', () => {
     expect(JSON.stringify(renderer.toJSON())).toContain('NOTHING FOUND');
   });
 
+  it('says it is still listening when only its own search came back empty', async () => {
+    mockSharing.pairing = { ...pairing(), bump: { ...pairing().bump, stage: 'waiting' } };
+    await act(async () => {
+      renderer = create(<ActivePairingScreen />);
+    });
+    const text = JSON.stringify(renderer.toJSON());
+    expect(text).toContain('LISTENING');
+    expect(text).not.toContain('NOTHING FOUND');
+    expect(action('try again')).toBeTruthy();
+  });
+
   it('removes the top status and presents making a link as a secondary action', async () => {
     await act(async () => {
       renderer = create(<ActivePairingScreen />);

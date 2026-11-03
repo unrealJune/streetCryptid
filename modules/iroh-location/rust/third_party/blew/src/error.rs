@@ -1,0 +1,120 @@
+use crate::types::DeviceId;
+use std::error::Error;
+use uuid::Uuid;
+
+pub type BlewResult<T> = Result<T, BlewError>;
+
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum BlewError {
+    #[error("Bluetooth adapter not found")]
+    AdapterNotFound,
+
+    #[error("not supported on this platform or not yet implemented")]
+    NotSupported,
+
+    #[error("Bluetooth adapter is not powered on")]
+    NotPowered,
+
+    #[error("required Android BLE permissions are not granted")]
+    PermissionDenied,
+
+    #[error(
+        "Android BLE support is not initialised — register tauri-plugin-blew, \
+         or call blew::platform::android::init_jvm before constructing a role"
+    )]
+    NotInitialized,
+
+    #[error("device not found: {0}")]
+    DeviceNotFound(DeviceId),
+
+    #[error("not connected to device: {0}")]
+    NotConnected(DeviceId),
+
+    #[error("characteristic {char_uuid} not found on device {device_id}")]
+    CharacteristicNotFound {
+        device_id: DeviceId,
+        char_uuid: Uuid,
+    },
+
+    #[error("local characteristic {char_uuid} not found")]
+    LocalCharacteristicNotFound { char_uuid: Uuid },
+
+    #[error("already advertising")]
+    AlreadyAdvertising,
+
+    #[error("operation timed out")]
+    Timeout,
+
+    #[error("connect to {0} timed out")]
+    ConnectTimedOut(DeviceId),
+
+    #[error("connect to {0} already in flight")]
+    ConnectInFlight(DeviceId),
+
+    #[error("GATT busy on device {0} (another operation in flight)")]
+    GattBusy(DeviceId),
+
+    #[error("value too large for current MTU: got {got} bytes, max {max}")]
+    ValueTooLarge { got: usize, max: usize },
+
+    #[error("already subscribed to characteristic {char_uuid} on {device_id}")]
+    AlreadySubscribed {
+        device_id: DeviceId,
+        char_uuid: Uuid,
+    },
+
+    #[error("event stream closed unexpectedly")]
+    StreamClosed,
+
+    #[error("device {0} disconnected during operation")]
+    DisconnectedDuringOperation(DeviceId),
+
+    #[error("GATT discovery failed on {device_id}: {reason}")]
+    DiscoveryFailed { device_id: DeviceId, reason: String },
+
+    #[error("GATT error on device {device_id}: {source}")]
+    Gatt {
+        device_id: DeviceId,
+        #[source]
+        source: Box<dyn Error + Send + Sync>,
+    },
+
+    #[error("peripheral error: {source}")]
+    Peripheral {
+        #[source]
+        source: Box<dyn Error + Send + Sync>,
+    },
+
+    #[error("central error: {source}")]
+    Central {
+        #[source]
+        source: Box<dyn Error + Send + Sync>,
+    },
+
+    #[error("L2CAP error: {source}")]
+    L2cap {
+        #[source]
+        source: Box<dyn Error + Send + Sync>,
+    },
+
+    /// The configured [`L2capEncryption`](crate::L2capEncryption) level has no
+    /// equivalent in this platform's L2CAP API. The backend refuses rather than
+    /// substituting a weaker level, which would hand back a channel that is
+    /// less protected than the caller asked for.
+    #[error("L2CAP encryption level '{requested}' is unavailable here: {reason}")]
+    L2capEncryptionUnsupported {
+        requested: crate::l2cap::L2capEncryption,
+        reason: &'static str,
+    },
+
+    /// The configured [`LocalName`](crate::peripheral::LocalName) can't be
+    /// advertised on this platform. The backend refuses rather than advertising
+    /// no name, which would leave a peer matching on the name unable to find
+    /// the peripheral.
+    #[error("advertising this local name is unavailable here: {reason}")]
+    LocalNameUnsupported { reason: &'static str },
+
+    #[error("internal error: {0}")]
+    Internal(String),
+}

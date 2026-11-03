@@ -7,7 +7,7 @@ import type {
   EventLogStatus,
   RecordEventLogEntry,
 } from './event-log';
-import type { Shipper, ShipperOptions } from './shipper';
+import type { Shipper, ShipperOptions, ShipperPush } from './shipper';
 import type { StartSpanOptions, Telemetry } from './telemetry';
 import type { UiLivenessOptions } from './ui-liveness';
 import type { OsDiagnostic } from './crash-diagnostics';
@@ -35,7 +35,7 @@ import type { OsDiagnostic } from './crash-diagnostics';
 
 export type { OtelConfig };
 export type { StartSpanOptions, Telemetry };
-export type { Shipper, ShipperOptions };
+export type { Shipper, ShipperOptions, ShipperPush };
 export type { UiLivenessOptions };
 export type { OsDiagnostic };
 export type {
@@ -161,6 +161,9 @@ export function uninstallConsoleTelemetryBridge(): void {}
 export function createShipper(_options: ShipperOptions): Shipper {
   return {
     async drain(): Promise<void> {},
+    async pushNow(): Promise<ShipperPush> {
+      return { sent: 0, reachable: true, remaining: 0 };
+    },
     isBackingOff(): boolean {
       return false;
     },

@@ -24,7 +24,12 @@ export interface PublishProfileCall {
 
 /** The native calls a race test can hold. */
 export type HoldableMethod =
-  'pollPairEvents' | 'listPairSessions' | 'readProfile' | 'start' | 'transportDiagnostics';
+  | 'pollPairEvents'
+  | 'listPairSessions'
+  | 'readProfile'
+  | 'start'
+  | 'transportDiagnostics'
+  | 'nearbyBlePeers';
 
 export class FakeNativeModule {
   calls = {
@@ -295,6 +300,7 @@ export class FakeNativeModule {
   }
   async nearbyBlePeers() {
     this.calls.nearbyBlePeers += 1;
+    await this.gate('nearbyBlePeers');
     return this.peers;
   }
   async bleCapabilities() {

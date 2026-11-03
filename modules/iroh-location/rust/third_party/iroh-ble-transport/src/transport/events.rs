@@ -108,7 +108,7 @@ pub async fn run_central_events(
                 }
                 PeerCommand::Advertised {
                     prefix,
-                    device,
+                    device_id: device.id,
                     rssi,
                 }
             }
@@ -321,9 +321,10 @@ mod tests {
     fn expected_probe_disconnect_is_consumed_even_if_pairing_phase_moves_on() {
         let expected: ProbeDisconnects = Arc::new(Mutex::new(HashMap::new()));
         let device = DeviceId::from("probe-device");
-        expected
-            .lock()
-            .insert(device.clone(), Instant::now() + std::time::Duration::from_secs(5));
+        expected.lock().insert(
+            device.clone(),
+            Instant::now() + std::time::Duration::from_secs(5),
+        );
 
         assert!(take_expected_probe_disconnect(
             &expected,

@@ -753,6 +753,10 @@ external fun uniffi_iroh_location_checksum_func_configure_telemetry(
 ): Int
 external fun uniffi_iroh_location_checksum_func_flush_telemetry(
 ): Int
+external fun uniffi_iroh_location_checksum_func_push_telemetry_now(
+): Int
+external fun uniffi_iroh_location_checksum_func_set_telemetry_spool_dir(
+): Int
 external fun uniffi_iroh_location_checksum_method_devicesecrets_identity_secret(
 ): Int
 external fun uniffi_iroh_location_checksum_method_devicesecrets_recv_secret(
@@ -1333,6 +1337,10 @@ external fun uniffi_iroh_location_fn_func_configure_telemetry(`endpoint`: RustBu
 ): Byte
 external fun uniffi_iroh_location_fn_func_flush_telemetry(
 ): Long
+external fun uniffi_iroh_location_fn_func_push_telemetry_now(
+): Long
+external fun uniffi_iroh_location_fn_func_set_telemetry_spool_dir(`dir`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): Byte
 external fun ffi_iroh_location_rustbuffer_alloc(`size`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
 external fun ffi_iroh_location_rustbuffer_from_bytes(`bytes`: ForeignBytes.ByValue,uniffi_out_err: UniffiRustCallStatus, 
@@ -1524,6 +1532,12 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_iroh_location_checksum_func_flush_telemetry() != 65035) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_iroh_location_checksum_func_push_telemetry_now() != 33874) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_iroh_location_checksum_func_set_telemetry_spool_dir() != 28941) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_iroh_location_checksum_method_devicesecrets_identity_secret() != 9294) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1551,7 +1565,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_iroh_location_checksum_method_locationnode_ble_has_scan_hint() != 33560) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_iroh_location_checksum_method_locationnode_cancel_pair() != 49013) {
+    if (lib.uniffi_iroh_location_checksum_method_locationnode_cancel_pair() != 17903) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_iroh_location_checksum_method_locationnode_clear_outbox() != 61861) {
@@ -3282,6 +3296,13 @@ public interface LocationNodeInterface {
     
     /**
      * Cancel a pairing under SAS verification — terminal (requires a fresh attempt).
+     *
+     * Returns once the decision is RECORDED, not once the peer has heard it. Telling the peer is a
+     * dial, bounded only by `PAIR_CONNECT_TIMEOUT`, and every caller is a human pressing REJECT or
+     * leaving the screen: on 2026-10-31 a Pixel's REJECT sat 15 s behind a Reject that could not
+     * reach an iPhone over a congested BLE link, and the app read as frozen. The decision itself
+     * (and any contradiction error) lands within the first lock, well inside
+     * [`CANCEL_PAIR_WAIT`]; delivery carries on in the background after that.
      */
     suspend fun `cancelPair`(`sessionId`: kotlin.ByteArray)
     
@@ -4210,6 +4231,13 @@ open class LocationNode: Disposable, AutoCloseable, LocationNodeInterface
     
     /**
      * Cancel a pairing under SAS verification — terminal (requires a fresh attempt).
+     *
+     * Returns once the decision is RECORDED, not once the peer has heard it. Telling the peer is a
+     * dial, bounded only by `PAIR_CONNECT_TIMEOUT`, and every caller is a human pressing REJECT or
+     * leaving the screen: on 2026-10-31 a Pixel's REJECT sat 15 s behind a Reject that could not
+     * reach an iPhone over a congested BLE link, and the app read as frozen. The decision itself
+     * (and any contradiction error) lands within the first lock, well inside
+     * [`CANCEL_PAIR_WAIT`]; delivery carries on in the background after that.
      */
     @Throws(LocationException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
@@ -10719,6 +10747,82 @@ public object FfiConverterTypeSealReport: FfiConverterRustBuffer<SealReport> {
 
 
 /**
+ * What [`push_telemetry_now`] came to, for the debug screen's status line.
+ */
+data class TelemetryPush (
+    /**
+     * An exporter is configured. `false` in a build without `otel`, or before `configure`.
+     */
+    var `configured`: kotlin.Boolean
+    , 
+    /**
+     * Spooled batches (traces and logs) the collector took during this push.
+     */
+    var `delivered`: kotlin.ULong
+    , 
+    /**
+     * Spooled batches given up on during this push: refused by the collector, or too old.
+     */
+    var `dropped`: kotlin.ULong
+    , 
+    /**
+     * The collector answered every send. `false` means the rest is still queued.
+     */
+    var `reachable`: kotlin.Boolean
+    , 
+    /**
+     * What is still waiting afterwards.
+     */
+    var `remainingBatches`: kotlin.ULong
+    , 
+    var `remainingBytes`: kotlin.ULong
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeTelemetryPush: FfiConverterRustBuffer<TelemetryPush> {
+    override fun read(buf: ByteBuffer): TelemetryPush {
+        return TelemetryPush(
+            FfiConverterBoolean.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterBoolean.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterULong.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: TelemetryPush) = (
+            FfiConverterBoolean.allocationSize(value.`configured`) +
+            FfiConverterULong.allocationSize(value.`delivered`) +
+            FfiConverterULong.allocationSize(value.`dropped`) +
+            FfiConverterBoolean.allocationSize(value.`reachable`) +
+            FfiConverterULong.allocationSize(value.`remainingBatches`) +
+            FfiConverterULong.allocationSize(value.`remainingBytes`)
+    )
+
+    override fun write(value: TelemetryPush, buf: ByteBuffer) {
+            FfiConverterBoolean.write(value.`configured`, buf)
+            FfiConverterULong.write(value.`delivered`, buf)
+            FfiConverterULong.write(value.`dropped`, buf)
+            FfiConverterBoolean.write(value.`reachable`, buf)
+            FfiConverterULong.write(value.`remainingBatches`, buf)
+            FfiConverterULong.write(value.`remainingBytes`, buf)
+    }
+}
+
+
+
+/**
  * One author's fix slot in the LOCAL durable replica — what this device could hand to a peer.
  *
  * Companion to [`TransportDiagnostics`]: a diagnostics read, carrying no location data, so it
@@ -13011,5 +13115,44 @@ public object FfiConverterSequenceTypeTransportAddressDiagnostic: FfiConverterRu
         UniffiNullRustCallStatusErrorHandler,
     )
     }
+
+        /**
+         * Send every Rust span and log this phone is holding, NOW: flush the batch processors, then drain
+         * the offline spool ignoring its backoff and its per-export budget. The normal drain only runs
+         * when a new batch is exported, so a phone that has gone quiet can sit on a spool for hours. For
+         * the debug screen's "push logs" button.
+         *
+         * Runs on a thread of its own rather than the blocking pool: the HTTP client is reqwest's blocking
+         * one, which must not be driven from inside a tokio runtime context.
+         */
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+     suspend fun `pushTelemetryNow`() : TelemetryPush {
+        return uniffiRustCallAsync(
+        UniffiLib.uniffi_iroh_location_fn_func_push_telemetry_now(),
+        { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_iroh_location_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_iroh_location_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterTypeTelemetryPush.lift(it) },
+        // Error FFI converter
+        UniffiNullRustCallStatusErrorHandler,
+    )
+    }
+
+        /**
+         * Where Rust telemetry that could not be sent waits for the collector (the app's caches
+         * directory). Until this is called it waits in memory, bounded, and dies with the process. Call it
+         * before [`configure_telemetry`]; calling it again moves future batches, not queued ones. Returns
+         * whether the directory is usable; always `false` without the `otel` feature.
+         */ fun `setTelemetrySpoolDir`(`dir`: kotlin.String): kotlin.Boolean {
+            return FfiConverterBoolean.lift(
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_iroh_location_fn_func_set_telemetry_spool_dir(
+    
+        FfiConverterString.lower(`dir`),_status)
+}
+    )
+    }
+    
 
 

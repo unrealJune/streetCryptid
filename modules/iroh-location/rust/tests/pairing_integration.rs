@@ -719,3 +719,42 @@ async fn a_completed_bump_leaves_both_sides_with_a_ratchet_session() {
     a.shutdown().await.expect("A shutdown");
     b.shutdown().await.expect("B shutdown");
 }
+
+/// A phone that turns a pairing down says so at once, and the dialler says why.
+///
+/// Before the refusal close codes, a refused Hello was answered by dropping the connection; over a
+/// link that dropped with it (BLE, 2026-10-29) the dialler waited out the whole 25 s exchange
+/// budget and told its user the other phone "did not answer". The refusal is now an explicit
+/// QUIC close with a code, sent before anything is dropped, so the dial ends on it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_refused_hello_fails_fast_and_says_so() {
+    let a = start_node().await;
+    let b = start_node().await;
+
+    let mut invite = a.create_invite(300).await.expect("A create invite");
+    // A wrong secret: A answers the Hello with a refusal.
+    invite.secret[0] ^= 0xff;
+    // Pay B's one-time relay wait (`our_endpoint_ticket`, 10 s against the unreachable test relay)
+    // up front, so the clock below measures the dial and nothing else.
+    b.create_invite(300).await.expect("B warms its endpoint ticket");
+
+    let started = std::time::Instant::now();
+    let err = tokio::time::timeout(std::time::Duration::from_secs(20), b.initiate_pair(invite))
+        .await
+        .expect("the dial must end, not hang")
+        .expect_err("a refused invite cannot start a pairing");
+    let elapsed = started.elapsed();
+
+    let message = err.to_string();
+    assert!(
+        message.contains("turned this pairing down"),
+        "the dialler should report the refusal, got: {message}"
+    );
+    assert!(
+        elapsed < std::time::Duration::from_secs(10),
+        "a refusal must not wait out the exchange budget (took {elapsed:?})"
+    );
+
+    a.shutdown().await.expect("A shutdown");
+    b.shutdown().await.expect("B shutdown");
+}

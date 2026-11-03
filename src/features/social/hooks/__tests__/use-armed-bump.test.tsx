@@ -2,7 +2,7 @@ import { AppState } from 'react-native';
 import { act, create, type ReactTestRenderer } from 'react-test-renderer';
 
 import type { PairingSnapshot } from '../../net/location-sharing';
-import { useArmedBump } from '../use-armed-bump';
+import { BUMP_FOREGROUND_GRACE_MS, useArmedBump } from '../use-armed-bump';
 
 jest.mock('expo-sensors', () => ({
   Accelerometer: {
@@ -125,5 +125,66 @@ describe('useArmedBump', () => {
     });
 
     expect(mockArmBump).not.toHaveBeenCalled();
+  });
+
+  describe('closing the window', () => {
+    let emitAppState: (state: string) => void = () => {};
+
+    beforeEach(() => {
+      jest
+        .spyOn(AppState, 'addEventListener')
+        .mockImplementation((_type: string, listener: (state: never) => void) => {
+          emitAppState = (state) => listener(state as never);
+          return { remove: jest.fn() } as never;
+        });
+    });
+
+    afterEach(() => {
+      jest.restoreAllMocks();
+    });
+
+    function armedAndMounted(): void {
+      jest.useFakeTimers();
+      mockPairing = snapshot({
+        bump: { stage: 'armed', expiresAt: null, rssi: null, peerCount: 0, error: null },
+      } as never);
+      act(() => {
+        renderer = create(<Harness active />);
+      });
+    }
+
+    // 2026-10-31: a Pixel 10 left the foreground for 1.6 s mid-handshake and lost the window.
+    it('keeps it open through a short trip out of the foreground', () => {
+      armedAndMounted();
+      act(() => emitAppState('background'));
+      act(() => {
+        jest.advanceTimersByTime(2_000);
+      });
+      act(() => emitAppState('active'));
+      act(() => {
+        jest.advanceTimersByTime(BUMP_FOREGROUND_GRACE_MS * 2);
+      });
+
+      expect(mockCancelBump).not.toHaveBeenCalled();
+    });
+
+    it('closes it once the app has been away longer than the grace', () => {
+      armedAndMounted();
+      act(() => emitAppState('background'));
+      act(() => {
+        jest.advanceTimersByTime(BUMP_FOREGROUND_GRACE_MS + 1);
+      });
+
+      expect(mockCancelBump).toHaveBeenCalled();
+    });
+
+    it('closes it at once when the screen is left', () => {
+      armedAndMounted();
+      act(() => {
+        renderer.update(<Harness active={false} />);
+      });
+
+      expect(mockCancelBump).toHaveBeenCalled();
+    });
   });
 });

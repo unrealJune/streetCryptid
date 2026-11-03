@@ -1,5 +1,5 @@
 import type { OtlpTransport } from './exporter';
-import { createShipper, type Shipper } from './shipper';
+import { createShipper, type Shipper, type ShipperPush } from './shipper';
 import { flushEventLog, recordEventLog, setJournalBuildResource } from './event-log';
 import { getBuildResource, resolveDeviceId } from './identity';
 import { newSpanId, newTraceId } from './ids';
@@ -42,6 +42,12 @@ export interface Telemetry {
   setResourceAttributes(attrs: Attributes): void;
   /** Await export of everything recorded so far. Headless tasks MUST await this before returning. */
   flush(): Promise<void>;
+  /**
+   * Persist, then send the WHOLE journal now, ignoring the shipper's backoff and budget (the debug
+   * screen's push button). Optional so test doubles need not implement it; `undefined` result
+   * means there is no collector to push to.
+   */
+  pushNow?(): Promise<ShipperPush | undefined>;
 }
 
 export interface CreateTelemetryOptions {
@@ -248,6 +254,12 @@ export function createTelemetry(options: CreateTelemetryOptions): Telemetry {
       // writes have landed would leave this wake's own spans behind for the next one.
       await flushEventLog();
       await shipper?.drain();
+    },
+    async pushNow(): Promise<ShipperPush | undefined> {
+      if (!shipper) return undefined;
+      await ensureIdentity();
+      await flushEventLog();
+      return shipper.pushNow();
     },
   };
 }

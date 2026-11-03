@@ -3,6 +3,7 @@ import { NativeModule, requireNativeModule } from 'expo-modules-core';
 import { requireIrohRelayRuntimeConfig } from './relay-config';
 import type {
   NativeIngestOutcome,
+  NativeTelemetryPush,
   IrohLocationEvents,
   IrohLocationApi,
   BleCapabilities,
@@ -436,6 +437,7 @@ export declare class IrohLocationNativeModule
    */
   takeCrashDiagnostics?(): Promise<string[]>;
   flushTelemetry?(): Promise<void>;
+  pushTelemetryNow?(): Promise<NativeTelemetryPush>;
 
   // Native MVT map-tile decoder (see modules/iroh-location/rust/src/mvt.rs). Runs
   // off the JS thread; returns a flat SCG1 geometry buffer. Optional: present on

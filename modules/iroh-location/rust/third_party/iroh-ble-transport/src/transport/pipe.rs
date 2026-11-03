@@ -73,6 +73,60 @@ use crate::transport::reliable::ReliableChannel;
 /// resolver calls `ReliableChannel::set_chunk_size` to bump this up.
 const INITIAL_CHUNK_SIZE: usize = (MIN_SANE_MTU as usize) - ATT_OVERHEAD;
 
+/// Per-path traffic for the `ble.pipe` summary: datagrams each way and when each direction last
+/// moved, in ms since the pipe opened (0 = never).
+///
+/// A pipe whose L2CAP channel stops delivering in one direction looks alive from every other
+/// angle: the GATT link stays up, the liveness clock is fed by the other path, nothing errors, and
+/// outbound keeps preferring L2CAP. On 2026-11-02 17:23 a Pixel dialled an iPhone's Hello over a
+/// pipe that had carried friend sync both ways four seconds earlier, and nothing reached the
+/// iPhone for 15 s; the pipe's totals could not say which path the dial went out on or whether
+/// anything came back. These can.
+#[derive(Debug)]
+pub(crate) struct PathTally {
+    opened: std::time::Instant,
+    datagrams_in: AtomicU64,
+    datagrams_out: AtomicU64,
+    last_in_ms: AtomicU64,
+    last_out_ms: AtomicU64,
+}
+
+impl PathTally {
+    fn new(opened: std::time::Instant) -> Self {
+        Self {
+            opened,
+            datagrams_in: AtomicU64::new(0),
+            datagrams_out: AtomicU64::new(0),
+            last_in_ms: AtomicU64::new(0),
+            last_out_ms: AtomicU64::new(0),
+        }
+    }
+
+    fn stamp(&self) -> u64 {
+        // +1 so a datagram in the pipe's first millisecond is not read as "never".
+        self.opened.elapsed().as_millis() as u64 + 1
+    }
+
+    pub(crate) fn note_in(&self) {
+        self.datagrams_in.fetch_add(1, Ordering::Relaxed);
+        self.last_in_ms.store(self.stamp(), Ordering::Relaxed);
+    }
+
+    fn note_out(&self) {
+        self.datagrams_out.fetch_add(1, Ordering::Relaxed);
+        self.last_out_ms.store(self.stamp(), Ordering::Relaxed);
+    }
+
+    fn read(&self) -> (u64, u64, u64, u64) {
+        (
+            self.datagrams_in.load(Ordering::Relaxed),
+            self.datagrams_out.load(Ordering::Relaxed),
+            self.last_in_ms.load(Ordering::Relaxed),
+            self.last_out_ms.load(Ordering::Relaxed),
+        )
+    }
+}
+
 /// GATT path worker. Owns a `ReliableChannel` for the Selective-
 /// Repeat ARQ protocol + a send loop that writes to the C2P or P2C
 /// characteristic via the blew interface.
@@ -107,6 +161,8 @@ struct L2capWorker {
 struct WorkerSet {
     gatt: Option<GattWorker>,
     l2cap: Option<L2capWorker>,
+    gatt_tally: Arc<PathTally>,
+    l2cap_tally: Arc<PathTally>,
 }
 
 impl WorkerSet {
@@ -133,6 +189,18 @@ pub async fn run_data_pipe(
     empty_frames_counter: Arc<AtomicU64>,
     last_rx_at: LivenessClock,
 ) {
+    // For the `ble.pipe` summary at the end. The two counters are transport-wide, so the deltas
+    // are this pipe's only while it is the only one; between two phones pairing it is.
+    let opened = std::time::Instant::now();
+    let retransmits_at_open = retransmit_counter.load(Ordering::Relaxed);
+    let truncations_at_open = truncation_counter.load(Ordering::Relaxed);
+    let mut l2cap_after_ms: Option<u64> = None;
+    let mut datagrams_out = 0u64;
+    let mut bytes_out = 0u64;
+    let mut gatt_fragments_in = 0u64;
+    let mut end = "registry-closed";
+    let gatt_tally = Arc::new(PathTally::new(opened));
+    let l2cap_tally = Arc::new(PathTally::new(opened));
     let mut workers = match initial_path {
         ConnectPath::Gatt => WorkerSet {
             gatt: Some(spawn_gatt_worker(
@@ -145,8 +213,11 @@ pub async fn run_data_pipe(
                 Arc::clone(&retransmit_counter),
                 Arc::clone(&truncation_counter),
                 last_rx_at.clone(),
+                Arc::clone(&gatt_tally),
             )),
             l2cap: None,
+            gatt_tally: Arc::clone(&gatt_tally),
+            l2cap_tally: Arc::clone(&l2cap_tally),
         },
         ConnectPath::L2cap => {
             let Some(channel) = initial_l2cap else {
@@ -163,7 +234,10 @@ pub async fn run_data_pipe(
                     registry_tx.clone(),
                     Arc::clone(&empty_frames_counter),
                     last_rx_at.clone(),
+                    Arc::clone(&l2cap_tally),
                 )),
+                gatt_tally: Arc::clone(&gatt_tally),
+                l2cap_tally: Arc::clone(&l2cap_tally),
             }
         }
     };
@@ -174,14 +248,18 @@ pub async fn run_data_pipe(
                 let Some(send) = maybe_send else {
                     // Registry dropped its outbound sender → pipe is
                     // shutting down. Fall through to teardown.
+                    end = "outbound-closed";
                     break;
                 };
+                datagrams_out += 1;
+                bytes_out += send.datagram.len() as u64;
                 forward_outbound(&mut workers, send, &device_id, &registry_tx).await;
                 if workers.is_empty() {
                     tracing::debug!(
                         device = %device_id,
                         "both paths dead after outbound send; pipe exiting"
                     );
+                    end = "both-paths-dead";
                     break;
                 }
             }
@@ -191,8 +269,10 @@ pub async fn run_data_pipe(
                     // closure does NOT imply L2CAP is dead. But the
                     // registry closes this when the peer entry is
                     // gone, which is our signal to shut down.
+                    end = "inbound-closed";
                     break;
                 };
+                gatt_fragments_in += 1;
                 forward_inbound_gatt(&mut workers, bytes, &device_id);
                 // Inbound doesn't force a path-dead check here — even
                 // if GATT just died, L2CAP may still be carrying traffic.
@@ -222,15 +302,57 @@ pub async fn run_data_pipe(
                     registry_tx.clone(),
                     Arc::clone(&empty_frames_counter),
                     last_rx_at.clone(),
+                    Arc::clone(&workers.l2cap_tally),
                 ));
                 tracing::info!(
                     device = %device_id,
                     has_gatt = workers.gatt.is_some(),
                     "L2CAP path added to pipe"
                 );
+                l2cap_after_ms.get_or_insert(opened.elapsed().as_millis() as u64);
             }
         }
     }
+
+    // `ble.pipe`: one per pipe, at its end. Every pipe starts on GATT and only the central
+    // upgrades to L2CAP, so how long a pipe ran on GATT, and how often the reliable layer had to
+    // retransmit there, is the cost of the slow path; on 2026-10-30 a Pixel⇄iPhone pipe logged an
+    // ACK-timeout retransmit every ~0.5 s and nothing could say how many or on which path. A span,
+    // because Loki drops `tracing` event fields (`infra/otel/README.md`).
+    let (gatt_in, gatt_out, gatt_last_in_ms, gatt_last_out_ms) = workers.gatt_tally.read();
+    let (l2cap_in, l2cap_out, l2cap_last_in_ms, l2cap_last_out_ms) = workers.l2cap_tally.read();
+    let span = tracing::info_span!(
+        "ble.pipe",
+        device = %device_id,
+        role = ?role,
+        initial_path = ?initial_path,
+        ms = opened.elapsed().as_millis() as u64,
+        l2cap_after_ms = l2cap_after_ms,
+        gatt_at_end = workers.gatt.is_some(),
+        l2cap_at_end = workers.l2cap.is_some(),
+        datagrams_out = datagrams_out,
+        bytes_out = bytes_out,
+        gatt_fragments_in = gatt_fragments_in,
+        // Datagrams per path and direction, and when each last moved (ms since the pipe opened,
+        // 0 = never). `l2cap_last_in_ms` far behind `ms` while `l2cap_out` kept climbing is a
+        // channel that stopped delivering one way.
+        gatt_in = gatt_in,
+        gatt_out = gatt_out,
+        gatt_last_in_ms = gatt_last_in_ms,
+        gatt_last_out_ms = gatt_last_out_ms,
+        l2cap_in = l2cap_in,
+        l2cap_out = l2cap_out,
+        l2cap_last_in_ms = l2cap_last_in_ms,
+        l2cap_last_out_ms = l2cap_last_out_ms,
+        retransmits = retransmit_counter
+            .load(Ordering::Relaxed)
+            .saturating_sub(retransmits_at_open),
+        truncations = truncation_counter
+            .load(Ordering::Relaxed)
+            .saturating_sub(truncations_at_open),
+        end = end,
+    );
+    drop(span.entered());
 
     teardown_worker_set(workers, device_id, L2CAP_HANDOVER_TIMEOUT).await;
 }
@@ -274,7 +396,10 @@ async fn forward_outbound(
     };
     let send = if let Some(result) = l2cap_send {
         match result {
-            Ok(()) => return,
+            Ok(()) => {
+                workers.l2cap_tally.note_out();
+                return;
+            }
             Err(mpsc::error::SendTimeoutError::Timeout(send)) => {
                 tracing::warn!(
                     device = %device_id,
@@ -307,7 +432,7 @@ async fn forward_outbound(
     };
     if let Some(gatt) = workers.gatt.as_ref() {
         match gatt.outbound_fwd_tx.try_send(send) {
-            Ok(()) => {}
+            Ok(()) => workers.gatt_tally.note_out(),
             Err(mpsc::error::TrySendError::Closed(send)) => {
                 tracing::debug!(
                     device = %device_id,
@@ -378,7 +503,7 @@ fn forward_inbound_gatt(workers: &mut WorkerSet, bytes: Bytes, device_id: &blew:
 /// deadline so a wedged worker can't hold the pipe supervisor past
 /// teardown.
 async fn teardown_worker_set(workers: WorkerSet, device_id: blew::DeviceId, timeout: Duration) {
-    let WorkerSet { gatt, l2cap } = workers;
+    let WorkerSet { gatt, l2cap, .. } = workers;
     if let Some(w) = gatt {
         teardown_gatt_worker(w, device_id.clone(), timeout).await;
     }
@@ -441,6 +566,7 @@ fn spawn_gatt_worker(
     retransmit_counter: Arc<AtomicU64>,
     truncation_counter: Arc<AtomicU64>,
     last_rx_at: LivenessClock,
+    tally: Arc<PathTally>,
 ) -> GattWorker {
     let (outbound_fwd_tx, outbound_fwd_rx) = mpsc::channel::<PendingSend>(32);
     let (inbound_fwd_tx, inbound_fwd_rx) = mpsc::channel::<Bytes>(64);
@@ -460,6 +586,7 @@ fn spawn_gatt_worker(
         retransmit_counter,
         truncation_counter,
         last_rx_at,
+        tally,
     ));
     GattWorker {
         outbound_fwd_tx,
@@ -479,6 +606,7 @@ fn spawn_l2cap_worker(
     registry_tx: mpsc::Sender<PeerCommand>,
     empty_frames_counter: Arc<AtomicU64>,
     last_rx_at: LivenessClock,
+    tally: Arc<PathTally>,
 ) -> L2capWorker {
     let (outbound_fwd_tx, outbound_fwd_rx) = mpsc::channel::<PendingSend>(32);
     let teardown_flag = Arc::new(AtomicBool::new(false));
@@ -492,6 +620,7 @@ fn spawn_l2cap_worker(
         registry_tx,
         empty_frames_counter,
         last_rx_at,
+        tally,
     ));
     L2capWorker {
         outbound_fwd_tx,
@@ -515,6 +644,7 @@ async fn run_gatt_pipe(
     retransmit_counter: Arc<AtomicU64>,
     truncation_counter: Arc<AtomicU64>,
     last_rx_at: LivenessClock,
+    tally: Arc<PathTally>,
 ) {
     // Start with a conservative chunk size so the select loop can begin
     // processing inbound fragments immediately. Blocking on the MTU resolver
@@ -606,6 +736,7 @@ async fn run_gatt_pipe(
                             "pipe reassembled datagram -> incoming_tx"
                         );
                         last_rx_at.bump();
+                        tally.note_in();
                         let _ = incoming_tx
                             .send(IncomingPacket {
                                 device_id: device_id.clone(),
@@ -642,6 +773,7 @@ async fn run_gatt_pipe(
         let _ = registry_tx
             .send(PeerCommand::Stalled {
                 device_id: device_id.clone(),
+                cause: crate::transport::peer::StallCause::LinkDead,
             })
             .await;
     }
@@ -658,6 +790,7 @@ async fn run_l2cap_pipe(
     registry_tx: mpsc::Sender<PeerCommand>,
     empty_frames_counter: Arc<AtomicU64>,
     last_rx_at: LivenessClock,
+    tally: Arc<PathTally>,
 ) {
     let (reader, writer) = tokio::io::split(channel);
 
@@ -670,6 +803,7 @@ async fn run_l2cap_pipe(
         last_rx_at,
         Arc::clone(&teardown_flag),
         Arc::clone(&empty_frames_counter),
+        Some(tally),
     );
     let _send_task = AbortOnDrop(send_task);
     let _recv_task = AbortOnDrop(recv_task);
@@ -741,6 +875,7 @@ async fn run_l2cap_pipe(
         let _ = registry_tx
             .send(PeerCommand::Stalled {
                 device_id: device_id.clone(),
+                cause: crate::transport::peer::StallCause::LinkDead,
             })
             .await;
     }
@@ -963,6 +1098,7 @@ mod tests {
             Arc::new(AtomicU64::new(0)),
             Arc::new(AtomicU64::new(0)),
             LivenessClock::new(),
+            Arc::new(PathTally::new(std::time::Instant::now())),
         );
 
         let GattWorker {
@@ -1067,6 +1203,8 @@ mod tests {
             let mut workers = WorkerSet {
                 gatt: None,
                 l2cap: Some(worker),
+                gatt_tally: Arc::new(PathTally::new(std::time::Instant::now())),
+                l2cap_tally: Arc::new(PathTally::new(std::time::Instant::now())),
             };
             forward_outbound(
                 &mut workers,
@@ -1115,6 +1253,8 @@ mod tests {
             let mut workers = WorkerSet {
                 gatt: None,
                 l2cap: Some(worker),
+                gatt_tally: Arc::new(PathTally::new(std::time::Instant::now())),
+                l2cap_tally: Arc::new(PathTally::new(std::time::Instant::now())),
             };
             forward_outbound(
                 &mut workers,

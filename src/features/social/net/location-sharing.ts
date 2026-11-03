@@ -183,7 +183,44 @@ export interface PairingVerification {
   peerVerified: boolean;
 }
 
-export type BumpStage = 'idle' | 'armed' | 'searching' | 'contact' | 'failed';
+/**
+ * Where this phone's half of a Bump stands.
+ *
+ * `waiting` is this phone's own search coming back empty while its window is still open. Each phone
+ * searches for the other independently and only one needs to succeed: on 2026-10-30 a Pixel found
+ * an iPhone and was dialling it while the iPhone's search found nothing and said "No other
+ * streetCryptid phone answered" — and then, when the Pixel's Hello landed, jumped straight from
+ * that to the SAS figures. A miss on this side is not a miss: the phone is still listening, and an
+ * inbound request takes the screen to `handshaking` from here like from `armed`.
+ */
+export type BumpStage = 'idle' | 'armed' | 'searching' | 'contact' | 'waiting' | 'failed';
+
+/**
+ * Why a Bump window closed, as `bump.reason` on the `bump.stage` span that takes it to `idle`.
+ *
+ * On 2026-10-31 nothing recorded who closed a window: a Pixel's two 1.6 s / 0.2 s trips out of the
+ * foreground closed it under running handshakes, and that had to be inferred by lining up
+ * `app.lifecycle` timestamps against the iPhone's `pairing.poll` states.
+ */
+export type BumpCloseReason =
+  /** The pairing screen went away (navigation, dismissal). */
+  | 'left-screen'
+  /** The screen stopped being the live surface (`useArmedBump(active=false)`). */
+  | 'not-live'
+  /** The app stayed out of the foreground past `BUMP_FOREGROUND_GRACE_MS`. */
+  | 'background-grace'
+  /** The user switched to the link channel. */
+  | 'switch-channel'
+  /** A link or code is being redeemed, which needs the radio quiet. */
+  | 'pair-from-input'
+  | 'expired'
+  /** A nearby session reached the visual check; the window's job is done. */
+  | 'sas-gate'
+  | 'pair-failed'
+  | 'paired'
+  | 'shutdown'
+  /** A caller that did not say. Should not appear; when it does, find the caller. */
+  | 'unspecified';
 
 /**
  * Why a pairing that had actually started did not finish.
@@ -706,6 +743,15 @@ export class LocationSharingService {
   private bumpError: string | null = null;
   private bumpResolveInFlight: Promise<void> | null = null;
   private bumpGeneration = 0;
+  /** Counts Bump windows, so every `bump.stage` span of one window shares a `bump.window`. */
+  private bumpWindowId = 0;
+  private bumpArmedAt: number | null = null;
+  /**
+   * How many times the pairing screen has been left ({@link standDownPairing}). A Bump handshake
+   * that returns after one of these is cancelled; one that returns after the window merely
+   * closed (see {@link commitBump}) is not.
+   */
+  private pairingStandDowns = 0;
   private pairingOperations = 0;
   private rebindInFlight = false;
   private readonly discoveries = new Map<string, Friend>();
@@ -1704,7 +1750,12 @@ export class LocationSharingService {
     this.bumpGeneration += 1;
     await this.setPairingReady(true);
     this.bumpUntil = Date.now() + Math.max(8000, windowMs);
-    this.bumpStage = 'armed';
+    this.bumpWindowId += 1;
+    this.bumpArmedAt = Date.now();
+    this.setBumpStage('armed', 'armed', {
+      'bump.window_ms': Math.max(8000, windowMs),
+      'bump.radio': this.bluetoothRadio,
+    });
     this.bumpRssi = null;
     this.bumpPeerCount = 0;
     this.bumpError = null;
@@ -1721,7 +1772,8 @@ export class LocationSharingService {
   async commitBump(): Promise<void> {
     if (!this.mod || !this.isBumpActive() || this.bumpResolveInFlight) return;
     const generation = this.bumpGeneration;
-    this.bumpStage = 'searching';
+    const standDowns = this.pairingStandDowns;
+    this.setBumpStage('searching', 'commit');
     this.bumpSearchStartedAt = Date.now();
     this.bumpUntil = Math.max(this.bumpUntil, this.bumpSearchStartedAt + BUMP_SEARCH_DURATION_MS);
     this.bumpError = null;
@@ -1732,29 +1784,46 @@ export class LocationSharingService {
       if (generation !== this.bumpGeneration || !this.isBumpActive()) return;
       this.bumpPeerCount = result.peerCount;
       this.bumpRssi = result.rssi;
+      const found: Attributes = {
+        'bump.resolve_status': result.status,
+        'bump.peer_count': result.peerCount,
+        'bump.rssi': result.rssi ?? undefined,
+        'bump.detail': result.detail || undefined,
+        'sc.peer': result.endpointId?.slice(0, 10),
+      };
       if (result.status === 'resolved' && result.endpointId) {
         if (this.state.friends[result.endpointId]) {
-          this.bumpStage = 'failed';
+          this.setBumpStage('failed', 'already-friend', found);
           this.bumpError = 'That cryptid is already in your atlas.';
           this.setPairingActivity('already paired');
           return;
         }
-        this.bumpStage = 'contact';
+        this.setBumpStage('contact', 'resolved', found);
         this.setPairingActivity('signal found');
         let sessionId: string;
         try {
           sessionId = await this.initiateNearbyPair(result.endpointId);
         } catch (error) {
           if (generation === this.bumpGeneration && this.isBumpActive()) {
-            this.bumpStage = 'failed';
+            this.setBumpStage('failed', 'initiate-error', { 'bump.detail': errorMessage(error) });
             this.bumpError =
               'The phones found each other, but the encrypted handshake did not start. Try again.';
             this.setPairingActivity('handshake failed');
           }
           throw error;
         }
-        if (generation !== this.bumpGeneration) {
+        // The window closing under a running handshake is not a reason to end it. It closes on
+        // every trip out of the foreground, and Android leaves it for a second or two whenever
+        // another activity takes the screen: on 2026-10-31 a Pixel 10 went to `background` for
+        // 1.6 s, 0.3 s into its Hello (its owner saw Android Auto open), and again for 0.2 s during the
+        // next try. Each time the handshake went on to put the figures on the iPhone's screen,
+        // and each time this branch then cancelled it, so the iPhone read "they declined" about a
+        // pair nobody had declined. Only leaving the pairing screen abandons a pair, and leaving
+        // already tells the other phone (`standDownPairing`); a handshake it could not yet name
+        // is caught here.
+        if (generation !== this.bumpGeneration && standDowns !== this.pairingStandDowns) {
           this.initiatedRoutes.delete(sessionId);
+          this.recordLocalCancel(sessionId, 'left-screen-during-handshake');
           await this.mod!.cancelPair(sessionId);
           return;
         }
@@ -1762,15 +1831,19 @@ export class LocationSharingService {
         return;
       }
 
-      this.bumpStage = 'failed';
+      // Nothing found, or found but not read: the other phone may still have found THIS one, and
+      // the window is still open to its Hello. Only the outcomes no Hello can fix are failures.
+      if (result.status === 'noPeers' || result.status === 'probeFailed') {
+        this.setBumpStage('waiting', result.status, found);
+        this.bumpError = null;
+        this.setPairingActivity('listening for the other phone');
+        return;
+      }
+      this.setBumpStage('failed', result.status, found);
       this.bumpError =
         result.status === 'ambiguous'
           ? 'More than one phone is equally close. Move the two phones apart and try again.'
-          : result.status === 'noPeers'
-            ? 'No other streetCryptid phone answered. Keep Friends open on both phones and retry.'
-            : result.status === 'unavailable'
-              ? 'Bluetooth is not available on this device or build.'
-              : 'The nearby phone was found, but its identity could not be read. Try Bump again.';
+          : 'Bluetooth is not available on this device or build.';
       this.setPairingActivity('bump needs another try');
     }).finally(() => {
       this.bumpResolveInFlight = null;
@@ -1780,8 +1853,8 @@ export class LocationSharingService {
     await run;
   }
 
-  async cancelBump(): Promise<void> {
-    this.stopBumpPolling();
+  async cancelBump(reason: BumpCloseReason = 'unspecified'): Promise<void> {
+    this.stopBumpPolling(true, reason);
     if (this.mod && this.pairingReadyFlag) await this.setPairingReady(false);
   }
 
@@ -2069,6 +2142,7 @@ export class LocationSharingService {
     try {
       if (!accept) {
         this.rejectedPairSessions.add(sessionId);
+        this.recordLocalCancel(sessionId, 'reveal-reject');
         await mod.cancelPair(sessionId);
         await this.withdrawDiscoveredFriend(sessionId, friend.endpointId, 'reveal-reject');
         this.setPairingActivity('pair rejected');
@@ -2202,7 +2276,7 @@ export class LocationSharingService {
               session.sessionId === inviteId && !TERMINAL_PAIR_STATES.includes(session.state)
           )
         ) {
-          await this.cancelPair(inviteId);
+          await this.cancelPair(inviteId, 'invite-withdrawn');
         }
       }
       if (this.inviteLink === link) {
@@ -2373,7 +2447,7 @@ export class LocationSharingService {
 
   private async pairFromInputUnlocked(input: string): Promise<string> {
     if (!this.mod) throw new Error('pairFromInput: native module not bound');
-    if (this.isBumpActive()) await this.cancelBump();
+    if (this.isBumpActive()) await this.cancelBump('pair-from-input');
     const trimmed = input.trim();
     if (isPairingCode(trimmed)) {
       return this.pairFromCode(trimmed);
@@ -2488,11 +2562,12 @@ export class LocationSharingService {
   }
 
   /** Cancel a pairing under SAS verification — terminal (a fresh attempt is required). */
-  async cancelPair(sessionId: string): Promise<void> {
+  async cancelPair(sessionId: string, reason = 'user'): Promise<void> {
     if (!this.mod) throw new Error('cancelPair: native module not bound');
     // The session snapshot can lag a Ready event. Only explicit discovery rejection may
     // withdraw a completed handshake; closing an acknowledged reveal must keep its friend.
     if (this.handledPairSessions.has(sessionId)) return;
+    this.recordLocalCancel(sessionId, reason);
     await this.mod.cancelPair(sessionId);
     this.verifications = this.verifications.filter((v) => v.sessionId !== sessionId);
     this.pendingPairRequests = this.pendingPairRequests.filter((e) => e.sessionId !== sessionId);
@@ -2522,6 +2597,7 @@ export class LocationSharingService {
    * cannot be reached is exactly the case where the local decision still has to stand.
    */
   async standDownPairing(candidateSessionIds: readonly string[]): Promise<void> {
+    this.pairingStandDowns += 1;
     if (!this.mod || candidateSessionIds.length === 0) return;
     const span = getTelemetry().startSpan('pair.stand_down');
     try {
@@ -2545,7 +2621,7 @@ export class LocationSharingService {
       });
       for (const { sessionId, session } of cancellable) {
         try {
-          await this.cancelPair(sessionId);
+          await this.cancelPair(sessionId, 'left-screen');
         } catch (err) {
           // Native refuses a contradictory decision (a session that accepted between our read and
           // this call) — which is the same invariant as the filter above, enforced one layer down.
@@ -3959,7 +4035,7 @@ export class LocationSharingService {
       releaseNativeRuntime();
     }
     // Stop callbacks synchronously before awaiting native teardown.
-    this.stopBumpPolling();
+    this.stopBumpPolling(true, 'shutdown');
     // Let acknowledge-time wiring finish before the module goes away. Bounded like every other
     // teardown await on this path (AGENTS.md: never `await` native teardown unbounded) — a
     // subscribe that is itself stuck must not become the reason shutdown never returns.
@@ -5152,6 +5228,53 @@ export class LocationSharingService {
   }
 
   /**
+   * Every Bump stage change goes through here and becomes a `bump.stage` span (`bump.from`,
+   * `bump.to`, `bump.reason`, `bump.window`, `bump.since_arm_ms`).
+   *
+   * Point spans, ended at once, and deliberately not one span per window: a span reaches the
+   * journal only when it ends, and the window most worth explaining is one that ended in a
+   * force-quit, as the 2026-10-31 attempts did. A window-long span would have died with it. A close
+   * of a window that was already idle is not a transition and is not recorded.
+   */
+  private setBumpStage(next: BumpStage, reason: string, attrs: Attributes = {}): void {
+    const from = this.bumpStage;
+    this.bumpStage = next;
+    if (from === 'idle' && next === 'idle') return;
+    getTelemetry()
+      .startSpan('bump.stage', {
+        attributes: {
+          'bump.from': from,
+          'bump.to': next,
+          'bump.reason': reason,
+          'bump.window': this.bumpWindowId,
+          'bump.since_arm_ms':
+            this.bumpArmedAt === null ? undefined : Date.now() - this.bumpArmedAt,
+          ...attrs,
+        },
+      })
+      .end();
+  }
+
+  /**
+   * `pair.cancel`: this phone decided to end a session. The wire Reject that follows reads on the
+   * other phone as "they declined", so the reason has to be recorded HERE. On 2026-10-31 a Pixel's
+   * own generation check cancelled two handshakes the iPhone had already put on screen, and the
+   * only trace was a Rust `local_decision fail` log line that said nothing about why.
+   */
+  private recordLocalCancel(sessionId: string, reason: string): void {
+    getTelemetry()
+      .startSpan('pair.cancel', {
+        attributes: {
+          'sc.session': sessionId.slice(0, 10),
+          reason,
+          'bump.window': this.bumpWindowId,
+          'bump.stage': this.bumpStage,
+        },
+      })
+      .end();
+  }
+
+  /**
    * Watch for the bump window closing.
    *
    * This used to ALSO drive `pollPairingOnce` every 300ms, in parallel with the pairing loop doing
@@ -5163,7 +5286,7 @@ export class LocationSharingService {
     if (this.bumpTimer) return;
     const timer = setInterval(() => {
       if (this.isBumpActive()) return;
-      this.stopBumpPolling(false);
+      this.stopBumpPolling(false, 'expired');
       if (this.pairingReadyFlag) void this.setPairingReady(false);
       if (!this.discoveredFriend) this.setPairingActivity('bump idle');
     }, BUMP_EXPIRY_CHECK_MS);
@@ -5173,7 +5296,7 @@ export class LocationSharingService {
     this.repollSoon();
   }
 
-  private stopBumpPolling(invalidateAttempt = true): void {
+  private stopBumpPolling(invalidateAttempt: boolean, reason: BumpCloseReason): void {
     if (invalidateAttempt) this.bumpGeneration += 1;
     if (this.bumpTimer) {
       clearInterval(this.bumpTimer);
@@ -5181,7 +5304,8 @@ export class LocationSharingService {
     }
     this.bumpUntil = 0;
     this.bumpSearchStartedAt = null;
-    this.bumpStage = 'idle';
+    this.setBumpStage('idle', reason);
+    this.bumpArmedAt = null;
     this.bumpRssi = null;
     this.bumpPeerCount = 0;
     this.bumpError = null;
@@ -5310,7 +5434,11 @@ export class LocationSharingService {
         // identified none of them, which is why this took a day to find.
         pairing_read_ms: reads.pairingReadMs ?? 0,
       });
-      if (current) await this.pollTransportDiagnosticsOnce();
+      // Started, never awaited. It is diagnostics, and `remote_info` can wait on a peer whose
+      // path is still being built: on 2026-10-31 a Pixel 10's poll sat behind it for 14.8 s while
+      // its own Bump handshake dialled over BLE, so the screen could not move off SEARCHING and no
+      // other poll could start. Deduplicated by the in-flight promise, and it never throws.
+      if (current) void this.pollTransportDiagnosticsOnce();
       // Pair events FIRST: `pool.applyProfile` is a no-op for an endpoint that isn't a friend yet,
       // and both queues are drained together above, so applying profiles first threw away the
       // persona of anyone whose `ready` was sitting in the very same batch.
@@ -5491,7 +5619,7 @@ export class LocationSharingService {
           (e) => e.sessionId !== event.sessionId
         );
         if (event.nearby) {
-          this.stopBumpPolling(false);
+          this.stopBumpPolling(false, 'sas-gate');
           if (this.pairingReadyFlag) void this.setPairingReady(false);
         }
         this.setPairingActivity(event.nearby ? 'signals are locking' : 'verify to connect');
@@ -5526,7 +5654,7 @@ export class LocationSharingService {
         this.verifications = this.verifications.filter((v) => v.sessionId !== event.sessionId);
         this.initiatedRoutes.delete(event.sessionId);
         if (event.nearby) {
-          this.stopBumpPolling(false);
+          this.stopBumpPolling(false, 'pair-failed');
           if (this.pairingReadyFlag) void this.setPairingReady(false);
         }
         this.setPairingFailure({
@@ -5717,7 +5845,7 @@ export class LocationSharingService {
     // handler's clear — and a friend on screen must never sit under a stale failure.
     this.pairingFailure = null;
     this.discoveries.set(event.sessionId, friend);
-    this.stopBumpPolling(false);
+    this.stopBumpPolling(false, 'paired');
     if (this.pairingReadyFlag) void this.setPairingReady(false);
     this.handledPairSessions.add(event.sessionId);
     this.setPairingActivity('cryptid discovered');

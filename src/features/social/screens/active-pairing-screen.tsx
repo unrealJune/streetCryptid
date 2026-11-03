@@ -168,7 +168,11 @@ export default function ActivePairingScreen() {
   const standDown = useCallback(async (): Promise<void> => {
     const sessionIds = abandonableRef.current;
     abandonableRef.current = [];
-    await Promise.allSettled([cancelBump(), cancelPairInvite(), standDownPairing(sessionIds)]);
+    await Promise.allSettled([
+      cancelBump('left-screen'),
+      cancelPairInvite(),
+      standDownPairing(sessionIds),
+    ]);
   }, [cancelBump, cancelPairInvite, standDownPairing]);
 
   useFocusEffect(
@@ -197,7 +201,7 @@ export default function ActivePairingScreen() {
     setIntent('redeem');
     setRedeeming(true);
     setWorking('redeem');
-    void cancelBump()
+    void cancelBump('pair-from-input')
       .then(() => (routeActive.current ? pairFromInput(token) : undefined))
       .then(() => setIntent('bump'))
       .catch((redeemError: unknown) => {
@@ -510,6 +514,19 @@ export default function ActivePairingScreen() {
           fieldMode: 'scatter',
           tone: 'amber',
         };
+      case 'bump-waiting':
+        // This phone's search came back empty, but its window is still open: the other phone may
+        // have found this one, and its request lands here. Saying "nothing found" was the lie.
+        return {
+          mode: 'BUMP ARMED',
+          status: 'LISTENING',
+          detail:
+            'This phone did not find the other one. If the other phone found this one, pairing starts here. Keep both open.',
+          caption: 'LISTENING',
+          readout: '',
+          fieldMode: 'pulse',
+          tone: 'signal',
+        };
       case 'bump-searching':
         return {
           mode: 'BUMP ARMED',
@@ -598,7 +615,7 @@ export default function ActivePairingScreen() {
     setLinkNotice(null);
     clearPairingFailure();
     try {
-      await cancelBump();
+      await cancelBump('switch-channel');
       if (!routeActive.current) return;
       const link = await createPairInvite(INVITE_TTL_SECONDS);
       if (!routeActive.current) return;
@@ -634,7 +651,7 @@ export default function ActivePairingScreen() {
     setRedeeming(true);
     setInputError(null);
     try {
-      await cancelBump();
+      await cancelBump('pair-from-input');
       if (!routeActive.current) return;
       await pairFromInput(value);
       setIntent('bump');
@@ -1108,7 +1125,7 @@ export default function ActivePairingScreen() {
               </>
             ) : stage === 'service-failed' ? (
               <Action color={signal} label="TRY AGAIN" onPress={retryService} />
-            ) : stage === 'bump-failed' ? (
+            ) : stage === 'bump-failed' || stage === 'bump-waiting' ? (
               <>
                 <Action
                   color={chrome.steel}

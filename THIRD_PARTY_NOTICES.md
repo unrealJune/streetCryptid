@@ -9,14 +9,14 @@ notices, not because their terms differ from the rest of the project.
 ## iroh-ble-transport (vendored, modified)
 
 - **Location:** `modules/iroh-location/rust/third_party/iroh-ble-transport/`
-- **Upstream:** <https://github.com/mcginty/iroh-ble-transport> (tag `iroh-ble-transport-v0.3.1`)
+- **Upstream:** <https://github.com/mcginty/iroh-ble-transport> (tag `iroh-ble-transport-v0.5.1-beta.7`; first vendored at v0.3.1)
 - **Original author:** Jake McGinty &lt;me@jakebot.org&gt;
 - **License:** GNU Affero General Public License v3.0 or later (**AGPL-3.0-or-later**)
 - **Full license text:** `modules/iroh-location/rust/third_party/iroh-ble-transport/LICENSE`
 - **List of modifications:** `modules/iroh-location/rust/third_party/iroh-ble-transport/NOTICE`
 
-An experimental Bluetooth Low Energy transport for iroh, vendored and ported from
-iroh 0.98.2 to iroh 1.0.2 for use by the `iroh-location` native module.
+An experimental Bluetooth Low Energy transport for iroh, vendored for use by the
+`iroh-location` native module and modified for its pairing and telemetry needs.
 
 It is a dependency on the Android and Apple targets only — the platforms its `blew`
 BLE backend supports and where this module ships natively (`Cargo.toml`, the
@@ -33,16 +33,33 @@ the iOS XCFramework — therefore contains and executes this code.
 
 ## blew (Rust crate + vendored Android runtime)
 
-- **Rust crate:** `blew = "0.3"` from crates.io, an Android-target dependency of `iroh-location`
+- **Vendored Rust crate:** `modules/iroh-location/rust/third_party/blew/` (upstream 0.5.1-beta.8; first vendored at 0.3.0), used by
+  `iroh-ble-transport` and, on Android, by `iroh-location` directly
+- **List of Rust modifications:** `modules/iroh-location/rust/third_party/blew/NOTICE`
 - **Vendored Android runtime:** `modules/iroh-location/android/src/main/java/org/jakebot/blew/`
 - **Notice/license:** `modules/iroh-location/android/third_party/blew/`
 - **Upstream:** <https://github.com/mcginty/blew>
 - **License:** GNU Affero General Public License v3.0 or later (**AGPL-3.0-or-later**)
 
 The Kotlin central/peripheral managers are the Android runtime half of the Rust `blew`
-dependency. They are vendored unchanged so Rust BLE threads can call into Android's
-Bluetooth APIs through JNI, and are reached from
-`com/unrealjune/irohlocation/IrohAndroidBootstrap.kt`.
+dependency. They are vendored so Rust BLE threads can call into Android's Bluetooth APIs
+through JNI (modified: the central asks for a high-priority connection; see that
+directory's NOTICE), and are reached from `com/unrealjune/irohlocation/IrohAndroidBootstrap.kt`.
+
+The Rust crate was vendored on 2026-10-31 to fix flow control in its CoreBluetooth
+backend, and rebased onto upstream 0.5.1-beta.8 on 2026-11-02, which fixes most of the
+same problems itself; its NOTICE lists what is still ours.
+
+## noq (vendored, modified)
+
+- **Location:** `modules/iroh-location/rust/third_party/noq/`
+- **Upstream:** <https://github.com/n0-computer/noq> (crates.io `noq` 1.4.0)
+- **Copyright:** n0, inc. and the noq / Quinn contributors
+- **License:** MIT OR Apache-2.0
+- **List of modifications:** `modules/iroh-location/rust/third_party/noq/NOTICE`
+
+Applied with `[patch.crates-io]` for a single fix: `read_to_end` on a stream already read to its
+end failed, which made most iroh-docs syncs report failure. Remove it once noq fixes it.
 
 ## Distribution obligation
 

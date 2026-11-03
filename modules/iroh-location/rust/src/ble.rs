@@ -219,7 +219,15 @@ mod imp {
     /// Build the BLE transport for `endpoint_id` and wire its dedup hook, custom transport, and
     /// address lookup onto `builder` (additive — N0 IP/relay transports stay intact). If the radio
     /// or permission is unavailable, log the failure and return the untouched IP/relay builder.
-    pub async fn attach(builder: Builder, endpoint_id: EndpointId) -> (Builder, BleHandle) {
+    ///
+    /// While `pairing_holds_ble()` is true the transport keeps its links for the pairing protocol
+    /// alone (`BleTransport::reserve_links_for`), so friend sync cannot crowd a Hello off a link
+    /// that carries a few kilobytes a second. See `BLE_PAIRING_HOLD_MAX` in `pairing.rs`.
+    pub async fn attach(
+        builder: Builder,
+        endpoint_id: EndpointId,
+        pairing_holds_ble: impl Fn() -> bool + Send + Sync + 'static,
+    ) -> (Builder, BleHandle) {
         let attached = match tokio::time::timeout(ATTACH_TIMEOUT, setup(endpoint_id)).await {
             Ok(result) => result,
             Err(_) => {
@@ -234,6 +242,8 @@ mod imp {
         };
         match attached {
             Ok((transport, central, peripheral)) => {
+                transport
+                    .reserve_links_for(vec![crate::pairing::PAIR_ALPN.to_vec()], pairing_holds_ble);
                 let builder = builder
                     .hooks(transport.dedup_hook())
                     .add_custom_transport(transport.as_custom_transport())
@@ -317,15 +327,24 @@ mod imp {
         budget: Duration,
     ) -> Result<Vec<u8>, String> {
         advertised_key_uuid(device).ok_or_else(|| "missing iroh advertisement".to_string())?;
+        // Each step's time lands on the caller's `ble.probe` span. Which step a failed probe died
+        // in is the whole question when a phone's own search finds the other and still cannot
+        // name it (2026-10-31: an iPhone's search never resolved a Pixel beside it).
+        let span = tracing::Span::current();
+        let step = std::time::Instant::now();
+        let mut connected = false;
         let read = tokio::time::timeout(std::cmp::min(PROBE_TIMEOUT, budget), async {
             central
                 .connect(&device.id)
                 .await
                 .map_err(|error| format!("connect failed: {error}"))?;
+            connected = true;
+            span.record("connect_ms", step.elapsed().as_millis() as u64);
             let services = central
                 .discover_services(&device.id)
                 .await
                 .map_err(|error| format!("service discovery failed: {error}"))?;
+            span.record("discover_ms", step.elapsed().as_millis() as u64);
             let identity_present = services.iter().any(|service| {
                 service
                     .characteristics
@@ -335,10 +354,12 @@ mod imp {
             if !identity_present {
                 return Err("identity characteristic missing".to_string());
             }
-            central
+            let value = central
                 .read_characteristic(&device.id, IROH_IDENTITY_CHAR_UUID)
                 .await
-                .map_err(|error| format!("identity read failed: {error}"))
+                .map_err(|error| format!("identity read failed: {error}"));
+            span.record("read_ms", step.elapsed().as_millis() as u64);
+            value
         })
         .await;
 
@@ -347,25 +368,50 @@ mod imp {
             let _ = central.refresh(&device.id).await;
         }
 
+        // The probe's error is what the read said. A connect that never landed has nothing to
+        // disconnect, and waiting 2 s for a disconnect event that cannot come only replaced the
+        // real error ("connect already in flight", say) with "disconnect did not complete".
+        let read = match read {
+            Ok(Ok(value)) => Ok(value),
+            Ok(Err(error)) => Err(error),
+            Err(_) => Err("identity probe timed out".to_string()),
+        };
+        span.record("read_ok", read.is_ok());
+
         let mut events = central.events();
         transport.expect_probe_disconnect(device.id.clone());
         let _ = tokio::time::timeout(DISCONNECT_TIMEOUT, central.disconnect(&device.id)).await;
-        let disconnected = tokio::time::timeout(DISCONNECT_TIMEOUT, async {
-            while let Some(event) = events.next().await {
-                if matches!(
-                    event,
-                    CentralEvent::DeviceDisconnected { ref device_id, .. } if *device_id == device.id
-                ) {
-                    return true;
+        let disconnected = if connected {
+            tokio::time::timeout(DISCONNECT_TIMEOUT, async {
+                while let Some(event) = events.next().await {
+                    if matches!(
+                        event,
+                        CentralEvent::DeviceDisconnected { ref device_id, .. } if *device_id == device.id
+                    ) {
+                        return true;
+                    }
                 }
-            }
+                false
+            })
+            .await
+            .unwrap_or(false)
+        } else {
             false
-        })
-        .await
-        .unwrap_or(false);
-        if !disconnected {
-            return Err("identity probe disconnect did not complete".to_string());
-        }
+        };
+        span.record("disconnect_ms", step.elapsed().as_millis() as u64);
+        span.record("disconnected", disconnected);
+        // A disconnect that is not reported no longer throws away an identity that was read. Two
+        // phones share one BLE link whichever side dialled, and while the other phone holds it
+        // iOS may not report our side closing: on 2026-10-31 an iPhone's probes failed with
+        // "disconnect did not complete" while the Pixel beside it was dialling it, and its own
+        // search never named the Pixel.
+        let value = match read {
+            Ok(value) => value,
+            Err(error) if connected && !disconnected => {
+                return Err(format!("{error} (and the disconnect did not complete)"));
+            }
+            Err(error) => return Err(error),
+        };
 
         let _ = central.stop_scan().await;
         central
@@ -386,25 +432,39 @@ mod imp {
         })
         .await
         .unwrap_or(false);
-        if !rediscovered {
-            return Err("identity probe peer was not rediscovered".to_string());
-        }
+        span.record("rediscover_ms", step.elapsed().as_millis() as u64);
+        // Not seeing the peer advertise again within the window no longer fails a probe that has
+        // already read its identity. The read is the answer; rediscovery only lets the transport
+        // hear the peer again before the pairing dial, and the restarted scan keeps listening for
+        // that. A phone that stops advertising while it holds a connection (legacy connectable
+        // advertising ends on connect, and not every stack restarts it at once) made the probing
+        // phone's search fail outright here, so only the other phone's search could pair them.
+        span.record("rediscovered", rediscovered);
 
-        let value = match read {
-            Ok(Ok(value)) => value,
-            Ok(Err(error)) => return Err(error),
-            Err(_) => return Err("identity probe timed out".to_string()),
-        };
         matching_endpoint_hint(device, &value)
             .ok_or_else(|| "identity did not match the advertised prefix".to_string())
     }
 
-    async fn collect_fresh_devices(central: &Central, budget: Duration) -> Vec<BleDevice> {
+    /// What one scan window heard. `heard` counts every discovery event, iroh or not, so an
+    /// empty result can be told apart: a radio that heard nothing at all, versus one that heard
+    /// devices and none of them advertised an iroh key.
+    struct ScanResult {
+        devices: Vec<BleDevice>,
+        heard: u64,
+        started: bool,
+    }
+
+    async fn collect_fresh_devices(central: &Central, budget: Duration) -> ScanResult {
         let mut events = central.events();
         let _ = central.stop_scan().await;
         if central.start_scan(ScanFilter::default()).await.is_err() {
-            return Vec::new();
+            return ScanResult {
+                devices: Vec::new(),
+                heard: 0,
+                started: false,
+            };
         }
+        let mut heard = 0u64;
 
         let deadline = tokio::time::Instant::now() + std::cmp::min(SCAN_WINDOW, budget);
         let mut devices = HashMap::<String, BleDevice>::new();
@@ -414,16 +474,21 @@ mod imp {
                 break;
             }
             match tokio::time::timeout(remaining, events.next()).await {
-                Ok(Some(CentralEvent::DeviceDiscovered(device)))
-                    if advertised_key_uuid(&device).is_some() =>
-                {
-                    devices.insert(device.id.to_string(), device);
+                Ok(Some(CentralEvent::DeviceDiscovered(device))) => {
+                    heard += 1;
+                    if advertised_key_uuid(&device).is_some() {
+                        devices.insert(device.id.to_string(), device);
+                    }
                 }
                 Ok(Some(_)) => {}
                 Ok(None) | Err(_) => break,
             }
         }
-        devices.into_values().collect()
+        ScanResult {
+            devices: devices.into_values().collect(),
+            heard,
+            started: true,
+        }
     }
 
     impl BleHandle {
@@ -471,7 +536,14 @@ mod imp {
             };
             let _resolve_guard = self.resolve_lock.lock().await;
             let started = tokio::time::Instant::now();
-            let mut devices = collect_fresh_devices(&central, timeout).await;
+            // Recorded on the caller's `bump.resolve` span (fields declared there).
+            let span = tracing::Span::current();
+            let scan = collect_fresh_devices(&central, timeout).await;
+            span.record("scan_ms", started.elapsed().as_millis() as u64);
+            span.record("scan_started", scan.started);
+            span.record("heard", scan.heard);
+            span.record("iroh_devices", scan.devices.len() as u64);
+            let mut devices = scan.devices;
             if devices.is_empty() {
                 return Err(BumpResolveError::NoPeers);
             }
@@ -481,6 +553,13 @@ mod imp {
                     .unwrap_or(i16::MIN)
                     .cmp(&left.rssi.unwrap_or(i16::MIN))
             });
+            let candidates = devices
+                .iter()
+                .take(5)
+                .map(|d| d.rssi.map_or_else(|| "?".to_string(), |r| r.to_string()))
+                .collect::<Vec<_>>()
+                .join(",");
+            span.record("candidate_rssi", candidates.as_str());
             let peer_count = u32::try_from(devices.len()).unwrap_or(u32::MAX);
             if let [first, second, ..] = devices.as_slice() {
                 if let (Some(first_rssi), Some(second_rssi)) = (first.rssi, second.rssi) {
@@ -492,16 +571,32 @@ mod imp {
 
             let transport_peers = transport.snapshot_peers();
             let mut last_error = "no candidate could be resolved".to_string();
+            let mut probes = 0u64;
             for device in devices {
                 let key = device.id.to_string();
+                // A phone we already hold a verified link to is known by its ENDPOINT, not by the
+                // address it advertises now: Android re-advertises under a new address the moment
+                // a central connects, so the advertisement an iPhone hears is never the device its
+                // live pipe to that Pixel is on. Matching by device id alone sent the iPhone to
+                // probe the new address (a second connect to a phone it was already connected
+                // to), which timed out every time (2026-11-01 21:32, 2026-11-02 17:23) while the
+                // Pixel resolved the iPhone as known in a second and a half.
                 let known = transport_peers
                     .iter()
                     .find(|peer| peer.device_id == device.id)
                     .and_then(|peer| peer.verified_endpoint)
+                    .or_else(|| {
+                        let key_uuid = advertised_key_uuid(&device)?;
+                        transport_peers
+                            .iter()
+                            .filter_map(|peer| peer.verified_endpoint)
+                            .find(|endpoint| key_uuid_matches_endpoint(&key_uuid, endpoint))
+                    })
                     .map(|endpoint| endpoint.as_bytes().to_vec())
                     .or_else(|| self.probe_cache.cached(&key));
                 if let Some(endpoint_id) = known {
                     if matching_endpoint_hint(&device, &endpoint_id).is_some() {
+                        span.record("resolved_via", "known");
                         return Ok(BumpResolvedPeer {
                             device_id: key,
                             endpoint_id,
@@ -516,9 +611,40 @@ mod imp {
                     if elapsed >= timeout {
                         break;
                     }
-                    match probe_endpoint_hint(&central, transport, &device, timeout - elapsed).await
-                    {
+                    probes += 1;
+                    span.record("probes", probes);
+                    let probe_span = tracing::info_span!(
+                        "ble.probe",
+                        device = %device.id,
+                        attempt = attempt as u64,
+                        rssi = device.rssi.map(i64::from),
+                        outcome = tracing::field::Empty,
+                        error = tracing::field::Empty,
+                        connect_ms = tracing::field::Empty,
+                        discover_ms = tracing::field::Empty,
+                        read_ms = tracing::field::Empty,
+                        disconnect_ms = tracing::field::Empty,
+                        rediscover_ms = tracing::field::Empty,
+                        rediscovered = tracing::field::Empty,
+                        read_ok = tracing::field::Empty,
+                        disconnected = tracing::field::Empty,
+                    );
+                    let probed = tracing::Instrument::instrument(
+                        probe_endpoint_hint(&central, transport, &device, timeout - elapsed),
+                        probe_span.clone(),
+                    )
+                    .await;
+                    match &probed {
+                        Ok(_) => probe_span.record("outcome", "ok"),
+                        Err(error) => {
+                            probe_span.record("outcome", "failed");
+                            probe_span.record("error", error.as_str())
+                        }
+                    };
+                    drop(probe_span);
+                    match probed {
                         Ok(endpoint_id) => {
+                            span.record("resolved_via", "probe");
                             self.probe_cache.store(&key, endpoint_id.clone());
                             return Ok(BumpResolvedPeer {
                                 device_id: key,

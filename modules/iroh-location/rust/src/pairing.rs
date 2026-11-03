@@ -189,6 +189,76 @@ const PAIR_INBOUND_TIMEOUT: Duration = Duration::from_secs(30);
 /// `conn.closed()` on its own never returns for a peer that vanished mid-handshake.
 const PAIR_CLOSE_LINGER: Duration = Duration::from_secs(5);
 
+/// QUIC application close codes on the pairing ALPN. Code 0 is every ordinary close
+/// (`pair-done`, `pair-error`, …); these two are a REFUSAL, sent by the answering phone so the
+/// dialler can stop at once and say why.
+///
+/// Before them a refused request was answered by dropping the connection, and the close that
+/// implies could be lost with the link carrying it: on 2026-10-29 an iPhone 14 refused a Pixel 10's
+/// nearby Hello (its Bump window had closed), tore its BLE pipe down with the connection, and the
+/// Pixel waited out all 25 s of `PAIR_EXCHANGE_TIMEOUT` before telling its user "That phone did not
+/// answer" — about a phone that had answered, with a no. An explicit close is sent before anything
+/// is dropped. Closing with a code is not part of the signed wire, so older peers are unaffected:
+/// an older dialler simply sees the connection end, sooner.
+const PAIR_CLOSE_NOT_LISTENING: u32 = 1;
+const PAIR_CLOSE_REFUSED: u32 = 2;
+
+/// The longest a Bump window keeps BLE for pairing alone ([`PairCore::holds_ble_for_pairing`]).
+///
+/// A BLE link carries a few kilobytes a second and every connection to a peer shares it. On
+/// 2026-10-30 a Pixel 10 had just removed an iPhone to pair with it again; the moment a pipe came
+/// up, thirteen friend-sync connections and a gossip one between the two phones were established
+/// over it, the link retransmitted continuously, and the Pixel's Hello never connected (37.7 s,
+/// "Could not reach that phone"). While the window is open, friend sync between phones in BLE
+/// range waits; it is released when a nearby pair reaches the SAS gate, when the app closes the
+/// window, or after this long, whichever comes first, so a window the app never closed (a process
+/// suspended mid-Bump) cannot starve sync. The app's window is 2 min, plus the search.
+const BLE_PAIRING_HOLD_MAX: Duration = Duration::from_secs(150);
+
+/// The answering phone is not taking nearby pair requests right now: its Bump window is shut.
+#[derive(Debug)]
+struct NotListening;
+
+impl std::fmt::Display for NotListening {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("not accepting nearby pair requests")
+    }
+}
+
+impl std::error::Error for NotListening {}
+
+/// The close code the inbound handler sends for an error from `handle_incoming`.
+fn refusal_code(err: &anyhow::Error) -> u32 {
+    if err.downcast_ref::<NotListening>().is_some() {
+        PAIR_CLOSE_NOT_LISTENING
+    } else {
+        PAIR_CLOSE_REFUSED
+    }
+}
+
+/// The refusal a peer closed `conn` with, if that is how it ended.
+fn peer_refusal(conn: &Connection) -> Option<u32> {
+    match conn.close_reason()? {
+        iroh::endpoint::ConnectionError::ApplicationClosed(close) => {
+            match close.error_code.into_inner() {
+                1 => Some(PAIR_CLOSE_NOT_LISTENING),
+                2 => Some(PAIR_CLOSE_REFUSED),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+/// What the pairing screen shows for a refusal. Shown verbatim, like the dial's other errors.
+fn refusal_message(code: u32) -> &'static str {
+    if code == PAIR_CLOSE_NOT_LISTENING {
+        "That phone is not ready to pair. Open Bump on both phones, then try again."
+    } else {
+        "That phone turned this pairing down. Start a fresh pairing on both phones."
+    }
+}
+
 /// The budget for a SECOND or later attempt to reach a relay, once a full
 /// [`ENDPOINT_ONLINE_TIMEOUT`] has already been spent and failed. See `our_endpoint_ticket`.
 const ENDPOINT_ONLINE_RETRY_TIMEOUT: Duration = Duration::from_secs(2);
@@ -1491,6 +1561,8 @@ pub struct PairCore {
     notices: Mutex<VecDeque<PairNotice>>,
     runtime: Mutex<Option<PairRuntime>>,
     pairing_ready: AtomicBool,
+    /// Until when BLE is kept for pairing alone. See [`BLE_PAIRING_HOLD_MAX`].
+    ble_hold_until: std::sync::Mutex<Option<Instant>>,
     /// Whether this node has been seen fully online (relay handshake complete) at least once,
     /// and whether a full relay wait has already been spent and lost. See
     /// [`Self::our_endpoint_ticket`] for why both are worth remembering.
@@ -1509,6 +1581,7 @@ impl PairCore {
             notices: Mutex::new(VecDeque::new()),
             runtime: Mutex::new(None),
             pairing_ready: AtomicBool::new(false),
+            ble_hold_until: std::sync::Mutex::new(None),
             endpoint_was_online: AtomicBool::new(false),
             endpoint_wait_spent: AtomicBool::new(false),
         })
@@ -1544,8 +1617,36 @@ impl PairCore {
 
     /// Whether we currently accept *nearby* (invite-less) pair requests. Invite-based requests
     /// are always allowed (creating an invite is itself consent).
+    ///
+    /// Opening the window also keeps BLE for pairing alone, for at most [`BLE_PAIRING_HOLD_MAX`];
+    /// closing it lets friend sync back on.
     pub fn set_pairing_ready(&self, ready: bool) {
         self.pairing_ready.store(ready, Ordering::SeqCst);
+        self.hold_ble_for_pairing(ready.then(|| Instant::now() + BLE_PAIRING_HOLD_MAX));
+    }
+
+    fn hold_ble_for_pairing(&self, until: Option<Instant>) {
+        let mut held = self
+            .ble_hold_until
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Two messages rather than one with a field: Loki keeps the message and drops the fields.
+        match (held.is_some(), until.is_some()) {
+            (false, true) => tracing::info!("pairing: BLE reserved for pairing"),
+            (true, false) => tracing::info!("pairing: BLE released for friend sync"),
+            _ => {}
+        }
+        *held = until;
+    }
+
+    /// Whether BLE links are being kept for the pairing protocol alone right now: a Bump window is
+    /// open and no nearby pair has reached the SAS gate yet. Asked by the BLE transport's hook once
+    /// per connection (`ble::attach`), so it must stay cheap and must never await.
+    pub fn holds_ble_for_pairing(&self) -> bool {
+        self.ble_hold_until
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_some_and(|until| Instant::now() < until)
     }
 
     pub fn pairing_ready(&self) -> bool {
@@ -1615,10 +1716,34 @@ impl PairCore {
     ///
     /// Bounded, because being offline is a legitimate state: on timeout we fall back to the
     /// local-only address, which is still correct for same-LAN pairing.
-    async fn our_endpoint_ticket(&self) -> String {
+    ///
+    /// `nearby` never waits. The argument above is about an address someone ELSEWHERE has to
+    /// dial; a nearby pair is carried by the BLE link it arrived on, and the peer finds this
+    /// endpoint again through the BLE address lookup and the N0 lookup, never through the relay
+    /// in this ticket (`relay::scrub_addr` drops a stale one anyway). So a relay wait there buys
+    /// nothing and costs the whole pair: on 2026-10-31 06:02-06:05 UTC a Pixel 10 and an iPhone
+    /// 16 Pro Max bumped with no internet, and each side's first message waited out the full
+    /// 10 s, every later one the 2 s retry, inside the other side's dial. 20 of the 25 s from
+    /// Bump to the figures, and the reason the phone that was found sat on SEARCHING while the
+    /// one that found it said CONNECTING: its Hello had not been sent yet.
+    async fn our_endpoint_ticket(&self, nearby: bool) -> String {
         let Ok(ep) = self.runtime_endpoint().await else {
             return String::new();
         };
+        if nearby {
+            // What `addr()` knows right now, relay included if one is already up.
+            tracing::info_span!(
+                "pair.endpoint_ticket",
+                sc.author = %crate::telemetry::short_hex(&self.endpoint_id),
+                waited_ms = 0u64,
+                timed_out = false,
+                latched = self.endpoint_was_online.load(Ordering::SeqCst),
+                budget_ms = 0u64,
+                nearby = true,
+            )
+            .in_scope(|| {});
+            return EndpointTicket::new(ep.addr()).to_string();
+        }
 
         // THE FULL WAIT IS PAID ONCE PER NODE, not once per message — and that distinction is
         // most of a slow bump.
@@ -1673,6 +1798,7 @@ impl PairCore {
             timed_out,
             latched,
             budget_ms = budget.as_millis() as u64,
+            nearby = false,
         )
         .in_scope(|| {});
         EndpointTicket::new(ep.addr()).to_string()
@@ -1768,7 +1894,7 @@ impl PairCore {
     ) -> Result<PairMsg> {
         let session_id = session.session_id;
         let build_started = Instant::now();
-        let endpoint_ticket = self.our_endpoint_ticket().await;
+        let endpoint_ticket = self.our_endpoint_ticket(session.nearby).await;
         let ticket_ms = build_started.elapsed().as_millis() as u64;
         let (mut profile_ticket, mut trail_ticket, mut profile_record) = match decision {
             Decision::Accept => (
@@ -1897,6 +2023,11 @@ impl PairCore {
         peer_endpoint: [u8; ENDPOINT_LEN],
         nearby: bool,
     ) {
+        // The figures are on screen: the handshake no longer needs the link to itself, and what
+        // follows (the Accept, then the new friend's first sync) should not wait for the window.
+        if nearby && signal == PairSignal::Verifying {
+            self.hold_ble_for_pairing(None);
+        }
         self.notices.lock().await.push_back(PairNotice {
             signal,
             session_id,
@@ -1994,7 +2125,7 @@ impl PairCore {
         let mut secret = [0u8; INVITE_SECRET_LEN];
         OsRng.fill_bytes(&mut invite_id);
         OsRng.fill_bytes(&mut secret);
-        let endpoint_ticket = self.our_endpoint_ticket().await;
+        let endpoint_ticket = self.our_endpoint_ticket(false).await;
         if endpoint_ticket.is_empty() {
             bail!("node not started: no endpoint ticket for invite");
         }
@@ -2814,7 +2945,7 @@ impl PairCore {
                 if nearby {
                     // Nearby: gated on pairing_ready and a matching deterministic id.
                     if !self.pairing_ready() {
-                        bail!("not accepting nearby pair requests");
+                        return Err(NotListening.into());
                     }
                     let expected = derive_nearby_id(&self.endpoint_id, &remote);
                     if expected != session_id {
@@ -3082,6 +3213,10 @@ async fn dial_exchange_in(
         Ok(Ok(resp)) => resp,
         Ok(Err(e)) => {
             span.record("exchange_ms", exchange_started.elapsed().as_millis() as u64);
+            if let Some(code) = peer_refusal(&conn) {
+                span.record("outcome", "refused");
+                return Err(anyhow!(refusal_message(code)));
+            }
             span.record("outcome", "exchange_failed");
             conn.close(0u32.into(), b"pair-error");
             return Err(e);
@@ -3144,6 +3279,7 @@ impl ProtocolHandler for PairProtocol {
             outcome = tracing::field::Empty,
         );
         let started = Instant::now();
+        let refused = AtomicBool::new(false);
         let served = tokio::time::timeout(PAIR_INBOUND_TIMEOUT, async {
             let (mut send, mut recv) = conn.accept_bi().await.map_err(accept_err)?;
             let req = read_frame(&mut recv).await.map_err(accept_err)?;
@@ -3153,11 +3289,16 @@ impl ProtocolHandler for PairProtocol {
                 tracing::field::display(crate::telemetry::short_hex(&msg.session_id)),
             );
             span.record("decision", tracing::field::debug(msg.decision));
-            let resp = self
-                .core
-                .handle_incoming(remote_bytes, msg)
-                .await
-                .map_err(accept_err)?;
+            let resp = match self.core.handle_incoming(remote_bytes, msg).await {
+                Ok(resp) => resp,
+                Err(e) => {
+                    // Say no out loud before anything is dropped; see `PAIR_CLOSE_REFUSED`.
+                    let code = refusal_code(&e);
+                    conn.close(code.into(), b"pair-refused");
+                    refused.store(true, Ordering::Relaxed);
+                    return Err(accept_err(e));
+                }
+            };
             let encoded = encode_msg(&resp).map_err(accept_err)?;
             write_frame(&mut send, &encoded).await.map_err(accept_err)?;
             Ok::<_, AcceptError>(())
@@ -3174,7 +3315,12 @@ impl ProtocolHandler for PairProtocol {
                 Ok(())
             }
             Ok(Err(e)) => {
-                span.record("outcome", "failed");
+                let outcome = if refused.load(Ordering::Relaxed) {
+                    "refused"
+                } else {
+                    "failed"
+                };
+                span.record("outcome", outcome);
                 Err(e)
             }
             Err(_) => {
@@ -3199,6 +3345,34 @@ mod tests {
     fn identity() -> ([u8; 32], [u8; 32]) {
         let sk = SigningKey::generate(&mut OsRng);
         (sk.to_bytes(), sk.verifying_key().to_bytes())
+    }
+
+    #[test]
+    fn a_shut_bump_window_is_the_not_listening_refusal() {
+        let not_listening: anyhow::Error = NotListening.into();
+        assert_eq!(refusal_code(&not_listening), PAIR_CLOSE_NOT_LISTENING);
+        // The text the inbound log line has always carried.
+        assert_eq!(
+            not_listening.to_string(),
+            "not accepting nearby pair requests"
+        );
+        assert_eq!(
+            refusal_code(&anyhow!("invite rejected: BadSecret")),
+            PAIR_CLOSE_REFUSED
+        );
+    }
+
+    #[test]
+    fn refusals_are_not_ordinary_closes_and_read_differently() {
+        assert_ne!(
+            PAIR_CLOSE_NOT_LISTENING, 0,
+            "0 is every ordinary pairing close"
+        );
+        assert_ne!(PAIR_CLOSE_REFUSED, 0);
+        assert_ne!(
+            refusal_message(PAIR_CLOSE_NOT_LISTENING),
+            refusal_message(PAIR_CLOSE_REFUSED)
+        );
     }
 
     /// A real endpoint ticket for `endpoint` shaped like the ones `our_endpoint_ticket` mints:
@@ -4061,6 +4235,45 @@ mod tests {
         OsRng.fill_bytes(&mut recv);
         let core = PairCore::new(sk.to_bytes(), endpoint, recv.to_vec());
         (core, endpoint, recv)
+    }
+
+    #[test]
+    fn a_bump_window_holds_ble_for_pairing_until_it_closes() {
+        let (core, _, _) = test_core();
+        assert!(!core.holds_ble_for_pairing());
+        core.set_pairing_ready(true);
+        assert!(core.holds_ble_for_pairing());
+        core.set_pairing_ready(false);
+        assert!(!core.holds_ble_for_pairing());
+    }
+
+    #[test]
+    fn a_ble_hold_the_app_never_closes_lapses_on_its_own() {
+        let (core, _, _) = test_core();
+        core.hold_ble_for_pairing(Some(Instant::now()));
+        assert!(!core.holds_ble_for_pairing());
+    }
+
+    #[tokio::test]
+    async fn reaching_the_sas_gate_nearby_lets_friend_sync_back_on_ble() {
+        let (core, _, _) = test_core();
+        let peer = SigningKey::generate(&mut OsRng).verifying_key().to_bytes();
+        core.set_pairing_ready(true);
+
+        core.push_notice(PairSignal::Verifying, [7; SESSION_ID_LEN], peer, false)
+            .await;
+        assert!(
+            core.holds_ble_for_pairing(),
+            "an invite pair says nothing about BLE"
+        );
+
+        core.push_notice(PairSignal::Verifying, [8; SESSION_ID_LEN], peer, true)
+            .await;
+        assert!(!core.holds_ble_for_pairing());
+        assert!(
+            core.pairing_ready(),
+            "the window itself is the app's to close"
+        );
     }
 
     #[tokio::test]

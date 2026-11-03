@@ -1,0 +1,110 @@
+blew — vendored, modified copy
+==============================
+
+This directory contains a vendored copy of the Rust half of `blew`, a
+cross-platform async Bluetooth Low Energy library (Apple, Linux, Android).
+
+Upstream project : https://github.com/mcginty/blew
+Upstream version : 0.5.1-beta.8 (git tag `blew-v0.5.1-beta.8`, crates/blew);
+                   first vendored at 0.3.0, rebased onto 0.5.1-beta.8 on 2026-11-02
+Original author  : Jake McGinty <me@jakebot.org>
+License          : GNU Affero General Public License v3.0 or later
+                   (AGPL-3.0-or-later) — see the `LICENSE` file in this
+                   directory for the full license text.
+
+This modified copy remains licensed under AGPL-3.0-or-later, the same license
+as the upstream project.
+
+The Android Kotlin half of blew was vendored separately, in July 2026, into
+modules/iroh-location/android/src/main/java/org/jakebot/blew/ (notice in
+modules/iroh-location/android/third_party/blew/). It is not duplicated here,
+and upstream's `android/` and `examples/` directories and its JNI parity test are
+omitted.
+
+
+Modifications by the streetCryptid project
+------------------------------------------
+
+In accordance with section 5 of the GNU AGPL, the changes made to the upstream
+source after it was vendored into this repository are dated and described
+below. Entries before 2026-11-02 describe changes to 0.3.0; the 2026-11-02
+entry says which of them survive on top of 0.5.1-beta.8.
+
+2026-10-31 — Apple flow control (CoreBluetooth backend):
+
+  * Cargo.toml
+      - Added this vendoring header, `publish = false`, and removed the
+        `include` list. Added `objc2-core-foundation` (Apple targets) for the
+        L2CAP reactor's run-loop source.
+
+  * build.rs
+      - `android_dir` now points at the module's vendored Kotlin sources.
+
+  * src/platform/apple/peripheral.rs
+      - `notify_characteristic` no longer drops a notification when
+        CoreBluetooth's transmit queue is full. Upstream ignored the return
+        value of `updateValue:forCharacteristic:onSubscribedCentrals:`; it now
+        waits for `peripheralManagerIsReadyToUpdateSubscribers:` (new delegate
+        method) and sends the value again, for at most 2 s.
+
+  * src/platform/apple/central.rs
+      - A write without response is sent only when `canSendWriteWithoutResponse`
+        is true; otherwise it waits for
+        `peripheralIsReadyToSendWriteWithoutResponse:` (new delegate method),
+        for at most 2 s. Upstream wrote unconditionally, which CoreBluetooth may
+        drop silently.
+
+  * src/platform/apple/l2cap.rs
+      - The reactor thread no longer polls its run loop every 50 ms. Commands
+        signal a `CFRunLoopSource` attached to the run loop, which also stops
+        an idle reactor from spinning when no stream is scheduled.
+      - Writes check `hasSpaceAvailable` before `write:maxLength:`, keep bytes
+        the stream cannot take yet in a per-channel queue, and no longer close
+        the channel when a write returns 0. The Rust-side bridge stops reading
+        from the app while 64 KiB are queued (back-pressure).
+
+2026-10-31 — Android L2CAP writes off the async runtime:
+
+  * src/platform/android/l2cap_state.rs
+      - The Rust->Kotlin bridge no longer calls `writeL2cap` from a tokio task.
+        `BluetoothSocket`'s output stream blocks until the peer grants L2CAP
+        credits, so a peer that stopped reading froze the whole runtime the
+        task ran on for 30+ s. Each channel now has a writer thread fed by a
+        bounded queue (4 chunks); the bridge task awaits queue space, which
+        keeps back-pressure, and the writer thread closes the socket when the
+        queue ends.
+
+2026-10-31 — Apple connects withdrawn when their future is dropped:
+
+  * src/platform/apple/central.rs
+      - `connect` keeps its pending request in a guard. If the future is dropped before
+        CoreBluetooth answers (a caller's own timeout), the guard removes the request and
+        cancels the connection. Upstream left the request behind, so every later connect to
+        that peripheral failed with `ConnectInFlight`.
+
+2026-11-02 — Android L2CAP close reaches the channel:
+
+  * src/platform/android/l2cap_state.rs
+      - When Kotlin reports a socket closed, the Kotlin->Rust bridge task now
+        shuts down its write half, so the app's `L2capChannel` reads EOF.
+        Before, dropping that split half closed nothing while the other half
+        lived, and `writeL2cap` on a forgotten socket returns without error,
+        so a closed channel read as open forever.
+
+2026-11-02 — Rebased onto upstream 0.5.1-beta.8:
+
+  Upstream fixed most of what the 2026-10-31 entries above changed, in its own
+  way: notifications queue behind `peripheralManagerIsReady` (#54 and the
+  peripheral queue), writes without response wait for
+  `canSendWriteWithoutResponse` (#54), the Apple L2CAP reactor sleeps on a
+  `CFRunLoopSource` and queues behind `hasSpaceAvailable` (#55), and Android
+  L2CAP writes run on the blocking pool rather than the runtime. Those files
+  are upstream's now. What remains of ours:
+
+  * Cargo.toml — `publish = false`; vendoring header.
+  * build.rs — the Android Kotlin half is found in the Expo module.
+  * src/platform/apple/central.rs — the `PendingConnect` guard on `connect`
+    (a dropped connect future withdraws its request; upstream still leaves it,
+    and every later connect fails with `ConnectInFlight`).
+  * src/platform/android/l2cap_state.rs — a socket Kotlin reports closed reads
+    as EOF on the app's channel (shutdown of the inbound bridge's write half).
