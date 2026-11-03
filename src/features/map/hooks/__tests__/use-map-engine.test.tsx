@@ -23,6 +23,7 @@ import {
   type ExplorationSource,
 } from '../../exploration/exploration-source';
 import { EMPTY_GEOMETRY } from '../../tiles/geometry-source';
+import { createLiveReadoutStore, type LiveReadoutStore } from '../live-readout';
 import { useMapEngine, type MapEngineState } from '../use-map-engine';
 import { useMapTheme } from '../use-map-theme';
 
@@ -58,8 +59,9 @@ jest.mock('../../core/native-h3-enumerator', () => ({
 }));
 jest.mock('../../core/readout', () => ({
   coverageInView: () => 0,
-  coverageMeasurable: () => true,
-  nearestPlaceName: () => null,
+  // The real cutoff, so a test can cross it.
+  coverageMeasurable: (zoom: number) => zoom >= 12.5,
+  nearestPlaceName: (_places: unknown, _center: unknown, zoom: number) => `z${zoom.toFixed(1)}`,
 }));
 jest.mock('../../exploration/exploration-source', () => ({
   createDemoExplorationSource: jest.fn(),
@@ -133,8 +135,11 @@ describe('useMapEngine publication and recovery', () => {
   const prefetchAround = jest.fn(async () => {});
   const prefetchPoints = jest.fn(async () => {});
 
+  let readouts: LiveReadoutStore;
+  let renders = 0;
   function Harness() {
-    latest = useMapEngine(VIEWPORT, null, null, FRIENDS);
+    renders++;
+    latest = useMapEngine(VIEWPORT, null, null, FRIENDS, readouts);
     return null;
   }
 
@@ -143,6 +148,8 @@ describe('useMapEngine publication and recovery', () => {
     jest.clearAllMocks();
     jest.spyOn(console, 'warn').mockImplementation(() => {});
     calls = [];
+    readouts = createLiveReadoutStore();
+    renders = 0;
     const index = createExplorationIndex([]);
     exploration = {
       ready: Promise.resolve(),
@@ -456,6 +463,42 @@ describe('useMapEngine publication and recovery', () => {
       expect(latest.region).toBe(completeB);
     }
   );
+
+  it('measures the readouts at a tracked live camera without building or committing', async () => {
+    await mount();
+    await finish(0);
+    const committed = latest.camera;
+    const rendersBefore = renders;
+    act(() => latest.track(transformFor(13)));
+    expect(readouts.get().sectorsVisible).toBe(true);
+    expect(readouts.get().placeName).toBe('z13.0');
+    // Crossing the cutoff mid-gesture is visible at once — the drawer pins on it.
+    act(() => latest.track(transformFor(11)));
+    expect(readouts.get().sectorsVisible).toBe(false);
+    expect(latest.camera).toBe(committed);
+    expect(calls).toHaveLength(1);
+    // The whole point of the store: a live update renders nothing on the map side.
+    expect(renders).toBe(rendersBefore);
+  });
+
+  it('settles the percentage on a commit, never on a live update', async () => {
+    readouts.set({ settledCoverage: 0.5 });
+    await mount();
+    await finish(0);
+    readouts.set({ settledCoverage: 0.5 });
+    act(() => latest.track(transformFor(13)));
+    expect(readouts.get().settledCoverage).toBe(0.5);
+    commitZoom(13);
+    expect(readouts.get().settledCoverage).toBe(0);
+  });
+
+  it('reads the readouts at a commit before its build lands', async () => {
+    await mount();
+    await finish(0);
+    commitZoom(11);
+    // `camera` still waits on the build; the island does not.
+    expect(readouts.get().sectorsVisible).toBe(false);
+  });
 
   it.each(['scheduled', 'in-flight'])('cancels %s recovery on unmount', async (stage) => {
     await mount();

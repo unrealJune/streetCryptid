@@ -13,6 +13,8 @@ import {
   clampPinchFactor,
   clampTranslation,
   makeViewLimits,
+  READOUT_ZOOM_STRIDE,
+  shouldTrackScaleMotion,
   transformDistanceSq,
   translationRange,
 } from '../gesture';
@@ -181,5 +183,15 @@ describe('transformDistanceSq', () => {
     const a: ViewTransform = { k: 1, tx: 0, ty: 0 };
     const b: ViewTransform = { k: 1.15, tx: 0, ty: 0 };
     expect(Math.sqrt(transformDistanceSq(b, a))).toBeCloseTo(90, 0);
+  });
+});
+
+describe('shouldTrackScaleMotion', () => {
+  const at = (zoomDelta: number): ViewTransform => ({ k: 2 ** zoomDelta, tx: 0, ty: 0 });
+
+  it('waits for a full stride of zoom in either direction', () => {
+    expect(shouldTrackScaleMotion(at(READOUT_ZOOM_STRIDE * 0.9), at(0))).toBe(false);
+    expect(shouldTrackScaleMotion(at(READOUT_ZOOM_STRIDE), at(0))).toBe(true);
+    expect(shouldTrackScaleMotion(at(-READOUT_ZOOM_STRIDE), at(0))).toBe(true);
   });
 });

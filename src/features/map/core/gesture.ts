@@ -38,6 +38,22 @@ export function shouldPrefetchScaleMotion(
   return current.k < previous.k && current.k / lastPrefetch.k <= 0.45;
 }
 
+/**
+ * Zoom levels a pinch travels between live readout updates (coverage, place name, and whether
+ * coverage is measurable at all). The pan stride does not see scale motion, and the scale prefetch
+ * fires only on deep zoom-outs, so without this a pinch updated the island only once it ended.
+ */
+export const READOUT_ZOOM_STRIDE = 0.2;
+
+/** Whether scale motion since `lastTracked` has gone far enough to re-measure the readouts. */
+export function shouldTrackScaleMotion(
+  current: ViewTransform,
+  lastTracked: ViewTransform
+): boolean {
+  'worklet';
+  return Math.abs(Math.log2(current.k / lastTracked.k)) >= READOUT_ZOOM_STRIDE;
+}
+
 /** Zoom + pan limits, precomputed into anchor-space pixels for worklet use. */
 export interface ViewLimits {
   /** Composed-scale range: k ∈ [kMin, kMax] ⇔ zoom ∈ [minZoom, maxZoom]. */

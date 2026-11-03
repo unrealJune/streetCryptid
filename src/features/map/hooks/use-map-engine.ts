@@ -30,6 +30,7 @@ import {
 } from '../exploration/exploration-source';
 import { sharedExplorationStore } from '../exploration/exploration-store';
 import { DATA_ZOOM_FULL_DETAIL_ZOOM, type DataZoomRange } from '../tiles/tile-math';
+import { createLiveReadoutStore, quantizeCoverage, type LiveReadoutStore } from './live-readout';
 import { useMapTheme } from './use-map-theme';
 
 /** How long the camera must sit still before idle neighbor prefetch kicks in. */
@@ -69,18 +70,6 @@ export interface MapEngineState {
   readonly anchor: CameraState;
   /** Zoom/bounds limits in anchor-space pixels, for the UI-thread clamps. */
   readonly limits: ViewLimits | null;
-  /** Explored fraction of DISPLAY-resolution cells in view, or 0 when unmeasurable. */
-  readonly coverage: number;
-  /**
-   * Whether a coverage percentage is meaningful at the on-screen zoom. False
-   * below the display-resolution band, where {@link coverage} is a meaningless 0
-   * rather than a real "nothing explored" — chrome should hide the readout, not
-   * show 0%. This is NOT "the layer is drawn": the resolution ladder keeps
-   * drawing coarse rolled-up rungs far below this (see `core/cell-ladder.ts`).
-   */
-  readonly sectorsVisible: boolean;
-  /** Nearest prominent place name to the camera center, for the island. */
-  readonly placeName: string | null;
   /**
    * The exploration grid as the layer is currently drawing it — one real H3 cell's size and
    * orientation, measured at the committed camera. The loading skeleton tiles the plane with it so
@@ -94,6 +83,12 @@ export interface MapEngineState {
    * commits are idempotent — there is no fold base to race against.
    */
   readonly commit: (t: ViewTransform) => void;
+  /**
+   * Report a live (mid-gesture/fling) transform for the readouts only: the `readouts` store is
+   * re-measured at it; nothing is built, the committed camera does not move, and nothing here
+   * re-renders. The caller throttles it: each call is one coverage measurement on the JS thread.
+   */
+  readonly track: (t: ViewTransform) => void;
   /**
    * Build the region for a live (mid-gesture/fling) transform and swap it in
    * without advancing the committed camera — keeps long pans loading ahead of
@@ -117,9 +112,16 @@ export function useMapEngine(
    * Friend locations (world space) to warm during idle, pre-ordered/capped by
    * the caller (selected first, then nearest). Empty by default.
    */
-  friendTargets: readonly WorldPoint[] = []
+  friendTargets: readonly WorldPoint[] = [],
+  /**
+   * Where the coverage / place readouts are written (`live-readout.ts`). Owned by the caller so
+   * the chrome can subscribe to it without the map re-rendering; a private one if omitted.
+   */
+  readouts?: LiveReadoutStore
 ): MapEngineState {
   const theme = useMapTheme();
+  const [ownReadouts] = useState(createLiveReadoutStore);
+  const sink = readouts ?? ownReadouts;
 
   const dataset = useMemo(() => createMapDataset(), []);
   const requestedHome = useMemo(
@@ -203,6 +205,19 @@ export function useMapEngine(
   const [target, setTarget] = useState<CameraState>(anchor);
   /** Camera whose region is on screen (advances when its build lands). */
   const [camera, setCamera] = useState<CameraState>(anchor);
+  /**
+   * Camera the readouts are measured at: the newest of a commit and a live `track`. Not `camera`,
+   * which waits for a build to land (a cold area can hold it for seconds), and not `target`
+   * alone, which only moves when a gesture ends. A ref, not state: it changes mid-gesture, and
+   * nothing that renders here depends on it.
+   */
+  const readoutCameraRef = useRef<CameraState>(anchor);
+  /**
+   * The current `measure` (declared below, once the region and exploration it reads exist).
+   * `commit` and `track` are handed to worklets and gesture callbacks; reading it through a ref
+   * keeps them stable across region publications.
+   */
+  const measureRef = useRef<(settle: boolean) => void>(() => {});
   const [region, setRegion] = useState<MapRegion | null>(null);
   /** A build in flight over an uncovered area (drives the skeleton). */
   const [pending, setPending] = useState<PendingLoad | null>(null);
@@ -363,6 +378,21 @@ export function useMapEngine(
       // Absolute commits are idempotent — dedupe to skip identical rebuild churn
       // (pan and pinch each finalize the same gesture).
       setTarget((prev) => (cameraAlmostEqual(prev, next, viewport) ? prev : next));
+      readoutCameraRef.current = next;
+      measureRef.current(true);
+    },
+    [viewport, anchor, constraints]
+  );
+
+  const track = useCallback(
+    (t: ViewTransform) => {
+      if (!viewport) return;
+      readoutCameraRef.current = clampCamera(
+        applyViewTransform(anchor, viewport, t),
+        viewport,
+        constraints
+      );
+      measureRef.current(false);
     },
     [viewport, anchor, constraints]
   );
@@ -413,24 +443,40 @@ export function useMapEngine(
     ]
   );
 
-  const coverage = useMemo(
-    () => (viewport ? coverageInView(exploration.index(), grid, camera, viewport) : 0),
-    // explorationVersion re-keys the memo: the index is identity-stable but mutable.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [exploration, explorationVersion, grid, camera, viewport]
+  // Measure the readouts at `readoutCameraRef` into the store. `settle` also advances
+  // `settledCoverage`, the copy for consumers that must not re-render mid-gesture.
+  const measure = useCallback(
+    (settle: boolean) => {
+      const cam = readoutCameraRef.current;
+      const coverage = viewport
+        ? quantizeCoverage(coverageInView(exploration.index(), grid, cam, viewport))
+        : 0;
+      sink.set({
+        coverage,
+        ...(settle ? { settledCoverage: coverage } : null),
+        // The same cutoff `coverageInView` uses to bail — read it directly so the chrome can tell
+        // "0% explored" apart from "no number means anything here". NOT the same as whether the
+        // layer draws: the ladder keeps drawing coarse rungs far below this.
+        sectorsVisible: coverageMeasurable(cam.zoom),
+        // Zoom-aware: a neighbourhood when the map shows one, the STATE once pulled back past a
+        // county (`headlineTiers` in `readout.ts`). The region's places, not the camera's: a
+        // prefetch keeps the region ahead of a pan, so the live center is inside it everywhere but
+        // the leading edge of a fast fling.
+        placeName: region ? nearestPlaceName(region.places, cam.center, cam.zoom) : null,
+      });
+    },
+    [viewport, exploration, grid, region, sink]
   );
-
-  // The same cutoff `coverageInView` uses to bail — read it directly so the
-  // chrome can tell "0% explored" apart from "no number means anything here".
-  // NOT the same as whether the layer draws: the ladder keeps drawing coarse
-  // rungs far below this, they just aren't measurable (see `coverageInView`).
-  const sectorsVisible = useMemo(() => coverageMeasurable(camera.zoom), [camera.zoom]);
-
-  // Zoom-aware: the headline names a neighbourhood when the map is showing one and the STATE once
-  // the camera is pulled back past a county's worth of ground. See `headlineTiers` in `readout.ts`.
-  const placeName = useMemo(
-    () => (region ? nearestPlaceName(region.places, camera.center, camera.zoom) : null),
-    [region, camera]
+  useEffect(() => {
+    measureRef.current = measure;
+  }, [measure]);
+  // A newly published region only changes the place name (and may land mid-gesture), so it does
+  // not settle. New exploration or a resize changes what the settled number should say.
+  useEffect(() => measureRef.current(false), [region]);
+  useEffect(
+    () => measureRef.current(true),
+    // explorationVersion re-keys it: the index is identity-stable but mutable.
+    [exploration, explorationVersion, viewport, sink]
   );
 
   // Keyed on the COMMITTED camera, exactly like the region it has to match: the ladder rung only
@@ -449,11 +495,9 @@ export function useMapEngine(
     camera,
     anchor,
     limits,
-    coverage,
-    sectorsVisible,
-    placeName,
     hexLattice,
     commit,
+    track,
     prefetchAt,
   };
 }
