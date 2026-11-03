@@ -1,5 +1,5 @@
 import { SymbolView } from 'expo-symbols';
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 
 import type { CryptidTheme } from '@/constants/cryptid-theme';
@@ -16,6 +16,7 @@ import {
 } from '../core/fix-transport';
 import { describePresence, formatAge, formatDistance, type FriendPresence } from '../core/presence';
 import type { Friend, RatchetActivity } from '../core/types';
+import { isNavigationDestination, openNavigation } from '../net/open-navigation';
 
 interface FriendDetailIslandProps {
   readonly presence: FriendPresence;
@@ -102,8 +103,12 @@ export function FriendDetailIsland({
   const [removing, setRemoving] = useState(false);
   const [removeError, setRemoveError] = useState<string | null>(null);
   const [sharingBusy, setSharingBusy] = useState(false);
+  const navigationInFlight = useRef(false);
+  const [navigationBusy, setNavigationBusy] = useState(false);
+  const [navigationError, setNavigationError] = useState<string | null>(null);
 
   const signalColor = resolveSignalColor(presence.friend.color, chrome.green);
+  const canNavigate = isNavigationDestination(presence.fix);
   const endpointId = presence.friend.endpointId;
   const distance = displayPreferencesReady
     ? formatDistance(presence.distanceM, distanceUnit)
@@ -153,22 +158,69 @@ export function FriendDetailIsland({
     }
   }
 
+  async function handleNavigate(): Promise<void> {
+    if (navigationInFlight.current) return;
+    navigationInFlight.current = true;
+    setNavigationBusy(true);
+    setNavigationError(null);
+    try {
+      if (!presence.fix) throw new Error('No location available.');
+      await openNavigation(presence.fix);
+    } catch {
+      setNavigationError(
+        'Could not open maps. Check that a maps app or browser is available, then try again.'
+      );
+    } finally {
+      navigationInFlight.current = false;
+      setNavigationBusy(false);
+    }
+  }
+
   return (
     <View style={styles.body}>
-      <Pressable
-        accessibilityLabel="Back to friends"
-        accessibilityRole="button"
-        hitSlop={8}
-        onPress={onBack}
-        style={({ pressed }) => [styles.back, { opacity: pressed ? 0.55 : 1 }]}
-      >
-        <SymbolView
-          name={{ ios: 'chevron.left', android: 'chevron_left', web: 'chevron_left' }}
-          size={20}
-          tintColor={chrome.steel}
-        />
-        <Text style={[styles.backLabel, { color: chrome.steel }]}>FRIENDS</Text>
-      </Pressable>
+      <View style={styles.header}>
+        <Pressable
+          accessibilityLabel="Back to friends"
+          accessibilityRole="button"
+          hitSlop={8}
+          onPress={onBack}
+          style={({ pressed }) => [styles.back, { opacity: pressed ? 0.55 : 1 }]}
+        >
+          <SymbolView
+            name={{ ios: 'chevron.left', android: 'chevron_left', web: 'chevron_left' }}
+            size={20}
+            tintColor={chrome.steel}
+          />
+          <Text style={[styles.backLabel, { color: chrome.steel }]}>FRIENDS</Text>
+        </Pressable>
+        <Pressable
+          accessibilityLabel={`Navigate to ${presence.friend.handle}`}
+          accessibilityHint={
+            canNavigate
+              ? 'Opens maps with their last known coordinates, shared with the map provider'
+              : 'No location available yet'
+          }
+          accessibilityRole="button"
+          accessibilityState={{ busy: navigationBusy, disabled: !canNavigate || navigationBusy }}
+          disabled={!canNavigate || navigationBusy}
+          onPress={() => void handleNavigate()}
+          style={({ pressed }) => [
+            styles.navigate,
+            { opacity: !canNavigate || navigationBusy ? 0.45 : pressed ? 0.55 : 1 },
+          ]}
+        >
+          <SymbolView
+            name={{
+              ios: 'arrow.triangle.turn.up.right.diamond',
+              android: 'directions',
+              web: 'directions',
+            }}
+            size={20}
+            tintColor={chrome.amber}
+          />
+          <Text style={[styles.backLabel, { color: chrome.amber }]}>NAVIGATE</Text>
+        </Pressable>
+      </View>
 
       {/* One hero at every height. The pane grows by disclosing rows under it, not by becoming a
           different composition of the same four facts. */}
@@ -196,6 +248,12 @@ export function FriendDetailIsland({
           </Text>
         </View>
       </View>
+
+      {navigationError ? (
+        <Text accessibilityRole="alert" style={[styles.confirmCopy, { color: chrome.ink }]}>
+          {navigationError}
+        </Text>
+      ) : null}
 
       {expanded ? (
         <View style={styles.details}>
@@ -456,6 +514,19 @@ const styles = StyleSheet.create({
     paddingBottom: Spacing.two,
     paddingHorizontal: Spacing.four,
     paddingTop: Spacing.one,
+  },
+  header: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    gap: Spacing.two,
+  },
+  navigate: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: Spacing.one,
+    minHeight: 44,
+    paddingHorizontal: Spacing.two,
   },
   back: {
     alignItems: 'center',
