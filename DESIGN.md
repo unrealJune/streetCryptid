@@ -261,10 +261,13 @@ the app is and **one** action. After the intro the friends keep softly checking 
 ## First launch — permissions
 
 After setup and before the map, every OS permission is asked from one place
-(`PermissionsGate`), **one screen per permission**, each saying what it is for before the
-phone asks: location (the Play disclosure), location all the time, Bluetooth for Bump, local
-network, and on Android notifications and unrestricted battery. An overview lists them first
-when there is more than one; each step carries `STEP n OF m`.
+(`PermissionsGate`), on **one page laid out as a journey**: a numbered rail with a row per
+permission — location (the Play disclosure), location all the time, Bluetooth for Bump, local
+network, and on Android notifications and unrestricted battery. The row being asked is open,
+saying what it is for before the phone asks; answering collapses it to its outcome (ALLOWED,
+NOT ALLOWED, NOT NOW) and opens the next. Rows still to come show one line each, so the whole
+plan is visible from the start, and a row that an earlier "Not now" made pointless stays on
+the rail as SKIPPED rather than disappearing.
 
 - **Nothing else prompts.** Node init only checks; the Bump button asks again for someone
   who said no. A new permission gets a step here, never a request at a call site.

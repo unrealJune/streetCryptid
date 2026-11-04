@@ -3,8 +3,9 @@ import {
   permissionStepCanDecline,
   permissionStepExists,
   projectedPermissionSteps,
+  permissionJourney,
+  permissionOutcome,
   seedLegacyInstall,
-  showsPermissionIntro,
   type PermissionContext,
 } from '../permission-steps';
 
@@ -213,11 +214,58 @@ describe('permissionStepExists', () => {
   });
 });
 
-describe('showsPermissionIntro', () => {
-  it('opens on the overview only when there is more than one step', () => {
-    expect(showsPermissionIntro(['location', 'bluetooth'])).toBe(true);
-    expect(showsPermissionIntro(['battery'])).toBe(false);
-    expect(showsPermissionIntro([])).toBe(false);
+describe('permissionJourney', () => {
+  const planned = projectedPermissionSteps(ctx());
+
+  it('opens on location with every planned step still to come', () => {
+    expect(permissionJourney(planned, ctx(), {}).map((row) => row.state)).toEqual([
+      'current',
+      'upcoming',
+      'upcoming',
+      'upcoming',
+      'upcoming',
+      'upcoming',
+    ]);
+  });
+
+  it('moves on to the next step, keeping the answered one as a done row', () => {
+    const after = ctx({
+      disclosure: 'accepted',
+      asked: new Set(['location']),
+      recorded: true,
+      granted: { location: true },
+    });
+    const rows = permissionJourney(planned, after, { location: 'allowed' });
+    expect(rows[0]).toEqual({ step: 'location', state: 'done', outcome: 'allowed' });
+    expect(rows[1]).toEqual({ step: 'background-location', state: 'current' });
+  });
+
+  it('marks what "Not now" on location took off the plan as skipped, not gone', () => {
+    const after = ctx({ disclosure: 'declined', asked: new Set(['location']), recorded: true });
+    expect(permissionJourney(planned, after, { location: 'declined' })).toEqual([
+      { step: 'location', state: 'done', outcome: 'declined' },
+      { step: 'background-location', state: 'skipped' },
+      { step: 'bluetooth', state: 'current' },
+      { step: 'local-network', state: 'upcoming' },
+      { step: 'notifications', state: 'skipped' },
+      { step: 'battery', state: 'skipped' },
+    ]);
+  });
+
+  it('is one row for an install owed one step', () => {
+    const legacy = ctx({ disclosure: 'accepted', androidApi: 34, granted: { location: true } });
+    expect(permissionJourney(projectedPermissionSteps(legacy), legacy, {})).toEqual([
+      { step: 'battery', state: 'current' },
+    ]);
+  });
+});
+
+describe('permissionOutcome', () => {
+  it('tells a refusal from a "Not now" and from an answer the OS kept to itself', () => {
+    expect(permissionOutcome(true, true)).toBe('allowed');
+    expect(permissionOutcome(true, false)).toBe('refused');
+    expect(permissionOutcome(true, undefined)).toBe('asked');
+    expect(permissionOutcome(false, undefined)).toBe('declined');
   });
 });
 

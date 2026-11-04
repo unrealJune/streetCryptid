@@ -1,4 +1,4 @@
-import { type ReactNode, useEffect, useRef } from 'react';
+import { type ReactNode, type RefObject, useEffect, useRef } from 'react';
 import { Pressable, ScrollView, StyleSheet, View, type ScrollViewInstance } from 'react-native';
 import { useRouter } from 'expo-router';
 import { SymbolView, type SymbolViewProps } from 'expo-symbols';
@@ -28,6 +28,8 @@ interface SettingsPageProps {
   readonly footer?: ReactNode;
   /** The footer's actions as rail buttons, used instead of `footer` beside a system rail. */
   readonly footerRail?: FooterRail;
+  /** The page's scroll view, for a page that moves its own reader along (the permissions page). */
+  readonly scrollRef?: RefObject<ScrollViewInstance | null>;
   readonly children: ReactNode;
 }
 
@@ -50,6 +52,7 @@ export function SettingsPage({
   backLabel = 'Settings',
   footer,
   footerRail,
+  scrollRef,
   children,
 }: SettingsPageProps) {
   const theme = useTheme();
@@ -57,14 +60,15 @@ export function SettingsPage({
   const railWidth = useSystemRail();
   const railed = railWidth > 0 && footerRail !== undefined;
   const router = useRouter();
-  const scroll = useRef<ScrollViewInstance>(null);
+  const ownScroll = useRef<ScrollViewInstance>(null);
+  const scroll = scrollRef ?? ownScroll;
 
   // A page whose first screen is one tall element (Delivery's preview) gives no hint that there is
   // more below it, so show the scroll bar once as it opens. iOS only flashes it when it can scroll.
   useEffect(() => {
     const timer = setTimeout(() => scroll.current?.flashScrollIndicators(), FLASH_SCROLL_DELAY_MS);
     return () => clearTimeout(timer);
-  }, []);
+  }, [scroll]);
 
   const page = (
     <ScrollView

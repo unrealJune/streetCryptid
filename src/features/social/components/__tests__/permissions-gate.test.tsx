@@ -9,13 +9,12 @@ import {
 } from '@/features/social/net/persistence';
 
 import type { PermissionContext, PermissionStepId } from '../../core/permission-steps';
-import { PermissionIntroScreen, PermissionStepScreen } from '../../screens/permission-step-screen';
+import { PermissionJourneyScreen } from '../../screens/permissions-journey-screen';
 import { PermissionSteps, PermissionsGate } from '../permissions-gate';
 
 jest.mock('@/global.css', () => ({}));
-jest.mock('../../screens/permission-step-screen', () => ({
-  PermissionIntroScreen: () => null,
-  PermissionStepScreen: () => null,
+jest.mock('../../screens/permissions-journey-screen', () => ({
+  PermissionJourneyScreen: () => null,
 }));
 jest.mock('@/features/dev/telemetry', () => ({
   getTelemetry: () => ({ startSpan: () => ({ end: () => undefined }) }),
@@ -60,38 +59,42 @@ describe('PermissionsGate', () => {
   }
 
   const app = () => renderer.root.findAllByType(Text).length > 0;
-  const step = () => renderer.root.findByType(PermissionStepScreen).props;
+  const page = () => renderer.root.findByType(PermissionJourneyScreen).props;
+  const asking = () => renderer.root.findAllByType(PermissionJourneyScreen).length > 0;
+  const current = () => page().rows.find((row: { state: string }) => row.state === 'current').step;
+  const states = () =>
+    page().rows.map((row: { step: string; state: string; outcome?: string }) =>
+      [row.step, row.state, row.outcome].filter(Boolean).join(' ')
+    );
 
   async function choose(allow: boolean) {
-    await act(async () => step().onChoice(allow));
+    await act(async () => page().onChoice(allow));
   }
 
-  it('walks a fresh install through every step, one prompt each, then opens the app', async () => {
+  it('walks a fresh install down one page, one prompt per row, then opens the app', async () => {
     await render();
-    const intro = renderer.root.findByType(PermissionIntroScreen).props;
-    expect(intro.steps).toEqual([
+    expect(states()).toEqual([
+      'location current',
+      'background-location upcoming',
+      'bluetooth upcoming',
+      'local-network upcoming',
+      'notifications upcoming',
+      'battery upcoming',
+    ]);
+
+    const seen: string[] = [];
+    while (!app()) {
+      seen.push(current());
+      await choose(true);
+      if (asking()) expect(states()).toContain(`${seen[seen.length - 1]} done allowed`);
+    }
+    expect(seen).toEqual([
       'location',
       'background-location',
       'bluetooth',
       'local-network',
       'notifications',
       'battery',
-    ]);
-    act(() => intro.onContinue());
-
-    const seen: string[] = [];
-    while (!app()) {
-      const { step: id, position } = step();
-      seen.push(`${id} ${position.join('/')}`);
-      await choose(true);
-    }
-    expect(seen).toEqual([
-      'location 1/6',
-      'background-location 2/6',
-      'bluetooth 3/6',
-      'local-network 4/6',
-      'notifications 5/6',
-      'battery 6/6',
     ]);
     expect(mockRequest.mock.calls.map(([id]) => id)).toEqual([
       'location',
@@ -107,21 +110,24 @@ describe('PermissionsGate', () => {
 
   it('drops what sharing needs after "Not now" on location, without prompting', async () => {
     await render();
-    act(() => renderer.root.findByType(PermissionIntroScreen).props.onContinue());
     await choose(false);
     expect(mockRequest).not.toHaveBeenCalled();
     expect(await loadLocationDisclosureChoice(mockKV)).toBe('declined');
-    expect(step().step).toBe('bluetooth');
-    expect(step().position).toEqual([2, 3]);
+    expect(states()).toEqual([
+      'location done declined',
+      'background-location skipped',
+      'bluetooth current',
+      'local-network upcoming',
+      'notifications skipped',
+      'battery skipped',
+    ]);
   });
 
   it('opens straight on the battery step for an install that onboarded before the steps', async () => {
     await saveLocationDisclosureChoice(mockKV, 'accepted');
     mockFacts = { ...mockFacts, androidApi: 34, granted: { location: true } };
     await render();
-    expect(renderer.root.findAllByType(PermissionIntroScreen)).toHaveLength(0);
-    expect(step().step).toBe('battery');
-    expect(step().position).toBeNull();
+    expect(states()).toEqual(['battery current']);
     await choose(false);
     expect(app()).toBe(true);
     // The answer created the record; the next launch must not read it as an install never asked.
@@ -157,10 +163,9 @@ describe('PermissionsGate', () => {
         <PermissionSteps replay onDone={onDone} saveLocationChoice={saveLocationChoice} />
       );
     });
-    act(() => renderer.root.findByType(PermissionIntroScreen).props.onContinue());
     const seen: string[] = [];
-    while (renderer.root.findAllByType(PermissionStepScreen).length > 0) {
-      seen.push(step().step);
+    while (asking()) {
+      seen.push(current());
       await choose(true);
     }
     expect(seen).toEqual([

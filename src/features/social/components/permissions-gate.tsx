@@ -6,10 +6,12 @@ import { useTheme } from '@/hooks/use-theme';
 
 import {
   pendingPermissionSteps,
+  permissionJourney,
+  permissionOutcome,
   projectedPermissionSteps,
   seedLegacyInstall,
-  showsPermissionIntro,
   type PermissionContext,
+  type PermissionOutcome,
   type PermissionStepId,
 } from '../core/permission-steps';
 import type { PersistentKV } from '../net/background/persistent-kv';
@@ -23,7 +25,7 @@ import {
   saveLocationDisclosureChoice,
   savePermissionAsked,
 } from '../net/persistence';
-import { PermissionIntroScreen, PermissionStepScreen } from '../screens/permission-step-screen';
+import { PermissionJourneyScreen } from '../screens/permissions-journey-screen';
 
 type Run =
   | { phase: 'loading' }
@@ -31,16 +33,16 @@ type Run =
   | {
       phase: 'asking';
       ctx: PermissionContext;
-      /** The overview is showing. */
-      intro: boolean;
-      /** Steps answered this run, for the step count. */
-      answered: number;
+      /** The rows the run opened with, so one never vanishes when an answer drops it. */
+      planned: readonly PermissionStepId[];
+      /** This run's answers, for the collapsed rows. */
+      outcomes: Partial<Record<PermissionStepId, PermissionOutcome>>;
       busy: boolean;
     };
 
 /**
- * Every OS permission the app needs, asked in one place, one step per permission
- * (`core/permission-steps.ts` decides which), before anything else can ask.
+ * Every OS permission the app needs, asked in one place before anything else can ask: one page,
+ * one row per permission, opened in turn (`core/permission-steps.ts` decides which).
  *
  * It sits in front of `LocationSharingProvider` on purpose: node init used to request Bluetooth
  * and nearby devices the moment a profile existed, on top of whatever screen was up, and iOS raised
@@ -81,12 +83,17 @@ export function PermissionSteps({
     let active = true;
     void (async () => {
       const ctx = replay ? await replayContext() : await loadContext(kv);
-      const pending = pendingPermissionSteps(ctx);
       if (!active) return;
       setRun(
-        pending.length === 0
+        pendingPermissionSteps(ctx).length === 0
           ? { phase: 'done' }
-          : { phase: 'asking', ctx, intro: showsPermissionIntro(pending), answered: 0, busy: false }
+          : {
+              phase: 'asking',
+              ctx,
+              planned: projectedPermissionSteps(ctx),
+              outcomes: {},
+              busy: false,
+            }
       );
     })().catch(() => {
       if (active) setRun({ phase: 'done' });
@@ -109,15 +116,6 @@ export function PermissionSteps({
   const { ctx } = run;
   const step = pendingPermissionSteps(ctx)[0];
   if (!step) return blank;
-
-  if (run.intro) {
-    return (
-      <PermissionIntroScreen
-        steps={projectedPermissionSteps(ctx)}
-        onContinue={() => setRun({ ...run, intro: false })}
-      />
-    );
-  }
 
   async function answer(current: PermissionStepId, allow: boolean) {
     if (inFlight.current || run.phase !== 'asking') return;
@@ -150,17 +148,19 @@ export function PermissionSteps({
     setRun(
       pendingPermissionSteps(next).length === 0
         ? { phase: 'done' }
-        : { phase: 'asking', ctx: next, intro: false, answered: run.answered + 1, busy: false }
+        : {
+            ...run,
+            ctx: next,
+            outcomes: { ...run.outcomes, [current]: permissionOutcome(allow, granted) },
+            busy: false,
+          }
     );
   }
 
-  const total = run.answered + projectedPermissionSteps(ctx).length;
   return (
-    <PermissionStepScreen
-      key={step}
-      step={step}
+    <PermissionJourneyScreen
+      rows={permissionJourney(run.planned, ctx, run.outcomes)}
       platform={ctx.platform}
-      position={total > 1 ? [run.answered + 1, total] : null}
       busy={run.busy}
       onChoice={(allow) => void answer(step, allow)}
     />

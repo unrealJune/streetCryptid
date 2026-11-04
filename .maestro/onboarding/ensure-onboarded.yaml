@@ -69,17 +69,9 @@ appId: com.unrealjune.streetcryptid
       - tapOn:
           id: 'onboarding-delivery-continue'
           enabled: true
-# One screen per permission (PermissionsGate): the overview when there is more than one, then each
-# step's continue. Steps the OS already grants are skipped, and launchApp grants most of them, so
+# One page of permissions (PermissionsGate), each row opened in turn under the same continue
+# button. Steps the OS already grants are skipped, and launchApp grants most of them, so
 # how many steps appear varies by platform — hence a loop rather than a fixed list.
-- runFlow:
-    when:
-      visible:
-        id: 'permission-intro-continue'
-      timeout: 15000
-    commands:
-      - tapOn:
-          id: 'permission-intro-continue'
 - repeat:
     times: 10
     while:

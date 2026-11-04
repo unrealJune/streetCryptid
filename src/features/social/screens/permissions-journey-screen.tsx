@@ -1,5 +1,7 @@
-import { Pressable, StyleSheet, View } from 'react-native';
-import type { SymbolViewProps } from 'expo-symbols';
+import { useRef } from 'react';
+import { Pressable, StyleSheet, View, type ScrollViewInstance } from 'react-native';
+import Animated, { FadeIn, FadeOut, LinearTransition } from 'react-native-reanimated';
+import { SymbolView, type SymbolViewProps } from 'expo-symbols';
 
 import { useColorScheme } from '@/hooks/use-color-scheme';
 import { ThemedText } from '@/components/themed-text';
@@ -9,16 +11,20 @@ import { useTheme } from '@/hooks/use-theme';
 
 import {
   permissionStepCanDecline,
+  type PermissionJourneyRow,
+  type PermissionOutcome,
   type PermissionPlatform,
   type PermissionStepId,
 } from '../core/permission-steps';
 
 /**
- * One screen of `PermissionsGate`: the overview, or a single permission with what it is for and
- * the button that raises the OS prompt behind it.
+ * `PermissionsGate`'s one page: every permission as a row on a journey, the one being asked open
+ * with what it is for, and the button that raises the OS prompt behind it pinned underneath.
+ * Answering collapses the row to its outcome and opens the next; `permissionJourney` says which
+ * row is in which state.
  *
- * The location step IS the background-location disclosure Google Play requires before the OS
- * prompt, and is the screen recorded for that declaration
+ * The open location row IS the background-location disclosure Google Play requires before the OS
+ * prompt, and is what is recorded for that declaration
  * (`docs/play-store/record-location-disclosure-video.md`): keep its title, its two feature cards
  * and, off iOS, its "Turn on location" button as they are. The web drivers (`store-shots`,
  * `map-bench`, `island-preview`) find that button by its text.
@@ -27,9 +33,12 @@ import {
  */
 
 interface StepCopy {
+  /** The row's name, in every state. */
+  readonly name: string;
+  /** The heading once the row is open. */
   readonly title: string;
   readonly lede: string;
-  /** One line for the overview. */
+  /** One line under the name while the step is still to come. */
   readonly summary: string;
   readonly cards: readonly { label: string; body: string; tone: 'amber' | 'green' }[];
   readonly note?: (platform: PermissionPlatform) => string | null;
@@ -40,6 +49,7 @@ interface StepCopy {
 
 const COPY: Record<PermissionStepId, StepCopy> = {
   location: {
+    name: 'Location',
     title: 'Before we turn on location',
     lede: 'streetCryptid uses your location — including while the app is closed or in the background — for two things. Here’s exactly what and why.',
     summary: 'Location — to reveal the streets you walk and share your position with friends.',
@@ -63,6 +73,7 @@ const COPY: Record<PermissionStepId, StepCopy> = {
     icon: { ios: 'location.fill', android: 'my_location', web: 'my_location' },
   },
   'background-location': {
+    name: 'Location all the time',
     title: 'Allow all the time',
     lede: 'Most of your walking happens with the app closed. Background access is what lets streetCryptid keep up then.',
     summary: 'Location all the time — so it keeps working while the app is closed.',
@@ -83,6 +94,7 @@ const COPY: Record<PermissionStepId, StepCopy> = {
     icon: { ios: 'location.circle', android: 'share_location', web: 'share_location' },
   },
   bluetooth: {
+    name: 'Bluetooth',
     title: 'Bluetooth, for Bump',
     lede: 'Bump pairs two phones held together, with no link to send and no account to look up.',
     summary: 'Bluetooth — to find a friend’s phone when you Bump.',
@@ -103,6 +115,7 @@ const COPY: Record<PermissionStepId, StepCopy> = {
     icon: { ios: 'antenna.radiowaves.left.and.right', android: 'bluetooth', web: 'bluetooth' },
   },
   'local-network': {
+    name: 'Local network',
     title: 'Phones on your Wi-Fi',
     lede: 'When a friend is on the same Wi-Fi, your phones can talk to each other directly.',
     summary: 'Local network — to reach friends on the same Wi-Fi directly.',
@@ -121,6 +134,7 @@ const COPY: Record<PermissionStepId, StepCopy> = {
     icon: { ios: 'wifi', android: 'wifi', web: 'wifi' },
   },
   notifications: {
+    name: 'Notifications',
     title: 'A notification while sharing',
     lede: 'Android shows a notification for as long as streetCryptid shares your location in the background.',
     summary: 'Notifications — so you can always see that sharing is on.',
@@ -135,6 +149,7 @@ const COPY: Record<PermissionStepId, StepCopy> = {
     icon: { ios: 'bell', android: 'notifications', web: 'notifications' },
   },
   battery: {
+    name: 'Battery',
     title: 'Keep sharing when the app is closed',
     lede: 'Android sometimes stops apps in the background to save memory. When it stops streetCryptid, it won’t let sharing start again until you open the app — so your friends see a dot that stopped hours ago.',
     summary: 'Unrestricted battery use — so Android can’t switch sharing off for good.',
@@ -154,161 +169,246 @@ const COPY: Record<PermissionStepId, StepCopy> = {
 
 type Choice = (allow: boolean) => void;
 
-export function PermissionIntroScreen({
-  steps,
-  onContinue,
-}: {
-  steps: readonly PermissionStepId[];
-  onContinue: () => void;
-}) {
-  const chrome = useChrome();
-  const theme = useTheme();
-  return (
-    <SettingsPage
-      kind="onboarding"
-      title="A few permissions"
-      subtitle="Each one gets its own screen saying what it’s for, before your phone asks. Here’s what’s coming."
-      testID="permissions-intro"
-      footerRail={{
-        primary: {
-          label: 'Continue',
-          railLabel: 'Next',
-          icon: { ios: 'chevron.right', android: 'arrow_forward', web: 'arrow_forward' },
-          color: chrome.green,
-          ink: chrome.bg,
-          testID: 'permission-intro-continue',
-          onPress: onContinue,
-        },
-      }}
-      footer={
-        <PrimaryButton
-          label="Continue"
-          color={chrome.green}
-          ink={chrome.bg}
-          testID="permission-intro-continue"
-          onPress={onContinue}
-        />
-      }
-    >
-      <View style={styles.list}>
-        {steps.map((step, index) => (
-          <View
-            key={step}
-            style={[styles.listRow, { borderColor: theme.backgroundSelected }]}
-            accessible
-          >
-            <ThemedText type="code" style={{ color: chrome.amber }}>
-              {String(index + 1).padStart(2, '0')}
-            </ThemedText>
-            <ThemedText type="small" themeColor="textSecondary" style={styles.listBody}>
-              {COPY[step].summary}
-            </ThemedText>
-          </View>
-        ))}
-      </View>
-      <ThemedText type="small" themeColor="textSecondary" style={styles.paragraph}>
-        Every one is optional, and every one can be changed later in your phone’s settings.
-      </ThemedText>
-    </SettingsPage>
-  );
-}
+const NODE = 28;
+const ROW_MOTION = LinearTransition.duration(240);
 
-export function PermissionStepScreen({
-  step,
+const OUTCOME_LABEL: Record<PermissionOutcome | 'skipped', string> = {
+  allowed: 'ALLOWED',
+  refused: 'NOT ALLOWED',
+  asked: 'ASKED',
+  declined: 'NOT NOW',
+  skipped: 'SKIPPED',
+};
+
+export function PermissionJourneyScreen({
+  rows,
   platform,
-  position,
   busy,
   onChoice,
 }: {
-  step: PermissionStepId;
+  rows: readonly PermissionJourneyRow[];
   platform: PermissionPlatform;
-  /** `[index, total]`, 1-based, or `null` for a run of one step. */
-  position: readonly [number, number] | null;
   busy: boolean;
   onChoice: Choice;
 }) {
   const chrome = useChrome();
-  const theme = useTheme();
-  const copy = COPY[step];
+  const scroll = useRef<ScrollViewInstance>(null);
+  const journeyTop = useRef(0);
+  const current = rows.find((row) => row.state === 'current')?.step;
   const canDecline = permissionStepCanDecline(platform);
-  const action = canDecline ? copy.action : 'Continue';
-  const note = copy.note?.(platform) ?? null;
+  const action = current && canDecline ? COPY[current].action : 'Continue';
+
+  // Bring the open row to the top once the reader is past the first: answered rows above it are
+  // one line each, but the open one can run past the fold on a short screen.
+  const reveal = (index: number, y: number) => {
+    if (index === 0) return;
+    scroll.current?.scrollTo({
+      y: Math.max(0, journeyTop.current + y - Spacing.three),
+      animated: true,
+    });
+  };
 
   return (
     <SettingsPage
       kind="onboarding"
-      title={copy.title}
-      subtitle={copy.lede}
-      testID={`permission-step-${step}`}
-      footerRail={{
-        back: canDecline
+      title={rows.length > 1 ? 'A few permissions' : 'One permission'}
+      subtitle="Each one says what it’s for before your phone asks. Every one is optional, and you can change any of them later in your phone’s settings."
+      testID="permissions-journey"
+      scrollRef={scroll}
+      footerRail={
+        current
           ? {
-              label: 'Not now',
-              icon: { ios: 'xmark', android: 'close', web: 'close' },
-              disabled: busy,
-              testID: 'permission-step-skip',
-              onPress: () => onChoice(false),
+              back: canDecline
+                ? {
+                    label: 'Not now',
+                    icon: { ios: 'xmark', android: 'close', web: 'close' },
+                    disabled: busy,
+                    testID: 'permission-step-skip',
+                    onPress: () => onChoice(false),
+                  }
+                : undefined,
+              primary: {
+                label: action,
+                railLabel: 'OK',
+                icon: COPY[current].icon,
+                disabled: busy,
+                busy,
+                color: chrome.amber,
+                ink: chrome.panel,
+                testID: 'permission-step-continue',
+                onPress: () => onChoice(true),
+              },
             }
-          : undefined,
-        primary: {
-          label: action,
-          railLabel: 'OK',
-          icon: copy.icon,
-          disabled: busy,
-          busy,
-          color: chrome.amber,
-          ink: chrome.panel,
-          testID: 'permission-step-continue',
-          onPress: () => onChoice(true),
-        },
-      }}
+          : undefined
+      }
       footer={
-        <View style={styles.actions}>
-          <PrimaryButton
-            label={action}
-            color={chrome.amber}
-            ink={chrome.panel}
-            disabled={busy}
-            testID="permission-step-continue"
-            onPress={() => onChoice(true)}
-          />
-          {canDecline ? (
-            <Pressable
-              accessibilityRole="button"
+        current ? (
+          <View style={styles.actions}>
+            <PrimaryButton
+              label={action}
+              color={chrome.amber}
+              ink={chrome.panel}
               disabled={busy}
-              onPress={() => onChoice(false)}
-              testID="permission-step-skip"
-              style={({ pressed }) => [styles.secondary, { opacity: pressed || busy ? 0.58 : 1 }]}
-            >
-              <ThemedText type="small" themeColor="textSecondary">
-                Not now
-              </ThemedText>
-            </Pressable>
-          ) : null}
-        </View>
+              testID="permission-step-continue"
+              onPress={() => onChoice(true)}
+            />
+            {canDecline ? (
+              <Pressable
+                accessibilityRole="button"
+                disabled={busy}
+                onPress={() => onChoice(false)}
+                testID="permission-step-skip"
+                style={({ pressed }) => [styles.secondary, { opacity: pressed || busy ? 0.58 : 1 }]}
+              >
+                <ThemedText type="small" themeColor="textSecondary">
+                  Not now
+                </ThemedText>
+              </Pressable>
+            ) : null}
+          </View>
+        ) : undefined
       }
     >
-      {position ? (
-        <ThemedText type="code" themeColor="textSecondary" style={styles.position}>
-          {`STEP ${position[0]} OF ${position[1]}`}
-        </ThemedText>
-      ) : null}
-      {copy.cards.map((card) => (
-        <View key={card.label} style={[styles.card, { borderColor: theme.backgroundSelected }]}>
-          <ThemedText type="smallBold" style={{ color: chrome[card.tone] }}>
-            {card.label}
-          </ThemedText>
-          <ThemedText type="small" themeColor="textSecondary" style={styles.paragraph}>
-            {card.body}
-          </ThemedText>
-        </View>
-      ))}
-      {note ? (
-        <ThemedText type="small" themeColor="textSecondary" style={styles.paragraph}>
-          {note}
-        </ThemedText>
-      ) : null}
+      <View
+        onLayout={(event) => {
+          journeyTop.current = event.nativeEvent.layout.y;
+        }}
+      >
+        {rows.map((row, index) => (
+          <Animated.View
+            key={row.step}
+            layout={ROW_MOTION}
+            onLayout={
+              row.state === 'current'
+                ? (event) => reveal(index, event.nativeEvent.layout.y)
+                : undefined
+            }
+          >
+            <JourneyRow
+              row={row}
+              number={index + 1}
+              last={index === rows.length - 1}
+              platform={platform}
+            />
+          </Animated.View>
+        ))}
+      </View>
     </SettingsPage>
+  );
+}
+
+/**
+ * One stop on the journey: a node on the rail (its number, then a check or a dash once answered)
+ * and the step's name. The open row adds everything the step's own screen used to say.
+ */
+function JourneyRow({
+  row,
+  number,
+  last,
+  platform,
+}: {
+  row: PermissionJourneyRow;
+  number: number;
+  last: boolean;
+  platform: PermissionPlatform;
+}) {
+  const chrome = useChrome();
+  const theme = useTheme();
+  const copy = COPY[row.step];
+  const open = row.state === 'current';
+  const outcome = row.state === 'done' ? row.outcome : row.state === 'skipped' ? 'skipped' : null;
+  const granted = outcome === 'allowed' || outcome === 'asked';
+  const note = open ? (copy.note?.(platform) ?? null) : null;
+
+  return (
+    <View
+      style={[styles.row, row.state === 'skipped' && styles.dim]}
+      testID={open ? `permission-step-${row.step}` : undefined}
+    >
+      <View style={styles.rail}>
+        <View
+          style={[
+            styles.node,
+            open
+              ? { backgroundColor: chrome.amber, borderColor: chrome.amber }
+              : granted
+                ? { backgroundColor: chrome.green, borderColor: chrome.green }
+                : { borderColor: theme.backgroundSelected },
+          ]}
+        >
+          {outcome ? (
+            <SymbolView
+              name={
+                granted
+                  ? { ios: 'checkmark', android: 'check', web: 'check' }
+                  : { ios: 'minus', android: 'remove', web: 'remove' }
+              }
+              size={14}
+              tintColor={granted ? chrome.bg : theme.textSecondary}
+            />
+          ) : (
+            <ThemedText type="code" style={{ color: open ? chrome.panel : theme.textSecondary }}>
+              {number}
+            </ThemedText>
+          )}
+        </View>
+        {last ? null : (
+          <View style={[styles.connector, { backgroundColor: theme.backgroundSelected }]} />
+        )}
+      </View>
+
+      <View style={[styles.body, !last && styles.bodySpaced]}>
+        <View style={styles.heading}>
+          <ThemedText
+            type="smallBold"
+            themeColor={open ? 'text' : 'textSecondary'}
+            style={styles.name}
+          >
+            {copy.name}
+          </ThemedText>
+          {outcome ? (
+            <ThemedText type="code" style={{ color: granted ? chrome.green : theme.textSecondary }}>
+              {OUTCOME_LABEL[outcome]}
+            </ThemedText>
+          ) : null}
+        </View>
+        {row.state === 'upcoming' ? (
+          <ThemedText type="small" themeColor="textSecondary" style={styles.paragraph}>
+            {copy.summary}
+          </ThemedText>
+        ) : null}
+        {open ? (
+          <Animated.View
+            entering={FadeIn.duration(220).delay(120)}
+            exiting={FadeOut.duration(120)}
+            style={styles.detail}
+          >
+            <ThemedText style={styles.title}>{copy.title}</ThemedText>
+            <ThemedText type="small" themeColor="textSecondary" style={styles.paragraph}>
+              {copy.lede}
+            </ThemedText>
+            {copy.cards.map((card) => (
+              <View
+                key={card.label}
+                style={[styles.card, { borderColor: theme.backgroundSelected }]}
+              >
+                <ThemedText type="smallBold" style={{ color: chrome[card.tone] }}>
+                  {card.label}
+                </ThemedText>
+                <ThemedText type="small" themeColor="textSecondary" style={styles.paragraph}>
+                  {card.body}
+                </ThemedText>
+              </View>
+            ))}
+            {note ? (
+              <ThemedText type="small" themeColor="textSecondary" style={styles.paragraph}>
+                {note}
+              </ThemedText>
+            ) : null}
+          </Animated.View>
+        ) : null}
+      </View>
+    </View>
   );
 }
 
@@ -350,7 +450,24 @@ function useChrome(): CryptidChrome {
 }
 
 const styles = StyleSheet.create({
-  position: { letterSpacing: 1 },
+  row: { flexDirection: 'row', gap: Spacing.three },
+  dim: { opacity: 0.6 },
+  rail: { alignItems: 'center', width: NODE },
+  node: {
+    alignItems: 'center',
+    borderRadius: NODE / 2,
+    borderWidth: 1.5,
+    height: NODE,
+    justifyContent: 'center',
+    width: NODE,
+  },
+  connector: { flex: 1, marginVertical: Spacing.one, minHeight: Spacing.three, width: 1.5 },
+  body: { flex: 1, gap: Spacing.one, paddingTop: 4 },
+  bodySpaced: { paddingBottom: Spacing.four },
+  heading: { alignItems: 'baseline', flexDirection: 'row', gap: Spacing.two },
+  name: { flex: 1 },
+  detail: { gap: Spacing.three, paddingTop: Spacing.two },
+  title: { fontSize: 20, fontWeight: 700, lineHeight: 26 },
   card: {
     borderRadius: Spacing.two,
     borderWidth: StyleSheet.hairlineWidth,
@@ -358,16 +475,6 @@ const styles = StyleSheet.create({
     padding: Spacing.three,
   },
   paragraph: { lineHeight: 21 },
-  list: { gap: Spacing.two },
-  listRow: {
-    alignItems: 'baseline',
-    borderRadius: Spacing.two,
-    borderWidth: StyleSheet.hairlineWidth,
-    flexDirection: 'row',
-    gap: Spacing.three,
-    padding: Spacing.three,
-  },
-  listBody: { flex: 1, lineHeight: 21 },
   actions: { gap: Spacing.two },
   primary: {
     alignItems: 'center',

@@ -146,7 +146,7 @@ export function seedLegacyInstall(ctx: PermissionContext): PermissionContext | n
 }
 
 /**
- * The steps a run is expected to ask, for the overview and the step count: those pending now, plus
+ * The steps a run is expected to ask, for the rows of the permissions page: those pending now, plus
  * the ones that open up once location is accepted and granted — the answer the run is asking for.
  * A "Not now" on location shrinks the count rather than a "Continue" growing it.
  */
@@ -163,12 +163,54 @@ export function projectedPermissionSteps(ctx: PermissionContext): PermissionStep
   return ['location', ...pendingPermissionSteps(accepted)];
 }
 
+/** How an answered step ended, as its collapsed row says it. */
+export type PermissionOutcome =
+  /** Continued, and the OS granted it. */
+  | 'allowed'
+  /** Continued, and the OS refused it (the system dialog's "Don't allow", or already denied). */
+  | 'refused'
+  /** Continued, and the OS could not say (iOS local network, a dialog left open). */
+  | 'asked'
+  /** "Not now". */
+  | 'declined';
+
+export function permissionOutcome(allow: boolean, granted: boolean | undefined): PermissionOutcome {
+  if (!allow) return 'declined';
+  return granted === undefined ? 'asked' : granted ? 'allowed' : 'refused';
+}
+
+export type PermissionJourneyRow =
+  | { readonly step: PermissionStepId; readonly state: 'done'; readonly outcome: PermissionOutcome }
+  /** Planned, but an earlier answer made it pointless (no location, no background location). */
+  | { readonly step: PermissionStepId; readonly state: 'skipped' }
+  | { readonly step: PermissionStepId; readonly state: 'current' | 'upcoming' };
+
 /**
- * Whether the run opens on the overview. One step is its own explanation; a list of one is not
- * worth a screen, which is exactly the case of an existing install owed only the battery step.
+ * The single permissions page as rows, in step order: what was answered, the one being asked,
+ * what is still to come, and what a "Not now" took off the plan. `planned` is the run's
+ * {@link projectedPermissionSteps} from its start, so a row never disappears from under someone —
+ * a step that stops being owed reads as skipped instead.
  */
-export function showsPermissionIntro(pending: readonly PermissionStepId[]): boolean {
-  return pending.length > 1;
+export function permissionJourney(
+  planned: readonly PermissionStepId[],
+  ctx: PermissionContext,
+  outcomes: Partial<Record<PermissionStepId, PermissionOutcome>>
+): PermissionJourneyRow[] {
+  const current = pendingPermissionSteps(ctx)[0];
+  // Still on the plan as things stand: what location's answer would open up counts as coming.
+  const ahead = projectedPermissionSteps(ctx);
+  const shown = new Set<PermissionStepId>([
+    ...planned,
+    ...ahead,
+    ...(Object.keys(outcomes) as PermissionStepId[]),
+  ]);
+  return PERMISSION_STEPS.filter((step) => shown.has(step)).map((step) => {
+    const outcome = outcomes[step];
+    if (outcome) return { step, state: 'done', outcome };
+    if (step === current) return { step, state: 'current' };
+    if (ahead.includes(step)) return { step, state: 'upcoming' };
+    return { step, state: 'skipped' };
+  });
 }
 
 /**
