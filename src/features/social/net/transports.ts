@@ -197,7 +197,7 @@ export function buildTransportReport(input: TransportInputs): TransportReport {
   const relayConfigured = input.relayUrls.length > 0;
   rows.push({
     id: 'relay',
-    label: 'Relay',
+    label: 'Internet relay',
     status: !input.transportEnabled.relay
       ? 'inactive'
       : !relayConfigured
@@ -233,7 +233,7 @@ export function buildTransportReport(input: TransportInputs): TransportReport {
 
   rows.push({
     id: 'direct',
-    label: 'Direct (IP)',
+    label: 'Direct IP',
     status: web
       ? 'n/a'
       : !native
@@ -276,7 +276,7 @@ export function buildTransportReport(input: TransportInputs): TransportReport {
 
   rows.push({
     id: 'lan',
-    label: 'LAN (mDNS)',
+    label: 'Local IP',
     status: web
       ? 'n/a'
       : !native
@@ -293,8 +293,8 @@ export function buildTransportReport(input: TransportInputs): TransportReport {
       : !input.transportEnabled.ip
         ? TRANSPORT_DISABLED
         : lanActive
-          ? `${lanPaths.filter(({ address }) => address.active).length} active same-network path${lanPaths.filter(({ address }) => address.active).length === 1 ? '' : 's'}.`
-          : 'mDNS and ticket-seeded LAN dialing are ready; no active LAN path observed.',
+          ? `${lanPaths.filter(({ address }) => address.active).length} active private/link-local IP path${lanPaths.filter(({ address }) => address.active).length === 1 ? '' : 's'}. Not proof of the same Wi-Fi.`
+          : 'Local IP dialing is ready. mDNS discovers addresses; it is not a transport.',
     groups: [
       {
         label: 'OS SUPPORT',
@@ -324,7 +324,7 @@ export function buildTransportReport(input: TransportInputs): TransportReport {
   const bleAvailable = native && (input.ble?.available ?? false);
   rows.push({
     id: 'ble',
-    label: 'BLE mesh',
+    label: 'Bluetooth',
     status: web
       ? 'n/a'
       : radioStatus(bleAvailable, bleActive, input.transportEnabled.ble, input.nodeReady),
@@ -413,7 +413,7 @@ export function buildTransportReport(input: TransportInputs): TransportReport {
 
   rows.push({
     id: 'stash',
-    label: 'Offline delivery (stash)',
+    label: 'Stash server',
     status: !input.stash.available ? 'unavailable' : input.stash.optedIn ? 'active' : 'inactive',
     detail: !input.stash.available
       ? 'No trail stash is configured.'

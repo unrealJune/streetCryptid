@@ -1,0 +1,10 @@
+iroh-blobs 0.103.0, Copyright n0, inc. and contributors.
+Licensed under MIT OR Apache-2.0; original licenses are included.
+Source: https://github.com/n0-computer/iroh-blobs
+
+Modified for streetCryptid, 2026-11-03:
+- Optional, connection-scoped download observers capture the actual supplier and
+  receive counters around a blob request. Completion runs before ContentReady,
+  including when iroh-docs downloads without React or an app-side pull.
+- Observers are weak, never retain a connection, and do not change the wire,
+  provider selection, retries, or content validation.

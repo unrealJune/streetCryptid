@@ -42,7 +42,8 @@ describe('describeDelivery', () => {
   it('recognises the stash rather than calling it a stranger', () => {
     const result = describe_({ via: 'stash', viaPeer: STASH });
     expect(result.kind).toBe('stash');
-    expect(result.headline).toBe('Served by the trail stash');
+    expect(result.headline).toBe('Replica entry from the stash server');
+    expect(result.detail).toContain('may have downloaded from another device');
   });
 
   /**

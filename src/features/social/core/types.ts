@@ -129,10 +129,13 @@ export interface SelfIdentity {
  * How a fix reached THIS device — the last hop in, not a claim about the author's own link.
  * Gossip is epidemic, so a live fix may have been forwarded by any neighbour in the swarm.
  *
- * - `relay`  — live, arrived over an iroh relay path.
- * - `direct` — live, arrived over a direct (routable IP) path.
- * - `lan`    — live, arrived over a private/link-local IP path.
- * - `ble`    — live, arrived over the BLE (custom) transport.
+ * The four live path labels describe the closest OPEN path, not a measured receive route.
+ * Local connection statistics use separate, correlated receive evidence.
+ *
+ * - `relay`  — live, nearest open path is an internet relay.
+ * - `direct` — live, nearest open path is direct (routable IP).
+ * - `lan`    — live, nearest open path is private/link-local IP.
+ * - `ble`    — live, nearest open path is Bluetooth.
  * - `live`   — live gossip, last hop unknown (older binaries; no path info).
  * - `docs`   — recovered by range-reconciliation with a peer's durable trail.
  * - `stash`  — recovered from the trail stash mirror.
@@ -154,7 +157,8 @@ export interface IncomingFix {
    */
   via?: FixTransport;
   /**
-   * WHO performed that last hop — the endpoint that handed this device the envelope. Not a claim
+   * Legacy provenance: the live forwarder or signed replica-entry provider. The latter is not
+   * necessarily the blob supplier measured by local connection statistics. Not a claim
    * about the author's own link, and frequently not {@link IncomingFix.author}: gossip is
    * epidemic, so any device in the author's swarm can carry their fix here, and reconciliation is
    * served by whichever peer holds the entry. May be an endpoint this device has never paired

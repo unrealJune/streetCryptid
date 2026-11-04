@@ -686,6 +686,27 @@ impl SessionManager {
         verified: &VerifiedEnvelope,
         now_ms: u64,
     ) -> Result<zeroize::Zeroizing<Vec<u8>>, SessionError> {
+        self.open_inner(author, verified, now_ms, true)
+    }
+
+    /// Validate a native background receipt without spending the key the app will need to read
+    /// its current fix. The trial state and plaintext die with this call; nothing is cached.
+    pub fn preview(
+        &self,
+        author: &[u8],
+        verified: &VerifiedEnvelope,
+        now_ms: u64,
+    ) -> Result<zeroize::Zeroizing<Vec<u8>>, SessionError> {
+        self.open_inner(author, verified, now_ms, false)
+    }
+
+    fn open_inner(
+        &self,
+        author: &[u8],
+        verified: &VerifiedEnvelope,
+        now_ms: u64,
+        commit: bool,
+    ) -> Result<zeroize::Zeroizing<Vec<u8>>, SessionError> {
         let _guard = self.lock()?;
         let (mut record, load_error) = match self.store.load_record(author) {
             Ok(Some(record)) => (record, None),
@@ -709,6 +730,9 @@ impl SessionManager {
                 let opened = verified
                     .open_wrap(index, &entry.state.session_id(), key)
                     .map_err(|_| SessionError::NotForUs)?;
+                if !commit {
+                    return Ok(opened.payload);
+                }
                 // The peer sent under this session, so they have it: a restart is answered.
                 let answered = entry.pending_boot.take().is_some();
                 self.store.save_record(author, &record)?;
@@ -740,6 +764,9 @@ impl SessionManager {
                 let opened = verified
                     .open_wrap(index, &entry.state.session_id(), key)
                     .map_err(|_| SessionError::NotForUs)?;
+                if !commit {
+                    return Ok(opened.payload);
+                }
                 self.store.save_record(author, &record)?;
                 self.clear_misses(author, verified.seq);
                 tracing::debug!(
@@ -772,6 +799,9 @@ impl SessionManager {
                 let opened = verified
                     .open_wrap(index, &session_id, key)
                     .map_err(|_| SessionError::NotForUs)?;
+                if !commit {
+                    return Ok(opened.payload);
+                }
                 self.adopt(author, &mut record, state, now_ms)?;
                 self.clear_misses(author, verified.seq);
                 tracing::info!(
@@ -800,7 +830,7 @@ impl SessionManager {
         if passed || self.is_adopted_restart(author, &record, &locators, now_ms) {
             return Err(SessionError::Replayed);
         }
-        if !self.note_miss(author, verified.seq) {
+        if commit && !self.note_miss(author, verified.seq) {
             return Err(SessionError::Replayed);
         }
         // Signature-valid, new, and nothing here is ours. Ordinary in a pool — but a *run* of

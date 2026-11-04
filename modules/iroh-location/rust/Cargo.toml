@@ -66,6 +66,8 @@ iroh-mdns-address-lookup = "0.4"
 # redb replica + blobs store on disk) and `rpc`, both required for a persistent `Docs` replica.
 iroh-docs = "0.101"
 iroh-blobs = "0.103"
+redb = "4.1"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 
 # --- async runtime bridged to Swift/Kotlin by uniffi's `tokio` feature ---
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
@@ -210,6 +212,8 @@ strip = true
 # noq release fixes it.
 [patch.crates-io]
 noq = { path = "third_party/noq" }
+iroh-blobs = { path = "third_party/iroh-blobs" }
+iroh-gossip = { path = "third_party/iroh-gossip" }
 
 # Optimize dependencies in test builds only; this crate itself stays at opt-level 0 so it keeps
 # fast rebuilds and full debuggability. The test suite is CPU-bound in dependency code it cannot
