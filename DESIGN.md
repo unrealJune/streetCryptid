@@ -258,6 +258,22 @@ the app is and **one** action. After the intro the friends keep softly checking 
 - **Beside a system rail the action moves into it**, like every onboarding step's, and the
   island keeps only the words. Friends never ping from under the island or the rail.
 
+## First launch — permissions
+
+After setup and before the map, every OS permission is asked from one place
+(`PermissionsGate`), **one screen per permission**, each saying what it is for before the
+phone asks: location (the Play disclosure), location all the time, Bluetooth for Bump, local
+network, and on Android notifications and unrestricted battery. An overview lists them first
+when there is more than one; each step carries `STEP n OF m`.
+
+- **Nothing else prompts.** Node init only checks; the Bump button asks again for someone
+  who said no. A new permission gets a step here, never a request at a call site.
+- **Off iOS each step has "Not now". On iOS none does** — App Review rejects a screen that
+  lets someone skip the system alert behind it, and the alert's own "Don't Allow" is the
+  decline. The button reads "Continue" there.
+- **Asked once.** What was asked is recorded, what the OS already grants is skipped, and an
+  install that onboarded before the steps sees only what it was never asked.
+
 ## Do / Don't (earned through iteration)
 
 - **Do:** flip-dot dots, hex sectors, single accents, real OSM geometry, calm restraint,

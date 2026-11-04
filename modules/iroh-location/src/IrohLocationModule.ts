@@ -21,6 +21,7 @@ import type {
   PairInviteWithToken,
   PairResult,
   PairStateRecord,
+  PermissionAuthorization,
   ProfileView,
   RatchetDropped,
   SasChallenge,
@@ -165,6 +166,24 @@ export declare class IrohLocationNativeModule
    * ANDROID ONLY, OPTIONAL.
    */
   requestBatteryOptimizationExemption?(): boolean;
+  /**
+   * iOS: Bluetooth authorization, read from `CBManager.authorization` WITHOUT creating a manager â€”
+   * creating one is what shows the alert. IOS ONLY, OPTIONAL (Android reads its runtime permissions
+   * from JS).
+   */
+  bluetoothAuthorization?(): PermissionAuthorization;
+  /**
+   * iOS: show the Bluetooth alert if it has not been answered, and resolve once it has (or after a
+   * bound). Onboarding's Bluetooth step calls this, so the alert appears there instead of when the
+   * node first attaches its BLE transport. IOS ONLY, OPTIONAL.
+   */
+  requestBluetoothAccess?(): Promise<PermissionAuthorization>;
+  /**
+   * iOS: trigger the local-network alert with a short Bonjour browse and advertise, and report what
+   * came of it. There is no API to read or request this permission directly; `unknown` means the
+   * probe ran out of time without either evidence. IOS ONLY, OPTIONAL.
+   */
+  requestLocalNetworkAccess?(): Promise<'granted' | 'denied' | 'unknown'>;
   /**
    * What the native runtime is doing and why — `{ running, state, wake_reason, auth_status,
    * precise, anchor_armed, fence_registered, slc_available, candidate_pending,

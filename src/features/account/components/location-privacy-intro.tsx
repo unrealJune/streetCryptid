@@ -16,9 +16,9 @@ import { SettingsPage } from '@/features/settings/components/settings-page';
  * the completed-onboarding marker (see `finish()` there), so this is seen exactly once per install
  * and replayed in full if setup is abandoned halfway.
  *
- * Distinct from `LocationDisclosureScreen`, which comes after onboarding, is required by Play
- * policy, states what the OS permission is used for, and carries the accept/decline that gates
- * background location. This one asks for nothing.
+ * Distinct from the location step of `PermissionsGate`, which comes after onboarding, is required
+ * by Play policy, states what the OS permission is used for, and carries the accept/decline that
+ * gates background location. This one asks for nothing.
  *
  * The copy is product copy: keep it whole, and keep it honest about the middle of the network
  * seeing that two anonymous IDs exchanged bytes.

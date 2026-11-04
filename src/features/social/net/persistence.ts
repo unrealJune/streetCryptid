@@ -5,6 +5,7 @@ import {
   parseDeliveryMode,
   type DeliveryMode,
 } from '../core/delivery-mode';
+import { PERMISSION_STEPS, type PermissionStepId } from '../core/permission-steps';
 import type { PoolState } from '../core/pool';
 import type { RatchetActivity } from '../core/types';
 import { InMemoryKV, type PersistentKV } from './background/persistent-kv';
@@ -483,7 +484,7 @@ export type LocationDisclosureChoice = 'accepted' | 'declined' | null;
  * Whether the user has been shown the in-app background-location disclosure and what they chose.
  * `null` means the disclosure hasn't been shown yet this install (fresh install, or the KV/SQLite
  * store was unavailable and fell back to in-memory). Shown once, before the OS runtime permission
- * prompt fires — see `LocationDisclosureScreen`.
+ * prompt fires — see the location step of `PermissionsGate`.
  */
 export async function loadLocationDisclosureChoice(
   kv: PersistentKV
@@ -503,9 +504,10 @@ export async function saveLocationDisclosureChoice(
 const BACKGROUND_RELIABILITY_KEY = 'sc.social.backgroundReliabilityAsked';
 
 /**
- * Whether the Android background-reliability step (`BackgroundReliabilityScreen`) has been answered
- * on this install. Stores only that it was asked, not the answer: the answer is the OS setting, read
- * live, and a user who flips it in Settings later must not be contradicted by a stale record here.
+ * Whether the Android background-reliability step (the battery step of `PermissionsGate`) has been
+ * answered on this install. Stores only that it was asked, not the answer: the answer is the OS
+ * setting, read live, and a user who flips it in Settings later must not be contradicted by a stale
+ * record here.
  */
 export async function loadBackgroundReliabilityAsked(kv: PersistentKV): Promise<boolean> {
   return (await kv.get(BACKGROUND_RELIABILITY_KEY)) === '1';
@@ -513,6 +515,42 @@ export async function loadBackgroundReliabilityAsked(kv: PersistentKV): Promise<
 
 export async function saveBackgroundReliabilityAsked(kv: PersistentKV): Promise<void> {
   await kv.set(BACKGROUND_RELIABILITY_KEY, '1');
+}
+
+const PERMISSIONS_ASKED_KEY = 'sc.social.permissionsAsked';
+
+/**
+ * Which onboarding permission steps (`PermissionsGate`) have been asked on this install. `null` when
+ * nothing was ever recorded — a fresh install, or one that onboarded before the steps existed,
+ * which `pendingPermissionSteps` tells apart by the disclosure choice. Like the battery record, it
+ * stores that a step was asked, never the answer: the answer is the OS's, read live.
+ */
+export async function loadPermissionsAsked(
+  kv: PersistentKV
+): Promise<ReadonlySet<PermissionStepId> | null> {
+  const raw = await kv.get(PERMISSIONS_ASKED_KEY);
+  if (raw === null || raw === undefined) return null;
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return new Set();
+    return new Set(
+      parsed.filter((step): step is PermissionStepId =>
+        (PERMISSION_STEPS as readonly unknown[]).includes(step)
+      )
+    );
+  } catch {
+    return new Set();
+  }
+}
+
+/** Record more asked steps. Read-modify-write; the steps are asked one at a time. */
+export async function savePermissionAsked(
+  kv: PersistentKV,
+  ...steps: PermissionStepId[]
+): Promise<void> {
+  const asked = new Set(await loadPermissionsAsked(kv));
+  for (const step of steps) asked.add(step);
+  await kv.set(PERMISSIONS_ASKED_KEY, JSON.stringify([...asked]));
 }
 
 /**
