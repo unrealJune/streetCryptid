@@ -5,8 +5,11 @@ import { Pressable, StyleSheet, Text, View } from 'react-native';
 import type { CryptidTheme } from '@/constants/cryptid-theme';
 import { resolveSignalColor } from '@/constants/signal-colors';
 import { Spacing } from '@/constants/theme';
+import { HexTab } from '@/components/hex-tab';
 import { CryptidAvatar } from '@/features/account/components/cryptid-avatar';
+import { useGlassAvailable } from '@/features/map/components/glass-surface';
 import type { DrawerDetent } from '@/features/map/components/map-drawer';
+import { formatColor, parseColor } from '@/features/map/theme/derive-chrome';
 import { useDisplayPreferences } from '@/features/settings/hooks/use-display-preferences';
 
 import {
@@ -41,6 +44,20 @@ interface FriendDetailIslandProps {
   onBack(): void;
   onToggleShare(on: boolean): Promise<void>;
   onRemove(): Promise<void>;
+}
+
+/** The slim edge tab: narrow enough that the place line gives up 28pt, not the 44 a rail tab would. */
+const NAVIGATE_TAB_WIDTH = 36;
+const NAVIGATE_TAB_CUT = 11;
+/** Brings the target to 44pt wide; the tab is already the hero's height. */
+const NAVIGATE_HIT_SLOP = { left: 8 };
+/** A tint the glass still reads through, as the lit layers FAB uses. */
+const NAVIGATE_TINT = 0.22;
+const NAVIGATE_TINT_PRESSED = 0.36;
+
+function tint(color: string, alpha: number): string | undefined {
+  const parsed = parseColor(color);
+  return parsed ? formatColor(parsed.rgb, alpha) : undefined;
 }
 
 function pairingLabel(method: FriendPresence['friend']['pairingMethod']): string {
@@ -93,6 +110,7 @@ export function FriendDetailIsland({
   onRemove,
 }: FriendDetailIslandProps) {
   const { chrome } = theme;
+  const glass = useGlassAvailable();
   const {
     distanceUnit,
     showFriendConnectionDetails,
@@ -178,21 +196,55 @@ export function FriendDetailIsland({
 
   return (
     <View style={styles.body}>
-      <View style={styles.header}>
-        <Pressable
-          accessibilityLabel="Back to friends"
-          accessibilityRole="button"
-          hitSlop={8}
-          onPress={onBack}
-          style={({ pressed }) => [styles.back, { opacity: pressed ? 0.55 : 1 }]}
+      <Pressable
+        accessibilityLabel="Back to friends"
+        accessibilityRole="button"
+        hitSlop={8}
+        onPress={onBack}
+        style={({ pressed }) => [styles.back, { opacity: pressed ? 0.55 : 1 }]}
+      >
+        <SymbolView
+          name={{ ios: 'chevron.left', android: 'chevron_left', web: 'chevron_left' }}
+          size={20}
+          tintColor={chrome.steel}
+        />
+        <Text style={[styles.backLabel, { color: chrome.steel }]}>FRIENDS</Text>
+      </Pressable>
+
+      {/* One hero at every height. The pane grows by disclosing rows under it, not by becoming a
+          different composition of the same four facts. */}
+      <View style={styles.heroRow}>
+        <View
+          accessible
+          accessibilityRole="summary"
+          accessibilityLabel={`${presence.friend.handle}. ${placeName ?? 'Location unnamed'}. ${subLine.toLowerCase()}.`}
+          style={styles.hero}
         >
-          <SymbolView
-            name={{ ios: 'chevron.left', android: 'chevron_left', web: 'chevron_left' }}
-            size={20}
-            tintColor={chrome.steel}
+          <CryptidAvatar
+            art={presence.friend.sigil || 'unknown'}
+            color={signalColor}
+            name={presence.friend.cryptidName ?? 'Unknown form'}
+            style={styles.avatar}
           />
-          <Text style={[styles.backLabel, { color: chrome.steel }]}>FRIENDS</Text>
-        </Pressable>
+          <View style={styles.heroCopy}>
+            <Text style={[styles.handle, { color: signalColor }]} numberOfLines={1}>
+              {presence.friend.handle}
+            </Text>
+            <Text style={[styles.place, { color: chrome.ink }]} numberOfLines={1}>
+              {placeName ?? '—'}
+            </Text>
+            <Text style={[styles.sub, { color: chrome.steel }]} numberOfLines={1}>
+              {subLine}
+            </Text>
+          </View>
+        </View>
+
+        {/* The onboarding rail's hex tab, flush on the island's edge and as tall as the hero. A
+            sibling of the summary rather than inside it: an `accessible` view hides its children
+            from VoiceOver, button included. It is content ON the island's glass, never a second
+            pane of glass — UIGlassEffect only takes a corner radius, a masked one renders as flat
+            blur — so it is a tint the material shows through, and pressing it does not dim on the
+            glass path, which answers the touch itself (see `IslandPressable`). */}
         <Pressable
           accessibilityLabel={`Navigate to ${presence.friend.handle}`}
           accessibilityHint={
@@ -203,50 +255,35 @@ export function FriendDetailIsland({
           accessibilityRole="button"
           accessibilityState={{ busy: navigationBusy, disabled: !canNavigate || navigationBusy }}
           disabled={!canNavigate || navigationBusy}
+          hitSlop={NAVIGATE_HIT_SLOP}
           onPress={() => void handleNavigate()}
           style={({ pressed }) => [
             styles.navigate,
-            { opacity: !canNavigate || navigationBusy ? 0.45 : pressed ? 0.55 : 1 },
+            {
+              opacity: !canNavigate || navigationBusy ? 0.45 : pressed && !glass ? 0.65 : 1,
+            },
           ]}
         >
-          <SymbolView
-            name={{
-              ios: 'arrow.triangle.turn.up.right.diamond',
-              android: 'directions',
-              web: 'directions',
-            }}
-            size={20}
-            tintColor={chrome.amber}
-          />
-          <Text style={[styles.backLabel, { color: chrome.amber }]}>NAVIGATE</Text>
+          {({ pressed }) => (
+            <HexTab
+              cut={NAVIGATE_TAB_CUT}
+              fill={
+                tint(
+                  canNavigate ? chrome.amber : chrome.steel,
+                  pressed && glass ? NAVIGATE_TINT_PRESSED : NAVIGATE_TINT
+                ) ?? chrome.seg
+              }
+              style={styles.navigateGlyph}
+              width={NAVIGATE_TAB_WIDTH}
+            >
+              <SymbolView
+                name={{ ios: 'location.fill', android: 'navigation', web: 'navigation' }}
+                size={20}
+                tintColor={canNavigate ? chrome.amber : chrome.steel}
+              />
+            </HexTab>
+          )}
         </Pressable>
-      </View>
-
-      {/* One hero at every height. The pane grows by disclosing rows under it, not by becoming a
-          different composition of the same four facts. */}
-      <View
-        accessible
-        accessibilityRole="summary"
-        accessibilityLabel={`${presence.friend.handle}. ${placeName ?? 'Location unnamed'}. ${subLine.toLowerCase()}.`}
-        style={styles.hero}
-      >
-        <CryptidAvatar
-          art={presence.friend.sigil || 'unknown'}
-          color={signalColor}
-          name={presence.friend.cryptidName ?? 'Unknown form'}
-          style={styles.avatar}
-        />
-        <View style={styles.heroCopy}>
-          <Text style={[styles.handle, { color: signalColor }]} numberOfLines={1}>
-            {presence.friend.handle}
-          </Text>
-          <Text style={[styles.place, { color: chrome.ink }]} numberOfLines={1}>
-            {placeName ?? '—'}
-          </Text>
-          <Text style={[styles.sub, { color: chrome.steel }]} numberOfLines={1}>
-            {subLine}
-          </Text>
-        </View>
       </View>
 
       {navigationError ? (
@@ -515,18 +552,25 @@ const styles = StyleSheet.create({
     paddingHorizontal: Spacing.four,
     paddingTop: Spacing.one,
   },
-  header: {
-    alignItems: 'center',
+  heroRow: {
+    alignItems: 'stretch',
     flexDirection: 'row',
-    justifyContent: 'space-between',
-    gap: Spacing.two,
+    gap: Spacing.three,
+    paddingBottom: Spacing.two,
+    paddingTop: Spacing.one,
   },
+  // Past the body's padding to the island's own edge; the drawer's `overflow: hidden` clips it
+  // square there, which is the "hexagon cut off by an edge" the rail tabs make on the screen's.
   navigate: {
-    alignItems: 'center',
-    flexDirection: 'row',
-    gap: Spacing.one,
+    marginRight: -Spacing.four,
     minHeight: 44,
-    paddingHorizontal: Spacing.two,
+    width: NAVIGATE_TAB_WIDTH,
+  },
+  navigateGlyph: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    // Optical centre: the cut takes the leading corners, so the glyph leans trailing.
+    paddingLeft: Spacing.one,
   },
   back: {
     alignItems: 'center',
@@ -541,10 +585,10 @@ const styles = StyleSheet.create({
   },
   hero: {
     alignItems: 'center',
+    flex: 1,
     flexDirection: 'row',
     gap: Spacing.three,
-    paddingBottom: Spacing.two,
-    paddingTop: Spacing.one,
+    minWidth: 0,
   },
   avatar: {
     width: 72,
