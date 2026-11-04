@@ -23,9 +23,15 @@ import { useCryptidProfile } from '../hooks/use-cryptid-profile';
 export function AccountOnboardingScreen({
   onSaveStart,
   onComplete,
+  replay = false,
+  saveDelivery,
 }: {
   onSaveStart: () => void;
   onComplete: () => void;
+  /** Settings → Debug: open on the splash even though a profile exists, which it then edits. */
+  replay?: boolean;
+  /** How the delivery choice is saved; a replay goes through the running service. */
+  saveDelivery?: (mode: DeliveryMode) => Promise<void>;
 }) {
   const { error: profileError, profile, saveProfile } = useCryptidProfile();
   const scheme = useColorScheme();
@@ -35,7 +41,7 @@ export function AccountOnboardingScreen({
   const [draft, setDraft] = useState<CryptidProfile | null>(profile);
   // A fresh install opens on the splash; a profile already in hand (setup resumed) skips it.
   const [step, setStep] = useState<'splash' | 'profile' | 'privacy' | 'delivery'>(() =>
-    profile ? 'profile' : 'splash'
+    profile && !replay ? 'profile' : 'splash'
   );
   const [mode, setMode] = useState<DeliveryMode>(NEW_USER_DELIVERY_MODE);
   const [ready, setReady] = useState(false);
@@ -68,7 +74,7 @@ export function AccountOnboardingScreen({
     setError(null);
     onSaveStart();
     try {
-      await saveDeliveryMode(kv, mode);
+      await (saveDelivery ? saveDelivery(mode) : saveDeliveryMode(kv, mode));
       // A profile is the completed-onboarding marker. Save it only after delivery, so
       // closing the app between these steps never skips the delivery choice on relaunch.
       await saveProfile(draft);

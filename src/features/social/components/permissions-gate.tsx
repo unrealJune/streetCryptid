@@ -12,6 +12,7 @@ import {
   type PermissionContext,
   type PermissionStepId,
 } from '../core/permission-steps';
+import type { PersistentKV } from '../net/background/persistent-kv';
 import { readPermissionFacts, requestPermissionStep } from '../net/permission-requests';
 import {
   createPersistentKV,
@@ -51,6 +52,26 @@ type Run =
  * A failure to read anything opens the app: nothing here may stand between someone and the map.
  */
 export function PermissionsGate({ children }: PropsWithChildren) {
+  const [done, setDone] = useState(false);
+  if (done) return children;
+  return <PermissionSteps onDone={() => setDone(true)} />;
+}
+
+/**
+ * The steps themselves. `replay` (Settings → Debug) runs every step that exists on this phone
+ * again, as on a fresh install: nothing already asked or granted is skipped, and the answers are
+ * saved like the first time. `saveLocationChoice` lets a replay route the location answer through
+ * the mounted provider, which holds the disclosure in state.
+ */
+export function PermissionSteps({
+  replay = false,
+  onDone,
+  saveLocationChoice,
+}: {
+  replay?: boolean;
+  onDone: () => void;
+  saveLocationChoice?: (accepted: boolean) => Promise<void>;
+}) {
   const theme = useTheme();
   const [kv] = useState(createPersistentKV);
   const [run, setRun] = useState<Run>({ phase: 'loading' });
@@ -59,21 +80,7 @@ export function PermissionsGate({ children }: PropsWithChildren) {
   useEffect(() => {
     let active = true;
     void (async () => {
-      const [disclosure, asked, batteryAsked, facts] = await Promise.all([
-        loadLocationDisclosureChoice(kv),
-        loadPermissionsAsked(kv),
-        loadBackgroundReliabilityAsked(kv),
-        readPermissionFacts(),
-      ]);
-      const loaded: PermissionContext = {
-        ...facts,
-        disclosure,
-        asked: new Set([...(asked ?? []), ...(batteryAsked ? (['battery'] as const) : [])]),
-        recorded: asked !== null,
-      };
-      const seeded = seedLegacyInstall(loaded);
-      if (seeded) await savePermissionAsked(kv, ...seeded.asked).catch(() => undefined);
-      const ctx = seeded ?? loaded;
+      const ctx = replay ? await replayContext() : await loadContext(kv);
       const pending = pendingPermissionSteps(ctx);
       if (!active) return;
       setRun(
@@ -87,17 +94,21 @@ export function PermissionsGate({ children }: PropsWithChildren) {
     return () => {
       active = false;
     };
-  }, [kv]);
+  }, [kv, replay]);
 
-  if (run.phase === 'loading') {
-    return <View style={[styles.loading, { backgroundColor: theme.background }]} />;
-  }
-  if (run.phase === 'done') return children;
+  // `onDone` must be idempotent: a caller re-rendering with a new one after the end calls it again.
+  const over = run.phase === 'done';
+  useEffect(() => {
+    if (over) onDone();
+  }, [over, onDone]);
+
+  // Also what shows for the one frame between the last answer and `onDone` taking over.
+  const blank = <View style={[styles.loading, { backgroundColor: theme.background }]} />;
+  if (run.phase !== 'asking') return blank;
 
   const { ctx } = run;
-  const pending = pendingPermissionSteps(ctx);
-  const step = pending[0];
-  if (!step) return children;
+  const step = pendingPermissionSteps(ctx)[0];
+  if (!step) return blank;
 
   if (run.intro) {
     return (
@@ -119,12 +130,14 @@ export function PermissionsGate({ children }: PropsWithChildren) {
     // costs a step asked twice on the next launch, never a stuck screen.
     await Promise.all([
       current === 'location' && disclosure !== null
-        ? saveLocationDisclosureChoice(kv, disclosure)
+        ? saveLocationChoice
+          ? saveLocationChoice(allow)
+          : saveLocationDisclosureChoice(kv, disclosure)
         : null,
       savePermissionAsked(kv, current),
       current === 'battery' ? saveBackgroundReliabilityAsked(kv) : null,
     ]).catch(() => undefined);
-    record(current, allow, granted, run.ctx.platform);
+    record(current, allow, granted, run.ctx.platform, replay);
     inFlight.current = false;
 
     const next: PermissionContext = {
@@ -162,7 +175,8 @@ function record(
   step: PermissionStepId,
   allow: boolean,
   granted: boolean | undefined,
-  platform: string
+  platform: string,
+  replay: boolean
 ) {
   getTelemetry()
     .startSpan('onboarding.permission', {
@@ -171,9 +185,38 @@ function record(
         choice: allow ? 'continue' : 'skip',
         ...(granted === undefined ? {} : { 'permission.granted': granted }),
         platform,
+        ...(replay ? { 'permission.replay': true } : {}),
       },
     })
     .end();
+}
+
+/** What this install has answered, as the gate reads it on launch. */
+async function loadContext(kv: PersistentKV): Promise<PermissionContext> {
+  const [disclosure, asked, batteryAsked, facts] = await Promise.all([
+    loadLocationDisclosureChoice(kv),
+    loadPermissionsAsked(kv),
+    loadBackgroundReliabilityAsked(kv),
+    readPermissionFacts(),
+  ]);
+  const loaded: PermissionContext = {
+    ...facts,
+    disclosure,
+    asked: new Set([...(asked ?? []), ...(batteryAsked ? (['battery'] as const) : [])]),
+    recorded: asked !== null,
+  };
+  const seeded = seedLegacyInstall(loaded);
+  if (seeded) await savePermissionAsked(kv, ...seeded.asked).catch(() => undefined);
+  return seeded ?? loaded;
+}
+
+/**
+ * A fresh install on this phone: nothing answered, nothing granted. `granted` is cleared rather
+ * than read so a step the OS already allows is still shown (its request returns at once).
+ */
+async function replayContext(): Promise<PermissionContext> {
+  const facts = await readPermissionFacts();
+  return { ...facts, granted: {}, disclosure: null, asked: new Set(), recorded: true };
 }
 
 const styles = StyleSheet.create({

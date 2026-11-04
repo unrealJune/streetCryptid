@@ -273,6 +273,8 @@ when there is more than one; each step carries `STEP n OF m`.
   decline. The button reads "Continue" there.
 - **Asked once.** What was asked is recorded, what the OS already grants is skipped, and an
   install that onboarded before the steps sees only what it was never asked.
+- **Replayable.** Settings → Debug → Replay onboarding runs setup and every step again on an
+  onboarded phone, granted ones included. The answers are real and are saved.
 
 ## Do / Don't (earned through iteration)
 

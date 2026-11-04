@@ -10,7 +10,7 @@ import {
 
 import type { PermissionContext, PermissionStepId } from '../../core/permission-steps';
 import { PermissionIntroScreen, PermissionStepScreen } from '../../screens/permission-step-screen';
-import { PermissionsGate } from '../permissions-gate';
+import { PermissionSteps, PermissionsGate } from '../permissions-gate';
 
 jest.mock('@/global.css', () => ({}));
 jest.mock('../../screens/permission-step-screen', () => ({
@@ -135,5 +135,43 @@ describe('PermissionsGate', () => {
     mockFacts = { ...mockFacts, platform: 'ios', androidApi: 0 };
     await render();
     expect(app()).toBe(true);
+  });
+
+  it('replays every step on an onboarded phone, granted ones included, then calls onDone', async () => {
+    await saveLocationDisclosureChoice(mockKV, 'accepted');
+    mockFacts = {
+      ...mockFacts,
+      granted: {
+        location: true,
+        'background-location': true,
+        bluetooth: true,
+        'local-network': true,
+        notifications: true,
+        battery: true,
+      },
+    };
+    const onDone = jest.fn();
+    const saveLocationChoice = jest.fn(() => Promise.resolve());
+    await act(async () => {
+      renderer = create(
+        <PermissionSteps replay onDone={onDone} saveLocationChoice={saveLocationChoice} />
+      );
+    });
+    act(() => renderer.root.findByType(PermissionIntroScreen).props.onContinue());
+    const seen: string[] = [];
+    while (renderer.root.findAllByType(PermissionStepScreen).length > 0) {
+      seen.push(step().step);
+      await choose(true);
+    }
+    expect(seen).toEqual([
+      'location',
+      'background-location',
+      'bluetooth',
+      'local-network',
+      'notifications',
+      'battery',
+    ]);
+    expect(saveLocationChoice).toHaveBeenCalledWith(true);
+    expect(onDone).toHaveBeenCalled();
   });
 });
