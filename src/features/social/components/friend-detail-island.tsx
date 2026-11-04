@@ -282,7 +282,7 @@ export function FriendDetailIsland({
                   android: 'directions',
                   web: 'directions',
                 }}
-                size={20}
+                size={26}
                 tintColor={canNavigate ? chrome.amber : chrome.steel}
               />
             </HexTab>
