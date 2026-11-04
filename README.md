@@ -40,6 +40,14 @@ whole sector, so the reveal comes in chunks, not traces. The city is drawn as a 
 dots — calm, precise, instrument-like. See [PRODUCT.md](./PRODUCT.md) for the product register and
 [DESIGN.md](./DESIGN.md) for the visual system of record.
 
+Select a friend on the map or in the friends drawer, then tap **Navigate** to open their
+last known location in an external maps app. The location's age stays visible; navigation
+does not request a fresh fix. iOS first tries the system's default-navigation scheme, with
+Apple Maps directions as a fallback. Android opens the destination in the default map app
+(or the system app chooser); choose directions there. Web, and Android without a map handler,
+use Google Maps directions. Only the destination coordinates are handed off, not the friend's
+identity or your own position. The chosen map provider's privacy policy applies.
+
 ## Nobody but your friends can read it
 
 - **End-to-end encrypted, per recipient.** Every fix is sealed on your device individually for each

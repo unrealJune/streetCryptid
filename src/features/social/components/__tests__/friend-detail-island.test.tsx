@@ -1,3 +1,4 @@
+import { SymbolView } from 'expo-symbols';
 import { Text } from 'react-native';
 import { act, create, type ReactTestRenderer } from 'react-test-renderer';
 
@@ -7,6 +8,13 @@ import type { DrawerDetent } from '@/features/map/core/drawer-detents';
 import { FriendDetailIsland } from '../friend-detail-island';
 import { buildFriendPresence } from '../../core/presence';
 import { FIX_STATE_PARKED, type Friend, type LocationFix } from '../../core/types';
+import { openNavigation } from '../../net/open-navigation';
+
+jest.mock('../../net/open-navigation', () => ({
+  ...jest.requireActual('../../net/open-navigation'),
+  openNavigation: jest.fn(),
+}));
+const mockOpenNavigation = jest.mocked(openNavigation);
 
 jest.mock('expo-symbols', () => ({
   SymbolView: () => null,
@@ -72,6 +80,10 @@ function parkedPresence() {
 describe('FriendDetailIsland', () => {
   let renderer: ReactTestRenderer;
 
+  beforeEach(() => {
+    mockOpenNavigation.mockReset().mockResolvedValue(undefined);
+  });
+
   afterEach(() => {
     act(() => renderer?.unmount());
     mockPreferences.distanceUnit = 'km';
@@ -79,7 +91,10 @@ describe('FriendDetailIsland', () => {
     mockPreferences.ready = true;
   });
 
-  function render(detent: DrawerDetent, overrides: { sharing?: boolean } = {}) {
+  function render(
+    detent: DrawerDetent,
+    overrides: { sharing?: boolean; presence?: ReturnType<typeof parkedPresence> } = {}
+  ) {
     const onBack = jest.fn();
     const onToggleShare = jest.fn().mockResolvedValue(undefined);
     const onRemove = jest.fn().mockResolvedValue(undefined);
@@ -91,7 +106,7 @@ describe('FriendDetailIsland', () => {
           onRemove={onRemove}
           onToggleShare={onToggleShare}
           placeName="Volunteer Park"
-          presence={parkedPresence()}
+          presence={overrides.presence ?? parkedPresence()}
           sharing={overrides.sharing ?? true}
           theme={CryptidThemes.daybreak}
         />
@@ -182,6 +197,109 @@ describe('FriendDetailIsland', () => {
       .toUpperCase();
     expect(labels).not.toContain('CENTRE MAP');
     expect(labels).not.toContain('VIEW ON MAP');
+  });
+
+  it.each(['peek', 'mid', 'full'] as const)(
+    'offers navigation at %s as the directions glyph on the hero edge tab',
+    (detent) => {
+      render(detent);
+      const navigate = renderer.root.findByProps({
+        accessibilityLabel: 'Navigate to @tallgrass',
+      });
+
+      expect(navigate.props.accessibilityState).toEqual({ busy: false, disabled: false });
+      expect(navigate.findByType(SymbolView).props.name).toEqual({
+        ios: 'arrow.triangle.turn.up.right.diamond.fill',
+        android: 'directions',
+        web: 'directions',
+      });
+      expect(mockOpenNavigation).not.toHaveBeenCalled();
+    }
+  );
+
+  it('navigates to the friend, not self, without hiding the age of their position', async () => {
+    render('peek');
+
+    await act(async () => {
+      renderer.root.findByProps({ accessibilityLabel: 'Navigate to @tallgrass' }).props.onPress();
+    });
+
+    expect(mockOpenNavigation).toHaveBeenCalledWith(parkedPresence().fix);
+    expect(findText(renderer, 'PARKED HERE 12 MIN · 1.2 KM')).toHaveLength(1);
+  });
+
+  it('disables navigation until a location arrives and uses that new destination', async () => {
+    const [unknown] = buildFriendPresence({ friends: [tallgrass], latest: [], selfFix, now: NOW });
+    render('peek', { presence: unknown });
+    const navigate = () =>
+      renderer.root.findByProps({ accessibilityLabel: 'Navigate to @tallgrass' });
+
+    expect(navigate().props.disabled).toBe(true);
+    expect(navigate().props.accessibilityState.disabled).toBe(true);
+    expect(navigate().props.accessibilityHint).toBe('No location available yet');
+
+    const props = renderer.root.findByType(FriendDetailIsland).props as Parameters<
+      typeof FriendDetailIsland
+    >[0];
+    act(() => renderer.update(<FriendDetailIsland {...props} presence={parkedPresence()} />));
+    expect(navigate().props.disabled).toBe(false);
+
+    await act(async () => navigate().props.onPress());
+    expect(mockOpenNavigation).toHaveBeenCalledWith(parkedPresence().fix);
+  });
+
+  it('allows a last-known destination even when the friend is out of contact', async () => {
+    render('peek', { presence: { ...parkedPresence(), state: 'out-of-contact' } });
+
+    await act(async () => {
+      renderer.root.findByProps({ accessibilityLabel: 'Navigate to @tallgrass' }).props.onPress();
+    });
+
+    expect(mockOpenNavigation).toHaveBeenCalledWith(parkedPresence().fix);
+    expect(
+      renderer.root.findByProps({ accessibilityRole: 'summary' }).props.accessibilityLabel
+    ).toContain('out of contact');
+  });
+
+  it('prevents duplicate launches while a handoff is pending', async () => {
+    let finish!: () => void;
+    mockOpenNavigation.mockImplementationOnce(
+      () => new Promise<void>((resolve) => (finish = resolve))
+    );
+    render('peek');
+    const navigate = () =>
+      renderer.root.findByProps({ accessibilityLabel: 'Navigate to @tallgrass' });
+    const press = navigate().props.onPress;
+    act(() => {
+      press();
+      press();
+    });
+
+    expect(mockOpenNavigation).toHaveBeenCalledTimes(1);
+    expect(navigate().props.accessibilityState).toEqual({ busy: true, disabled: true });
+
+    await act(async () => finish());
+    expect(navigate().props.disabled).toBe(false);
+  });
+
+  it('announces a failed handoff in the peek and allows retrying', async () => {
+    mockOpenNavigation.mockRejectedValueOnce(new Error('No maps or browser'));
+    render('peek');
+    const navigate = () =>
+      renderer.root.findByProps({ accessibilityLabel: 'Navigate to @tallgrass' });
+
+    await act(async () => navigate().props.onPress());
+
+    expect(renderer.root.findByProps({ accessibilityRole: 'alert' }).props.children).toBe(
+      'Could not open maps. Check that a maps app or browser is available, then try again.'
+    );
+    expect(navigate().props.disabled).toBe(false);
+
+    await act(async () => navigate().props.onPress());
+    expect(mockOpenNavigation).toHaveBeenCalledTimes(2);
+    expect(
+      renderer.root.findAllByProps({ accessibilityRole: 'alert' }, { deep: false })
+    ).toHaveLength(0);
   });
 
   // Three stages meant the pane answered in three different shapes, and the tallest of them was

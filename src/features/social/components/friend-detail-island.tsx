@@ -1,12 +1,15 @@
 import { SymbolView } from 'expo-symbols';
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 
 import type { CryptidTheme } from '@/constants/cryptid-theme';
 import { resolveSignalColor } from '@/constants/signal-colors';
 import { Spacing } from '@/constants/theme';
+import { HexTab } from '@/components/hex-tab';
 import { CryptidAvatar } from '@/features/account/components/cryptid-avatar';
+import { useGlassAvailable } from '@/features/map/components/glass-surface';
 import type { DrawerDetent } from '@/features/map/components/map-drawer';
+import { formatColor, parseColor } from '@/features/map/theme/derive-chrome';
 import { useDisplayPreferences } from '@/features/settings/hooks/use-display-preferences';
 
 import {
@@ -16,6 +19,7 @@ import {
 } from '../core/fix-transport';
 import { describePresence, formatAge, formatDistance, type FriendPresence } from '../core/presence';
 import type { Friend, RatchetActivity } from '../core/types';
+import { isNavigationDestination, openNavigation } from '../net/open-navigation';
 
 interface FriendDetailIslandProps {
   readonly presence: FriendPresence;
@@ -40,6 +44,20 @@ interface FriendDetailIslandProps {
   onBack(): void;
   onToggleShare(on: boolean): Promise<void>;
   onRemove(): Promise<void>;
+}
+
+/** The slim edge tab: narrow enough that the place line gives up 34pt, not the 60 a rail-width tab would. */
+const NAVIGATE_TAB_WIDTH = 42;
+const NAVIGATE_TAB_CUT = 12;
+/** Brings the target to 44pt wide; the tab is already the hero's height. */
+const NAVIGATE_HIT_SLOP = { left: 2 };
+/** A tint the glass still reads through, as the lit layers FAB uses. */
+const NAVIGATE_TINT = 0.22;
+const NAVIGATE_TINT_PRESSED = 0.36;
+
+function tint(color: string, alpha: number): string | undefined {
+  const parsed = parseColor(color);
+  return parsed ? formatColor(parsed.rgb, alpha) : undefined;
 }
 
 function pairingLabel(method: FriendPresence['friend']['pairingMethod']): string {
@@ -92,6 +110,7 @@ export function FriendDetailIsland({
   onRemove,
 }: FriendDetailIslandProps) {
   const { chrome } = theme;
+  const glass = useGlassAvailable();
   const {
     distanceUnit,
     showFriendConnectionDetails,
@@ -102,8 +121,12 @@ export function FriendDetailIsland({
   const [removing, setRemoving] = useState(false);
   const [removeError, setRemoveError] = useState<string | null>(null);
   const [sharingBusy, setSharingBusy] = useState(false);
+  const navigationInFlight = useRef(false);
+  const [navigationBusy, setNavigationBusy] = useState(false);
+  const [navigationError, setNavigationError] = useState<string | null>(null);
 
   const signalColor = resolveSignalColor(presence.friend.color, chrome.green);
+  const canNavigate = isNavigationDestination(presence.fix);
   const endpointId = presence.friend.endpointId;
   const distance = displayPreferencesReady
     ? formatDistance(presence.distanceM, distanceUnit)
@@ -153,6 +176,24 @@ export function FriendDetailIsland({
     }
   }
 
+  async function handleNavigate(): Promise<void> {
+    if (navigationInFlight.current) return;
+    navigationInFlight.current = true;
+    setNavigationBusy(true);
+    setNavigationError(null);
+    try {
+      if (!presence.fix) throw new Error('No location available.');
+      await openNavigation(presence.fix);
+    } catch {
+      setNavigationError(
+        'Could not open maps. Check that a maps app or browser is available, then try again.'
+      );
+    } finally {
+      navigationInFlight.current = false;
+      setNavigationBusy(false);
+    }
+  }
+
   return (
     <View style={styles.body}>
       <Pressable
@@ -172,30 +213,88 @@ export function FriendDetailIsland({
 
       {/* One hero at every height. The pane grows by disclosing rows under it, not by becoming a
           different composition of the same four facts. */}
-      <View
-        accessible
-        accessibilityRole="summary"
-        accessibilityLabel={`${presence.friend.handle}. ${placeName ?? 'Location unnamed'}. ${subLine.toLowerCase()}.`}
-        style={styles.hero}
-      >
-        <CryptidAvatar
-          art={presence.friend.sigil || 'unknown'}
-          color={signalColor}
-          name={presence.friend.cryptidName ?? 'Unknown form'}
-          style={styles.avatar}
-        />
-        <View style={styles.heroCopy}>
-          <Text style={[styles.handle, { color: signalColor }]} numberOfLines={1}>
-            {presence.friend.handle}
-          </Text>
-          <Text style={[styles.place, { color: chrome.ink }]} numberOfLines={1}>
-            {placeName ?? '—'}
-          </Text>
-          <Text style={[styles.sub, { color: chrome.steel }]} numberOfLines={1}>
-            {subLine}
-          </Text>
+      <View style={styles.heroRow}>
+        <View
+          accessible
+          accessibilityRole="summary"
+          accessibilityLabel={`${presence.friend.handle}. ${placeName ?? 'Location unnamed'}. ${subLine.toLowerCase()}.`}
+          style={styles.hero}
+        >
+          <CryptidAvatar
+            art={presence.friend.sigil || 'unknown'}
+            color={signalColor}
+            name={presence.friend.cryptidName ?? 'Unknown form'}
+            style={styles.avatar}
+          />
+          <View style={styles.heroCopy}>
+            <Text style={[styles.handle, { color: signalColor }]} numberOfLines={1}>
+              {presence.friend.handle}
+            </Text>
+            <Text style={[styles.place, { color: chrome.ink }]} numberOfLines={1}>
+              {placeName ?? '—'}
+            </Text>
+            <Text style={[styles.sub, { color: chrome.steel }]} numberOfLines={1}>
+              {subLine}
+            </Text>
+          </View>
         </View>
+
+        {/* The onboarding rail's hex tab, flush on the island's edge and as tall as the hero. A
+            sibling of the summary rather than inside it: an `accessible` view hides its children
+            from VoiceOver, button included. It is content ON the island's glass, never a second
+            pane of glass — UIGlassEffect only takes a corner radius, a masked one renders as flat
+            blur — so it is a tint the material shows through, and pressing it does not dim on the
+            glass path, which answers the touch itself (see `IslandPressable`). */}
+        <Pressable
+          accessibilityLabel={`Navigate to ${presence.friend.handle}`}
+          accessibilityHint={
+            canNavigate
+              ? 'Opens maps with their last known coordinates, shared with the map provider'
+              : 'No location available yet'
+          }
+          accessibilityRole="button"
+          accessibilityState={{ busy: navigationBusy, disabled: !canNavigate || navigationBusy }}
+          disabled={!canNavigate || navigationBusy}
+          hitSlop={NAVIGATE_HIT_SLOP}
+          onPress={() => void handleNavigate()}
+          style={({ pressed }) => [
+            styles.navigate,
+            {
+              opacity: !canNavigate || navigationBusy ? 0.45 : pressed && !glass ? 0.65 : 1,
+            },
+          ]}
+        >
+          {({ pressed }) => (
+            <HexTab
+              cut={NAVIGATE_TAB_CUT}
+              fill={
+                tint(
+                  canNavigate ? chrome.amber : chrome.steel,
+                  pressed && glass ? NAVIGATE_TINT_PRESSED : NAVIGATE_TINT
+                ) ?? chrome.seg
+              }
+              style={styles.navigateGlyph}
+              width={NAVIGATE_TAB_WIDTH}
+            >
+              <SymbolView
+                name={{
+                  ios: 'arrow.triangle.turn.up.right.diamond.fill',
+                  android: 'directions',
+                  web: 'directions',
+                }}
+                size={26}
+                tintColor={canNavigate ? chrome.amber : chrome.steel}
+              />
+            </HexTab>
+          )}
+        </Pressable>
       </View>
+
+      {navigationError ? (
+        <Text accessibilityRole="alert" style={[styles.confirmCopy, { color: chrome.ink }]}>
+          {navigationError}
+        </Text>
+      ) : null}
 
       {expanded ? (
         <View style={styles.details}>
@@ -457,6 +556,26 @@ const styles = StyleSheet.create({
     paddingHorizontal: Spacing.four,
     paddingTop: Spacing.one,
   },
+  heroRow: {
+    alignItems: 'stretch',
+    flexDirection: 'row',
+    gap: Spacing.three,
+    paddingBottom: Spacing.two,
+    paddingTop: Spacing.one,
+  },
+  // Past the body's padding to the island's own edge; the drawer's `overflow: hidden` clips it
+  // square there, which is the "hexagon cut off by an edge" the rail tabs make on the screen's.
+  navigate: {
+    marginRight: -Spacing.four,
+    minHeight: 44,
+    width: NAVIGATE_TAB_WIDTH,
+  },
+  navigateGlyph: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    // Optical centre: the cut takes the leading corners, so the glyph leans trailing.
+    paddingLeft: Spacing.one,
+  },
   back: {
     alignItems: 'center',
     flexDirection: 'row',
@@ -470,10 +589,10 @@ const styles = StyleSheet.create({
   },
   hero: {
     alignItems: 'center',
+    flex: 1,
     flexDirection: 'row',
     gap: Spacing.three,
-    paddingBottom: Spacing.two,
-    paddingTop: Spacing.one,
+    minWidth: 0,
   },
   avatar: {
     width: 72,

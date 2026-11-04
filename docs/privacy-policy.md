@@ -1,6 +1,6 @@
 # streetCryptid Privacy Policy
 
-**Effective date:** 2026-07-13
+**Effective date:** 2026-11-03
 **Contact:** mail.junephilip@gmail.com
 
 ## The short version
@@ -44,6 +44,18 @@ background, if you allow it) and shares it with the friends you have paired with
   already-encrypted data and can never decrypt it. Using a stash is optional and
   off unless you turn it on.
 
+### Opening directions
+
+When you tap **Navigate** on a friend's map details, streetCryptid passes their last known
+coordinates to an external maps app or website. It does not include their handle, cryptographic
+identifiers, trail, or your own location. This handoff happens only when you request it, not
+when you view a friend. The coordinates are readable by that map provider and are subject to
+its privacy policy, outside streetCryptid's encrypted sharing.
+
+The app tries the system navigation handler on iOS and the default map app or app chooser on
+Android. If unavailable, it opens Apple Maps directions on iOS or Google Maps directions on
+Android. The web app opens Google Maps directions.
+
 ### Push notification token
 
 If you allow notifications, the app registers your device's push token
@@ -76,6 +88,8 @@ Data reaches the following parties only as described above:
   your own, no third party is involved at all.
 - **Apple (APNs) and Google (FCM)** — deliver the silent wake notifications, per
   their own privacy policies.
+- **The maps provider you open with Navigate** — receives the destination coordinates
+  for that request, as described under "Opening directions."
 
 ## Data retention and deletion
 

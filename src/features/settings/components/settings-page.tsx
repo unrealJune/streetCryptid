@@ -1,17 +1,10 @@
 import { type ReactNode, useEffect, useRef } from 'react';
-import {
-  Pressable,
-  ScrollView,
-  StyleSheet,
-  View,
-  type ScrollViewInstance,
-  type StyleProp,
-  type ViewStyle,
-} from 'react-native';
+import { Pressable, ScrollView, StyleSheet, View, type ScrollViewInstance } from 'react-native';
 import { useRouter } from 'expo-router';
 import { SymbolView, type SymbolViewProps } from 'expo-symbols';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
+import { HexTab } from '@/components/hex-tab';
 import { ThemedText } from '@/components/themed-text';
 import { BrandFonts, MaxContentWidth, Spacing } from '@/constants/theme';
 import { LEADING_SCROLL_BAR, useSystemRail } from '@/hooks/use-system-rail';
@@ -248,7 +241,13 @@ function RailPrimary({ action }: { action: RailAction }) {
       style={({ pressed }) => ({ opacity: action.disabled ? 0.4 : pressed ? 0.65 : 1 })}
       testID={action.testID}
     >
-      <HexTab fill={fill} height={RAIL_PRIMARY_HEIGHT} style={styles.railPrimary}>
+      <HexTab
+        cut={RAIL_TAB_CUT}
+        fill={fill}
+        height={RAIL_PRIMARY_HEIGHT}
+        style={styles.railPrimary}
+        width={RAIL_TAB_WIDTH}
+      >
         <View style={styles.railLetters}>
           {[...letters].map((letter, index) =>
             letter === ' ' ? (
@@ -278,48 +277,19 @@ function RailButton({ action }: { action: RailAction }) {
       style={({ pressed }) => ({ opacity: action.disabled ? 0.4 : pressed ? 0.65 : 1 })}
       testID={action.testID}
     >
-      <HexTab fill={theme.backgroundSelected} height={RAIL_BUTTON_HEIGHT} style={styles.railButton}>
+      <HexTab
+        cut={RAIL_TAB_CUT}
+        fill={theme.backgroundSelected}
+        height={RAIL_BUTTON_HEIGHT}
+        style={styles.railButton}
+        width={RAIL_TAB_WIDTH}
+      >
         <SymbolView name={action.icon} size={20} tintColor={theme.text} weight="semibold" />
         <ThemedText numberOfLines={1} style={[styles.railButtonLabel, { color: theme.text }]}>
           {(action.railLabel ?? action.label).toUpperCase()}
         </ThemedText>
       </HexTab>
     </Pressable>
-  );
-}
-
-/**
- * A tab with hex-cut corners on its leading side and a square trailing side, for sitting flush
- * against the screen edge. Drawn from plain views, so it needs no SVG or Skia: two border-trick
- * trapezoids for the cut ends and a rectangle between them.
- */
-function HexTab({
-  fill,
-  height,
-  style,
-  children,
-}: {
-  fill: string;
-  height: number;
-  style?: StyleProp<ViewStyle>;
-  children: ReactNode;
-}) {
-  return (
-    <View style={{ height, width: RAIL_TAB_WIDTH }}>
-      <View
-        style={[
-          styles.hexCut,
-          { borderBottomColor: fill, borderBottomWidth: RAIL_TAB_CUT, top: 0 },
-        ]}
-      />
-      <View
-        style={[styles.hexBody, { backgroundColor: fill, bottom: RAIL_TAB_CUT, top: RAIL_TAB_CUT }]}
-      />
-      <View
-        style={[styles.hexCut, { borderTopColor: fill, borderTopWidth: RAIL_TAB_CUT, bottom: 0 }]}
-      />
-      <View style={[StyleSheet.absoluteFill, style]}>{children}</View>
-    </View>
   );
 }
 
@@ -404,19 +374,6 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     letterSpacing: 0.6,
     lineHeight: 14,
-  },
-  hexCut: {
-    borderLeftColor: 'transparent',
-    borderLeftWidth: RAIL_TAB_CUT,
-    height: 0,
-    position: 'absolute',
-    right: 0,
-    width: RAIL_TAB_WIDTH,
-  },
-  hexBody: {
-    left: 0,
-    position: 'absolute',
-    right: 0,
   },
   footerColumn: {
     alignSelf: 'center',
