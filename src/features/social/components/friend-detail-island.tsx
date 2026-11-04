@@ -46,11 +46,11 @@ interface FriendDetailIslandProps {
   onRemove(): Promise<void>;
 }
 
-/** The slim edge tab: narrow enough that the place line gives up 28pt, not the 44 a rail tab would. */
-const NAVIGATE_TAB_WIDTH = 36;
-const NAVIGATE_TAB_CUT = 11;
+/** The slim edge tab: narrow enough that the place line gives up 34pt, not the 60 a rail-width tab would. */
+const NAVIGATE_TAB_WIDTH = 42;
+const NAVIGATE_TAB_CUT = 12;
 /** Brings the target to 44pt wide; the tab is already the hero's height. */
-const NAVIGATE_HIT_SLOP = { left: 8 };
+const NAVIGATE_HIT_SLOP = { left: 2 };
 /** A tint the glass still reads through, as the lit layers FAB uses. */
 const NAVIGATE_TINT = 0.22;
 const NAVIGATE_TINT_PRESSED = 0.36;
@@ -277,7 +277,11 @@ export function FriendDetailIsland({
               width={NAVIGATE_TAB_WIDTH}
             >
               <SymbolView
-                name={{ ios: 'location.fill', android: 'navigation', web: 'navigation' }}
+                name={{
+                  ios: 'arrow.triangle.turn.up.right.diamond.fill',
+                  android: 'directions',
+                  web: 'directions',
+                }}
                 size={20}
                 tintColor={canNavigate ? chrome.amber : chrome.steel}
               />

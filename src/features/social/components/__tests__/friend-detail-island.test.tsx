@@ -200,7 +200,7 @@ describe('FriendDetailIsland', () => {
   });
 
   it.each(['peek', 'mid', 'full'] as const)(
-    'offers navigation at %s as the GPS glyph on the hero edge tab',
+    'offers navigation at %s as the directions glyph on the hero edge tab',
     (detent) => {
       render(detent);
       const navigate = renderer.root.findByProps({
@@ -209,9 +209,9 @@ describe('FriendDetailIsland', () => {
 
       expect(navigate.props.accessibilityState).toEqual({ busy: false, disabled: false });
       expect(navigate.findByType(SymbolView).props.name).toEqual({
-        ios: 'location.fill',
-        android: 'navigation',
-        web: 'navigation',
+        ios: 'arrow.triangle.turn.up.right.diamond.fill',
+        android: 'directions',
+        web: 'directions',
       });
       expect(mockOpenNavigation).not.toHaveBeenCalled();
     }
