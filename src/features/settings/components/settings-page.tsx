@@ -30,6 +30,8 @@ interface SettingsPageProps {
   readonly footerRail?: FooterRail;
   /** The page's scroll view, for a page that moves its own reader along (the permissions page). */
   readonly scrollRef?: RefObject<ScrollViewInstance | null>;
+  /** Called with the scroll offset as the page scrolls. */
+  readonly onScrollOffset?: (y: number) => void;
   readonly children: ReactNode;
 }
 
@@ -53,6 +55,7 @@ export function SettingsPage({
   footer,
   footerRail,
   scrollRef,
+  onScrollOffset,
   children,
 }: SettingsPageProps) {
   const theme = useTheme();
@@ -74,6 +77,10 @@ export function SettingsPage({
     <ScrollView
       ref={scroll}
       testID={testID}
+      onScroll={
+        onScrollOffset ? (event) => onScrollOffset(event.nativeEvent.contentOffset.y) : undefined
+      }
+      scrollEventThrottle={onScrollOffset ? 32 : undefined}
       // Beside the rail's tabs the scroll bar moves to the leading edge, clear of them.
       style={[
         {

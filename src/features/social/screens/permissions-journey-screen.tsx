@@ -1,6 +1,15 @@
-import { useRef } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { Pressable, StyleSheet, View, type ScrollViewInstance } from 'react-native';
-import Animated, { FadeIn, FadeOut, LinearTransition } from 'react-native-reanimated';
+import Animated, {
+  Easing,
+  FadeIn,
+  interpolate,
+  useAnimatedStyle,
+  useReducedMotion,
+  useSharedValue,
+  withTiming,
+} from 'react-native-reanimated';
+import { scheduleOnRN } from 'react-native-worklets';
 import { SymbolView, type SymbolViewProps } from 'expo-symbols';
 
 import { useColorScheme } from '@/hooks/use-color-scheme';
@@ -170,7 +179,15 @@ const COPY: Record<PermissionStepId, StepCopy> = {
 type Choice = (allow: boolean) => void;
 
 const NODE = 28;
-const ROW_MOTION = LinearTransition.duration(240);
+/**
+ * One answer closes a row and opens the next in a single motion on the UI thread: each row's
+ * detail animates its own height (see `Disclosure`), so what one row gives up the next takes and
+ * the rows below barely move. Entering/exiting animations plus a layout transition did this in
+ * three uncoordinated pieces — the open row grew empty and filled in late, the closing row's text
+ * overlapped its neighbour while it faded, and a scroll on every layout raced both.
+ */
+const DISCLOSURE_MS = 300;
+const DISCLOSURE_EASING = Easing.bezier(0.2, 0, 0, 1);
 
 const OUTCOME_LABEL: Record<PermissionOutcome | 'skipped', string> = {
   allowed: 'ALLOWED',
@@ -194,18 +211,18 @@ export function PermissionJourneyScreen({
   const chrome = useChrome();
   const scroll = useRef<ScrollViewInstance>(null);
   const journeyTop = useRef(0);
+  const rowTops = useRef<Partial<Record<PermissionStepId, number>>>({});
+  const offset = useRef(0);
   const current = rows.find((row) => row.state === 'current')?.step;
   const canDecline = permissionStepCanDecline(platform);
   const action = current && canDecline ? COPY[current].action : 'Continue';
 
-  // Bring the open row to the top once the reader is past the first: answered rows above it are
-  // one line each, but the open one can run past the fold on a short screen.
-  const reveal = (index: number, y: number) => {
-    if (index === 0) return;
-    scroll.current?.scrollTo({
-      y: Math.max(0, journeyTop.current + y - Spacing.three),
-      animated: true,
-    });
+  // Once a row has finished opening, bring its top back into view if the reader was scrolled past
+  // it — reading to the bottom of a long row and answering collapses the content above them.
+  // After the motion, never during it: a scroll racing a height animation is what looked janky.
+  const settle = (step: PermissionStepId) => {
+    const top = journeyTop.current + (rowTops.current[step] ?? 0) - Spacing.three;
+    if (offset.current > top) scroll.current?.scrollTo({ y: Math.max(0, top), animated: true });
   };
 
   return (
@@ -215,6 +232,9 @@ export function PermissionJourneyScreen({
       subtitle="Each one says what it’s for before your phone asks. Every one is optional, and you can change any of them later in your phone’s settings."
       testID="permissions-journey"
       scrollRef={scroll}
+      onScrollOffset={(y) => {
+        offset.current = y;
+      }}
       footerRail={
         current
           ? {
@@ -275,22 +295,20 @@ export function PermissionJourneyScreen({
         }}
       >
         {rows.map((row, index) => (
-          <Animated.View
+          <View
             key={row.step}
-            layout={ROW_MOTION}
-            onLayout={
-              row.state === 'current'
-                ? (event) => reveal(index, event.nativeEvent.layout.y)
-                : undefined
-            }
+            onLayout={(event) => {
+              rowTops.current[row.step] = event.nativeEvent.layout.y;
+            }}
           >
             <JourneyRow
               row={row}
               number={index + 1}
               last={index === rows.length - 1}
               platform={platform}
+              onOpened={() => settle(row.step)}
             />
-          </Animated.View>
+          </View>
         ))}
       </View>
     </SettingsPage>
@@ -306,11 +324,13 @@ function JourneyRow({
   number,
   last,
   platform,
+  onOpened,
 }: {
   row: PermissionJourneyRow;
   number: number;
   last: boolean;
   platform: PermissionPlatform;
+  onOpened: () => void;
 }) {
   const chrome = useChrome();
   const theme = useTheme();
@@ -318,7 +338,7 @@ function JourneyRow({
   const open = row.state === 'current';
   const outcome = row.state === 'done' ? row.outcome : row.state === 'skipped' ? 'skipped' : null;
   const granted = outcome === 'allowed' || outcome === 'asked';
-  const note = open ? (copy.note?.(platform) ?? null) : null;
+  const note = copy.note?.(platform) ?? null;
 
   return (
     <View
@@ -367,22 +387,23 @@ function JourneyRow({
             {copy.name}
           </ThemedText>
           {outcome ? (
-            <ThemedText type="code" style={{ color: granted ? chrome.green : theme.textSecondary }}>
-              {OUTCOME_LABEL[outcome]}
-            </ThemedText>
+            <Animated.View entering={FadeIn.duration(DISCLOSURE_MS)}>
+              <ThemedText
+                type="code"
+                style={{ color: granted ? chrome.green : theme.textSecondary }}
+              >
+                {OUTCOME_LABEL[outcome]}
+              </ThemedText>
+            </Animated.View>
           ) : null}
         </View>
-        {row.state === 'upcoming' ? (
-          <ThemedText type="small" themeColor="textSecondary" style={styles.paragraph}>
+        <Disclosure open={row.state === 'upcoming'}>
+          <ThemedText type="small" themeColor="textSecondary" style={styles.summary}>
             {copy.summary}
           </ThemedText>
-        ) : null}
-        {open ? (
-          <Animated.View
-            entering={FadeIn.duration(220).delay(120)}
-            exiting={FadeOut.duration(120)}
-            style={styles.detail}
-          >
+        </Disclosure>
+        <Disclosure open={open} onOpened={onOpened}>
+          <View style={styles.detail}>
             <ThemedText style={styles.title}>{copy.title}</ThemedText>
             <ThemedText type="small" themeColor="textSecondary" style={styles.paragraph}>
               {copy.lede}
@@ -405,10 +426,88 @@ function JourneyRow({
                 {note}
               </ThemedText>
             ) : null}
-          </Animated.View>
-        ) : null}
+          </View>
+        </Disclosure>
       </View>
     </View>
+  );
+}
+
+/**
+ * Content that opens and closes by animating its height between 0 and its measured height, the
+ * text fading in over the second half of an opening and out over the first half of a closing, so
+ * it is never seen squashed. While animating, the content is laid out absolutely inside a clipping
+ * box, which is what lets it measure at full height while the box is still shut.
+ *
+ * Content open at mount is shown in place, unanimated (the page opening is its entrance). It stays
+ * mounted only while open or closing, and reduced motion gets the end state at once.
+ */
+function Disclosure({
+  open,
+  onOpened,
+  children,
+}: {
+  open: boolean;
+  onOpened?: () => void;
+  children: ReactNode;
+}) {
+  const reducedMotion = useReducedMotion();
+  const [mounted, setMounted] = useState(open);
+  // In normal flow until it first animates, so what is open at mount needs no measuring frame.
+  const [inFlow, setInFlow] = useState(open);
+  const height = useSharedValue(0);
+  const progress = useSharedValue(open ? 1 : 0);
+  const opened = useRef(onOpened);
+  useEffect(() => {
+    opened.current = onOpened;
+  });
+  // A change of `open` is adjusted during render (React's pattern for state that follows a prop):
+  // opening mounts the content at once so the effect below has something to grow.
+  const [prevOpen, setPrevOpen] = useState(open);
+  if (open !== prevOpen) {
+    setPrevOpen(open);
+    setInFlow(false);
+    if (open || reducedMotion) setMounted(open);
+  }
+
+  const animated = useRef(open);
+  useEffect(() => {
+    if (animated.current === open) return;
+    animated.current = open;
+    const notifyOpened = () => opened.current?.();
+    if (reducedMotion) {
+      progress.value = open ? 1 : 0;
+      if (open) notifyOpened();
+      return;
+    }
+    progress.value = withTiming(
+      open ? 1 : 0,
+      { duration: DISCLOSURE_MS, easing: DISCLOSURE_EASING },
+      (finished) => {
+        if (!finished) return;
+        if (open) scheduleOnRN(notifyOpened);
+        else scheduleOnRN(setMounted, false);
+      }
+    );
+  }, [open, reducedMotion, progress]);
+
+  const box = useAnimatedStyle(() => ({ height: height.value * progress.value }));
+  const fade = useAnimatedStyle(() => ({
+    opacity: interpolate(progress.value, [0.45, 1], [0, 1], 'clamp'),
+  }));
+
+  if (!mounted) return null;
+  return (
+    <Animated.View style={[styles.disclosure, !inFlow && box]}>
+      <Animated.View
+        style={[!inFlow && styles.disclosureContent, fade]}
+        onLayout={(event) => {
+          height.value = event.nativeEvent.layout.height;
+        }}
+      >
+        {children}
+      </Animated.View>
+    </Animated.View>
   );
 }
 
@@ -462,11 +561,14 @@ const styles = StyleSheet.create({
     width: NODE,
   },
   connector: { flex: 1, marginVertical: Spacing.one, minHeight: Spacing.three, width: 1.5 },
-  body: { flex: 1, gap: Spacing.one, paddingTop: 4 },
+  body: { flex: 1, paddingTop: 4 },
   bodySpaced: { paddingBottom: Spacing.four },
   heading: { alignItems: 'baseline', flexDirection: 'row', gap: Spacing.two },
   name: { flex: 1 },
-  detail: { gap: Spacing.three, paddingTop: Spacing.two },
+  summary: { lineHeight: 21, paddingTop: Spacing.one },
+  detail: { gap: Spacing.three, paddingTop: Spacing.three },
+  disclosure: { overflow: 'hidden' },
+  disclosureContent: { left: 0, position: 'absolute', right: 0, top: 0 },
   title: { fontSize: 20, fontWeight: 700, lineHeight: 26 },
   card: {
     borderRadius: Spacing.two,
