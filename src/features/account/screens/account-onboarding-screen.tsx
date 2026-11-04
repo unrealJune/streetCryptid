@@ -16,6 +16,7 @@ import {
 
 import { CryptidProfileEditor } from '../components/cryptid-profile-editor';
 import { LocationPrivacyIntro } from '../components/location-privacy-intro';
+import { OnboardingSplash } from '../components/onboarding-splash';
 import type { CryptidProfile } from '../core/profile';
 import { useCryptidProfile } from '../hooks/use-cryptid-profile';
 
@@ -32,7 +33,10 @@ export function AccountOnboardingScreen({
   const [kv] = useState(createPersistentKV);
   const [availability] = useState(() => ({ stashConfigured: getStashConfig() !== null }));
   const [draft, setDraft] = useState<CryptidProfile | null>(profile);
-  const [step, setStep] = useState<'profile' | 'privacy' | 'delivery'>('profile');
+  // A fresh install opens on the splash; a profile already in hand (setup resumed) skips it.
+  const [step, setStep] = useState<'splash' | 'profile' | 'privacy' | 'delivery'>(() =>
+    profile ? 'profile' : 'splash'
+  );
   const [mode, setMode] = useState<DeliveryMode>(NEW_USER_DELIVERY_MODE);
   const [ready, setReady] = useState(false);
   const [loadAttempt, setLoadAttempt] = useState(0);
@@ -75,6 +79,10 @@ export function AccountOnboardingScreen({
       inFlight.current = false;
       setSaving(false);
     }
+  }
+
+  if (step === 'splash') {
+    return <OnboardingSplash onContinue={() => setStep('profile')} />;
   }
 
   if (step === 'profile') {

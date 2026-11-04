@@ -240,6 +240,24 @@ Gentle live **YOU** pulse; sector acquisition can animate a single hex "flip." E
 `prefers-reduced-motion` fallback (crossfade / instant). Motion is intentional per
 element — never one uniform entrance on everything.
 
+## First launch — the splash
+
+The first screen of a fresh install, in front of the persona step. The pairing field's dot
+lattice fills the screen; friends ping in from its edges in the default friend signal, timed so
+every ring reaches the sigil together; **YOU answers in amber**, which is literal here — there is
+no profile yet, so amber is your color. The lattice then clears around the mark and the mothman
+sigil flips in one row at a time, eyes last, before the wordmark and one island: a line of what
+the app is and **one** action. After the intro the friends keep softly checking in.
+
+- **One shader, stateless.** A ring's trail is analytic (`exp` of the time since it passed a
+  dot), so reduced motion is a single settled frame, not a different code path. The clock stops
+  off screen (`useIsAppActive`), like every other loop.
+- **Sized, not scaled.** Short screens (an iPhone Duo's 5.4" outer display, ~680 pt tall) get a
+  smaller hero so it never meets the island; tablet-sized windows get a larger one and a fourth
+  friend; a wide landscape window puts the island beside the mark. The island stops at 420 pt.
+- **Beside a system rail the action moves into it**, like every onboarding step's, and the
+  island keeps only the words. Friends never ping from under the island or the rail.
+
 ## Do / Don't (earned through iteration)
 
 - **Do:** flip-dot dots, hex sectors, single accents, real OSM geometry, calm restraint,

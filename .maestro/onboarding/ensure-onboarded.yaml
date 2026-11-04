@@ -24,6 +24,14 @@ appId: com.unrealjune.streetcryptid
 - runFlow:
     when:
       visible:
+        id: 'onboarding-splash'
+      timeout: 15000
+    commands:
+      - tapOn:
+          id: 'onboarding-splash-continue'
+- runFlow:
+    when:
+      visible:
         id: 'username-input'
       timeout: 15000
     commands:

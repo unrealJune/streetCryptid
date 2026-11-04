@@ -1,7 +1,7 @@
 appId: com.unrealjune.streetcryptid
 ---
 # Wipes the app's local state (equivalent to uninstall+reinstall) so onboarding
-# starts from a genuinely fresh profile, then drives the username and delivery steps and the
+# starts from a genuinely fresh profile, then drives the splash, the username and delivery steps and the
 # location-disclosure gate through to the live map. Run per-device with --udid
 # so each simulator gets its own clean identity, e.g.:
 #   maestro --udid <UDID> test -e USERNAME=alice .maestro/onboarding/fresh-onboard.yaml
@@ -20,6 +20,9 @@ appId: com.unrealjune.streetcryptid
       timeout: 4000
     commands:
       - tapOn: 'Close'
+# The first-launch splash: one action, in the island or (iPhone Duo) the system rail.
+- tapOn:
+    id: 'onboarding-splash-continue'
 - assertVisible:
     id: 'username-input'
 - tapOn:

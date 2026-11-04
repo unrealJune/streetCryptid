@@ -9,6 +9,7 @@ import {
 } from '@/features/social/net/persistence';
 
 import { CryptidProfileEditor } from '../../components/cryptid-profile-editor';
+import { OnboardingSplash } from '../../components/onboarding-splash';
 import type { CryptidProfile } from '../../core/profile';
 import { AccountOnboardingScreen } from '../account-onboarding-screen';
 
@@ -24,6 +25,9 @@ jest.mock('iroh-location', () => ({
 }));
 jest.mock('../../components/cryptid-profile-editor', () => ({
   CryptidProfileEditor: () => null,
+}));
+jest.mock('../../components/onboarding-splash', () => ({
+  OnboardingSplash: () => null,
 }));
 jest.mock('@/features/settings/components/delivery-options', () => ({
   DeliveryOptions: () => null,
@@ -63,12 +67,14 @@ describe('delivery onboarding', () => {
     act(() => renderer?.unmount());
   });
 
+  /** Mounts setup and turns past the splash, which every fresh install opens on. */
   async function render() {
     await act(async () => {
       renderer = create(
         <AccountOnboardingScreen onSaveStart={onSaveStart} onComplete={onComplete} />
       );
     });
+    act(() => renderer.root.findByType(OnboardingSplash).props.onContinue());
   }
 
   /** Past the persona step and the privacy intro, which stands between it and delivery. */
@@ -89,6 +95,21 @@ describe('delivery onboarding', () => {
       renderer.root.findByProps({ testID: 'onboarding-delivery-continue' }).props.onPress();
     });
   }
+
+  it('opens on the splash and reaches the persona only through it', async () => {
+    await act(async () => {
+      renderer = create(
+        <AccountOnboardingScreen onSaveStart={onSaveStart} onComplete={onComplete} />
+      );
+    });
+    expect(renderer.root.findAllByType(CryptidProfileEditor)).toHaveLength(0);
+
+    act(() => renderer.root.findByType(OnboardingSplash).props.onContinue());
+
+    expect(renderer.root.findAllByType(OnboardingSplash)).toHaveLength(0);
+    expect(renderer.root.findByType(CryptidProfileEditor)).toBeTruthy();
+    expect(onSaveStart).not.toHaveBeenCalled();
+  });
 
   it('defaults new users to stash and does not complete after the profile step', async () => {
     await render();
