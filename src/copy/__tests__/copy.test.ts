@@ -1,9 +1,8 @@
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 
-import { PERMISSION_STEPS } from '../../core/permission-steps';
-import { parsePermissionsCopy } from '../parse-copy';
-import { PERMISSION_STEP_COPY, PERMISSIONS_PAGE_COPY } from '../permissions';
+import { parseCopy, parsePermissionsCopy } from '../parse-copy';
+import { COPY_FILES } from '../registry';
 
 const STEPS = ['location', 'bluetooth'] as const;
 const PAGE = `## page
@@ -43,14 +42,37 @@ ${id} summary
 ${id} action
 ${extra}`;
 
-describe('permissions copy', () => {
-  it('is what permissions.md says — run `just copy` after editing it', () => {
-    const markdown = readFileSync(path.join(__dirname, '../permissions.md'), 'utf8');
-    expect({ page: PERMISSIONS_PAGE_COPY, steps: PERMISSION_STEP_COPY }).toEqual(
-      parsePermissionsCopy(markdown, PERMISSION_STEPS)
-    );
+describe.each(COPY_FILES)('$markdown', (file) => {
+  it('is what the generated module says — run `just copy` after editing it', () => {
+    const markdown = readFileSync(path.join(__dirname, '..', file.markdown), 'utf8');
+    const generated = jest.requireActual(`../${file.module}`);
+    expect(Object.keys(generated).sort()).toEqual(Object.keys(file.parse(markdown)).sort());
+    expect(generated).toEqual(expect.objectContaining(file.parse(markdown)));
+  });
+});
+
+describe('plain copy', () => {
+  const SCHEMA = { 'first-screen': { required: ['title', 'body-text'], optional: ['note'] } };
+  const BASE = '## first-screen\n### title\nx\n### body-text\nx\n';
+
+  it('reads each section with its fields in camelCase', () => {
+    expect(
+      parseCopy('Preamble.\n## first-screen\n### title\nHi\n### body-text\nOne\ntwo\n', SCHEMA)
+    ).toEqual({ firstScreen: { title: 'Hi', bodyText: 'One two' } });
   });
 
+  it.each([
+    ['a missing section', '', /no "## first-screen"/],
+    ['an unknown section', `${BASE}## second\n`, /second/],
+    ['a missing field', '## first-screen\n### title\nx\n', /body-text/],
+    ['an unknown field', `${BASE}### hint\nx\n`, /hint/],
+    ['a repeated optional field', `${BASE}### note\na\n### note\nb\n`, /appears twice/],
+  ])('refuses %s', (_, markdown, error) => {
+    expect(() => parseCopy(markdown, SCHEMA)).toThrow(error);
+  });
+});
+
+describe('permissions copy', () => {
   it('joins wrapped lines, keeps paragraphs and ignores comments', () => {
     const copy = parsePermissionsCopy(
       `Preamble.\n\n${PAGE}${step('location')}\n### card: ONE (amber)\nfirst\nline <!-- gone -->\n\nsecond\n${step('bluetooth')}`,

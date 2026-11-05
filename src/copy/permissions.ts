@@ -1,5 +1,5 @@
 // GENERATED from permissions.md by `just copy`. Edit the Markdown, not this file.
-import type { PermissionStepId } from '../core/permission-steps';
+import type { PermissionStepId } from '@/features/social/core/permission-steps';
 import type { PageCopyText, StepCopyText } from './parse-copy';
 
 export const PERMISSIONS_PAGE_COPY: PageCopyText = {

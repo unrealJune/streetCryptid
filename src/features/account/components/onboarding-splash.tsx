@@ -9,6 +9,7 @@ import Animated, {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { ThemedText } from '@/components/themed-text';
+import { ONBOARDING_COPY } from '@/copy/onboarding';
 import { BrandFonts, CryptidThemes, Spacing } from '@/constants/theme';
 import { PageFooter } from '@/features/settings/components/settings-page';
 import { useColorScheme } from '@/hooks/use-color-scheme';
@@ -25,8 +26,8 @@ import {
 } from '../core/splash-layout';
 import { SplashCanvas } from './splash-canvas-loader';
 
-const COPY =
-  'Share your location with your friends and track where you’ve been. We promise to never save, sell, or snoop on your trail.';
+/** The words are in `src/copy/onboarding.md`. */
+const COPY = ONBOARDING_COPY.splash;
 
 /** Intro clock frames are clamped so a hitch (or a debugger pause) never skips the animation. */
 const MAX_FRAME_S = 0.05;
@@ -186,15 +187,15 @@ export function OnboardingSplash({ onContinue }: { onContinue: () => void }) {
           ]}
         >
           <Text style={[styles.heading, { color: chrome.ink, fontSize: layout.headingSize }]}>
-            Find your people out in the city.
+            {COPY.heading}
           </Text>
           <ThemedText type="small" style={[styles.body, { color: chrome.steel }]}>
-            {COPY}
+            {COPY.body}
           </ThemedText>
           {railed ? null : (
             <Pressable
               accessibilityRole="button"
-              accessibilityLabel="Get started"
+              accessibilityLabel={COPY.start}
               onPress={onContinue}
               testID="onboarding-splash-continue"
               style={({ pressed }) => [
@@ -202,7 +203,7 @@ export function OnboardingSplash({ onContinue }: { onContinue: () => void }) {
                 { backgroundColor: chrome.ink, opacity: pressed ? 0.65 : 1 },
               ]}
             >
-              <Text style={[styles.buttonLabel, { color: chrome.bg }]}>Get started</Text>
+              <Text style={[styles.buttonLabel, { color: chrome.bg }]}>{COPY.start}</Text>
             </Pressable>
           )}
         </Animated.View>
@@ -212,8 +213,8 @@ export function OnboardingSplash({ onContinue }: { onContinue: () => void }) {
         <PageFooter
           rail={{
             primary: {
-              label: 'Get started',
-              railLabel: 'Start',
+              label: COPY.start,
+              railLabel: COPY.railStart,
               icon: { ios: 'arrow.right', android: 'arrow_forward', web: 'arrow_forward' },
               testID: 'onboarding-splash-continue',
               onPress: onContinue,

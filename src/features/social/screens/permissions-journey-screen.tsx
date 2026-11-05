@@ -24,7 +24,7 @@ import {
   type PermissionPlatform,
   type PermissionStepId,
 } from '../core/permission-steps';
-import { PERMISSION_STEP_COPY, PERMISSIONS_PAGE_COPY } from '../copy/permissions';
+import { PERMISSION_STEP_COPY, PERMISSIONS_PAGE_COPY } from '@/copy/permissions';
 
 /**
  * `PermissionsGate`'s one page: every permission as a row on a journey, the one being asked open
@@ -32,7 +32,7 @@ import { PERMISSION_STEP_COPY, PERMISSIONS_PAGE_COPY } from '../copy/permissions
  * Answering collapses the row to its outcome and opens the next; `permissionJourney` says which
  * row is in which state.
  *
- * Every word on the page is in `../copy/permissions.md` (regenerate with `just copy`). The open
+ * Every word on the page is in `src/copy/permissions.md` (regenerate with `just copy`). The open
  * location row IS the background-location disclosure Google Play requires before the OS prompt,
  * and is what is recorded for that declaration (`docs/play-store/record-location-disclosure-video.md`):
  * keep its title, its two feature cards and, off iOS, its "Turn on location" button as they are.
@@ -41,7 +41,7 @@ import { PERMISSION_STEP_COPY, PERMISSIONS_PAGE_COPY } from '../copy/permissions
  * Off iOS every step offers "Not now". On iOS none does — see `permissionStepCanDecline`.
  */
 
-/** The step's icon on the primary button. Its words are in `../copy/permissions.md`. */
+/** The step's icon on the primary button. Its words are in `src/copy/permissions.md`. */
 const STEP_ICON: Record<PermissionStepId, SymbolViewProps['name']> = {
   location: { ios: 'location.fill', android: 'my_location', web: 'my_location' },
   'background-location': {

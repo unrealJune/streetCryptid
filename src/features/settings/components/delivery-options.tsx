@@ -175,9 +175,7 @@ function DeliveryCopy({ mode }: { mode: DeliveryMode }) {
   const copy = DELIVERY_MODE_COPY[mode];
   return (
     <>
-      <ThemedText type="smallBold">
-        {mode === 'mutual' ? 'Mutual friend relay' : copy.title}
-      </ThemedText>
+      <ThemedText type="smallBold">{copy.heading}</ThemedText>
       <ThemedText type="small" themeColor="textSecondary">
         {mode === 'mutual' ? mutualFriendRelayExplanation(Platform.OS) : copy.body}
       </ThemedText>

@@ -1,10 +1,11 @@
-import type { PermissionPlatform, PermissionStepId } from '../core/permission-steps';
+import type { PermissionPlatform, PermissionStepId } from '@/features/social/core/permission-steps';
 
 /**
- * Reads `permissions.md` into the shape `permissions.ts` exports. Pure, so the jest test can hold
- * the generated module to the Markdown and `scripts/build-copy.ts` can write it. The file's own
- * preamble documents the format for whoever edits it; this is the strict half of that contract —
- * anything it does not recognise is an error rather than text that silently goes missing.
+ * Reads the Markdown in this folder into the objects the generated `.ts` beside it export. Pure, so
+ * the jest test can hold each generated module to its Markdown and `scripts/build-copy.ts` can
+ * write it. Each file's own preamble documents the format for whoever edits it; this is the strict
+ * half of that contract — anything it does not recognise is an error rather than text that
+ * silently goes missing.
  */
 
 export type CardTone = 'amber' | 'green';
@@ -93,6 +94,47 @@ function sections(markdown: string): Map<string, Field[]> {
     }
   });
   close();
+  return out;
+}
+
+/** Which fields a `## section` holds; a field is required unless it is listed as optional. */
+export type CopySchema = Readonly<
+  Record<string, { readonly required: readonly string[]; readonly optional?: readonly string[] }>
+>;
+
+const camel = (key: string) =>
+  key.replace(/-([a-z])/g, (_, letter: string) => letter.toUpperCase());
+
+/** A file of plain fields: every section and field the schema names, keys in camelCase. */
+export function parseCopy(markdown: string, schema: CopySchema) {
+  const all = sections(markdown);
+  for (const id of all.keys()) {
+    if (!(id in schema)) {
+      throw new Error(`"## ${id}" is not a section here (${Object.keys(schema).join(', ')})`);
+    }
+  }
+  const out: Record<string, Record<string, string>> = {};
+  for (const [id, { required, optional = [] }] of Object.entries(schema)) {
+    const fields = all.get(id);
+    if (!fields) throw new Error(`no "## ${id}" section`);
+    for (const field of fields) {
+      if (![...required, ...optional].includes(field.key)) {
+        throw new Error(`line ${field.line}: "${id}" has an unknown field "${field.key}"`);
+      }
+    }
+    const text = single(fields, id, required);
+    for (const field of fields) {
+      if (optional.includes(field.key)) {
+        if (field.key in text) {
+          throw new Error(`line ${field.line}: "${field.key}" appears twice in "${id}"`);
+        }
+        text[field.key] = field.text;
+      }
+    }
+    out[camel(id)] = Object.fromEntries(
+      [...required, ...optional].filter((key) => key in text).map((key) => [camel(key), text[key]])
+    );
+  }
   return out;
 }
 

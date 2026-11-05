@@ -105,7 +105,7 @@ format:
 format-check:
     bun run format:check
 
-# Regenerate the copy modules from the Markdown people edit (src/features/social/copy/*.md).
+# Regenerate the copy modules from the Markdown people edit (src/copy/*.md).
 copy:
     bun scripts/build-copy.ts
 
