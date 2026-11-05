@@ -21,10 +21,10 @@ import { useTheme } from '@/hooks/use-theme';
 import {
   permissionStepCanDecline,
   type PermissionJourneyRow,
-  type PermissionOutcome,
   type PermissionPlatform,
   type PermissionStepId,
 } from '../core/permission-steps';
+import { PERMISSION_STEP_COPY, PERMISSIONS_PAGE_COPY } from '../copy/permissions';
 
 /**
  * `PermissionsGate`'s one page: every permission as a row on a journey, the one being asked open
@@ -32,148 +32,27 @@ import {
  * Answering collapses the row to its outcome and opens the next; `permissionJourney` says which
  * row is in which state.
  *
- * The open location row IS the background-location disclosure Google Play requires before the OS
- * prompt, and is what is recorded for that declaration
- * (`docs/play-store/record-location-disclosure-video.md`): keep its title, its two feature cards
- * and, off iOS, its "Turn on location" button as they are. The web drivers (`store-shots`,
- * `map-bench`, `island-preview`) find that button by its text.
+ * Every word on the page is in `../copy/permissions.md` (regenerate with `just copy`). The open
+ * location row IS the background-location disclosure Google Play requires before the OS prompt,
+ * and is what is recorded for that declaration (`docs/play-store/record-location-disclosure-video.md`):
+ * keep its title, its two feature cards and, off iOS, its "Turn on location" button as they are.
+ * The web drivers (`store-shots`, `map-bench`, `island-preview`) find that button by its text.
  *
  * Off iOS every step offers "Not now". On iOS none does — see `permissionStepCanDecline`.
  */
 
-interface StepCopy {
-  /** The row's name, in every state. */
-  readonly name: string;
-  /** The heading once the row is open. */
-  readonly title: string;
-  readonly lede: string;
-  /** One line under the name while the step is still to come. */
-  readonly summary: string;
-  readonly cards: readonly { label: string; body: string; tone: 'amber' | 'green' }[];
-  readonly note?: (platform: PermissionPlatform) => string | null;
-  /** The button off iOS, where it raises the prompt; iOS says "Continue". */
-  readonly action: string;
-  readonly icon: SymbolViewProps['name'];
-}
-
-const COPY: Record<PermissionStepId, StepCopy> = {
-  location: {
-    name: 'Location',
-    title: 'Before we turn on location',
-    lede: 'streetCryptid uses your location — including while the app is closed or in the background — for two things. Here’s exactly what and why.',
-    summary: 'Location — to reveal the streets you walk and share your position with friends.',
-    cards: [
-      {
-        label: 'TERRITORY EXPLORATION',
-        tone: 'amber',
-        body: 'As you walk through your city, streetCryptid reveals the streets and hex-shaped sectors you’ve actually covered — building your personal explored map. This only works if the app can sample your location occasionally in the background, since most of your walking happens while the app is closed.',
-      },
-      {
-        label: 'FRIEND LOCATION SHARING',
-        tone: 'green',
-        body: 'If you pair with friends, your live location syncs directly to their devices — end-to-end encrypted — so they can see you on the map, including while the app is in the background. Only friends you’ve explicitly paired with can see this.',
-      },
-    ],
-    note: (platform) =>
-      platform === 'ios'
-        ? 'Next, your iPhone will ask to allow location access. The step after this one asks for background access.'
-        : 'Next, your device will ask you to allow location access, and the step after this one asks for “Allow all the time.” Choosing “Not now” keeps streetCryptid working, minus background exploration and friend sharing — you can turn it on later from Settings.',
-    action: 'Turn on location',
-    icon: { ios: 'location.fill', android: 'my_location', web: 'my_location' },
-  },
+/** The step's icon on the primary button. Its words are in `../copy/permissions.md`. */
+const STEP_ICON: Record<PermissionStepId, SymbolViewProps['name']> = {
+  location: { ios: 'location.fill', android: 'my_location', web: 'my_location' },
   'background-location': {
-    name: 'Location all the time',
-    title: 'Allow all the time',
-    lede: 'Most of your walking happens with the app closed. Background access is what lets streetCryptid keep up then.',
-    summary: 'Location all the time — so it keeps working while the app is closed.',
-    cards: [
-      {
-        label: 'WHILE THE APP IS CLOSED',
-        tone: 'green',
-        body: 'With “all the time,” your explored map keeps filling in and friends keep seeing where you are while your phone is in your pocket. With “only while using the app,” both stop the moment you leave it, and friends see a dot that stopped where you were.',
-      },
-    ],
-    note: (platform) =>
-      platform === 'ios'
-        ? 'Next, your iPhone will ask whether to change to “Always Allow.”'
-        : platform === 'android'
-          ? 'Android opens Settings for this one: choose “Allow all the time,” then come back.'
-          : null,
-    action: 'Allow all the time',
-    icon: { ios: 'location.circle', android: 'share_location', web: 'share_location' },
+    ios: 'location.circle',
+    android: 'share_location',
+    web: 'share_location',
   },
-  bluetooth: {
-    name: 'Bluetooth',
-    title: 'Bluetooth, for Bump',
-    lede: 'Bump pairs two phones held together, with no link to send and no account to look up.',
-    summary: 'Bluetooth — to find a friend’s phone when you Bump.',
-    cards: [
-      {
-        label: 'PAIRING IN PERSON',
-        tone: 'green',
-        body: 'When you both tap Bump, each phone finds the other over Bluetooth and starts an encrypted pairing on the spot — it works with no signal at all. Without Bluetooth you can still pair by sending a link.',
-      },
-    ],
-    note: (platform) =>
-      platform === 'android'
-        ? 'Android calls this “Nearby devices.”'
-        : platform === 'ios'
-          ? 'Next, your iPhone will ask to allow Bluetooth.'
-          : null,
-    action: 'Allow Bluetooth',
-    icon: { ios: 'antenna.radiowaves.left.and.right', android: 'bluetooth', web: 'bluetooth' },
-  },
-  'local-network': {
-    name: 'Local network',
-    title: 'Phones on your Wi-Fi',
-    lede: 'When a friend is on the same Wi-Fi, your phones can talk to each other directly.',
-    summary: 'Local network — to reach friends on the same Wi-Fi directly.',
-    cards: [
-      {
-        label: 'THE SHORT WAY ROUND',
-        tone: 'green',
-        body: 'Directly is faster than going through a relay, and it keeps working when the internet doesn’t. Without it nothing breaks — your location still reaches friends, just the long way.',
-      },
-    ],
-    note: (platform) =>
-      platform === 'ios'
-        ? 'Next, your iPhone will ask to find and connect to devices on your local network.'
-        : null,
-    action: 'Allow local network',
-    icon: { ios: 'wifi', android: 'wifi', web: 'wifi' },
-  },
-  notifications: {
-    name: 'Notifications',
-    title: 'A notification while sharing',
-    lede: 'Android shows a notification for as long as streetCryptid shares your location in the background.',
-    summary: 'Notifications — so you can always see that sharing is on.',
-    cards: [
-      {
-        label: 'ALWAYS VISIBLE',
-        tone: 'amber',
-        body: 'It’s how you can tell at a glance that sharing is on, and if Android ever stops it, it’s how we let you know. Sharing works either way; without this you just can’t see it.',
-      },
-    ],
-    action: 'Allow notifications',
-    icon: { ios: 'bell', android: 'notifications', web: 'notifications' },
-  },
-  battery: {
-    name: 'Battery',
-    title: 'Keep sharing when the app is closed',
-    lede: 'Android sometimes stops apps in the background to save memory. When it stops streetCryptid, it won’t let sharing start again until you open the app — so your friends see a dot that stopped hours ago.',
-    summary: 'Unrestricted battery use — so Android can’t switch sharing off for good.',
-    cards: [
-      {
-        label: 'SET BATTERY USE TO UNRESTRICTED',
-        tone: 'green',
-        body: 'This lets streetCryptid restart sharing by itself. It doesn’t make the app check your location any more often — it only stops Android from switching sharing off for good.',
-      },
-    ],
-    note: () =>
-      'You can change this any time in Settings → Apps → streetCryptid → Battery. If you skip it, we’ll send a notification whenever sharing stops so you can turn it back on.',
-    action: 'Allow',
-    icon: { ios: 'battery.100', android: 'battery_full', web: 'battery_full' },
-  },
+  bluetooth: { ios: 'antenna.radiowaves.left.and.right', android: 'bluetooth', web: 'bluetooth' },
+  'local-network': { ios: 'wifi', android: 'wifi', web: 'wifi' },
+  notifications: { ios: 'bell', android: 'notifications', web: 'notifications' },
+  battery: { ios: 'battery.100', android: 'battery_full', web: 'battery_full' },
 };
 
 type Choice = (allow: boolean) => void;
@@ -189,13 +68,8 @@ const NODE = 28;
 const DISCLOSURE_MS = 300;
 const DISCLOSURE_EASING = Easing.bezier(0.2, 0, 0, 1);
 
-const OUTCOME_LABEL: Record<PermissionOutcome | 'skipped', string> = {
-  allowed: 'ALLOWED',
-  refused: 'NOT ALLOWED',
-  asked: 'ASKED',
-  declined: 'NOT NOW',
-  skipped: 'SKIPPED',
-};
+const PAGE = PERMISSIONS_PAGE_COPY;
+const COPY = PERMISSION_STEP_COPY;
 
 export function PermissionJourneyScreen({
   rows,
@@ -215,7 +89,7 @@ export function PermissionJourneyScreen({
   const offset = useRef(0);
   const current = rows.find((row) => row.state === 'current')?.step;
   const canDecline = permissionStepCanDecline(platform);
-  const action = current && canDecline ? COPY[current].action : 'Continue';
+  const action = current && canDecline ? COPY[current].action : PAGE.continue;
 
   // Once a row has finished opening, bring its top back into view if the reader was scrolled past
   // it — reading to the bottom of a long row and answering collapses the content above them.
@@ -228,8 +102,8 @@ export function PermissionJourneyScreen({
   return (
     <SettingsPage
       kind="onboarding"
-      title={rows.length > 1 ? 'A few permissions' : 'One permission'}
-      subtitle="Each one says what it’s for before your phone asks. Every one is optional, and you can change any of them later in your phone’s settings."
+      title={rows.length > 1 ? PAGE.title : PAGE.titleSingle}
+      subtitle={PAGE.subtitle}
       testID="permissions-journey"
       scrollRef={scroll}
       onScrollOffset={(y) => {
@@ -240,7 +114,7 @@ export function PermissionJourneyScreen({
           ? {
               back: canDecline
                 ? {
-                    label: 'Not now',
+                    label: PAGE.notNow,
                     icon: { ios: 'xmark', android: 'close', web: 'close' },
                     disabled: busy,
                     testID: 'permission-step-skip',
@@ -249,8 +123,8 @@ export function PermissionJourneyScreen({
                 : undefined,
               primary: {
                 label: action,
-                railLabel: 'OK',
-                icon: COPY[current].icon,
+                railLabel: PAGE.railOk,
+                icon: STEP_ICON[current],
                 disabled: busy,
                 busy,
                 color: chrome.amber,
@@ -281,7 +155,7 @@ export function PermissionJourneyScreen({
                 style={({ pressed }) => [styles.secondary, { opacity: pressed || busy ? 0.58 : 1 }]}
               >
                 <ThemedText type="small" themeColor="textSecondary">
-                  Not now
+                  {PAGE.notNow}
                 </ThemedText>
               </Pressable>
             ) : null}
@@ -338,7 +212,7 @@ function JourneyRow({
   const open = row.state === 'current';
   const outcome = row.state === 'done' ? row.outcome : row.state === 'skipped' ? 'skipped' : null;
   const granted = outcome === 'allowed' || outcome === 'asked';
-  const note = copy.note?.(platform) ?? null;
+  const note = copy.note[platform] ?? copy.note.default ?? null;
 
   return (
     <View
@@ -392,7 +266,7 @@ function JourneyRow({
                 type="code"
                 style={{ color: granted ? chrome.green : theme.textSecondary }}
               >
-                {OUTCOME_LABEL[outcome]}
+                {PAGE.outcome[outcome]}
               </ThemedText>
             </Animated.View>
           ) : null}

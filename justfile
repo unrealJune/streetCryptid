@@ -105,6 +105,10 @@ format:
 format-check:
     bun run format:check
 
+# Regenerate the copy modules from the Markdown people edit (src/features/social/copy/*.md).
+copy:
+    bun scripts/build-copy.ts
+
 # Run the jest test suite.
 test:
     bun run test

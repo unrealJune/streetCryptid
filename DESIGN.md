@@ -278,6 +278,8 @@ the rail as SKIPPED rather than disappearing.
   install that onboarded before the steps sees only what it was never asked.
 - **Replayable.** Settings → Debug → Replay onboarding runs setup and every step again on an
   onboarded phone, granted ones included. The answers are real and are saved.
+- **Words in Markdown.** Every word on the page lives in `src/features/social/copy/permissions.md`;
+  `just copy` regenerates the module the app reads, and the jest run fails if the two disagree.
 
 ## Do / Don't (earned through iteration)
 
