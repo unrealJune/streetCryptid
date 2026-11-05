@@ -46,7 +46,8 @@ eas_ci_verify_access
 # A failed build is the one you most want the profile for, so the sampler is stopped on every path.
 sc_profile_reset
 sc_profile_sampler_start
-trap 'sc_profile_sampler_stop' EXIT
+sc_resource_monitor_start
+trap 'sc_resource_monitor_stop; sc_profile_sampler_stop' EXIT
 
 build_start="$(date +%s)"
 build_status=0
@@ -60,6 +61,7 @@ run_eas_privately build \
   >/dev/null 2>&1 || build_status=$?
 build_seconds="$(( $(date +%s) - build_start ))"
 
+sc_resource_monitor_stop
 sc_profile_sampler_stop
 trap - EXIT
 

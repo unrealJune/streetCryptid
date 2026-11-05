@@ -219,3 +219,50 @@ sc_profile_sampler_stop() {
   sc_profile_note 'sampler_stopped_at' "$(date +%s)"
   return 0
 }
+
+# A runner that dies cannot report on itself. Every Android store build since the SDK 58 merge
+# (2026-10-29) ended in "The runner has received a shutdown signal" 10-32 minutes into
+# `eas build --local`, with nothing in the log between the step starting and the kill, and the
+# profile above is published by a later step that a dead runner never reaches. So this one prints
+# straight into the build step's own log, which GitHub streams while the step runs: whatever the
+# runner ran out of, the last lines before the kill say so.
+#
+# Numbers only, read from /proc/meminfo and `df`, never from the process table: the output cannot
+# carry anything EAS wrote. Linux only (the macOS iOS runner has no /proc), and it never fails the
+# caller.
+SC_RESOURCE_INTERVAL="${SC_RESOURCE_INTERVAL:-30}"
+
+sc_resource_line() {
+  local mem_avail swap_total swap_free root_avail mnt_avail='-' load
+  mem_avail="$(awk '/^MemAvailable:/ { print int($2 / 1024) }' /proc/meminfo 2>/dev/null)"
+  swap_total="$(awk '/^SwapTotal:/ { print int($2 / 1024) }' /proc/meminfo 2>/dev/null)"
+  swap_free="$(awk '/^SwapFree:/ { print int($2 / 1024) }' /proc/meminfo 2>/dev/null)"
+  root_avail="$(df -Pk / 2>/dev/null | awk 'NR == 2 { print int($4 / 1024) }')"
+  if mountpoint -q /mnt 2>/dev/null; then
+    mnt_avail="$(df -Pk /mnt 2>/dev/null | awk 'NR == 2 { print int($4 / 1024) }')"
+  fi
+  load="$(awk '{ print $1 }' /proc/loadavg 2>/dev/null)"
+  printf 'resources: mem_avail_mb=%s swap_used_mb=%s disk_root_avail_mb=%s disk_mnt_avail_mb=%s load1=%s\n' \
+    "${mem_avail:--}" "$(( ${swap_total:-0} - ${swap_free:-0} ))" "${root_avail:--}" "$mnt_avail" "${load:--}"
+}
+
+sc_resource_monitor_start() {
+  [[ -r /proc/meminfo ]] || return 0
+  (
+    while :; do
+      sc_resource_line >&2 || true
+      sleep "$SC_RESOURCE_INTERVAL"
+    done
+  ) &
+  SC_RESOURCE_MONITOR_PID=$!
+  return 0
+}
+
+sc_resource_monitor_stop() {
+  if [[ "${SC_RESOURCE_MONITOR_PID:-}" =~ ^[0-9]+$ ]]; then
+    kill "$SC_RESOURCE_MONITOR_PID" 2>/dev/null || true
+    wait "$SC_RESOURCE_MONITOR_PID" 2>/dev/null || true
+  fi
+  SC_RESOURCE_MONITOR_PID=''
+  return 0
+}
