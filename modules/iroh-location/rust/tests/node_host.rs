@@ -476,6 +476,11 @@ async fn the_own_subscription_outlives_a_dropped_handle_and_dies_with_the_node()
         .await
         .unwrap();
     let first_ptr = Arc::as_ptr(&first);
+    // Held only to pin the allocation: once the old node frees its subscription, the allocator may
+    // hand the restarted node's the very same address, and comparing pointers would then fail on a
+    // test that is right (it did, in CI, under nextest's fresh process per test). A weak reference
+    // keeps the memory reserved without keeping the subscription alive.
+    let pinned = Arc::downgrade(&first);
     // JS `unsubscribe` destroys its handle. The background runtime is still publishing through it.
     drop(first);
     let second = node.clone().own_subscription(vec![], None).await.unwrap();
@@ -498,6 +503,7 @@ async fn the_own_subscription_outlives_a_dropped_handle_and_dies_with_the_node()
         first_ptr,
         "a new node has its own subscription"
     );
+    drop(pinned);
 }
 
 /// Two nodes on loopback: `peer` joins `node`'s own topic, which raises `peer-up` on whichever

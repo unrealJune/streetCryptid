@@ -93,6 +93,32 @@ runs:
             ;;
         esac
 
+    # The root disk of a hosted Ubuntu runner has roughly 20 GB free, and an Android build fills it
+    # from both ends: ~4 GB of restored caches (Cargo target, Gradle, ccache) unpacked, then the
+    # Rust core, CMake trees and Gradle intermediates for every ABI. A store build has three. Disk
+    # errors have been seen on this job before, and since the SDK 58 merge every store build has
+    # died with "The runner has received a shutdown signal" -- what a runner looks like when the
+    # disk its own diagnostics write to fills. These toolchains ship on the image and nothing here
+    # uses them. Before the cache restores, so the restores land on the space this frees.
+    - name: Free disk space for the native build
+      if: inputs.platform == 'android' && runner.os == 'Linux'
+      shell: bash
+      run: |
+        set -euo pipefail
+        df -h /
+        for path in \
+          /usr/share/dotnet \
+          /usr/local/.ghcup \
+          /opt/ghc \
+          /opt/hostedtoolcache/CodeQL \
+          /usr/local/share/boost \
+          /usr/local/share/powershell \
+          /usr/share/swift; do
+          [[ -e "$path" ]] && sudo rm -rf -- "$path" &
+        done
+        wait
+        df -h /
+
     - name: Install Node.js
       uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
       with:
