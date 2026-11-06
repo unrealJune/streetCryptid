@@ -1,9 +1,4 @@
-import { copySegments } from '@/components/copy-text';
-
-jest.mock('expo-web-browser', () => ({
-  openBrowserAsync: jest.fn(),
-  WebBrowserPresentationStyle: {},
-}));
+import { copySegments } from '../segments';
 
 describe('copySegments', () => {
   it('splits Markdown links out of a paragraph', () => {
