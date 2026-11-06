@@ -176,7 +176,7 @@ function DeliveryCopy({ mode }: { mode: DeliveryMode }) {
   return (
     <>
       <ThemedText type="smallBold">
-        {mode === 'mutual' ? 'Mutual friend relay' : copy.title}
+        {mode === 'mutual' ? 'Friend forwarding' : copy.title}
       </ThemedText>
       <ThemedText type="small" themeColor="textSecondary">
         {mode === 'mutual' ? mutualFriendRelayExplanation(Platform.OS) : copy.body}

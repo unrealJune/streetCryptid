@@ -450,6 +450,23 @@ export interface PeerTransportDiagnostic {
   addresses: TransportAddressDiagnostic[];
 }
 
+/** Anonymous hourly receipt bucket, with independently recorded dimensions. */
+export interface DeliveryCount {
+  hour: number;
+  source: 'author' | 'friend' | 'other' | 'stash' | 'unknown';
+  path: 'bluetooth' | 'local-ip' | 'direct-ip' | 'relay' | 'unknown';
+  relaySetup: 'yes' | 'no' | 'unknown';
+  mechanism: 'gossip' | 'sync';
+  count: number;
+}
+
+/** Anonymous native receipt totals; today is excluded until its local calendar day ends. */
+export interface DeliveryStatistics {
+  recordedDays: number;
+  counts: DeliveryCount[];
+  incomplete: boolean;
+}
+
 /** Point-in-time endpoint transport snapshot. */
 export interface TransportDiagnostics {
   localAddresses: TransportAddressDiagnostic[];
@@ -1302,6 +1319,8 @@ export interface IrohLocationApi {
 
   /** Local addresses plus live path usage for the requested peer EndpointIds. */
   transportDiagnostics(peerEndpointIdsHex: string[]): Promise<TransportDiagnostics>;
+  /** Local-only collection, independent of developer telemetry. Absent on older binaries/web. */
+  deliveryStatistics?(): Promise<DeliveryStatistics>;
 
   /**
    * What this device's durable replica can SERVE, one record per author present in it.

@@ -7,7 +7,7 @@ export default function AdvancedScreen() {
   return (
     <SettingsPage title="Advanced">
       <View>
-        <SettingsMenuRow href="/settings/transports" label="Transports" />
+        <SettingsMenuRow href="/settings/transports" label="Connections" />
         <SettingsMenuRow href="/settings/debug" label="Debug" />
       </View>
     </SettingsPage>

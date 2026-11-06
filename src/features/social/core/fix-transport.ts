@@ -12,27 +12,27 @@ import type { FixTransport } from './types';
  * direct path never retires the relay fallback) and exposes only the set, never the carrier. See
  * `delivery_label` in `modules/iroh-location/rust/src/lib.rs` for the ranking and why picking the
  * first active path instead made two phones disagree about the same link. `docs` / `stash` / `sync`
- * come off the backfill path and are exact.
+ * describe replica sync; its recorded entry provider may differ from the content supplier.
  *
- * WHO performed that hop is a separate and exact fact — the delivering endpoint, recorded beside
- * the label. {@link describeDelivery} is the only place that interprets it.
+ * This legacy display is not the measured connection statistics. {@link describeDelivery}
+ * interprets its recorded forwarder / entry provider without claiming a packet route.
  */
 
 /** Terse uppercase badge for the history rows (matches the sheet's `type="code"` treatment). */
 export function fixTransportBadge(via: FixTransport | undefined): string {
   switch (via) {
     case 'relay':
-      return 'RELAY';
+      return 'INTERNET RELAY';
     case 'direct':
-      return 'DIRECT';
+      return 'DIRECT IP';
     case 'lan':
-      return 'LAN';
+      return 'LOCAL IP';
     case 'ble':
-      return 'BLE';
+      return 'BLUETOOTH';
     case 'live':
-      return 'LIVE';
+      return 'BROADCAST';
     case 'docs':
-      return 'TRAIL';
+      return 'REPLICA';
     case 'stash':
       return 'STASH';
     case 'sync':
@@ -46,19 +46,19 @@ export function fixTransportBadge(via: FixTransport | undefined): string {
 export function fixTransportDescription(via: FixTransport | undefined): string {
   switch (via) {
     case 'relay':
-      return 'received live, nearest open path a relay';
+      return 'received by live broadcast, nearest open path an internet relay';
     case 'direct':
-      return 'received live, nearest open path a direct connection';
+      return 'received by live broadcast, nearest open path direct IP';
     case 'lan':
-      return 'received live, nearest open path the local network';
+      return 'received by live broadcast, nearest open path private or link-local IP';
     case 'ble':
-      return 'received live, nearest open path Bluetooth';
+      return 'received by live broadcast, nearest open path Bluetooth';
     case 'live':
-      return 'received live';
+      return 'received by live broadcast';
     case 'docs':
-      return "recovered from a friend's durable trail";
+      return 'recovered by replica sync';
     case 'stash':
-      return 'recovered from the trail stash';
+      return 'replica entry received from the stash server';
     case 'sync':
       return 'recovered from the durable trail';
     case undefined:
@@ -152,16 +152,20 @@ export function describeDelivery(input: DeliveryProvenanceInput): DeliveryProven
   if (stash && peer === stash) {
     return {
       kind: 'stash',
-      headline: 'Served by the trail stash',
-      detail: `The stash held ${authorHandle}'s sealed fix until this device asked for it. It could not read it.`,
+      headline: 'Replica entry from the stash server',
+      detail: `The stash held ${authorHandle}'s encrypted replica entry. The content may have downloaded from another device.`,
     };
   }
 
   if (peer === normalise(input.author)) {
     return {
       kind: 'author',
-      headline: `Straight from ${authorHandle}'s phone`,
-      detail: 'No other device carried this one — it came from the phone that made it.',
+      headline: recovered
+        ? `Replica entry from ${authorHandle}'s phone`
+        : `Straight from ${authorHandle}'s phone`,
+      detail: recovered
+        ? 'The signed entry came from their phone. Its encrypted content may have downloaded from another device.'
+        : 'Their phone delivered this broadcast. Its connection may still have used an internet relay.',
     };
   }
 
@@ -169,18 +173,20 @@ export function describeDelivery(input: DeliveryProvenanceInput): DeliveryProven
   if (handle) {
     return {
       kind: 'friend',
-      headline: `Forwarded by ${handle}`,
+      headline: recovered ? `Replica entry from ${handle}` : `Forwarded by ${handle}`,
       detail: recovered
-        ? `Recovered from ${handle}'s replica of ${authorHandle}'s trail. Sealed the whole way — ${handle} could not read it.`
+        ? `Entry from ${handle}'s replica of ${authorHandle}'s trail. Its encrypted content may have downloaded from another device.`
         : `${handle} carried ${authorHandle}'s sealed fix to this phone. They could not read it.`,
     };
   }
 
   return {
     kind: 'stranger',
-    headline: "Forwarded by a device you haven't paired with",
+    headline: recovered
+      ? 'Replica entry from another device'
+      : "Forwarded by a device you haven't paired with",
     detail: recovered
-      ? `Another of ${authorHandle}'s friends served this from their replica. Sealed the whole way — they could not read it.`
+      ? `Another device supplied the signed entry for ${authorHandle}'s update. Its encrypted content may have downloaded from a different device.`
       : `Another of ${authorHandle}'s friends carried it here. Sealed the whole way — they could not read it.`,
     peerId: shortEndpoint(peer),
   };

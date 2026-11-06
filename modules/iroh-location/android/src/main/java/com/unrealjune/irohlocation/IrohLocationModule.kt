@@ -1441,6 +1441,23 @@ class IrohLocationModule : Module() {
     // Pure decode, node-free: lets JS recognise a configured stash by its EndpointId.
     AsyncFunction("endpointIdFromTicket") Coroutine { ticket: String -> endpointIdFromTicket(ticket) }
 
+    AsyncFunction("deliveryStatistics") Coroutine
+      { ->
+        val n = node ?: throw IllegalStateException("call createNode first")
+        val statistics = n.deliveryStatistics()
+        mapOf(
+          "recordedDays" to statistics.recordedDays.toLong(),
+          "incomplete" to statistics.incomplete,
+          "counts" to statistics.counts.map { row ->
+            mapOf(
+              "hour" to row.hour.toInt(), "source" to row.source, "path" to row.path,
+              "relaySetup" to row.relaySetup, "mechanism" to row.mechanism,
+              "count" to row.count.toLong(),
+            )
+          },
+        )
+      }
+
     AsyncFunction("transportDiagnostics") Coroutine
       { peerEndpointIdsHex: List<String> ->
         val n = node ?: throw IllegalStateException("call createNode first")

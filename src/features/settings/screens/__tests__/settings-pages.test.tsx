@@ -59,7 +59,7 @@ describe('settings pages', () => {
       renderer = create(<AdvancedScreen />);
     });
     expect(renderer.root.findAllByType(SettingsMenuRow).map((row) => row.props.label)).toEqual([
-      'Transports',
+      'Connections',
       'Debug',
     ]);
   });
@@ -88,13 +88,14 @@ describe('settings pages', () => {
     expect(JSON.stringify(renderer.toJSON())).toContain('Export is unencrypted');
   });
 
-  it('shows enabled transports before detailed status', () => {
+  it('shows incoming history before connection controls and detailed status', () => {
     act(() => {
       renderer = create(<TransportsScreen />);
     });
     expect(
       renderer.root.findAllByType(SettingsSection).map((section) => section.props.label)
-    ).toEqual(['ENABLED TRANSPORTS', 'DETAILED STATUS']);
+    ).toEqual(['INCOMING UPDATES', 'ENABLED TRANSPORTS', 'DETAILED STATUS']);
+    expect(renderer.root.findByType(SettingsPage).props.title).toBe('Connections');
     expect(renderer.root.findByType(SettingsPage).props.subtitle).toBeUndefined();
   });
 

@@ -41,6 +41,47 @@ and is mirrored by the app's service.
 - Everything below (cross-compile, dev client, on-device A→B) requires **macOS/Xcode**
   (iOS), **Android NDK**, and **physical devices**.
 
+## Local delivery statistics
+
+Settings → Advanced → **Connections** shows a 24-hour stacked chart of unique incoming
+location updates, including parked/heartbeat positions but not null acknowledgements or
+replica rereads. Collection runs in Rust, including JS-free background downloads, without
+developer telemetry. The optional `deliveryStatistics()` export is absent on older binaries
+and on web; those surfaces report unavailable rather than an invented zero.
+
+`receipt_collector.rs` correlates gossip at the actual connection's receive boundary and
+replica contents at the blob downloader's successful completion, **not** the peer supplying
+the signed docs entry. Two small optional hooks in the vendored upstream crates preserve
+wire formats, discovery, forwarding, retries and acceptance. A trial ratchet decrypt validates
+a downloaded update without advancing or persisting session keys needed by the later app read.
+
+The independent axes are deliverer (their phone / another friend / another device / stash /
+unknown), receive path (Bluetooth / private or link-local IP / other direct IP / internet relay /
+unknown), relay-assisted setup, and broadcast vs replica sync. mDNS is discovery, not transport;
+a private address does not prove shared Wi-Fi. Path classification requires received application
+frame counters that account for the whole observation. Multiple families, missing counters,
+or partial/resumed downloads remain unknown. Gossip uses the receiving connection's cumulative
+history because a message may already be buffered before its read starts; after migration this
+can stay unknown until a fresh connection. Relay handshake traffic proves relay assistance;
+disabled relays prove absence; a direct handshake alone leaves the setup category unknown.
+Legacy per-fix badges still show the nearest open path / replica-entry provider, not these
+measurements.
+
+`delivery_stats.rs` keeps anonymous hourly counters in `delivery-statistics.redb` under
+`state_dir`, plus keyed, per-update deduplication tokens for `(author, sequence)`. There are
+no per-friend counters, endpoint IDs, positions, payloads, or exact receipt timestamps in this
+database, and it is never uploaded. Connection/message correlation lives only in bounded
+memory. Both live and replica copies increment a single counter transactionally.
+
+Today is retained but excluded from the average until local midnight. The denominator is
+`min(recorded_days, 30)`, including zero-update days, and filters never change it. Buckets keep
+the local calendar date/hour at receipt: a repeated DST hour is combined, a skipped hour stays
+zero, and travel does not rewrite previous buckets. Counters and dedup tokens expire outside
+the previous 30 completed days plus today. Duplicate tokens are capped at one million;
+collection failures are logged and surfaced as an incomplete-history warning, not allowed to
+fail location delivery. Blob inspection is bounded to two seconds and 1 MiB; larger contents
+are not loaded into memory for statistics and flag the history as incomplete.
+
 ## Build pipeline
 
 The generated Android `.so` files and iOS XCFramework are git-ignored. EAS runs

@@ -8,6 +8,7 @@ import { useLocationSharing } from '@/features/social/hooks/use-location-sharing
 import { SettingsPage, SettingsSection } from '../components/settings-page';
 import { TransportControls } from '../components/transport-controls';
 import { TransportDiagnostic } from '../components/transport-diagnostic';
+import { DeliveryStatisticsChart } from '../components/delivery-statistics';
 
 /**
  * Every path the node can use: a live diagnostic of what each one is actually
@@ -38,7 +39,10 @@ export default function TransportsScreen() {
   const transports = snapshot?.transports ?? { relay: true, ip: true, ble: true };
 
   return (
-    <SettingsPage title="Transports" backLabel="Advanced">
+    <SettingsPage title="Connections" backLabel="Advanced">
+      <SettingsSection label="INCOMING UPDATES">
+        <DeliveryStatisticsChart chrome={chrome} />
+      </SettingsSection>
       <SettingsSection label="ENABLED TRANSPORTS">
         <TransportControls
           accent={chrome.green}

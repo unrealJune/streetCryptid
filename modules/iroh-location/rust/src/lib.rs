@@ -21,6 +21,7 @@ mod ble;
 mod contact;
 pub mod crypto;
 pub mod delivery;
+pub mod delivery_stats;
 mod docs;
 mod durable;
 /// `friend.pull` spans: a native runtime's receive-side pull, with what it cost against the OS's
@@ -50,6 +51,7 @@ mod pairing;
 mod profile;
 pub mod publish;
 pub mod ratchet;
+mod receipt_collector;
 pub mod recipients;
 pub mod restart;
 pub mod seq_store;
@@ -1328,6 +1330,15 @@ impl LocationNode {
             while let Some(event) = receiver.next().await {
                 match event {
                     Ok(Event::Received(msg)) => {
+                        let receipts = node.receipts.lock().await.clone();
+                        let receipt = receipts
+                            .as_ref()
+                            .map(|collector| {
+                                collector.take_gossip(msg.delivered_from.as_bytes(), &msg.content)
+                            })
+                            .unwrap_or_default();
+                        let weak_receipts = receipts.as_ref().map(Arc::downgrade);
+                        drop(receipts);
                         // Short sync span per inbound envelope: `sc.entry_hash` (blake3 of the
                         // sealed bytes) is what joins this receive to the sender's publish and
                         // the stash's entry — `outcome` says why a ping stopped here (decrypt
@@ -1399,6 +1410,11 @@ impl LocationNode {
                                 span.record("sc.via", via.as_str());
                                 match decode_fix_payload(&opened.payload) {
                                     Ok(Some(fix)) => {
+                                        if let Some(receipts) =
+                                            weak_receipts.as_ref().and_then(std::sync::Weak::upgrade)
+                                        {
+                                            receipts.gossip(&opened.author, opened.seq, &peer, receipt);
+                                        }
                                         span.record("outcome", "delivered");
                                         tracing::debug!(
                                             sc.author = %telemetry::short_hex(&opened.author),
@@ -1658,6 +1674,7 @@ pub struct LocationNode {
     /// [`crate::delivery`]. Opened with the others because the drain reads it on every wake, and a
     /// wake with no JS context has nowhere else to get it.
     delivery: Mutex<Option<Arc<delivery::DeliveryStore>>>,
+    receipts: Mutex<Option<Arc<receipt_collector::Collector>>>,
     /// Ephemerals minted by `begin_session` and awaiting the peer's half. Keyed by peer endpoint
     /// id. Held in memory only: an unfinished bootstrap that does not survive a restart is a
     /// bootstrap the user simply repeats, whereas one persisted to disk is a private key sitting
@@ -2331,6 +2348,7 @@ fn new_location_node_at(
         own_log: Mutex::new(None),
         transport: Mutex::new(None),
         delivery: Mutex::new(None),
+        receipts: Mutex::new(None),
         pending_bootstrap: Mutex::new(HashMap::new()),
         last_control: Mutex::new(None),
         clock_offset_ms: std::sync::atomic::AtomicI64::new(0),
@@ -2578,10 +2596,27 @@ impl LocationNode {
         // (Builder::address_lookup appends, it does not replace). `subscribe` seeds it with the
         // direct addresses carried in each bootstrap ticket so gossip can dial peers directly.
         let memory = MemoryLookup::new();
+        let receipts = {
+            let mut slot = self.receipts.lock().await;
+            if slot.is_none() {
+                *slot = Some(receipt_collector::Collector::new(
+                    &self.state_dir,
+                    &self.identity_seed,
+                    self.session_manager().await?,
+                    self.recipient_store().await?,
+                    self.delivery_store().await?,
+                ));
+            }
+            slot.as_ref().expect("collector installed").clone()
+        };
         #[allow(unused_mut)]
         let mut builder = Endpoint::builder(iroh::endpoint::presets::N0)
             .secret_key(secret)
             .relay_mode(relay_mode)
+            .hooks(receipt_collector::Hook {
+                collector: Arc::downgrade(&receipts),
+                relay_enabled,
+            })
             .address_lookup(memory.clone());
         // iroh's default resolver sends its own queries to a nameserver list: Google's on Apple,
         // where it cannot read the system config, and on Android whatever list it read at build or
@@ -2806,6 +2841,7 @@ impl LocationNode {
         tracing::info!("shutdown: detaching pair runtime");
         self.pair.detach_runtime().await;
         tracing::info!("shutdown: taking sessions lock");
+        *self.receipts.lock().await = None;
         *self.sessions.lock().await = None;
         // Same rule for the publish counter: hold the slot past shutdown and the directory claim
         // outlives the node, so the next `start` is refused and the device stops publishing.
@@ -4451,6 +4487,21 @@ impl LocationNode {
             local_addresses,
             peers,
         })
+    }
+
+    /// De-identified local receipt counts for the last 30 completed local calendar days.
+    pub async fn delivery_statistics(
+        &self,
+    ) -> Result<delivery_stats::DeliveryStatistics, LocationError> {
+        let collector = self
+            .receipts
+            .lock()
+            .await
+            .clone()
+            .ok_or(LocationError::NotStarted)?;
+        collector
+            .statistics()
+            .map_err(|error| LocationError::Network(error.to_string()))
     }
 
     /// What this device's durable replica can **serve**, one record per author present in it.

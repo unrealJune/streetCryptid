@@ -2420,8 +2420,6 @@ dependencies = [
 [[package]]
 name = "iroh-blobs"
 version = "0.103.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5be50b0e2d0a9ba65cee4e0dfb708b3704e02ad12bd4c14c6307e94245943126"
 dependencies = [
  "arrayvec",
  "bao-tree",
@@ -2524,8 +2522,6 @@ dependencies = [
 [[package]]
 name = "iroh-gossip"
 version = "0.101.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4e1dc4b05f73e7a1b9e83b531eb63c3fd671b0af3aeb13b59c546dd7ca747515"
 dependencies = [
  "blake3",
  "bytes",
@@ -2569,6 +2565,7 @@ dependencies = [
  "blake3",
  "blew",
  "chacha20poly1305",
+ "chrono",
  "clap",
  "dotenvy",
  "ed25519-dalek 2.2.0",
@@ -2597,6 +2594,7 @@ dependencies = [
  "postcard",
  "prost",
  "rand 0.8.6",
+ "redb 4.1.0",
  "reqwest 0.12.28",
  "serde",
  "serde_json",

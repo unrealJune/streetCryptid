@@ -76,13 +76,15 @@ describe('SettingsScreen', () => {
     expect(byHref.get('/settings/appearance')).toBe('Seattle · Light');
     // Transports moved behind Advanced, so Advanced is where their state has to surface:
     // a row that reports nothing is what made this menu look unfinished.
-    expect(byHref.get('/settings/advanced')).toBe('Relay · Direct · BLE');
+    expect(byHref.get('/settings/advanced')).toBe('Internet relay · Direct IP · Bluetooth');
     expect(byHref.get('/settings/pairing')).toBe('Nobody paired yet');
   });
 
   it('names only the transports that are permitted, and says so when none are', () => {
     snapshot.transports = { relay: true, ip: false, ble: true };
-    expect(rows().find((row) => row.href === '/settings/advanced')?.value).toBe('Relay · BLE');
+    expect(rows().find((row) => row.href === '/settings/advanced')?.value).toBe(
+      'Internet relay · Bluetooth'
+    );
 
     act(() => renderer.unmount());
     snapshot.transports = { relay: false, ip: false, ble: false };

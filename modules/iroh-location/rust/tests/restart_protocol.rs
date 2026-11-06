@@ -261,6 +261,32 @@ fn assert_talking(leader: &mut Party, follower: &mut Party, now: u64) {
 // ── the basics ─────────────────────────────────────────────────────────────────────────────
 
 #[test]
+fn receipt_preview_never_consumes_or_adopts_a_session() {
+    let (mut leader, mut follower) = paired_and_primed(T0);
+    for restarting in [false, true] {
+        if restarting {
+            let prekey = follower.control(T0).newest_prekey().unwrap();
+            leader.m().restart_as_leader(&follower.id, &prekey, None, T0).unwrap();
+        }
+        let env = leader.send(&[follower.id], 0, T0).unwrap();
+        let verified = crypto::verify_v3(&env.bytes).unwrap();
+        let before = std::fs::read(follower.record_path(&leader.id)).unwrap();
+        let session = follower.session_with(&leader.id);
+        for _ in 0..3 {
+            assert_eq!(
+                follower.m().preview(&leader.id, &verified, T0).unwrap().as_slice(),
+                payload_for(&env.author, env.seq, env.lane).as_slice(),
+            );
+            assert_eq!(follower.session_with(&leader.id), session);
+            assert_eq!(std::fs::read(follower.record_path(&leader.id)).unwrap(), before);
+        }
+        follower.restart_process();
+        follower.open(&env, T0).unwrap();
+        assert!(matches!(follower.open(&env, T0), Err(SessionError::Replayed)));
+    }
+}
+
+#[test]
 fn a_paired_session_talks_both_ways_and_stays_v3() {
     let now = T0;
     let (mut leader, mut follower) = paired_and_primed(now);

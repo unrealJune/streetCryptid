@@ -1,0 +1,9 @@
+iroh-gossip 0.101.0
+Upstream: https://github.com/n0-computer/iroh-gossip
+License: MIT OR Apache-2.0 (see LICENSE-MIT and LICENSE-APACHE).
+
+streetCryptid modifications:
+- Optional weak, connection-scoped observer at the decoded gossip receive boundary,
+  before the actor queue. Supplies the actual Connection and payload for local
+  receive correlation. No changes to wire encoding, forwarding, or acceptance.
+- Exposes a crate-private payload accessor for this hook.

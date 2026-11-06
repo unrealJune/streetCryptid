@@ -26,7 +26,7 @@ describe('DeliveryOptions', () => {
       );
     });
     const json = JSON.stringify(renderer.toJSON());
-    expect(json).toContain('Mutual friend relay');
+    expect(json).toContain('Friend forwarding');
     expect(json).toContain(`background processing on ${Platform.OS === 'ios' ? 'iOS' : 'Android'}`);
     expect(json).not.toContain('They cannot read');
     expect(json).not.toContain('shared pool');
