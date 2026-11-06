@@ -138,8 +138,6 @@ keep up then.
 
 ### summary
 
-Location all the time.
-
 ### card: WHILE THE APP IS CLOSED (green)
 
 With “all the time,” your explored map keeps filling in and friends keep seeing where you are while

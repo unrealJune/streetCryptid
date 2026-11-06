@@ -46,7 +46,6 @@ export const PERMISSION_STEP_COPY: Record<PermissionStepId, StepCopyText> = {
     name: 'Location all the time',
     title: 'Allow all the time',
     lede: 'Most of your walking happens with the app closed. Background access is what lets streetCryptid keep up then.',
-    summary: 'Location all the time.',
     cards: [
       {
         label: 'WHILE THE APP IS CLOSED',

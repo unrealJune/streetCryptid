@@ -61,7 +61,7 @@ that follows, which is why it sits right before it.
 
 ### title
 
-Where your location goes
+Quick message from us
 
 ### lede
 
@@ -78,7 +78,7 @@ travel directly between your friend network without us ever needing to store it 
 others to read. This also means that all of your friends need their phone to be listening when you
 send out your location. This is pretty hard.
 
-That’s why we also offer a more resilient option, that uses a server to store your location updates
+We also offer a more resilient option, that uses a server to store your location updates
 for your friends to read when they come back online. This is called the “stash” option, and it is
 encrypted so that only your friends can read it. Like this app, the server is open source and
 designed to hold no information about you. We make it an option for folks that may not need the
