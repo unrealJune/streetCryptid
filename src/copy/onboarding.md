@@ -69,11 +69,21 @@ What makes streetCryptid different?
 
 ### letter
 
-streetCryptid was designed to be privacy focused from the ground up. We don't collect logs, telemetry, or other data. We've also taken steps to ensure
-that the way we share your location is also private. To facilitate this, we try to rely on peer-to-peer connections between friends. This means that your location
-can travel directly between your friend network without us ever needing to store it on a server for others to read. This also means that all of your friends need their phone to
-be listening when you send out your location. This is pretty hard. That's why we also offer a more resilient option, that uses a server to store your location updates for your friends to read when they come back online. This is called the "stash" option, and it is encrypted so that only your friends can read it. Like this app, the server is open source and designed to hold no information about you. We make it an option
-for folks that may not need the extra privacy, but want to make sure their friends can always see their location updates. You can always host your own server if you don't trust us.
+streetCryptid was designed to be privacy focused from the ground up. We don’t collect logs,
+telemetry, or other data.
+
+We’ve also taken steps to ensure that the way we share your location is also private. To facilitate
+this, we try to rely on peer-to-peer connections between friends. This means that your location can
+travel directly between your friend network without us ever needing to store it on a server for
+others to read. This also means that all of your friends need their phone to be listening when you
+send out your location. This is pretty hard.
+
+That’s why we also offer a more resilient option, that uses a server to store your location updates
+for your friends to read when they come back online. This is called the “stash” option, and it is
+encrypted so that only your friends can read it. Like this app, the server is open source and
+designed to hold no information about you. We make it an option for folks that may not need the
+extra privacy, but want to make sure their friends can always see their location updates. You can
+always host your own server if you don’t trust us.
 
 Read more about our privacy preserving decisions on our [website](https://streetcrypt.id).
 

@@ -56,14 +56,14 @@ export const PERMISSION_STEP_COPY: Record<PermissionStepId, StepCopyText> = {
     ],
     note: {
       ios: 'Next, your iPhone will ask whether to change to “Always Allow.”',
-      android: "We will open the app's settings: choose “Allow all the time,” then come back.",
+      android: 'We will open the app’s settings: choose “Allow all the time,” then come back.',
     },
     action: 'Allow all the time',
   },
   bluetooth: {
     name: 'Bluetooth',
     title: 'Bluetooth, for Bump',
-    lede: "Bump pairs two phones held together, when you're next to a friend.",
+    lede: 'Bump pairs two phones held together, when you’re next to a friend.',
     summary: 'Pair with your friends!',
     cards: [
       {

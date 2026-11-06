@@ -152,7 +152,7 @@ Next, your iPhone will ask whether to change to “Always Allow.”
 
 ### note-android
 
-We will open the app's settings: choose “Allow all the time,” then come back.
+We will open the app’s settings: choose “Allow all the time,” then come back.
 
 ### action
 
@@ -170,7 +170,7 @@ Bluetooth, for Bump
 
 ### lede
 
-Bump pairs two phones held together, when you're next to a friend.
+Bump pairs two phones held together, when you’re next to a friend.
 
 ### summary
 
