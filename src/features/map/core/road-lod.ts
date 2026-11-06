@@ -6,7 +6,7 @@ import { clamp } from './color';
  * enough to swallow the gap between two parallel residential streets turns the
  * whole block into a lit surface (the "grey-out").
  */
-export const ROAD_WIDTHS = [1.5, 2.0, 2.9, 3.8, 5.0] as const;
+export const ROAD_WIDTHS = [1.35, 1.8, 2.61, 3.42, 4.5] as const;
 
 /**
  * Mask brightness per road class 0-4 - what the dot field reads a street's
