@@ -4,6 +4,7 @@ import { Pressable, StyleSheet, View } from 'react-native';
 
 import { useColorScheme } from '@/hooks/use-color-scheme';
 import { ThemedText } from '@/components/themed-text';
+import { ONBOARDING_COPY } from '@/copy/onboarding';
 import { CryptidThemes, Spacing } from '@/constants/theme';
 import { DeliveryOptions } from '@/features/settings/components/delivery-options';
 import { SettingsPage } from '@/features/settings/components/settings-page';
@@ -16,15 +17,25 @@ import {
 
 import { CryptidProfileEditor } from '../components/cryptid-profile-editor';
 import { LocationPrivacyIntro } from '../components/location-privacy-intro';
+import { OnboardingSplash } from '../components/onboarding-splash';
 import type { CryptidProfile } from '../core/profile';
 import { useCryptidProfile } from '../hooks/use-cryptid-profile';
+
+/** The delivery step's words; every onboarding screen's are in `src/copy/onboarding.md`. */
+const COPY = ONBOARDING_COPY.delivery;
 
 export function AccountOnboardingScreen({
   onSaveStart,
   onComplete,
+  replay = false,
+  saveDelivery,
 }: {
   onSaveStart: () => void;
   onComplete: () => void;
+  /** Settings → Debug: open on the splash even though a profile exists, which it then edits. */
+  replay?: boolean;
+  /** How the delivery choice is saved; a replay goes through the running service. */
+  saveDelivery?: (mode: DeliveryMode) => Promise<void>;
 }) {
   const { error: profileError, profile, saveProfile } = useCryptidProfile();
   const scheme = useColorScheme();
@@ -32,7 +43,10 @@ export function AccountOnboardingScreen({
   const [kv] = useState(createPersistentKV);
   const [availability] = useState(() => ({ stashConfigured: getStashConfig() !== null }));
   const [draft, setDraft] = useState<CryptidProfile | null>(profile);
-  const [step, setStep] = useState<'profile' | 'privacy' | 'delivery'>('profile');
+  // A fresh install opens on the splash; a profile already in hand (setup resumed) skips it.
+  const [step, setStep] = useState<'splash' | 'profile' | 'privacy' | 'delivery'>(() =>
+    profile && !replay ? 'profile' : 'splash'
+  );
   const [mode, setMode] = useState<DeliveryMode>(NEW_USER_DELIVERY_MODE);
   const [ready, setReady] = useState(false);
   const [loadAttempt, setLoadAttempt] = useState(0);
@@ -50,7 +64,7 @@ export function AccountOnboardingScreen({
         setError(null);
       })
       .catch(() => {
-        if (active) setError('Could not load delivery preferences. Try again.');
+        if (active) setError(COPY.loadError);
       });
     return () => {
       active = false;
@@ -64,17 +78,21 @@ export function AccountOnboardingScreen({
     setError(null);
     onSaveStart();
     try {
-      await saveDeliveryMode(kv, mode);
+      await (saveDelivery ? saveDelivery(mode) : saveDeliveryMode(kv, mode));
       // A profile is the completed-onboarding marker. Save it only after delivery, so
       // closing the app between these steps never skips the delivery choice on relaunch.
       await saveProfile(draft);
       onComplete();
     } catch {
-      setError('Could not finish setup. Try again.');
+      setError(COPY.saveError);
     } finally {
       inFlight.current = false;
       setSaving(false);
     }
+  }
+
+  if (step === 'splash') {
+    return <OnboardingSplash onContinue={() => setStep('profile')} />;
   }
 
   if (step === 'profile') {
@@ -103,20 +121,20 @@ export function AccountOnboardingScreen({
   return (
     <SettingsPage
       kind="onboarding"
-      title="Delivery"
+      title={COPY.title}
       testID="delivery-onboarding"
       footerRail={{
         back: {
-          label: 'Back',
-          accessibilityLabel: 'Back to privacy',
+          label: COPY.back,
+          accessibilityLabel: COPY.backLabel,
           icon: { ios: 'chevron.left', android: 'arrow_back', web: 'arrow_back' },
           disabled: saving,
           onPress: () => setStep('privacy'),
         },
         primary: {
-          label: saving ? 'Saving…' : 'Continue',
-          railLabel: 'Next',
-          accessibilityLabel: 'Continue with selected delivery',
+          label: saving ? COPY.saving : COPY.continue,
+          railLabel: COPY.railContinue,
+          accessibilityLabel: COPY.continueLabel,
           icon: { ios: 'checkmark', android: 'check', web: 'check' },
           disabled: !ready || saving,
           busy: saving,
@@ -130,16 +148,16 @@ export function AccountOnboardingScreen({
         <View style={styles.actions}>
           <Pressable
             accessibilityRole="button"
-            accessibilityLabel="Back to privacy"
+            accessibilityLabel={COPY.backLabel}
             disabled={saving}
             onPress={() => setStep('privacy')}
             style={styles.back}
           >
-            <ThemedText type="smallBold">Back</ThemedText>
+            <ThemedText type="smallBold">{COPY.back}</ThemedText>
           </Pressable>
           <Pressable
             accessibilityRole="button"
-            accessibilityLabel="Continue with selected delivery"
+            accessibilityLabel={COPY.continueLabel}
             accessibilityState={{ disabled: !ready || saving, busy: saving }}
             disabled={!ready || saving}
             onPress={() => void finish()}
@@ -153,7 +171,7 @@ export function AccountOnboardingScreen({
             ]}
           >
             <ThemedText type="smallBold" style={{ color: chrome.bg }}>
-              {saving ? 'Saving…' : 'Continue'}
+              {saving ? COPY.saving : COPY.continue}
             </ThemedText>
           </Pressable>
         </View>
@@ -168,7 +186,7 @@ export function AccountOnboardingScreen({
         />
       ) : !error ? (
         <ThemedText type="small" themeColor="textSecondary">
-          Loading delivery preferences…
+          {COPY.loading}
         </ThemedText>
       ) : null}
       {error ? (
@@ -179,10 +197,10 @@ export function AccountOnboardingScreen({
       {!ready && error ? (
         <Pressable
           accessibilityRole="button"
-          accessibilityLabel="Retry loading delivery preferences"
+          accessibilityLabel={COPY.retry}
           onPress={() => setLoadAttempt((attempt) => attempt + 1)}
         >
-          <ThemedText type="smallBold">Retry loading delivery preferences</ThemedText>
+          <ThemedText type="smallBold">{COPY.retry}</ThemedText>
         </Pressable>
       ) : null}
     </SettingsPage>

@@ -135,6 +135,15 @@ async function waitFor(page: Page, predicate: string, timeoutMs = 30_000): Promi
 }
 
 async function onboard(page: Page): Promise<void> {
+  // The first-launch splash stands in front of the persona step. One action, nothing stored.
+  // Waiting for either screen keeps an already-onboarded run from paying this wait twice.
+  const splash = `!!document.querySelector('[data-testid="onboarding-splash"]')`;
+  if (await waitFor(page, `${splash} || !!document.querySelector('input')`, 20_000)) {
+    if (await page.eval<boolean>(splash).catch(() => false)) {
+      await sleep(600);
+      await clickText(page, 'Get started');
+    }
+  }
   const atProfile = await waitFor(page, `document.querySelector('input')`);
   if (!atProfile) return;
 

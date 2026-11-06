@@ -3,8 +3,8 @@ appId: com.unrealjune.streetcryptid
 # Idempotent: brings whatever profile state the app is in the rest of the way to
 # the live map, without wiping existing data. Safe to run on a device that's
 # already fully onboarded (the onboarding runFlow blocks just no-op) or one that's
-# mid-onboarding (e.g. the privacy read or delivery not confirmed, or the location disclosure not
-# yet accepted).
+# mid-onboarding (e.g. the privacy read or delivery not confirmed, or the permission steps not
+# yet answered).
 # For a guaranteed-fresh profile instead, use fresh-onboard.yaml.
 #
 # Every `when:` carries an explicit `timeout`. maestro-runner defaults condition checks to 1000ms,
@@ -21,6 +21,14 @@ appId: com.unrealjune.streetcryptid
       timeout: 4000
     commands:
       - tapOn: 'Close'
+- runFlow:
+    when:
+      visible:
+        id: 'onboarding-splash'
+      timeout: 15000
+    commands:
+      - tapOn:
+          id: 'onboarding-splash-continue'
 - runFlow:
     when:
       visible:
@@ -61,11 +69,16 @@ appId: com.unrealjune.streetcryptid
       - tapOn:
           id: 'onboarding-delivery-continue'
           enabled: true
-- runFlow:
-    when:
-      visible: 'Turn on location'
-      timeout: 15000
+# One page of permissions (PermissionsGate), each row opened in turn under the same continue
+# button. Steps the OS already grants are skipped, and launchApp grants most of them, so
+# how many steps appear varies by platform — hence a loop rather than a fixed list.
+- repeat:
+    times: 10
+    while:
+      visible:
+        id: 'permission-step-continue'
     commands:
-      - tapOn: 'Turn on location'
+      - tapOn:
+          id: 'permission-step-continue'
 - assertVisible:
     id: 'map-view'

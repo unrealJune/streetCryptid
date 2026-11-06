@@ -17,6 +17,13 @@ Read the exact versioned docs at https://docs.expo.dev/versions/v58.0.0/ before 
 - `expo-env.d.ts` and `.expo/types/` are generated (git-ignored). Run `just start`
   once on a fresh clone before `just typecheck`.
 - ESLint is pinned to v9 (eslint-config-expo's plugins were not ESLint 10 ready as of SDK 57).
+- **OS permission prompts come from `PermissionsGate` and nowhere else on launch.** It sits in
+  front of `LocationSharingProvider` and asks one permission per explained step
+  (`core/permission-steps.ts` decides which); node init only CHECKS (`hasPairingPermissions`).
+  A new permission gets a step there. Asking from init put Bluetooth and nearby-devices dialogs
+  over the location disclosure, and iOS raised its Bluetooth and local-network alerts whenever the
+  node first touched the radio or the LAN — which is why iOS now triggers both on purpose
+  (`OnboardingPermissions.swift`; `_streetcryptid._tcp` must stay in `NSBonjourServices`).
 
 ## Developer telemetry (OTEL)
 

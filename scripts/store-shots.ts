@@ -199,7 +199,7 @@ async function waitFor(page: Page, predicate: string, timeoutMs = 30_000): Promi
 }
 
 /**
- * Walk first run: pick a persona, claim a handle, read where location goes, choose
+ * Walk first run: get past the splash, pick a persona, claim a handle, read where location goes, choose
  * a delivery route, and accept the location disclosure. This is the app's real onboarding, driven
  * rather than bypassed — a fresh browser profile starts here every time, and
  * the map is behind it.
@@ -210,6 +210,15 @@ async function waitFor(page: Page, predicate: string, timeoutMs = 30_000): Promi
  * had stalled on and labelled it `map`.
  */
 async function onboard(page: Page, handle: string): Promise<void> {
+  // The first-launch splash stands in front of the persona step. One action, nothing stored.
+  // Waiting for either screen keeps an already-onboarded run from paying this wait twice.
+  const splash = `!!document.querySelector('[data-testid="onboarding-splash"]')`;
+  if (await waitFor(page, `${splash} || !!document.querySelector('input')`, 20_000)) {
+    if (await page.eval<boolean>(splash).catch(() => false)) {
+      await sleep(600);
+      await clickText(page, 'Get started');
+    }
+  }
   const atProfile = await waitFor(page, `document.querySelector('input')`);
   if (!atProfile) return; // Already onboarded (a reused profile), or a deep link.
 

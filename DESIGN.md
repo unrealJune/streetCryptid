@@ -240,6 +240,48 @@ Gentle live **YOU** pulse; sector acquisition can animate a single hex "flip." E
 `prefers-reduced-motion` fallback (crossfade / instant). Motion is intentional per
 element — never one uniform entrance on everything.
 
+## First launch — the splash
+
+The first screen of a fresh install, in front of the persona step. The pairing field's dot
+lattice fills the screen; friends ping in from its edges in the default friend signal, timed so
+every ring reaches the sigil together; **YOU answers in amber**, which is literal here — there is
+no profile yet, so amber is your color. The lattice then clears around the mark and the mothman
+sigil flips in one row at a time, eyes last, before the wordmark and one island: a line of what
+the app is and **one** action. After the intro the friends keep softly checking in.
+
+- **One shader, stateless.** A ring's trail is analytic (`exp` of the time since it passed a
+  dot), so reduced motion is a single settled frame, not a different code path. The clock stops
+  off screen (`useIsAppActive`), like every other loop.
+- **Sized, not scaled.** Short screens (an iPhone Duo's 5.4" outer display, ~680 pt tall) get a
+  smaller hero so it never meets the island; tablet-sized windows get a larger one and a fourth
+  friend; a wide landscape window puts the island beside the mark. The island stops at 420 pt.
+- **Beside a system rail the action moves into it**, like every onboarding step's, and the
+  island keeps only the words. Friends never ping from under the island or the rail.
+
+## First launch — permissions
+
+After setup and before the map, every OS permission is asked from one place
+(`PermissionsGate`), on **one page laid out as a journey**: a numbered rail with a row per
+permission — location (the Play disclosure), location all the time, Bluetooth for Bump, local
+network, and on Android notifications and unrestricted battery. The row being asked is open,
+saying what it is for before the phone asks; answering collapses it to its outcome (ALLOWED,
+NOT ALLOWED, NOT NOW) and opens the next. Rows still to come show one line each, so the whole
+plan is visible from the start, and a row that an earlier "Not now" made pointless stays on
+the rail as SKIPPED rather than disappearing.
+
+- **Nothing else prompts.** Node init only checks; the Bump button asks again for someone
+  who said no. A new permission gets a step here, never a request at a call site.
+- **Off iOS each step has "Not now". On iOS none does** — App Review rejects a screen that
+  lets someone skip the system alert behind it, and the alert's own "Don't Allow" is the
+  decline. The button reads "Continue" there.
+- **Asked once.** What was asked is recorded, what the OS already grants is skipped, and an
+  install that onboarded before the steps sees only what it was never asked.
+- **Replayable.** Settings → Debug → Replay onboarding runs setup and every step again on an
+  onboarded phone, granted ones included. The answers are real and are saved.
+- **Words in Markdown.** Every word on the page lives in `src/copy/permissions.md`, and the setup
+  screens before it (splash, profile, the privacy letter, delivery) in `src/copy/onboarding.md`;
+  `just copy` regenerates the modules the app reads, and the jest run fails if they disagree.
+
 ## Do / Don't (earned through iteration)
 
 - **Do:** flip-dot dots, hex sectors, single accents, real OSM geometry, calm restraint,
