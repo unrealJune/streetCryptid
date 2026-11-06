@@ -626,7 +626,7 @@ export function CryptidProfileEditor({
               <ThemedText style={styles.title}>
                 {mode === 'onboarding' ? ONBOARDING_COPY.profile.title : 'Profile'}
               </ThemedText>
-              {mode === 'onboarding' ? (
+              {mode === 'onboarding' && ONBOARDING_COPY.profile.intro ? (
                 <ThemedText type="small" themeColor="textSecondary" style={styles.intro}>
                   {ONBOARDING_COPY.profile.intro}
                 </ThemedText>

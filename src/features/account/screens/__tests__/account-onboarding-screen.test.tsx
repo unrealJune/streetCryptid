@@ -246,7 +246,6 @@ describe('delivery onboarding', () => {
     // The intro, not the picker: its last line promises the route choice is the NEXT screen.
     expect(renderer.root.findByProps({ testID: 'privacy-onboarding' })).toBeTruthy();
     expect(renderer.root.findAllByType(DeliveryOptions)).toHaveLength(0);
-    expect(JSON.stringify(renderer.toJSON())).toContain('there is no streetCryptid server at all');
     expect(writes).not.toHaveBeenCalled();
     expect(mockSaveProfile).not.toHaveBeenCalled();
 

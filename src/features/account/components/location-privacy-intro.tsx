@@ -1,6 +1,7 @@
 import { Pressable, StyleSheet, View } from 'react-native';
 
 import { useColorScheme } from '@/hooks/use-color-scheme';
+import { CopyText } from '@/components/copy-text';
 import { ThemedText } from '@/components/themed-text';
 import { ONBOARDING_COPY } from '@/copy/onboarding';
 import { CryptidThemes, Spacing } from '@/constants/theme';
@@ -25,9 +26,12 @@ import { SettingsPage } from '@/features/settings/components/settings-page';
  * seeing that two anonymous IDs exchanged bytes.
  */
 
-/** The words are in `src/copy/onboarding.md`, the letter's paragraphs separated by blank lines. */
+/**
+ * The words are in `src/copy/onboarding.md`, the letter's paragraphs separated by blank lines. Any
+ * of the prose left empty there is left off the page.
+ */
 const COPY = ONBOARDING_COPY.privacy;
-const LETTER = COPY.letter.split('\n\n');
+const LETTER = COPY.letter?.split('\n\n') ?? [];
 
 export function LocationPrivacyIntro({
   onBack,
@@ -90,31 +94,44 @@ export function LocationPrivacyIntro({
         </View>
       }
     >
-      <View style={styles.body}>
-        {LETTER.map((paragraph) => (
-          <ThemedText
-            key={paragraph.slice(0, 32)}
+      {LETTER.length ? (
+        <View style={styles.body}>
+          {LETTER.map((paragraph) => (
+            <CopyText
+              key={paragraph.slice(0, 32)}
+              text={paragraph}
+              type="small"
+              themeColor="textSecondary"
+              style={styles.paragraph}
+            />
+          ))}
+        </View>
+      ) : null}
+
+      {COPY.caveat ? (
+        <View style={[styles.card, { borderColor: chrome.amber }]}>
+          <CopyText
+            text={COPY.caveat}
             type="small"
             themeColor="textSecondary"
             style={styles.paragraph}
-          >
-            {paragraph}
-          </ThemedText>
-        ))}
-      </View>
+          />
+        </View>
+      ) : null}
 
-      <View style={[styles.card, { borderColor: chrome.amber }]}>
-        <ThemedText type="small" themeColor="textSecondary" style={styles.paragraph}>
-          {COPY.caveat}
+      {COPY.next ? (
+        <CopyText
+          text={COPY.next}
+          type="small"
+          themeColor="textSecondary"
+          style={styles.paragraph}
+        />
+      ) : null}
+      {COPY.signoff ? (
+        <ThemedText type="small" themeColor="textSecondary" style={styles.signoff}>
+          {COPY.signoff}
         </ThemedText>
-      </View>
-
-      <ThemedText type="small" themeColor="textSecondary" style={styles.paragraph}>
-        {COPY.next}
-      </ThemedText>
-      <ThemedText type="small" themeColor="textSecondary" style={styles.signoff}>
-        {COPY.signoff}
-      </ThemedText>
+      ) : null}
     </SettingsPage>
   );
 }

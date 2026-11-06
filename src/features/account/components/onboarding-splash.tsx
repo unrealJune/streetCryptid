@@ -8,7 +8,7 @@ import Animated, {
 } from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
-import { ThemedText } from '@/components/themed-text';
+import { CopyText } from '@/components/copy-text';
 import { ONBOARDING_COPY } from '@/copy/onboarding';
 import { BrandFonts, CryptidThemes, Spacing } from '@/constants/theme';
 import { PageFooter } from '@/features/settings/components/settings-page';
@@ -186,12 +186,18 @@ export function OnboardingSplash({ onContinue }: { onContinue: () => void }) {
             },
           ]}
         >
-          <Text style={[styles.heading, { color: chrome.ink, fontSize: layout.headingSize }]}>
-            {COPY.heading}
-          </Text>
-          <ThemedText type="small" style={[styles.body, { color: chrome.steel }]}>
-            {COPY.body}
-          </ThemedText>
+          {COPY.heading ? (
+            <Text style={[styles.heading, { color: chrome.ink, fontSize: layout.headingSize }]}>
+              {COPY.heading}
+            </Text>
+          ) : null}
+          {COPY.body ? (
+            <CopyText
+              type="small"
+              style={[styles.body, { color: chrome.steel }]}
+              text={COPY.body}
+            />
+          ) : null}
           {railed ? null : (
             <Pressable
               accessibilityRole="button"

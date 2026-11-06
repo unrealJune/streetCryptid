@@ -1,6 +1,8 @@
 import { Text } from 'react-native';
 import { act, create, type ReactTestRenderer } from 'react-test-renderer';
 
+import { PERMISSION_STEP_COPY as COPY, PERMISSIONS_PAGE_COPY } from '@/copy/permissions';
+
 import type { PermissionJourneyRow } from '../../core/permission-steps';
 import { PermissionJourneyScreen } from '../permissions-journey-screen';
 
@@ -69,30 +71,26 @@ describe('PermissionJourneyScreen', () => {
 
   it('opens the current row in full, with the rows to come as one line each', () => {
     render(FIRST);
-    expect(texts()).toContain('Before we turn on location');
-    expect(texts()).toContain(
-      'Location all the time — so it keeps working while the app is closed.'
-    );
-    expect(texts()).not.toContain('Allow all the time');
-    expect(texts()).toContain('Turn on location');
+    expect(texts()).toContain(COPY.location.title);
+    expect(texts()).toContain(COPY['background-location'].summary);
+    expect(texts()).not.toContain(COPY['background-location'].title);
+    expect(texts()).toContain(COPY.location.action);
     expect(byTestId('permission-step-location').length).toBeGreaterThan(0);
   });
 
   it('collapses an answered row to its outcome and opens the next', () => {
     render(FIRST);
     render(SECOND);
-    expect(texts()).not.toContain('Before we turn on location');
-    expect(texts()).toContain('ALLOWED');
-    expect(texts()).toContain('Allow all the time');
-    expect(texts()).not.toContain(
-      'Location all the time — so it keeps working while the app is closed.'
-    );
+    expect(texts()).not.toContain(COPY.location.title);
+    expect(texts()).toContain(PERMISSIONS_PAGE_COPY.outcome.allowed);
+    expect(texts()).toContain(COPY['background-location'].title);
+    expect(texts()).not.toContain(COPY['background-location'].summary);
     expect(byTestId('permission-step-background-location').length).toBeGreaterThan(0);
   });
 
   it('says Continue with no "Not now" on iOS', () => {
     render(FIRST, 'ios');
-    expect(texts()).not.toContain('Turn on location');
+    expect(texts()).not.toContain(COPY.location.action);
     expect(byTestId('permission-step-skip')).toHaveLength(0);
   });
 });

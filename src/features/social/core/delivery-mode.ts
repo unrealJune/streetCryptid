@@ -66,14 +66,14 @@ export interface DeliveryModeCopy {
   readonly title: string;
   /** Uppercase micro-label for the segmented control. */
   readonly segment: string;
-  /** Over the explanation, under the segmented control. */
-  readonly heading: string;
-  readonly body: string;
+  /** Over the explanation, under the segmented control; absent when the copy leaves it empty. */
+  readonly heading?: string;
+  readonly body?: string;
   /** A second, quieter line. Present only where the mode has a real caveat to state. */
   readonly note: string | null;
 }
 
-export function mutualFriendRelayExplanation(platform: string): string {
+export function mutualFriendRelayExplanation(platform: string): string | undefined {
   const name =
     platform === 'ios'
       ? 'iOS'
@@ -82,7 +82,7 @@ export function mutualFriendRelayExplanation(platform: string): string {
         : platform === 'web'
           ? 'the web'
           : 'your device';
-  return ONBOARDING_COPY.deliveryMutual.body.replace('{platform}', name);
+  return ONBOARDING_COPY.deliveryMutual.body?.replace('{platform}', name);
 }
 
 /** The words are in `src/copy/onboarding.md`; Settings → Delivery shows the same ones. */

@@ -4,6 +4,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { useColorScheme } from '@/hooks/use-color-scheme';
 import { useSystemRail } from '@/hooks/use-system-rail';
+import { CopyText } from '@/components/copy-text';
 import { ThemedText } from '@/components/themed-text';
 import { CryptidThemes, Spacing } from '@/constants/theme';
 import {
@@ -173,12 +174,11 @@ export function DeliveryOptions({
 
 function DeliveryCopy({ mode }: { mode: DeliveryMode }) {
   const copy = DELIVERY_MODE_COPY[mode];
+  const body = mode === 'mutual' ? mutualFriendRelayExplanation(Platform.OS) : copy.body;
   return (
     <>
-      <ThemedText type="smallBold">{copy.heading}</ThemedText>
-      <ThemedText type="small" themeColor="textSecondary">
-        {mode === 'mutual' ? mutualFriendRelayExplanation(Platform.OS) : copy.body}
-      </ThemedText>
+      {copy.heading ? <ThemedText type="smallBold">{copy.heading}</ThemedText> : null}
+      {body ? <CopyText text={body} type="small" themeColor="textSecondary" /> : null}
     </>
   );
 }

@@ -6,15 +6,21 @@ import type { PermissionPlatform, PermissionStepId } from '@/features/social/cor
  * write it. Each file's own preamble documents the format for whoever edits it; this is the strict
  * half of that contract — anything it does not recognise is an error rather than text that
  * silently goes missing.
+ *
+ * A field left empty is the same as one deleted: the screen leaves that text out. Only what a
+ * screen cannot work without (a button, a name, an error) is required, and an empty required field
+ * is an error that says so.
  */
 
 export type CardTone = 'amber' | 'green';
 
 export interface StepCopyText {
   readonly name: string;
-  readonly title: string;
-  readonly lede: string;
-  readonly summary: string;
+  /** The heading once the row is open. */
+  readonly title?: string;
+  readonly lede?: string;
+  /** One line under the name while the step is still to come. */
+  readonly summary?: string;
   readonly cards: readonly { label: string; body: string; tone: CardTone }[];
   /** `default` is every platform without its own line; a platform with neither shows none. */
   readonly note: Partial<Record<PermissionPlatform | 'default', string>>;
@@ -24,7 +30,7 @@ export interface StepCopyText {
 export interface PageCopyText {
   readonly title: string;
   readonly titleSingle: string;
-  readonly subtitle: string;
+  readonly subtitle?: string;
   readonly continue: string;
   readonly notNow: string;
   readonly railOk: string;
@@ -44,6 +50,7 @@ export interface PermissionsCopy {
 
 interface Field {
   readonly key: string;
+  /** Empty when the field was left blank. */
   readonly text: string;
   readonly line: number;
 }
@@ -69,7 +76,6 @@ function sections(markdown: string): Map<string, Field[]> {
           .join(' ')
       )
       .join('\n\n');
-    if (!text) throw new Error(`line ${field.line}: "${field.key}" has no text`);
     section.push({ key: field.key, text, line: field.line });
     field = null;
   };
@@ -97,15 +103,51 @@ function sections(markdown: string): Map<string, Field[]> {
   return out;
 }
 
-/** Which fields a `## section` holds; a field is required unless it is listed as optional. */
-export type CopySchema = Readonly<
-  Record<string, { readonly required: readonly string[]; readonly optional?: readonly string[] }>
->;
+interface FieldRules {
+  readonly required: readonly string[];
+  readonly optional?: readonly string[];
+}
+
+/**
+ * A section's plain fields that have text, by key. Fields `extra` claims (cards, notes) are left
+ * to the caller; anything else unknown, repeated, or required and empty is an error.
+ */
+function fieldsOf(
+  fields: readonly Field[],
+  section: string,
+  { required, optional = [] }: FieldRules,
+  extra: (key: string) => boolean = () => false
+): Record<string, string> {
+  const seen = new Set<string>();
+  const text: Record<string, string> = {};
+  for (const field of fields) {
+    if (extra(field.key)) continue;
+    if (!required.includes(field.key) && !optional.includes(field.key)) {
+      throw new Error(`line ${field.line}: "${section}" has an unknown field "${field.key}"`);
+    }
+    if (seen.has(field.key)) {
+      throw new Error(`line ${field.line}: "${field.key}" appears twice in "${section}"`);
+    }
+    seen.add(field.key);
+    if (field.text) text[field.key] = field.text;
+  }
+  for (const key of required) {
+    if (!(key in text)) {
+      throw new Error(
+        `"### ${key}" in "${section}" ${seen.has(key) ? 'is empty' : 'is missing'}, and the app can’t do without it`
+      );
+    }
+  }
+  return text;
+}
+
+/** Which fields a `## section` holds. A required field must have text; an optional one may not. */
+export type CopySchema = Readonly<Record<string, FieldRules>>;
 
 const camel = (key: string) =>
   key.replace(/-([a-z])/g, (_, letter: string) => letter.toUpperCase());
 
-/** A file of plain fields: every section and field the schema names, keys in camelCase. */
+/** A file of plain fields: every section the schema names, keys in camelCase, empty ones left out. */
 export function parseCopy(markdown: string, schema: CopySchema) {
   const all = sections(markdown);
   for (const id of all.keys()) {
@@ -114,90 +156,81 @@ export function parseCopy(markdown: string, schema: CopySchema) {
     }
   }
   const out: Record<string, Record<string, string>> = {};
-  for (const [id, { required, optional = [] }] of Object.entries(schema)) {
+  for (const [id, rules] of Object.entries(schema)) {
     const fields = all.get(id);
     if (!fields) throw new Error(`no "## ${id}" section`);
-    for (const field of fields) {
-      if (![...required, ...optional].includes(field.key)) {
-        throw new Error(`line ${field.line}: "${id}" has an unknown field "${field.key}"`);
-      }
-    }
-    const text = single(fields, id, required);
-    for (const field of fields) {
-      if (optional.includes(field.key)) {
-        if (field.key in text) {
-          throw new Error(`line ${field.line}: "${field.key}" appears twice in "${id}"`);
-        }
-        text[field.key] = field.text;
-      }
-    }
+    const text = fieldsOf(fields, id, rules);
     out[camel(id)] = Object.fromEntries(
-      [...required, ...optional].filter((key) => key in text).map((key) => [camel(key), text[key]])
+      [...rules.required, ...(rules.optional ?? [])]
+        .filter((key) => key in text)
+        .map((key) => [camel(key), text[key]])
     );
   }
   return out;
 }
 
+/** The TypeScript type of what `parseCopy` returns for `schema`, for the generated module. */
+export function copySchemaType(schema: CopySchema): string {
+  const section = ({ required, optional = [] }: FieldRules) =>
+    `{ ${[
+      ...required.map((key) => `readonly ${camel(key)}: string;`),
+      ...optional.map((key) => `readonly ${camel(key)}?: string;`),
+    ].join(' ')} }`;
+  return `{ ${Object.entries(schema)
+    .map(([id, rules]) => `readonly ${JSON.stringify(camel(id))}: ${section(rules)};`)
+    .join(' ')} }`;
+}
+
 const NOTE = /^note(?:-(ios|android|web))?$/;
 const CARD = /^card:\s*(.+?)\s*\((amber|green)\)$/;
 
-function single(fields: Field[], section: string, keys: readonly string[]) {
-  const seen: Record<string, string> = {};
-  for (const field of fields) {
-    if (!keys.includes(field.key)) continue;
-    if (field.key in seen) {
-      throw new Error(`line ${field.line}: "${field.key}" appears twice in "${section}"`);
-    }
-    seen[field.key] = field.text;
-  }
-  for (const key of keys) {
-    if (!(key in seen)) throw new Error(`section "${section}" has no "### ${key}"`);
-  }
-  return seen;
-}
+const STEP_FIELDS: FieldRules = {
+  required: ['name', 'action'],
+  optional: ['title', 'lede', 'summary'],
+};
 
 function stepCopy(id: string, fields: Field[]): StepCopyText {
-  const known = ['name', 'title', 'lede', 'summary', 'action'] as const;
-  const text = single(fields, id, known);
+  const text = fieldsOf(fields, id, STEP_FIELDS, (key) => CARD.test(key) || NOTE.test(key));
   const cards: StepCopyText['cards'][number][] = [];
   const note: Partial<Record<PermissionPlatform | 'default', string>> = {};
   for (const field of fields) {
     const card = CARD.exec(field.key);
     const platform = NOTE.exec(field.key);
     if (card) {
-      cards.push({ label: card[1], tone: card[2] as CardTone, body: field.text });
+      // A card with no text is a card taken off the page.
+      if (field.text) cards.push({ label: card[1], tone: card[2] as CardTone, body: field.text });
     } else if (platform) {
       const which = (platform[1] ?? 'default') as PermissionPlatform | 'default';
       if (which in note) throw new Error(`line ${field.line}: "${field.key}" appears twice`);
-      note[which] = field.text;
-    } else if (!(known as readonly string[]).includes(field.key)) {
-      throw new Error(`line ${field.line}: "${id}" has an unknown field "${field.key}"`);
+      if (field.text) note[which] = field.text;
     }
   }
   return {
     name: text.name,
-    title: text.title,
-    lede: text.lede,
-    summary: text.summary,
+    ...(text.title ? { title: text.title } : {}),
+    ...(text.lede ? { lede: text.lede } : {}),
+    ...(text.summary ? { summary: text.summary } : {}),
     cards,
     note,
     action: text.action,
   };
 }
 
-const PAGE_FIELDS = [
-  'title',
-  'title-single',
-  'subtitle',
-  'continue',
-  'not-now',
-  'rail-ok',
-  'allowed',
-  'refused',
-  'asked',
-  'declined',
-  'skipped',
-] as const;
+const PAGE_FIELDS: FieldRules = {
+  required: [
+    'title',
+    'title-single',
+    'continue',
+    'not-now',
+    'rail-ok',
+    'allowed',
+    'refused',
+    'asked',
+    'declined',
+    'skipped',
+  ],
+  optional: ['subtitle'],
+};
 
 export function parsePermissionsCopy(
   markdown: string,
@@ -206,12 +239,7 @@ export function parsePermissionsCopy(
   const all = sections(markdown);
   const pageFields = all.get('page');
   if (!pageFields) throw new Error('no "## page" section');
-  for (const field of pageFields) {
-    if (!(PAGE_FIELDS as readonly string[]).includes(field.key)) {
-      throw new Error(`line ${field.line}: "page" has an unknown field "${field.key}"`);
-    }
-  }
-  const page = single(pageFields, 'page', PAGE_FIELDS);
+  const page = fieldsOf(pageFields, 'page', PAGE_FIELDS);
 
   const steps: Record<string, StepCopyText> = {};
   for (const [id, fields] of all) {
@@ -229,7 +257,7 @@ export function parsePermissionsCopy(
     page: {
       title: page.title,
       titleSingle: page['title-single'],
-      subtitle: page.subtitle,
+      ...(page.subtitle ? { subtitle: page.subtitle } : {}),
       continue: page.continue,
       notNow: page['not-now'],
       railOk: page['rail-ok'],

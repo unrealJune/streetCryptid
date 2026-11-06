@@ -14,8 +14,12 @@ How this file is read:
   colour is the label's.
 - `### note` is the line under the cards. `### note-ios`, `### note-android` and `### note-web`
   replace it on that platform; a platform with neither shows no note.
-- Text is used exactly as written: no Markdown formatting, so type curly quotes and apostrophes
-  (’ “ ”) as you want them shown. HTML comments are ignored, so leave notes in those.
+- **Leave a field empty, or delete it, and the app leaves that text out.** A card with no text is
+  dropped. Only `name` and `action` on a step, and everything in `page` but the `subtitle`, have to
+  have text; `just copy` names any of those you emptied.
+- Text is used exactly as written, so type curly quotes and apostrophes (’ “ ”) as you want them
+  shown. The one piece of Markdown that works is a link, `[words](https://…)`, in the paragraphs.
+  HTML comments are ignored, so leave notes in those.
 
 <!--
 The open `location` row IS the background-location disclosure Google Play requires before the OS
@@ -29,7 +33,7 @@ text "Turn on location".
 
 ### title
 
-A few permissions
+Permissions
 
 ### title-single
 
@@ -37,8 +41,7 @@ One permission
 
 ### subtitle
 
-Each one says what it’s for before your phone asks. Every one is optional, and you can change any
-of them later in your phone’s settings.
+We need your approval to use the following device features. You can change your mind later in Settings. streetCryptid works best with all of them, but you can skip any you want.
 
 ### continue
 
@@ -90,35 +93,29 @@ Before we turn on location
 
 ### lede
 
-streetCryptid uses your location — including while the app is closed or in the background — for
-two things. Here’s exactly what and why.
+streetCryptid uses your location while the app is closed or in the background.
 
 ### summary
 
-Location — to reveal the streets you walk and share your position with friends.
-
 ### card: TERRITORY EXPLORATION (amber)
 
-As you walk through your city, streetCryptid reveals the streets and hex-shaped sectors you’ve
-actually covered — building your personal explored map. This only works if the app can sample your
-location occasionally in the background, since most of your walking happens while the app is closed.
+As you walk through your city, streetCryptid reveals the streets and hex-shaped sectors you’ve covered.
+This only works if the app can sample your location occasionally in the background, since most of your moving around happens while the app is closed.
 
 ### card: FRIEND LOCATION SHARING (green)
 
-If you pair with friends, your live location syncs directly to their devices — end-to-end
-encrypted — so they can see you on the map, including while the app is in the background. Only
+If you pair with friends and enable location sharing, your live location is sent
+so they can see you on the map, including while the app is in the background. Only
 friends you’ve explicitly paired with can see this.
 
 ### note-ios
 
-Next, your iPhone will ask to allow location access. The step after this one asks for background
+Next, your iPhone will ask to allow location access. After that, it will ask for background
 access.
 
 ### note
 
-Next, your device will ask you to allow location access, and the step after this one asks for
-“Allow all the time.” Choosing “Not now” keeps streetCryptid working, minus background exploration
-and friend sharing — you can turn it on later from Settings.
+Next, your device will ask you to allow location access.
 
 ### action
 
@@ -141,7 +138,7 @@ keep up then.
 
 ### summary
 
-Location all the time — so it keeps working while the app is closed.
+Location all the time.
 
 ### card: WHILE THE APP IS CLOSED (green)
 
@@ -155,7 +152,7 @@ Next, your iPhone will ask whether to change to “Always Allow.”
 
 ### note-android
 
-Android opens Settings for this one: choose “Allow all the time,” then come back.
+We will open the app's settings: choose “Allow all the time,” then come back.
 
 ### action
 
@@ -173,17 +170,16 @@ Bluetooth, for Bump
 
 ### lede
 
-Bump pairs two phones held together, with no link to send and no account to look up.
+Bump pairs two phones held together, when you're next to a friend.
 
 ### summary
 
-Bluetooth — to find a friend’s phone when you Bump.
+Pair with your friends!
 
 ### card: PAIRING IN PERSON (green)
 
 When you both tap Bump, each phone finds the other over Bluetooth and starts an encrypted pairing
-on the spot — it works with no signal at all. Without Bluetooth you can still pair by sending a
-link.
+on the spot.
 
 ### note-android
 
@@ -209,16 +205,13 @@ Phones on your Wi-Fi
 
 ### lede
 
-When a friend is on the same Wi-Fi, your phones can talk to each other directly.
+When a friend is on the same Wi-Fi, your phones can talk to each other directly, minimizing network exposure and missed updates.
 
 ### summary
 
-Local network — to reach friends on the same Wi-Fi directly.
+Reach friends on the same Wi-Fi directly.
 
 ### card: THE SHORT WAY ROUND (green)
-
-Directly is faster than going through a relay, and it keeps working when the internet doesn’t.
-Without it nothing breaks — your location still reaches friends, just the long way.
 
 ### note-ios
 
@@ -244,12 +237,9 @@ Android shows a notification for as long as streetCryptid shares your location i
 
 ### summary
 
-Notifications — so you can always see that sharing is on.
-
 ### card: ALWAYS VISIBLE (amber)
 
-It’s how you can tell at a glance that sharing is on, and if Android ever stops it, it’s how we let
-you know. Sharing works either way; without this you just can’t see it.
+We are required to show a notification while sharing your location in the background.
 
 ### action
 
@@ -268,17 +258,15 @@ Keep sharing when the app is closed
 ### lede
 
 Android sometimes stops apps in the background to save memory. When it stops streetCryptid, it
-won’t let sharing start again until you open the app — so your friends see a dot that stopped hours
-ago.
+won’t let sharing start again until you open the app.
 
 ### summary
 
-Unrestricted battery use — so Android can’t switch sharing off for good.
+Unrestricted battery use
 
 ### card: SET BATTERY USE TO UNRESTRICTED (green)
 
-This lets streetCryptid restart sharing by itself. It doesn’t make the app check your location any
-more often — it only stops Android from switching sharing off for good.
+This lets streetCryptid restart sharing by itself.
 
 ### note
 

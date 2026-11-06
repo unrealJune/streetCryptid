@@ -1,11 +1,57 @@
 // GENERATED from onboarding.md by `just copy`. Edit the Markdown, not this file.
 
-export const ONBOARDING_COPY = {
+export const ONBOARDING_COPY: {
+  readonly splash: {
+    readonly start: string;
+    readonly railStart: string;
+    readonly heading?: string;
+    readonly body?: string;
+  };
+  readonly profile: { readonly title: string; readonly intro?: string };
+  readonly privacy: {
+    readonly title: string;
+    readonly back: string;
+    readonly backLabel: string;
+    readonly continue: string;
+    readonly continueLabel: string;
+    readonly railContinue: string;
+    readonly lede?: string;
+    readonly letter?: string;
+    readonly caveat?: string;
+    readonly next?: string;
+    readonly signoff?: string;
+  };
+  readonly delivery: {
+    readonly title: string;
+    readonly loading: string;
+    readonly loadError: string;
+    readonly retry: string;
+    readonly saveError: string;
+    readonly back: string;
+    readonly backLabel: string;
+    readonly continue: string;
+    readonly saving: string;
+    readonly continueLabel: string;
+    readonly railContinue: string;
+  };
+  readonly deliveryMutual: {
+    readonly title: string;
+    readonly segment: string;
+    readonly heading?: string;
+    readonly body?: string;
+  };
+  readonly deliveryStash: {
+    readonly title: string;
+    readonly segment: string;
+    readonly heading?: string;
+    readonly body?: string;
+  };
+} = {
   splash: {
-    heading: 'Find your people out in the city.',
-    body: 'Share your location with your friends and track where you’ve been. We promise to never save, sell, or snoop on your trail.',
     start: 'Get started',
     railStart: 'Start',
+    heading: 'Find your cryptids in the world.',
+    body: 'Share your location with your friends and track where you’ve been. We promise to never save, sell, or snoop on your trail.',
   },
   profile: {
     title: 'Set up your profile',
@@ -13,18 +59,15 @@ export const ONBOARDING_COPY = {
   },
   privacy: {
     title: 'Where your location goes',
-    lede: 'In a minute you’ll pick how your location travels. Here’s what’s carrying it.',
-    letter:
-      'Every fix is encrypted on your phone before it leaves — individually, for each friend you share it with. Only their phones hold the keys. We can’t read where you’ve been. Not as a promise we’re making, but as a consequence of how it’s built.\n\nMostly there’s no we in the path at all. Your phone talks to your friends’ phones directly, and the infrastructure that helps them find each other only ever handles data it can’t read. There is no streetCryptid server holding your trail — there is no streetCryptid server at all. There are no accounts either: no email, no password, nothing to spill.\n\nWe built it this way because the alternative has a known ending. Anything that holds your data long enough gets breached, or acquired, or has a quarter bad enough to make selling it sound reasonable. We would rather not ask you to trust us — we’d rather not be in a position where you have to.\n\nWhich is also why all of it is open, under a license that requires anyone running it as a service to publish their changes too. The encryption, the delivery routes, the code that decides what leaves your phone — all of it is readable, by you or by someone you trust more than us.',
-    caveat:
-      'What we won’t tell you is that nothing at all is visible. Delivering an encrypted fix means something in the middle can see that two anonymous IDs passed data between them — that’s true of every network, and true of this one. What that data says, and where you are, stays yours. The privacy policy says what each route can see.',
-    next: 'Next screen asks how you want your location to travel, and tells you what each route costs.',
-    signoff: '— the streetCryptid team.',
     back: 'Back',
     backLabel: 'Back to profile',
     continue: 'Continue',
     continueLabel: 'Continue to delivery',
     railContinue: 'Next',
+    lede: 'What makes streetCryptid different?',
+    letter:
+      "streetCryptid was designed to be privacy focused from the ground up. We don't collect logs, telemetry, or other data. We've also taken steps to ensure that the way we share your location is also private. To facilitate this, we try to rely on peer-to-peer connections between friends. This means that your location can travel directly between your friend network without us ever needing to store it on a server for others to read. This also means that all of your friends need their phone to be listening when you send out your location. This is pretty hard. That's why we also offer a more resilient option, that uses a server to store your location updates for your friends to read when they come back online. This is called the \"stash\" option, and it is encrypted so that only your friends can read it. Like this app, the server is open source and designed to hold no information about you. We make it an option for folks that may not need the extra privacy, but want to make sure their friends can always see their location updates. You can always host your own server if you don't trust us.\n\nRead more about our privacy preserving decisions on our [website](https://streetcrypt.id).",
+    signoff: '— the streetCryptid team.',
   },
   delivery: {
     title: 'Delivery',
@@ -51,4 +94,4 @@ export const ONBOARDING_COPY = {
     heading: 'Mutuals + Stash Server',
     body: 'If your friends are offline and can’t receive your location updates, using stash will allow friends to catch up with your location updates when they come back online. Stash entries are encrypted and can only be read by your friends, and are auto deleted after a short period of time.',
   },
-} as const;
+};

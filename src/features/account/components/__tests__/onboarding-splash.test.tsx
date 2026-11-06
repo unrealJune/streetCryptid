@@ -1,5 +1,7 @@
 import { act, create, type ReactTestRenderer } from 'react-test-renderer';
 
+import { ONBOARDING_COPY } from '@/copy/onboarding';
+
 import { OnboardingSplash } from '../onboarding-splash';
 
 jest.mock('@/global.css', () => ({}));
@@ -59,8 +61,10 @@ describe('OnboardingSplash', () => {
     mockInsets = { top: 47, bottom: 34, left: 0, right: 0 };
     const onContinue = render();
     const text = JSON.stringify(renderer.toJSON());
-    expect(text).toContain('Find your people out in the city.');
-    expect(text).toContain('We promise to never save, sell, or snoop on your trail.');
+    // Whatever src/copy/onboarding.md says today, in a JSON string as it renders.
+    for (const line of [ONBOARDING_COPY.splash.heading, ONBOARDING_COPY.splash.body]) {
+      if (line) expect(text).toContain(JSON.stringify(line).slice(1, -1));
+    }
 
     const [button] = continueButtons();
     expect(button.props.accessibilityLabel).toBe('Get started');

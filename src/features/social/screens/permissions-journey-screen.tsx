@@ -13,6 +13,7 @@ import { scheduleOnRN } from 'react-native-worklets';
 import { SymbolView, type SymbolViewProps } from 'expo-symbols';
 
 import { useColorScheme } from '@/hooks/use-color-scheme';
+import { CopyText } from '@/components/copy-text';
 import { ThemedText } from '@/components/themed-text';
 import { CryptidThemes, Spacing, type CryptidChrome } from '@/constants/theme';
 import { SettingsPage } from '@/features/settings/components/settings-page';
@@ -213,6 +214,8 @@ function JourneyRow({
   const outcome = row.state === 'done' ? row.outcome : row.state === 'skipped' ? 'skipped' : null;
   const granted = outcome === 'allowed' || outcome === 'asked';
   const note = copy.note[platform] ?? copy.note.default ?? null;
+  // Copy left empty in permissions.md is left off; a row with none at all just names the step.
+  const detailed = Boolean(copy.title || copy.lede || copy.cards.length || note);
 
   return (
     <View
@@ -271,17 +274,27 @@ function JourneyRow({
             </Animated.View>
           ) : null}
         </View>
-        <Disclosure open={row.state === 'upcoming'}>
-          <ThemedText type="small" themeColor="textSecondary" style={styles.summary}>
-            {copy.summary}
-          </ThemedText>
-        </Disclosure>
-        <Disclosure open={open} onOpened={onOpened}>
+        {copy.summary ? (
+          <Disclosure open={row.state === 'upcoming'}>
+            <CopyText
+              text={copy.summary}
+              type="small"
+              themeColor="textSecondary"
+              style={styles.summary}
+            />
+          </Disclosure>
+        ) : null}
+        <Disclosure open={open && detailed} onOpened={onOpened}>
           <View style={styles.detail}>
-            <ThemedText style={styles.title}>{copy.title}</ThemedText>
-            <ThemedText type="small" themeColor="textSecondary" style={styles.paragraph}>
-              {copy.lede}
-            </ThemedText>
+            {copy.title ? <ThemedText style={styles.title}>{copy.title}</ThemedText> : null}
+            {copy.lede ? (
+              <CopyText
+                text={copy.lede}
+                type="small"
+                themeColor="textSecondary"
+                style={styles.paragraph}
+              />
+            ) : null}
             {copy.cards.map((card) => (
               <View
                 key={card.label}
@@ -290,15 +303,21 @@ function JourneyRow({
                 <ThemedText type="smallBold" style={{ color: chrome[card.tone] }}>
                   {card.label}
                 </ThemedText>
-                <ThemedText type="small" themeColor="textSecondary" style={styles.paragraph}>
-                  {card.body}
-                </ThemedText>
+                <CopyText
+                  text={card.body}
+                  type="small"
+                  themeColor="textSecondary"
+                  style={styles.paragraph}
+                />
               </View>
             ))}
             {note ? (
-              <ThemedText type="small" themeColor="textSecondary" style={styles.paragraph}>
-                {note}
-              </ThemedText>
+              <CopyText
+                text={note}
+                type="small"
+                themeColor="textSecondary"
+                style={styles.paragraph}
+              />
             ) : null}
           </View>
         </Disclosure>

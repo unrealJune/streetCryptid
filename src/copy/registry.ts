@@ -1,6 +1,6 @@
 import { PERMISSION_STEPS } from '@/features/social/core/permission-steps';
 
-import { parseCopy, parsePermissionsCopy } from './parse-copy';
+import { copySchemaType, parseCopy, parsePermissionsCopy, type CopySchema } from './parse-copy';
 
 /**
  * Every Markdown file in this folder and the module generated from it. `scripts/build-copy.ts`
@@ -17,23 +17,12 @@ export interface CopyFile {
   readonly imports?: string;
 }
 
-const ONBOARDING = {
-  splash: { required: ['heading', 'body', 'start', 'rail-start'] },
-  profile: { required: ['title', 'intro'] },
+const ONBOARDING: CopySchema = {
+  splash: { required: ['start', 'rail-start'], optional: ['heading', 'body'] },
+  profile: { required: ['title'], optional: ['intro'] },
   privacy: {
-    required: [
-      'title',
-      'lede',
-      'letter',
-      'caveat',
-      'next',
-      'signoff',
-      'back',
-      'back-label',
-      'continue',
-      'continue-label',
-      'rail-continue',
-    ],
+    required: ['title', 'back', 'back-label', 'continue', 'continue-label', 'rail-continue'],
+    optional: ['lede', 'letter', 'caveat', 'next', 'signoff'],
   },
   delivery: {
     required: [
@@ -50,15 +39,16 @@ const ONBOARDING = {
       'rail-continue',
     ],
   },
-  'delivery-mutual': { required: ['title', 'segment', 'heading', 'body'] },
-  'delivery-stash': { required: ['title', 'segment', 'heading', 'body'] },
-} as const;
+  'delivery-mutual': { required: ['title', 'segment'], optional: ['heading', 'body'] },
+  'delivery-stash': { required: ['title', 'segment'], optional: ['heading', 'body'] },
+};
 
 export const COPY_FILES: readonly CopyFile[] = [
   {
     markdown: 'onboarding.md',
     module: 'onboarding.ts',
     parse: (markdown) => ({ ONBOARDING_COPY: parseCopy(markdown, ONBOARDING) }),
+    types: { ONBOARDING_COPY: copySchemaType(ONBOARDING) },
   },
   {
     markdown: 'permissions.md',

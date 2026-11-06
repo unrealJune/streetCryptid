@@ -61,10 +61,22 @@ describe('plain copy', () => {
     ).toEqual({ firstScreen: { title: 'Hi', bodyText: 'One two' } });
   });
 
+  it('leaves out an optional field that is empty or deleted', () => {
+    expect(parseCopy(`${BASE}### note\n   \n`, SCHEMA)).toEqual({
+      firstScreen: { title: 'x', bodyText: 'x' },
+    });
+    expect(parseCopy(BASE, SCHEMA)).toEqual({ firstScreen: { title: 'x', bodyText: 'x' } });
+  });
+
   it.each([
     ['a missing section', '', /no "## first-screen"/],
     ['an unknown section', `${BASE}## second\n`, /second/],
-    ['a missing field', '## first-screen\n### title\nx\n', /body-text/],
+    ['a missing field', '## first-screen\n### title\nx\n', /"### body-text" .* is missing/],
+    [
+      'an emptied required field',
+      '## first-screen\n### title\n\n### body-text\nx\n',
+      /"### title" .* is empty/,
+    ],
     ['an unknown field', `${BASE}### hint\nx\n`, /hint/],
     ['a repeated optional field', `${BASE}### note\na\n### note\nb\n`, /appears twice/],
   ])('refuses %s', (_, markdown, error) => {
@@ -92,6 +104,24 @@ describe('permissions copy', () => {
     expect(copy.steps.bluetooth.note).toEqual({});
   });
 
+  it('leaves out emptied prose, cards and notes', () => {
+    const emptied = step('location')
+      .replace('location title', '')
+      .replace('location lede', '')
+      .replace('location summary', '');
+    const copy = parsePermissionsCopy(
+      `${PAGE.replace('Sub', '')}${emptied}### card: GONE (green)\n\n### note-ios\n\n${step('bluetooth')}`,
+      STEPS
+    );
+    expect(copy.page.subtitle).toBeUndefined();
+    expect(copy.steps.location).toEqual({
+      name: 'location name',
+      action: 'location action',
+      cards: [],
+      note: {},
+    });
+  });
+
   it.each([
     ['a missing step', `${PAGE}${step('location')}`, /no section for "## bluetooth"/],
     ['an unknown step', `${PAGE}${step('location')}${step('bluetooth')}${step('radar')}`, /radar/],
@@ -106,9 +136,9 @@ describe('permissions copy', () => {
       /card: X \(red\)/,
     ],
     [
-      'an empty field',
-      `${PAGE}${step('location', '### note\n\n')}${step('bluetooth')}`,
-      /"note" has no text/,
+      'an emptied action',
+      `${PAGE}${step('location').replace('location action', '')}${step('bluetooth')}`,
+      /"### action" in "location" is empty/,
     ],
     [
       'a repeated field',
