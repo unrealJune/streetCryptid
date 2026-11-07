@@ -593,9 +593,9 @@ is the gossip path, and the delivery story in `infra/otel/README.md` is stash-me
 
 ## 9d. Later phases
 
-- Self-hosted **repeaters**: ciphertext-blind, persistent stash daemons that friends consent to
-  individually, grouped into pools with a signed roster and an invite ACL. Design in
-  [`REPEATERS.md`](./REPEATERS.md).
+- Self-hosted **repeaters**: ciphertext-blind, persistent stash daemons grouped into pools with a
+  signed roster. Anyone may pull from one; each person opts in to having their own trail carried
+  (`invite` or `open` pools). Design in [`REPEATERS.md`](./REPEATERS.md).
 - Operate authenticated relay and mailbox deployments outside the public app repository.
 - IndexedDB-backed docs/outbox persistence for production web parity.
 - Exchange explored-sector summaries so the roster can calculate the designed "shared ground"
