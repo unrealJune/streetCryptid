@@ -3,10 +3,16 @@
 //! Requires the `live` feature: `cargo run --features live`.
 //!
 //! Environment:
-//! * `TRAIL_STASH_SECRET_KEY`   — **required**: 64 lowercase hex chars (32-byte ed25519 seed).
-//!   Gives the stash a stable dialable identity so `EXPO_PUBLIC_TRAIL_STASH_TICKET` survives
-//!   restarts. It is a key, not user data — inject it from a secret manager, never commit it.
-//!   Generate one with `openssl rand -hex 32`.
+//! * `TRAIL_STASH_SECRET_KEY`   — 64 lowercase hex chars (32-byte ed25519 seed). Gives the stash
+//!   a stable dialable identity so `EXPO_PUBLIC_TRAIL_STASH_TICKET` survives restarts. It is a
+//!   key, not user data — inject it from a secret manager, never commit it. Generate one with
+//!   `openssl rand -hex 32`. **Required** for the hosted stash; a repeater (below) without it
+//!   keeps a generated one in `<data dir>/secret.key`.
+//! * `TRAIL_STASH_DATA_DIR`             — run as a **repeater**: the replica, blobs and grant book
+//!   live on disk here and survive restarts. Unset ⇒ the RAM-only hosted stash.
+//! * `TRAIL_STASH_PEERS`                — comma-separated endpoint tickets of sibling repeaters to
+//!   reconcile every held namespace with.
+//! * `TRAIL_STASH_PEER_SYNC_INTERVAL_MIN` — how often (default 5).
 //! * `PORT`                             — control-API port (default 8787).
 //! * `TRAIL_STASH_RETENTION_HOURS`      — latest-fix backstop (default 48, clamped 1–336).
 //! * `TRAIL_STASH_PRUNE_INTERVAL_MIN`   — prune cadence (default 15).
@@ -27,7 +33,7 @@ use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::EnvFilter;
 use trail_stash::config::StashConfig;
 use trail_stash::log_redaction::redact_log_line;
-use trail_stash::node::{default_delivery, StashNode};
+use trail_stash::node::{default_delivery, StashNode, Storage};
 use trail_stash::waker::{EnvCredentials, HttpPushWaker, NoopWaker, PushConfig, Waker};
 
 #[tokio::main]
@@ -35,7 +41,7 @@ async fn main() -> Result<()> {
     // Secret first: the subscriber wants the public key as `service.instance.id`. A missing key
     // therefore reports via anyhow/stderr instead of a log line — same visibility, earlier exit.
     let config = StashConfig::from_env(|k| std::env::var(k).ok());
-    let secret = load_secret_key()?;
+    let secret = load_secret_key(config.data_dir.as_deref())?;
 
     init_tracing(&secret);
 
@@ -45,7 +51,23 @@ async fn main() -> Result<()> {
         );
     }
 
-    let node = StashNode::spawn(
+    let storage = match &config.data_dir {
+        Some(dir) => Storage::Persistent(dir.into()),
+        None => Storage::Memory,
+    };
+    let peers = config
+        .peers
+        .iter()
+        .map(|ticket| {
+            ticket
+                .parse::<iroh_tickets::endpoint::EndpointTicket>()
+                .map(|t| t.endpoint_addr().clone())
+                .map_err(|e| anyhow!("TRAIL_STASH_PEERS holds an invalid endpoint ticket: {e}"))
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    let node = StashNode::spawn_with(
+        storage,
         secret,
         config.retention,
         &config.relay_urls,
@@ -66,6 +88,17 @@ async fn main() -> Result<()> {
     }
 
     tokio::spawn(Arc::clone(&node).run_prune_loop(config.prune_interval_min));
+    if !peers.is_empty() {
+        tracing::info!(
+            "repeater: reconciling with {} sibling(s) every {}m",
+            peers.len(),
+            config.peer_sync_interval_min
+        );
+        tokio::spawn(Arc::clone(&node).run_peer_sync_loop(
+            peers,
+            std::time::Duration::from_secs(config.peer_sync_interval_min * 60),
+        ));
+    }
 
     let serve = tokio::spawn(Arc::clone(&node).serve_control_api(config.port, config.psk.clone()));
 
@@ -77,6 +110,8 @@ async fn main() -> Result<()> {
             res.context("control api task")?.context("control api")?;
         }
     }
+    // A repeater's stores are on disk; close them rather than let the process die mid-write.
+    node.shutdown().await;
     #[cfg(feature = "otel")]
     trail_stash::telemetry::shutdown();
     Ok(())
@@ -150,16 +185,58 @@ fn build_waker() -> Arc<dyn Waker> {
     Arc::new(HttpPushWaker::new(config, Arc::new(EnvCredentials)))
 }
 
-/// Load the required stable identity seed from `TRAIL_STASH_SECRET_KEY`.
-fn load_secret_key() -> Result<SecretKey> {
-    let hex = std::env::var("TRAIL_STASH_SECRET_KEY").map_err(|_| {
-        anyhow!(
+/// Load the stable identity seed: `TRAIL_STASH_SECRET_KEY` when set; otherwise, for a repeater,
+/// `<data dir>/secret.key`, generated on first boot. The hosted stash has no disk and still
+/// requires the variable.
+fn load_secret_key(data_dir: Option<&str>) -> Result<SecretKey> {
+    if let Ok(hex) = std::env::var("TRAIL_STASH_SECRET_KEY") {
+        let bytes = decode_hex_32(hex.trim()).ok_or_else(|| {
+            anyhow!("TRAIL_STASH_SECRET_KEY must be exactly 64 lowercase hex chars")
+        })?;
+        return Ok(SecretKey::from_bytes(&bytes));
+    }
+    let Some(dir) = data_dir else {
+        return Err(anyhow!(
             "TRAIL_STASH_SECRET_KEY is required (64 hex chars). Generate one with: openssl rand -hex 32"
-        )
-    })?;
-    let bytes = decode_hex_32(hex.trim())
-        .ok_or_else(|| anyhow!("TRAIL_STASH_SECRET_KEY must be exactly 64 lowercase hex chars"))?;
-    Ok(SecretKey::from_bytes(&bytes))
+        ));
+    };
+    let path = std::path::Path::new(dir).join("secret.key");
+    match std::fs::read_to_string(&path) {
+        Ok(hex) => {
+            let bytes = decode_hex_32(hex.trim())
+                .ok_or_else(|| anyhow!("{} is not 64 lowercase hex chars", path.display()))?;
+            Ok(SecretKey::from_bytes(&bytes))
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            // The identity IS the repeater: friends' apps hold its endpoint id. Losing this file
+            // means pairing a new repeater, so it is written once and never regenerated over an
+            // unreadable one (that is the arm above, which fails).
+            let secret = SecretKey::generate();
+            let hex: String = secret
+                .to_bytes()
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect();
+            std::fs::create_dir_all(dir).with_context(|| format!("create {dir}"))?;
+            write_private(&path, hex.as_bytes())
+                .with_context(|| format!("write {}", path.display()))?;
+            Ok(secret)
+        }
+        Err(e) => Err(anyhow!("read {}: {e}", path.display())),
+    }
+}
+
+/// Write a file only its owner can read (on Unix; Windows inherits the directory's ACL).
+fn write_private(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options.open(path)?.write_all(bytes)
 }
 
 /// Decode exactly 32 bytes from 64 lowercase hex chars.
