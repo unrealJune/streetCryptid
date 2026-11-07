@@ -37,12 +37,16 @@ pub mod content;
 pub mod log_redaction;
 pub mod mls;
 pub mod push;
+pub mod repeater_proto;
 pub mod retention;
+pub mod roster;
 pub mod subscriptions;
 pub mod waker;
 
 #[cfg(feature = "live")]
 pub mod node;
+#[cfg(feature = "live")]
+pub mod repeater;
 
 // `sc.*` join-key helpers always; the OTLP pipeline only with `otel` (see the module docs).
 #[cfg(feature = "live")]

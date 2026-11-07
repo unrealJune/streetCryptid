@@ -8,10 +8,12 @@
 //!   key, not user data — inject it from a secret manager, never commit it. Generate one with
 //!   `openssl rand -hex 32`. **Required** for the hosted stash; a repeater (below) without it
 //!   keeps a generated one in `<data dir>/secret.key`.
-//! * `TRAIL_STASH_DATA_DIR`             — run as a **repeater**: the replica, blobs and grant book
-//!   live on disk here and survive restarts. Unset ⇒ the RAM-only hosted stash.
-//! * `TRAIL_STASH_PEERS`                — comma-separated endpoint tickets of sibling repeaters to
-//!   reconcile every held namespace with.
+//! * `TRAIL_STASH_DATA_DIR`             — run as a **repeater**: the replica, blobs, grant book and
+//!   roster live on disk here and survive restarts, grants arrive over the
+//!   `streetcryptid/repeater/1` protocol, and the HTTP control API is not served. While unclaimed
+//!   it prints a claim link to stdout. Unset ⇒ the RAM-only hosted stash.
+//! * `TRAIL_STASH_PEERS`                — comma-separated endpoint tickets of extra sibling
+//!   repeaters; the roster's own repeaters are reconciled with regardless.
 //! * `TRAIL_STASH_PEER_SYNC_INTERVAL_MIN` — how often (default 5).
 //! * `PORT`                             — control-API port (default 8787).
 //! * `TRAIL_STASH_RETENTION_HOURS`      — latest-fix backstop (default 48, clamped 1–336).
@@ -88,26 +90,33 @@ async fn main() -> Result<()> {
     }
 
     tokio::spawn(Arc::clone(&node).run_prune_loop(config.prune_interval_min));
-    if !peers.is_empty() {
+
+    if node.repeater().is_some() {
+        // A repeater: grants arrive over `streetcryptid/repeater/1`, from members the roster
+        // carries, so the PSK'd HTTP control API is not served at all.
         tracing::info!(
-            "repeater: reconciling with {} sibling(s) every {}m",
-            peers.len(),
-            config.peer_sync_interval_min
+            "repeater: reconciling with siblings every {}m ({} configured by hand)",
+            config.peer_sync_interval_min,
+            peers.len()
         );
-        tokio::spawn(Arc::clone(&node).run_peer_sync_loop(
+        tokio::spawn(trail_stash::repeater::run_sibling_loop(
+            Arc::clone(&node),
             peers,
             std::time::Duration::from_secs(config.peer_sync_interval_min * 60),
         ));
-    }
-
-    let serve = tokio::spawn(Arc::clone(&node).serve_control_api(config.port, config.psk.clone()));
-
-    // Graceful shutdown on Ctrl-C / SIGTERM. The replica is in RAM with nothing to flush; only
-    // buffered telemetry batches (otel builds) need a final drain.
-    tokio::select! {
-        _ = shutdown_signal() => tracing::info!("stash: shutdown signal received"),
-        res = serve => {
-            res.context("control api task")?.context("control api")?;
+        tokio::spawn(print_claim_links(Arc::clone(&node)));
+        shutdown_signal().await;
+        tracing::info!("repeater: shutdown signal received");
+    } else {
+        let serve =
+            tokio::spawn(Arc::clone(&node).serve_control_api(config.port, config.psk.clone()));
+        // Graceful shutdown on Ctrl-C / SIGTERM. The replica is in RAM with nothing to flush; only
+        // buffered telemetry batches (otel builds) need a final drain.
+        tokio::select! {
+            _ = shutdown_signal() => tracing::info!("stash: shutdown signal received"),
+            res = serve => {
+                res.context("control api task")?.context("control api")?;
+            }
         }
     }
     // A repeater's stores are on disk; close them rather than let the process die mid-write.
@@ -115,6 +124,32 @@ async fn main() -> Result<()> {
     #[cfg(feature = "otel")]
     trail_stash::telemetry::shutdown();
     Ok(())
+}
+
+/// While the repeater is unclaimed, print its claim link to the console — and a fresh one each
+/// time the old one expires. Printed with `println!`, not through tracing: the log pipeline
+/// redacts identifier-length runs, and this link is meant for exactly one reader, at this screen.
+async fn print_claim_links(node: Arc<StashNode>) {
+    let Some(repeater) = node.repeater().cloned() else {
+        return;
+    };
+    let mut last = None;
+    loop {
+        match repeater.claim_secret() {
+            None => return,
+            Some(secret) if Some(secret) != last => {
+                println!(
+                    "\nUnclaimed repeater. Scan or paste this in streetCryptid (Settings > Repeaters > \
+                     Claim) within {} minutes:\n\n  {}\n",
+                    trail_stash::repeater::CLAIM_WINDOW_MS / 60_000,
+                    trail_stash::repeater_proto::claim_link(&node.node_ticket(), &secret)
+                );
+                last = Some(secret);
+            }
+            Some(_) => {}
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+    }
 }
 
 /// Install the global subscriber: redacted console fmt (exactly the pre-telemetry behavior) plus,

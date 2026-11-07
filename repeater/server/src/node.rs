@@ -69,6 +69,7 @@ use crate::auth::{authorize, bearer_token};
 use crate::book::NamespaceBook;
 use crate::content::ContentIndex;
 use crate::mls::{Admission, DeliveryService, EnvelopeRef, PassthroughDelivery};
+use crate::repeater::{Repeater, RepeaterProtocol};
 use crate::retention::{release_decisions, RetentionEntry, RetentionPolicy};
 use crate::subscriptions::{NamespaceId as NsBytes, NamespaceRegistry, PushSubscription};
 use crate::waker::{NoopWaker, Waker};
@@ -106,6 +107,30 @@ pub fn now_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
+}
+
+/// Lowercase hex of a 32-byte id — how the grant book keys namespaces and members.
+pub(crate) fn full_hex(bytes: &[u8; 32]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn parse_hex_32(hex: &str) -> Option<[u8; 32]> {
+    if hex.len() != 64 {
+        return None;
+    }
+    let mut out = [0u8; 32];
+    for (i, byte) in out.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(hex.get(2 * i..2 * i + 2)?, 16).ok()?;
+    }
+    Some(out)
+}
+
+/// The namespace a docs read ticket names.
+pub fn ticket_namespace(ticket: &str) -> Result<NsBytes> {
+    let ticket: DocTicket = ticket
+        .parse()
+        .map_err(|e| anyhow!("parse doc ticket: {e}"))?;
+    Ok(ticket.capability.id().to_bytes())
 }
 
 /// Why an opaque-content upload was or was not stored.
@@ -156,6 +181,8 @@ pub struct StashNode {
     tracked: Mutex<HashMap<Hash, TrackedEntry>>,
     /// Every grant, on disk — `Some` only for [`Storage::Persistent`]. See [`crate::book`].
     book: Option<std::sync::Mutex<NamespaceBook>>,
+    /// The repeater protocol's state — `Some` exactly when `book` is. See [`crate::repeater`].
+    repeater: Option<Arc<Repeater>>,
     /// The node's own background tasks (settle loop, namespace watchers), aborted by
     /// [`StashNode::shutdown`] so their `Arc<Self>` clones release the on-disk stores.
     tasks: std::sync::Mutex<Vec<tokio::task::AbortHandle>>,
@@ -240,6 +267,8 @@ impl StashNode {
         delivery: Arc<dyn DeliveryService>,
         waker: Arc<dyn Waker>,
     ) -> Result<Arc<Self>> {
+        // The repeater signs its certs with the key it answers dials with.
+        let seed = secret.to_bytes();
         let mut endpoint_builder =
             Endpoint::builder(iroh::endpoint::presets::N0).secret_key(secret);
         if !relay_urls.is_empty() {
@@ -268,7 +297,7 @@ impl StashNode {
         // `forget` drops the reference → the next sweep frees the bytes. Without this a RAM-only
         // process would grow for its entire lifetime once it started storing content for real.
         let content = Arc::new(std::sync::Mutex::new(ContentIndex::new()));
-        let (blobs, docs, book): (iroh_blobs::api::Store, Docs, _) = match &storage {
+        let (blobs, docs, book, repeater): (iroh_blobs::api::Store, Docs, _, _) = match &storage {
             Storage::Memory => {
                 let protect = content.clone();
                 let mem = MemStore::new_with_opts(iroh_blobs::store::mem::Options {
@@ -293,7 +322,7 @@ impl StashNode {
                     .spawn(endpoint.clone(), (*mem).clone(), gossip.clone())
                     .await
                     .map_err(|e| anyhow!("spawn docs: {e}"))?;
-                ((*mem).clone(), docs, None)
+                ((*mem).clone(), docs, None, None)
             }
             Storage::Persistent(dir) => {
                 // The same stores the phones use (`modules/iroh-location/rust/src/lib.rs`). No GC
@@ -313,7 +342,13 @@ impl StashNode {
                     .spawn(endpoint.clone(), (*fs).clone(), gossip.clone())
                     .await
                     .map_err(|e| anyhow!("spawn persistent docs: {e}"))?;
-                ((*fs).clone(), docs, Some(std::sync::Mutex::new(book)))
+                let repeater = Arc::new(Repeater::open(dir, &seed)?);
+                (
+                    (*fs).clone(),
+                    docs,
+                    Some(std::sync::Mutex::new(book)),
+                    Some(repeater),
+                )
             }
         };
 
@@ -323,11 +358,17 @@ impl StashNode {
         // and `execute_push` returns success without any acknowledgement — so it could never tell a
         // phone whether it is safe to sleep. The stash pulls instead (see `settle_once`) and
         // reports content presence over the control API, which is a real delivery receipt.
-        let router = Router::builder(endpoint.clone())
+        let mut router = Router::builder(endpoint.clone())
             .accept(iroh_gossip::ALPN, gossip.clone())
             .accept(iroh_blobs::ALPN, BlobsProtocol::new(&blobs, None))
-            .accept(iroh_docs::ALPN, docs.clone())
-            .spawn();
+            .accept(iroh_docs::ALPN, docs.clone());
+        if let Some(repeater) = &repeater {
+            router = router.accept(
+                crate::repeater_proto::ALPN,
+                RepeaterProtocol::new(repeater.clone()),
+            );
+        }
+        let router = router.spawn();
 
         let node = Arc::new(Self {
             endpoint,
@@ -341,14 +382,22 @@ impl StashNode {
             content,
             tracked: Mutex::new(HashMap::new()),
             book,
+            repeater,
             tasks: std::sync::Mutex::new(Vec::new()),
             router,
         });
+        if let Some(repeater) = &node.repeater {
+            repeater.attach(&node);
+        }
         let settle = tokio::spawn(node.clone().run_settle_loop());
         node.track_task(settle.abort_handle());
         if let Err(e) = node.restore().await {
             node.shutdown().await;
             return Err(e);
+        }
+        // A roster that moved on while this node was down is applied once at start.
+        if let Some(state) = node.repeater.as_ref().and_then(|r| r.roster_state()) {
+            node.enforce_roster(&state).await;
         }
         Ok(node)
     }
@@ -363,14 +412,14 @@ impl StashNode {
         fields(namespaces = tracing::field::Empty, adopted = tracing::field::Empty)
     )]
     async fn restore(self: &Arc<Self>) -> Result<()> {
-        let tickets = match &self.book {
-            Some(book) => book.lock().expect("namespace book poisoned").tickets(),
+        let grants = match &self.book {
+            Some(book) => book.lock().expect("namespace book poisoned").grants(),
             None => return Ok(()),
         };
         let mut adopted = 0usize;
-        for ticket in &tickets {
+        for (_, grant) in &grants {
             let ns = self
-                .register(ticket, None)
+                .register_as(&grant.ticket, None, grant.granted_by.as_deref())
                 .await
                 .map_err(|e| anyhow!("reopen a granted namespace: {e}"))?;
             if let Some(doc) = self.handle(ns).await {
@@ -378,10 +427,10 @@ impl StashNode {
             }
         }
         let span = tracing::Span::current();
-        span.record("namespaces", tickets.len());
+        span.record("namespaces", grants.len());
         span.record("adopted", adopted);
         tracing::info!(
-            namespaces = tickets.len(),
+            namespaces = grants.len(),
             adopted,
             "repeater: reopened every granted namespace"
         );
@@ -521,6 +570,120 @@ impl StashNode {
         self.endpoint.addr()
     }
 
+    pub fn endpoint(&self) -> &Endpoint {
+        &self.endpoint
+    }
+
+    /// The repeater state, for a persistent node.
+    pub fn repeater(&self) -> Option<&Arc<Repeater>> {
+        self.repeater.as_ref()
+    }
+
+    /// Carry `ticket`'s namespace on behalf of `member`, who the caller has already checked is
+    /// carried and owns the namespace. `None` when the member is at `limit` namespaces already.
+    pub async fn grant_for(
+        self: &Arc<Self>,
+        member: &[u8; 32],
+        ticket: &str,
+        limit: usize,
+    ) -> Result<Option<NsBytes>> {
+        let member_hex = full_hex(member);
+        let ns_hex = full_hex(&ticket_namespace(ticket)?);
+        {
+            let book = self
+                .book
+                .as_ref()
+                .ok_or_else(|| anyhow!("only a persistent node takes grants"))?
+                .lock()
+                .expect("namespace book poisoned");
+            let already_theirs = book
+                .get(&ns_hex)
+                .is_some_and(|grant| grant.granted_by.as_deref() == Some(member_hex.as_str()));
+            if !already_theirs && book.count_granted_by(&member_hex) >= limit {
+                return Ok(None);
+            }
+        }
+        let ns = self.register_as(ticket, None, Some(&member_hex)).await?;
+        Ok(Some(ns))
+    }
+
+    /// Stop carrying every namespace granted on behalf of someone `state` no longer carries.
+    pub async fn enforce_roster(&self, state: &crate::roster::RosterState) {
+        let carried: HashSet<String> = state.carried.iter().map(full_hex).collect();
+        let doomed: Vec<String> = match &self.book {
+            Some(book) => book
+                .lock()
+                .expect("namespace book poisoned")
+                .grants()
+                .into_iter()
+                .filter(|(_, grant)| {
+                    grant
+                        .granted_by
+                        .as_ref()
+                        .is_some_and(|member| !carried.contains(member))
+                })
+                .map(|(ns, _)| ns)
+                .collect(),
+            None => return,
+        };
+        for ns_hex in doomed {
+            if let Some(ns) = parse_hex_32(&ns_hex) {
+                if let Err(e) = self.release(ns).await {
+                    tracing::warn!(error = %e, "repeater: could not release a namespace");
+                }
+            }
+        }
+    }
+
+    /// Stop carrying a namespace: forget the grant, leave the doc so the live engine stops
+    /// syncing it, and drop its content from the ledger. What is on disk is not deleted here; it
+    /// is unreachable to the ledger and goes when disk GC lands (REPEATERS.md, phase 3).
+    #[tracing::instrument(
+        name = "repeater.release",
+        skip_all,
+        fields(sc.namespace = %crate::telemetry::short_hex(&ns))
+    )]
+    pub async fn release(&self, ns: NsBytes) -> Result<()> {
+        if let Some(book) = &self.book {
+            book.lock()
+                .expect("namespace book poisoned")
+                .remove(&full_hex(&ns))
+                .map_err(|e| anyhow!("{e}"))?;
+        }
+        let doc = self.handles.lock().await.remove(&ns);
+        if let Some(doc) = doc {
+            if let Err(e) = doc.leave().await {
+                tracing::warn!(error = %e, "repeater: leaving a released namespace failed");
+            }
+        }
+        self.registry.forget(&ns);
+        self.content
+            .lock()
+            .expect("content index poisoned")
+            .forget_namespace(&ns);
+        self.tracked
+            .lock()
+            .await
+            .retain(|_, entry| entry.namespace != ns);
+        tracing::info!("repeater: stopped carrying a namespace");
+        Ok(())
+    }
+
+    /// Which of `hashes` are held in full — the receipt a phone reads before it stops waiting.
+    pub async fn have(&self, hashes: &[[u8; 32]]) -> Vec<bool> {
+        let mut present = Vec::with_capacity(hashes.len());
+        for hash in hashes {
+            present.push(
+                self.blobs
+                    .blobs()
+                    .has(Hash::from_bytes(*hash))
+                    .await
+                    .unwrap_or(false),
+            );
+        }
+        present
+    }
+
     /// How many replicated entries are still missing their bytes, and how many are tracked.
     ///
     /// A stash that is doing its job keeps `missing` near zero: it spikes as entries arrive and
@@ -622,6 +785,16 @@ impl StashNode {
         read_ticket: &str,
         subscription: Option<PushSubscription>,
     ) -> Result<NsBytes> {
+        self.register_as(read_ticket, subscription, None).await
+    }
+
+    /// [`Self::register`], recording which carried member the grant is for (persistent nodes).
+    pub(crate) async fn register_as(
+        self: &Arc<Self>,
+        read_ticket: &str,
+        subscription: Option<PushSubscription>,
+        granted_by: Option<&str>,
+    ) -> Result<NsBytes> {
         let ticket: DocTicket = read_ticket
             .parse()
             .map_err(|e| anyhow!("parse doc ticket: {e}"))?;
@@ -659,10 +832,9 @@ impl StashNode {
         // one it reopens after a restart. A book that cannot be written fails the grant: the phone
         // retries, which beats a repeater that forgets what it said yes to.
         if let Some(book) = &self.book {
-            let ns_hex: String = ns_bytes.iter().map(|b| format!("{b:02x}")).collect();
             book.lock()
                 .expect("namespace book poisoned")
-                .insert(&ns_hex, read_ticket)
+                .insert(&full_hex(&ns_bytes), read_ticket, granted_by)
                 .map_err(|e| anyhow!("{e}"))?;
         }
 

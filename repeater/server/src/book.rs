@@ -44,8 +44,19 @@ pub enum BookError {
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct OnDisk {
     version: u32,
-    /// Namespace id (lowercase hex) → the read ticket it was granted with.
-    namespaces: BTreeMap<String, String>,
+    /// Namespace id (lowercase hex) → how it was granted.
+    namespaces: BTreeMap<String, Grant>,
+}
+
+/// One grant: the read ticket, and the member it is carried for.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Grant {
+    pub ticket: String,
+    /// The endpoint (lowercase hex) of the member who granted it over the repeater protocol, and
+    /// whose roster membership it lives and dies with. `None` for a grant made outside the
+    /// roster (the control API, or a test), which nothing revokes.
+    #[serde(default)]
+    pub granted_by: Option<String>,
 }
 
 /// The persisted set of granted namespaces.
@@ -83,15 +94,35 @@ impl NamespaceBook {
         Ok(Self { path, data })
     }
 
-    /// Record a grant. Returns whether the book changed (a new namespace, or a new ticket for a
-    /// known one); an identical re-grant writes nothing.
-    pub fn insert(&mut self, namespace_hex: &str, read_ticket: &str) -> Result<bool, BookError> {
-        if self.data.namespaces.get(namespace_hex).map(String::as_str) == Some(read_ticket) {
+    /// Record a grant. Returns whether the book changed (a new namespace, a new ticket, or a new
+    /// granter for a known one); an identical re-grant writes nothing.
+    pub fn insert(
+        &mut self,
+        namespace_hex: &str,
+        read_ticket: &str,
+        granted_by: Option<&str>,
+    ) -> Result<bool, BookError> {
+        let grant = Grant {
+            ticket: read_ticket.to_string(),
+            granted_by: granted_by.map(str::to_string),
+        };
+        if self.data.namespaces.get(namespace_hex) == Some(&grant) {
             return Ok(false);
         }
         let mut next = self.data.clone();
-        next.namespaces
-            .insert(namespace_hex.to_string(), read_ticket.to_string());
+        next.namespaces.insert(namespace_hex.to_string(), grant);
+        write_atomic(&self.path, &next)?;
+        self.data = next;
+        Ok(true)
+    }
+
+    /// Forget a namespace. Returns whether it was there.
+    pub fn remove(&mut self, namespace_hex: &str) -> Result<bool, BookError> {
+        if !self.data.namespaces.contains_key(namespace_hex) {
+            return Ok(false);
+        }
+        let mut next = self.data.clone();
+        next.namespaces.remove(namespace_hex);
         write_atomic(&self.path, &next)?;
         self.data = next;
         Ok(true)
@@ -99,7 +130,34 @@ impl NamespaceBook {
 
     /// Every granted namespace's read ticket, in a stable order.
     pub fn tickets(&self) -> Vec<String> {
-        self.data.namespaces.values().cloned().collect()
+        self.data
+            .namespaces
+            .values()
+            .map(|grant| grant.ticket.clone())
+            .collect()
+    }
+
+    /// Every grant, keyed by namespace id (hex).
+    pub fn grants(&self) -> Vec<(String, Grant)> {
+        self.data
+            .namespaces
+            .iter()
+            .map(|(ns, grant)| (ns.clone(), grant.clone()))
+            .collect()
+    }
+
+    /// The grant for one namespace, if any.
+    pub fn get(&self, namespace_hex: &str) -> Option<&Grant> {
+        self.data.namespaces.get(namespace_hex)
+    }
+
+    /// How many namespaces are carried for `member` (hex).
+    pub fn count_granted_by(&self, member_hex: &str) -> usize {
+        self.data
+            .namespaces
+            .values()
+            .filter(|grant| grant.granted_by.as_deref() == Some(member_hex))
+            .count()
     }
 
     pub fn len(&self) -> usize {
@@ -154,8 +212,8 @@ mod tests {
     fn grants_survive_a_reload() {
         let path = scratch("reload").join("namespaces.json");
         let mut book = NamespaceBook::load(&path).unwrap();
-        assert!(book.insert("aa", "docaaa").unwrap());
-        assert!(book.insert("bb", "docbbb").unwrap());
+        assert!(book.insert("aa", "docaaa", None).unwrap());
+        assert!(book.insert("bb", "docbbb", Some("m1")).unwrap());
         let book = NamespaceBook::load(&path).unwrap();
         assert_eq!(book.tickets(), vec!["docaaa", "docbbb"]);
     }
@@ -164,14 +222,29 @@ mod tests {
     fn a_regrant_replaces_and_an_identical_one_writes_nothing() {
         let path = scratch("regrant").join("namespaces.json");
         let mut book = NamespaceBook::load(&path).unwrap();
-        assert!(book.insert("aa", "docold").unwrap());
-        assert!(!book.insert("aa", "docold").unwrap());
-        assert!(book.insert("aa", "docnew").unwrap());
+        assert!(book.insert("aa", "docold", None).unwrap());
+        assert!(!book.insert("aa", "docold", None).unwrap());
+        assert!(book.insert("aa", "docnew", None).unwrap());
         assert_eq!(book.len(), 1);
         assert_eq!(
             NamespaceBook::load(&path).unwrap().tickets(),
             vec!["docnew"]
         );
+    }
+
+    #[test]
+    fn grants_remember_their_member_and_can_be_removed() {
+        let path = scratch("member").join("namespaces.json");
+        let mut book = NamespaceBook::load(&path).unwrap();
+        book.insert("aa", "docaaa", Some("m1")).unwrap();
+        book.insert("bb", "docbbb", Some("m1")).unwrap();
+        book.insert("cc", "docccc", None).unwrap();
+        assert_eq!(book.count_granted_by("m1"), 2);
+        assert!(book.remove("aa").unwrap());
+        assert!(!book.remove("aa").unwrap());
+        let book = NamespaceBook::load(&path).unwrap();
+        assert_eq!(book.count_granted_by("m1"), 1);
+        assert_eq!(book.get("cc").unwrap().granted_by, None);
     }
 
     #[test]

@@ -49,6 +49,11 @@ otel = [
 serde = { version = "1", features = ["derive"] }
 serde_json = "1" # push-payload construction (pure, tested) + live JSON
 thiserror = "2"
+# Repeater roster signatures and wire (pure, tested without a node). ed25519-dalek 2 is the same
+# major as streetCryptid's core, which signs the ops this crate verifies.
+ed25519-dalek = "2"
+postcard = { version = "1", default-features = false, features = ["alloc"] }
+blake3 = "1"
 
 # --- live node only (see `live` feature). Versions match modules/iroh-location/rust so the
 # stash speaks the exact same docs/blobs/gossip protocols as the phones. ---
