@@ -205,7 +205,7 @@ export default function MapScreenBody() {
     [friends, theme.chrome.green]
   );
   // The roster carries EVERY friend, not just the ones with a fix — a friend who
-  // has gone dark should dim in place rather than silently vanish from the list.
+  // has gone dark should dim rather than silently vanish from the list.
   const rosterFriends = useMemo<MapRosterFriend[]>(
     () =>
       friends.map((presence) => ({
