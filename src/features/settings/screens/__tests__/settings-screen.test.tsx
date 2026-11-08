@@ -33,6 +33,15 @@ jest.mock('@/features/social/hooks/use-location-sharing', () => ({
   useLocationSharing: () => ({ snapshot, refreshPairing: jest.fn() }),
 }));
 
+const repeaters: { status: string; sections: unknown } = {
+  status: 'ready',
+  sections: { mine: null, carryingMe: [], others: [] },
+};
+
+jest.mock('@/features/repeaters/hooks/use-repeaters', () => ({
+  useRepeaters: () => repeaters,
+}));
+
 // A real scheme: `useTheme()` now retints every chrome token from the selected palette, so the
 // menu cannot render against a name-only stub.
 jest.mock('@/features/map/hooks/use-map-color-scheme', () => ({
@@ -62,6 +71,7 @@ describe('SettingsScreen', () => {
     expect(rows().map((row) => row.href)).toEqual([
       '/settings/delivery',
       '/settings/pairing',
+      '/settings/repeaters',
       '/settings/appearance',
       '/settings/advanced',
       '/settings/app-data',
@@ -102,6 +112,27 @@ describe('SettingsScreen', () => {
     expect(rows().find((row) => row.href === '/settings/pairing')?.value).toBe('2 friends');
 
     snapshot.friends = [];
+  });
+
+  it('summarises repeaters, and leaves them out of a build that has none', () => {
+    expect(rows().find((row) => row.href === '/settings/repeaters')?.value).toBe('None');
+
+    act(() => renderer.unmount());
+    repeaters.sections = {
+      mine: { machines: ['aaaaaa', 'bbbbbb'], carriesMe: true },
+      carryingMe: [{ machines: ['cccccc'], carriesMe: true }],
+      others: [],
+    };
+    expect(rows().find((row) => row.href === '/settings/repeaters')?.value).toBe(
+      '2 machines · carried by 2'
+    );
+
+    act(() => renderer.unmount());
+    repeaters.status = 'unsupported';
+    expect(rows().some((row) => row.href === '/settings/repeaters')).toBe(false);
+
+    repeaters.status = 'ready';
+    repeaters.sections = { mine: null, carryingMe: [], others: [] };
   });
 
   it('names the route that is actually in use, not the one that was asked for', () => {

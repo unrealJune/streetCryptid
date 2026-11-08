@@ -478,7 +478,11 @@ is this one.
      phone.
    - A `repeaters` collection outside `friends`, with the invariant test.
    - `RepeaterCard` on the profile namespace, with cross-friend vouching.
-   - The claim flow, and the Enrol prompt at pairing and in the repeater menu.
+   - Built (UI): Settings → Repeaters (`src/features/repeaters`). My repeaters (claim by pasted
+     link, the policy for the first machine, carry my trail), Carrying my trail, and rosters this
+     phone knows; the Settings menu summarises them. A build without the calls hides the entry.
+   - Not yet: Available through friends and the Enrol prompt at pairing (both need
+     `RepeaterCard`), inviting, and scanning the link as a QR code.
    - Delivery: pushes to rosters I am enrolled in, pulls from friends' repeaters, the
      receipt-gated early break, isolation, and telemetry.
 3. **Operations.**

@@ -1299,6 +1299,50 @@ class IrohLocationModule : Module() {
         n.grantStashNow()
       }
 
+    // ── Repeaters — see docs/social/REPEATERS.md ──────────────────────────────────────────
+
+    /// Claim the repeater whose console printed `link` into the roster this phone owns, and list
+    /// it there. Refused unless its signed cert names this phone, this roster and the machine that
+    /// answered (`repeater.rs`).
+    AsyncFunction("claimRepeater") Coroutine
+      { link: String, open: Boolean, carryMe: Boolean ->
+        val n = node ?: throw IllegalStateException("call createNode first")
+        val c = n.claimRepeater(link, open, carryMe)
+        mapOf("rosterId" to c.rosterId, "repeaterId" to c.repeaterId)
+      }
+
+    /// Every roster this phone knows, for Settings → Repeaters.
+    AsyncFunction("repeaterRosters") Coroutine
+      { ->
+        val n = node ?: throw IllegalStateException("call createNode first")
+        n.repeaterRosters().map { r ->
+          mapOf(
+            "rosterId" to r.rosterId,
+            "owner" to r.owner,
+            "mine" to r.mine,
+            "open" to r.open,
+            "carriesMe" to r.carriesMe,
+            "repeaters" to r.repeaters,
+            "carried" to r.carried.toLong(),
+          )
+        }
+      }
+
+    /// Have a roster carry our trail, or stop. Resolves whether it carries us now.
+    AsyncFunction("setRepeaterCarried") Coroutine
+      { rosterId: String, carry: Boolean ->
+        val n = node ?: throw IllegalStateException("call createNode first")
+        n.setRepeaterCarried(rosterId, carry)
+      }
+
+    /// Ask every repeater that carries us to carry our namespaces now. Resolves at once; the
+    /// dials run on a native task and report as a `repeater.grant` span.
+    AsyncFunction("grantRepeaters") Coroutine
+      { ->
+        val n = node ?: throw IllegalStateException("call createNode first")
+        n.grantRepeatersNow()
+      }
+
     // ── Profiles — see docs/social/ARCHITECTURE.md §3 ─────────────────────────────────────
 
     AsyncFunction("publishProfile") Coroutine

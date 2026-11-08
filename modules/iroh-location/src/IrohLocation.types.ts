@@ -4,6 +4,29 @@
  * sources). Keys cross the bridge as lowercase hex strings.
  */
 
+/** A repeater this phone just claimed, and the roster it joined. Lowercase hex ids. */
+export interface NativeRepeaterClaim {
+  rosterId: string;
+  repeaterId: string;
+}
+
+/** One roster this phone knows. Mirrors Rust's `RepeaterRoster`; ids are lowercase hex. */
+export interface NativeRepeaterRoster {
+  rosterId: string;
+  /** The owner's endpoint id: a phone, and so possibly a friend. */
+  owner: string;
+  /** This phone owns it. */
+  mine: boolean;
+  /** Anyone may enrol, rather than only whoever an inviter invited. */
+  open: boolean;
+  /** It carries this phone's own trail: the one opt-in there is. */
+  carriesMe: boolean;
+  /** Endpoint ids of the machines in it. */
+  repeaters: string[];
+  /** How many people's trails it carries. */
+  carried: number;
+}
+
 /** What one {@link IrohLocationApi.pushTelemetryNow} did. Mirrors Rust's `TelemetryPush`. */
 export interface NativeTelemetryPush {
   /** An exporter is configured; `false` in a build without telemetry. */
@@ -1181,6 +1204,21 @@ export interface IrohLocationApi {
    * where the JS HTTP grant is still the only one.
    */
   grantStash?(): Promise<void>;
+
+  // ── Repeaters (docs/social/REPEATERS.md). Optional: absent on binaries that predate them. ───
+  /**
+   * Claim the repeater whose console printed `link` (`streetcryptid-repeater:…`) into the roster
+   * this phone owns, creating it (`open` or invite-only) if there is none. `carryMe` also enrols
+   * this phone. Rejects unless the repeater's signed cert names this phone, this roster and the
+   * machine that answered.
+   */
+  claimRepeater?(link: string, open: boolean, carryMe: boolean): Promise<NativeRepeaterClaim>;
+  /** Every roster this phone knows. */
+  repeaterRosters?(): Promise<NativeRepeaterRoster[]>;
+  /** Have a roster carry our trail, or stop. Resolves whether it carries us now. */
+  setRepeaterCarried?(rosterId: string, carry: boolean): Promise<boolean>;
+  /** Ask every repeater that carries us to carry our namespaces now. Resolves at once. */
+  grantRepeaters?(): Promise<void>;
 
   // ── Developer telemetry (dev/preview builds; see src/features/dev/telemetry in the app) ─────
   /**

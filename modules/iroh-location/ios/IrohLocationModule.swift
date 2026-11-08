@@ -1128,6 +1128,41 @@ public final class IrohLocationModule: Module {
       await node.grantStashNow()
     }
 
+    // ── Repeaters — see docs/social/REPEATERS.md ────────────────────────────────────────────
+
+    // Claim the repeater whose console printed `link` into the roster this phone owns, and list it
+    // there. Refused unless its signed cert names this phone, this roster and the machine that
+    // answered (`repeater.rs`).
+    AsyncFunction("claimRepeater") { (link: String, open: Bool, carryMe: Bool) async throws -> [String: Any] in
+      guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
+      let c = try await node.claimRepeater(link: link, open: open, carryMe: carryMe)
+      return ["rosterId": c.rosterId, "repeaterId": c.repeaterId]
+    }
+
+    // Every roster this phone knows, for Settings → Repeaters.
+    AsyncFunction("repeaterRosters") { () async throws -> [[String: Any]] in
+      guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
+      return try await node.repeaterRosters().map { r in
+        [
+          "rosterId": r.rosterId, "owner": r.owner, "mine": r.mine, "open": r.open,
+          "carriesMe": r.carriesMe, "repeaters": r.repeaters, "carried": Double(r.carried),
+        ]
+      }
+    }
+
+    // Have a roster carry our trail, or stop. Resolves whether it carries us now.
+    AsyncFunction("setRepeaterCarried") { (rosterId: String, carry: Bool) async throws -> Bool in
+      guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
+      return try await node.setRepeaterCarried(rosterId: rosterId, carry: carry)
+    }
+
+    // Ask every repeater that carries us to carry our namespaces now. Resolves at once; the dials
+    // run on a native task and report as a `repeater.grant` span.
+    AsyncFunction("grantRepeaters") { () async throws in
+      guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
+      await node.grantRepeatersNow()
+    }
+
     Function("configureTelemetry") { (endpoint: String, instanceId: String) -> Bool in
       TelemetryConfigurator.apply(endpoint: endpoint, instanceId: instanceId, remember: true)
     }

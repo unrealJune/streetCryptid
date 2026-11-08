@@ -3,6 +3,8 @@ import { NativeModule, requireNativeModule } from 'expo-modules-core';
 import { requireIrohRelayRuntimeConfig } from './relay-config';
 import type {
   NativeIngestOutcome,
+  NativeRepeaterClaim,
+  NativeRepeaterRoster,
   NativeTelemetryPush,
   IrohLocationEvents,
   IrohLocationApi,
@@ -424,6 +426,21 @@ export declare class IrohLocationNativeModule
    * where the JS HTTP grant is still the only one.
    */
   grantStash?(): Promise<void>;
+
+  // ── Repeaters (docs/social/REPEATERS.md). Optional: absent on binaries that predate them. ───
+  /**
+   * Claim the repeater whose console printed `link` (`streetcryptid-repeater:…`) into the roster
+   * this phone owns, creating it (`open` or invite-only) if there is none. `carryMe` also enrols
+   * this phone. Rejects unless the repeater's signed cert names this phone, this roster and the
+   * machine that answered.
+   */
+  claimRepeater?(link: string, open: boolean, carryMe: boolean): Promise<NativeRepeaterClaim>;
+  /** Every roster this phone knows. */
+  repeaterRosters?(): Promise<NativeRepeaterRoster[]>;
+  /** Have a roster carry our trail, or stop. Resolves whether it carries us now. */
+  setRepeaterCarried?(rosterId: string, carry: boolean): Promise<boolean>;
+  /** Ask every repeater that carries us to carry our namespaces now. Resolves at once. */
+  grantRepeaters?(): Promise<void>;
 
   // Optional for compatibility with installed iOS binaries built before the telemetry API.
   configureTelemetry?(endpoint: string, instanceId: string): Promise<boolean>;
