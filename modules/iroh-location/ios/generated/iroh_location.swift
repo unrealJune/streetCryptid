@@ -1767,6 +1767,18 @@ public protocol LocationNodeProtocol: AnyObject, Sendable {
     func recvSecret()  -> Data
     
     /**
+     * Take a machine out of the roster this phone owns. It is told too, so it stops serving it.
+     */
+    func removeRepeater(rosterId: String, repeaterId: String) async throws 
+    
+    /**
+     * Stop the roster this phone owns carrying `member`'s trail. Each repeater releases what it
+     * held for them as the removal reaches it, and they cannot enrol again, even in an open
+     * roster, until someone invites them after this.
+     */
+    func removeRepeaterMember(rosterId: String, member: String) async throws 
+    
+    /**
      * Every roster this phone knows, for the repeater settings.
      */
     func repeaterRosters() async throws  -> [RepeaterRoster]
@@ -1856,6 +1868,12 @@ public protocol LocationNodeProtocol: AnyObject, Sendable {
      * one asleep honours it when it next hears from a sibling or from us.
      */
     func setRepeaterCarried(rosterId: String, carry: Bool) async throws  -> Bool
+    
+    /**
+     * Set who may enrol in the roster this phone owns (`open`, or invite-only) from now on.
+     * Nobody already carried is dropped.
+     */
+    func setRepeaterPolicy(rosterId: String, `open`: Bool) async throws 
     
     /**
      * Replace the set of friends this device seals location envelopes for.
@@ -3695,6 +3713,48 @@ open func recvSecret() -> Data  {
 }
     
     /**
+     * Take a machine out of the roster this phone owns. It is told too, so it stops serving it.
+     */
+open func removeRepeater(rosterId: String, repeaterId: String)async throws   {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_iroh_location_fn_method_locationnode_remove_repeater(
+                    self.uniffiCloneHandle(),
+                    FfiConverterString.lower(rosterId),FfiConverterString.lower(repeaterId)
+                )
+            },
+            pollFunc: ffi_iroh_location_rust_future_poll_void,
+            completeFunc: ffi_iroh_location_rust_future_complete_void,
+            freeFunc: ffi_iroh_location_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: FfiConverterTypeLocationError_lift
+        )
+}
+    
+    /**
+     * Stop the roster this phone owns carrying `member`'s trail. Each repeater releases what it
+     * held for them as the removal reaches it, and they cannot enrol again, even in an open
+     * roster, until someone invites them after this.
+     */
+open func removeRepeaterMember(rosterId: String, member: String)async throws   {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_iroh_location_fn_method_locationnode_remove_repeater_member(
+                    self.uniffiCloneHandle(),
+                    FfiConverterString.lower(rosterId),FfiConverterString.lower(member)
+                )
+            },
+            pollFunc: ffi_iroh_location_rust_future_poll_void,
+            completeFunc: ffi_iroh_location_rust_future_complete_void,
+            freeFunc: ffi_iroh_location_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: FfiConverterTypeLocationError_lift
+        )
+}
+    
+    /**
      * Every roster this phone knows, for the repeater settings.
      */
 open func repeaterRosters()async throws  -> [RepeaterRoster]  {
@@ -3923,6 +3983,27 @@ open func setRepeaterCarried(rosterId: String, carry: Bool)async throws  -> Bool
             completeFunc: ffi_iroh_location_rust_future_complete_i8,
             freeFunc: ffi_iroh_location_rust_future_free_i8,
             liftFunc: FfiConverterBool.lift,
+            errorHandler: FfiConverterTypeLocationError_lift
+        )
+}
+    
+    /**
+     * Set who may enrol in the roster this phone owns (`open`, or invite-only) from now on.
+     * Nobody already carried is dropped.
+     */
+open func setRepeaterPolicy(rosterId: String, `open`: Bool)async throws   {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_iroh_location_fn_method_locationnode_set_repeater_policy(
+                    self.uniffiCloneHandle(),
+                    FfiConverterString.lower(rosterId),FfiConverterBool.lower(`open`)
+                )
+            },
+            pollFunc: ffi_iroh_location_rust_future_poll_void,
+            completeFunc: ffi_iroh_location_rust_future_complete_void,
+            freeFunc: ffi_iroh_location_rust_future_free_void,
+            liftFunc: { $0 },
             errorHandler: FfiConverterTypeLocationError_lift
         )
 }
@@ -8684,6 +8765,10 @@ public struct RepeaterRoster: Equatable, Hashable {
      * How many people's trails it carries.
      */
     public var carried: UInt32
+    /**
+     * Whose trails it carries (endpoint ids), the owner included when enrolled.
+     */
+    public var members: [String]
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
@@ -8699,7 +8784,10 @@ public struct RepeaterRoster: Equatable, Hashable {
          */carriesMe: Bool, repeaters: [String], 
         /**
          * How many people's trails it carries.
-         */carried: UInt32) {
+         */carried: UInt32, 
+        /**
+         * Whose trails it carries (endpoint ids), the owner included when enrolled.
+         */members: [String]) {
         self.rosterId = rosterId
         self.owner = owner
         self.mine = mine
@@ -8707,6 +8795,7 @@ public struct RepeaterRoster: Equatable, Hashable {
         self.carriesMe = carriesMe
         self.repeaters = repeaters
         self.carried = carried
+        self.members = members
     }
 
     
@@ -8731,7 +8820,8 @@ public struct FfiConverterTypeRepeaterRoster: FfiConverterRustBuffer {
                 open: FfiConverterBool.read(from: &buf), 
                 carriesMe: FfiConverterBool.read(from: &buf), 
                 repeaters: FfiConverterSequenceString.read(from: &buf), 
-                carried: FfiConverterUInt32.read(from: &buf)
+                carried: FfiConverterUInt32.read(from: &buf), 
+                members: FfiConverterSequenceString.read(from: &buf)
         )
     }
 
@@ -8743,6 +8833,7 @@ public struct FfiConverterTypeRepeaterRoster: FfiConverterRustBuffer {
         FfiConverterBool.write(value.carriesMe, into: &buf)
         FfiConverterSequenceString.write(value.repeaters, into: &buf)
         FfiConverterUInt32.write(value.carried, into: &buf)
+        FfiConverterSequenceString.write(value.members, into: &buf)
     }
 }
 
@@ -11986,6 +12077,12 @@ private let initializationResult: InitializationResult = {
     if (uniffi_iroh_location_checksum_method_locationnode_recv_secret() != 13424) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_iroh_location_checksum_method_locationnode_remove_repeater() != 54199) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_iroh_location_checksum_method_locationnode_remove_repeater_member() != 58081) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_iroh_location_checksum_method_locationnode_repeater_rosters() != 50455) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -12014,6 +12111,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_method_locationnode_set_repeater_carried() != 33375) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_iroh_location_checksum_method_locationnode_set_repeater_policy() != 42971) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_method_locationnode_set_sharing_recipients() != 14453) {
