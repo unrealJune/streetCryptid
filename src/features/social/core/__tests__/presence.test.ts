@@ -33,18 +33,18 @@ const fix = (lat: number, lon: number, ts: number): LocationFix => ({
 });
 
 describe('friend presence', () => {
-  it('carries the deliverer alongside the transport label', () => {
+  it('carries the serving peer alongside the delivery label', () => {
     const peer = 'bb'.repeat(32);
     const [presence] = buildFriendPresence({
       friends: [friend('aabb', '@moth')],
       latest: [
-        { author: 'aabb', fix: fix(1, 2, 900), receivedAt: 900, via: 'relay', viaPeer: peer },
+        { author: 'aabb', fix: fix(1, 2, 900), receivedAt: 900, via: 'docs', viaPeer: peer },
       ],
       selfFix: null,
       now: 1000,
     });
 
-    expect(presence.via).toBe('relay');
+    expect(presence.via).toBe('docs');
     expect(presence.viaPeer).toBe(peer);
   });
 

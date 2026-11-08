@@ -138,7 +138,6 @@ export function FriendDetailIsland({
     (peers ?? []).map((peer) => [peer.endpointId.trim().toLowerCase(), peer.handle])
   );
   const delivery = describeDelivery({
-    via: presence.via,
     viaPeer: presence.viaPeer,
     author: endpointId,
     authorHandle: presence.friend.handle,
@@ -452,20 +451,19 @@ export function FriendDetailIsland({
 function formatAckAge(ack: RatchetActivity['fix'] | undefined): string {
   if (!ack) return 'Never';
   const ageMs = Math.max(0, Date.now() - ack.receivedAt);
-  const path = ack.source === 'live' ? 'live' : 'sync';
-  if (ageMs < 60_000) return `Now · ${path}`;
+  if (ageMs < 60_000) return 'Now';
   const minutes = Math.floor(ageMs / 60_000);
-  if (minutes < 60) return `${minutes} min ago · ${path}`;
+  if (minutes < 60) return `${minutes} min ago`;
   const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours} hr ago · ${path}`;
+  if (hours < 24) return `${hours} hr ago`;
   const days = Math.floor(hours / 24);
-  return `${days} day${days === 1 ? '' : 's'} ago · ${path}`;
+  return `${days} day${days === 1 ? '' : 's'} ago`;
 }
 
 /**
  * SIGNAL PATH, which answers two different questions and so is one row that opens.
  *
- * The badge says HOW the last hop happened; pressing says WHO performed it. It stays folded away
+ * The badge says whether a serving peer was recorded; pressing says WHO it was. It stays folded away
  * by default because the honest answer is often "a device you haven't paired with" — true, and not
  * what a glance at a friend is for.
  */

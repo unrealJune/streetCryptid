@@ -13,7 +13,6 @@ import expo.modules.kotlin.functions.Coroutine
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
 import java.lang.ref.WeakReference
-import java.util.UUID
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -27,16 +26,14 @@ import uniffi.iroh_location.BatteryState
 import uniffi.iroh_location.BleCapabilities
 import uniffi.iroh_location.BlePeer
 import uniffi.iroh_location.BumpResolution
-import uniffi.iroh_location.ControlMsg
 import uniffi.iroh_location.DeliveryConfig
-import uniffi.iroh_location.FixListener
 import uniffi.iroh_location.RatchetEvent
 import uniffi.iroh_location.RecipientKey
+import uniffi.iroh_location.ReplicaListener
 import uniffi.iroh_location.LocationFix
 import uniffi.iroh_location.LocationNode
 import uniffi.iroh_location.NodeHolder
 import uniffi.iroh_location.PairEvent
-import uniffi.iroh_location.PeerDial
 import uniffi.iroh_location.PairEventKind
 import uniffi.iroh_location.PairInvite
 import uniffi.iroh_location.PairResult
@@ -46,7 +43,6 @@ import uniffi.iroh_location.ProfileView
 import uniffi.iroh_location.SasChallenge
 import uniffi.iroh_location.SasRoleKind
 import uniffi.iroh_location.IngestOutcome
-import uniffi.iroh_location.Subscription
 import uniffi.iroh_location.TransportConfig
 import uniffi.iroh_location.PeerTransportDiagnostic
 import uniffi.iroh_location.TransportAddressDiagnostic
@@ -54,7 +50,6 @@ import uniffi.iroh_location.TransportDiagnostics
 import uniffi.iroh_location.decodeMvtBundle
 import uniffi.iroh_location.decodeMvtTile
 import uniffi.iroh_location.decodePairInvite
-import uniffi.iroh_location.deriveTopic
 import uniffi.iroh_location.encodePairInvite
 import uniffi.iroh_location.endpointIdFromTicket
 import uniffi.iroh_location.flushTelemetry
@@ -96,26 +91,6 @@ private fun fixToMap(fix: LocationFix): Map<String, Any> = buildMap {
   fix.state?.let { put("state", it.toInt()) }
   fix.publishedDeltaS?.let { put("publishedDeltaS", it.toLong()) }
 }
-
-/** Build a control message from the JS object (see `NativeControlMsg`). `nonce` crosses as hex. */
-private fun controlMsgOf(msg: Map<String, Any?>): ControlMsg =
-  ControlMsg(
-    ((msg["v"] as? Number)?.toInt() ?: 1).toUByte(),
-    ((msg["kind"] as? Number)?.toInt() ?: 0).toUByte(),
-    ((msg["ts"] as? Number)?.toLong() ?: 0L).toULong(),
-    ((msg["ttlMs"] as? Number)?.toLong() ?: 0L).toUInt(),
-    (msg["nonce"] as? String).orEmpty().hexToBytes(),
-  )
-
-/** Render a control message back to the JS shape. */
-private fun controlMsgToMap(msg: ControlMsg): Map<String, Any> =
-  mapOf(
-    "v" to msg.v.toInt(),
-    "kind" to msg.kind.toInt(),
-    "ts" to msg.ts.toLong(),
-    "ttlMs" to msg.ttlMs.toLong(),
-    "nonce" to msg.nonce.toHex(),
-  )
 
 // ── JS-facing conversions: byte arrays → lowercase hex, U64 → JS number ──────────────────────
 
@@ -332,12 +307,17 @@ class IrohLocationModule : Module() {
         if (generation != cachedGeneration) {
           cachedNode = NodeStorage.host.current()
           cachedGeneration = generation
+          replicaBridge?.let { cachedNode?.watchReplica(it) }
         }
         return cachedNode
       }
     }
 
-  private val subs = mutableMapOf<String, Subscription>()
+  /**
+   * Set while JS wants replica notifications. Re-attached to every node generation, because a
+   * restart or replacement builds a new `LocationNode` that knows no listener. Guarded by `nodeLock`.
+   */
+  private var replicaBridge: ReplicaBridge? = null
   private var multicastLock: WifiManager.MulticastLock? = null
   private var secretsStore: KeystoreDeviceSecrets? = null
 
@@ -492,16 +472,14 @@ class IrohLocationModule : Module() {
   /**
    * Undo what this module set up AROUND the node — never the node itself, which is the host's.
    *
-   * Destroying the subscription handles drops this module's references: a friend's topic then
-   * leaves the swarm, and the own-topic subscription stays alive in the node's slot for the
-   * background runtime, silenced by the host once no app holds the node.
+   * The host detaches the replica listener itself once no app holds the node; this only forgets
+   * that JS asked for one.
    */
   private fun clearModuleRuntime() {
-    subs.values.forEach { runCatching { it.destroy() } }
-    subs.clear()
     unregisterNetworkCallback()
     releaseMulticastLock()
     synchronized(nodeLock) {
+      replicaBridge = null
       cachedNode = null
       cachedGeneration = ULong.MAX_VALUE
     }
@@ -514,55 +492,23 @@ class IrohLocationModule : Module() {
         ?: appContext.currentActivity?.applicationContext
     ) { "IrohLocation requires an Android application context" }
 
-  // Bridges inbound Rust gossip events to the JS EventEmitter.
-  private inner class EventBridge(private val subscriptionId: String) : FixListener {
-    // `backfill` is true when the fix arrived via durable range-reconciliation (iroh-docs
-    // catch-up) rather than the live gossip path. `via` names the last hop into this device
-    // (`relay` | `direct` | `lan` | `ble` | `live` | `docs` | `stash`); `viaPeer` names the
-    // device that performed it, which is not necessarily the fix's author.
-    override fun onFix(
-      author: ByteArray,
-      seq: ULong,
-      fix: LocationFix,
-      backfill: Boolean,
-      via: String,
-      viaPeer: String?,
-    ) {
-      sendEvent(
-        "onFix",
-        mapOf(
-          "author" to author.toHex(),
-          "seq" to seq.toLong(),
-          "fix" to fixToMap(fix),
-          "backfill" to backfill,
-          "via" to via,
-          "viaPeer" to viaPeer,
-        ),
-      )
+  /**
+   * Tells JS which friends' replica slots just became readable (`ReplicaListener` in `lib.rs`).
+   *
+   * Carries authors only. The entries stay in the replica and are read back with `readLatest`, so
+   * a notification dropped while no app is mounted loses nothing but latency.
+   */
+  private inner class ReplicaBridge : ReplicaListener {
+    override fun onFriendEntries(authors: List<ByteArray>) {
+      sendEvent("onReplicaChanged", mapOf("authors" to authors.map { it.toHex() }))
     }
-
-    override fun onOpaque(author: ByteArray, seq: ULong) {
-      sendEvent(
-        "onOpaque",
-        mapOf(
-          "author" to author.toHex(),
-          "seq" to seq.toLong(),
-          "kind" to if (author.isEmpty()) "opaque" else "null",
-        ),
-      )
-    }
-
-    override fun onStatus(status: String) {
-      sendEvent("onStatus", mapOf("subscriptionId" to subscriptionId, "status" to status))
-    }
-
   }
 
   override fun definition() = ModuleDefinition {
     Name("IrohLocation")
     // `onNativeFix` is the mounted-app handoff: while the app is wired the foreground service hands
     // its captures here rather than running them itself. See `IrohLocationModule.handOffCapture`.
-    Events("onFix", "onOpaque", "onStatus", "onSync", "onNativeFix", "onFriendsPulled")
+    Events("onReplicaChanged", "onNativeFix", "onFriendsPulled")
 
     OnCreate {
       val context = checkNotNull(
@@ -603,7 +549,6 @@ class IrohLocationModule : Module() {
     AsyncFunction("createNode") Coroutine
       { identityHex: String?, recvHex: String? ->
         val context = applicationContextOrThrow()
-        val generationBefore = NodeStorage.host.generation()
         // Adopts the live node when the identity matches — including one the foreground service
         // built and started while no JS was alive — and builds otherwise. Never refused.
         val n =
@@ -613,12 +558,9 @@ class IrohLocationModule : Module() {
             NodeStorage.dataRoot(context),
             NodeStorage.stateRoot(context),
           )
-        val heldBefore = synchronized(nodeLock) { leases.also { leases += 1 } }
-        // A replacement (a different identity) invalidates every subscription made on the old node.
-        if (heldBefore > 0 && NodeStorage.host.generation() != generationBefore) {
-          subs.values.forEach { runCatching { it.destroy() } }
-          subs.clear()
-        }
+        synchronized(nodeLock) { leases += 1 }
+        // A replacement (a different identity) is a new node: the getter re-attaches the watch.
+        node
         mapOf(
           "endpointId" to n.endpointId().toHex(),
           "identitySecret" to n.identitySecret().toHex(),
@@ -666,17 +608,35 @@ class IrohLocationModule : Module() {
         if (synchronized(nodeLock) { leases } <= 0) {
           throw IllegalStateException("call createNode first")
         }
-        // Every subscription belongs to the node being replaced; JS resubscribes afterwards.
-        subs.values.forEach { runCatching { it.destroy() } }
-        subs.clear()
         if (ipEnabled) acquireMulticastLock()
         NodeStorage.host.restart(
           TransportConfig(relayUrls, relayAuthToken, relayEnabled, ipEnabled, bleEnabled),
           RESTART_BUDGET_MS,
         )
+        // The new node has no listener; touching the getter attaches the watch before JS asks.
+        node
         registerNetworkCallback()
         Unit
       }
+
+    /**
+     * Announce, as `onReplicaChanged`, each friend whose fix or null slot becomes readable.
+     *
+     * Replication runs whether or not anyone listens; this only stops JS having to poll the
+     * replica to notice. Kept across node restarts and replacements by this module.
+     */
+    Function("watchReplica") {
+      val bridge = ReplicaBridge()
+      synchronized(nodeLock) { replicaBridge = bridge }
+      node?.watchReplica(bridge)
+      Unit
+    }
+
+    Function("unwatchReplica") {
+      synchronized(nodeLock) { replicaBridge = null }
+      node?.unwatchReplica()
+      Unit
+    }
 
     /** The host's view of who holds the node, for `device.health`. */
     Function("nodeHostSnapshot") {
@@ -750,15 +710,13 @@ class IrohLocationModule : Module() {
         Unit
       }
 
-    /// Hand one captured fix to the native pipeline on the CURRENT subscription. The background
-    /// service does not come through here — it owns its own node — but the mounted app uses it to
-    /// exercise the same path the background one takes.
+    /// Hand one captured fix to the native pipeline: gate → outbox → seal → own docs namespace.
+    /// The mounted app's captures come through here; the foreground service calls the same node
+    /// method directly.
     AsyncFunction("ingestFix") Coroutine
-      { subscriptionId: String, fix: Map<String, Double>, battery: Map<String, Any>, intervalMs: Double ->
-        val sub = subs[subscriptionId] ?: throw IllegalStateException("no such subscription")
+      { fix: Map<String, Double>, battery: Map<String, Any>, intervalMs: Double ->
         val outcome =
-          sub.ingestFix(
-            subscriptionId,
+          requireNode().ingestFix(
             locationFixOf(fix),
             batteryStateOf(battery),
             intervalMs.coerceAtLeast(1.0).toULong(),
@@ -772,11 +730,9 @@ class IrohLocationModule : Module() {
     /// reliable one, and the cadence has to stay uniform whether or not the phone is moving.
     /// `parked` is the caller's motion claim (`null` for none) — see `publish::Motion`.
     AsyncFunction("heartbeatFix") Coroutine
-      { subscriptionId: String, battery: Map<String, Any>, intervalMs: Double, parked: Boolean? ->
-        val sub = subs[subscriptionId] ?: throw IllegalStateException("no such subscription")
+      { battery: Map<String, Any>, intervalMs: Double, parked: Boolean? ->
         ingestOutcomeToMap(
-          sub.heartbeatFix(
-            subscriptionId,
+          requireNode().heartbeatFix(
             batteryStateOf(battery),
             intervalMs.coerceAtLeast(1.0).toULong(),
             System.currentTimeMillis().toULong(),
@@ -790,11 +746,8 @@ class IrohLocationModule : Module() {
     /// the TS contract and called by `connectNewFriend` since it existed, and exported by neither
     /// platform until the export-parity test found it: every new friend waited for the next slot.
     AsyncFunction("publishIntroduction") Coroutine
-      { subscriptionId: String ->
-        val sub = subs[subscriptionId] ?: throw IllegalStateException("no such subscription")
-        ingestOutcomeToMap(
-          sub.publishIntroduction(subscriptionId, System.currentTimeMillis().toULong())
-        )
+      { ->
+        ingestOutcomeToMap(requireNode().publishIntroduction(System.currentTimeMillis().toULong()))
       }
 
     /// Start/stop the native foreground service. The app calls these when the user turns sharing
@@ -862,9 +815,6 @@ class IrohLocationModule : Module() {
     }
 
     // Native publish state.
-
-    AsyncFunction("nextSeq") Coroutine
-      { -> requireNode().nextSeq().toDouble() }
 
     AsyncFunction("currentSeq") Coroutine
       { -> requireNode().currentSeq().toDouble() }
@@ -952,8 +902,6 @@ class IrohLocationModule : Module() {
 
     AsyncFunction("ticket") Coroutine { -> node?.ticket() ?: "" }
 
-    Function("deriveTopic") { authorHex: String -> deriveTopic(authorHex.hexToBytes()).toHex() }
-
     // Map tile decode (see rust/src/mvt.rs). AsyncFunction bodies run off the JS
     // thread, so decoding a bundle never blocks Hermes. Bytes cross as Uint8Array.
     AsyncFunction("decodeMvtBundle") { bundle: ByteArray -> decodeMvtBundle(bundle) }
@@ -965,130 +913,6 @@ class IrohLocationModule : Module() {
     AsyncFunction("h3CellsForPolygon") { coordinates: List<Double>, resolution: Int ->
       h3CellsForPolygon(coordinates, resolution.toUByte())
     }
-
-    AsyncFunction("subscribe") Coroutine
-      { topicHex: String, bootstrap: List<String> ->
-        val n = node ?: throw IllegalStateException("call createNode first")
-        val id = UUID.randomUUID().toString()
-        val sub = n.subscribe(topicHex.hexToBytes(), bootstrap, EventBridge(id))
-        subs[id] = sub
-        id
-      }
-
-    // Recipients are **endpoint ids**, not receiving keys: every fix lane is envelope v3 now, and
-    // a v3 wrap is keyed by the per-friend ratchet session, which is keyed by endpoint id
-    // (FORWARD-SECRECY.md §4.7). Returns the recipients left out, as "<endpointHex>:<reason>" —
-    // a friend with no session yet, a lapsed one, or one whose state could not be read. The
-    // caller must surface these rather than treat a short wrap list as success.
-    AsyncFunction("publish") Coroutine
-      {
-        subscriptionId: String,
-        seq: Double,
-        fix: Map<String, Double>,
-        recipientEndpoints: List<String>,
-        traceparent: String? ->
-        val sub = subs[subscriptionId] ?: return@Coroutine emptyList<String>()
-        if (traceparent != null) {
-          sub.publishTraced(
-            seq.toLong().toULong(),
-            locationFixOf(fix),
-            recipientEndpoints,
-            traceparent,
-          )
-        } else {
-          sub.publish(
-            seq.toLong().toULong(),
-            locationFixOf(fix),
-            recipientEndpoints,
-          )
-        }
-      }
-
-    // A null fix is an ordinary envelope with an empty padded payload
-    // (FORWARD-SECRECY.md §4.1) — the watcher half of the symmetric lanes. No fix map: there is
-    // no position, only the tick's timestamp, which rides in the signed header as usual.
-    AsyncFunction("publishNull") Coroutine
-      {
-        subscriptionId: String,
-        seq: Double,
-        ts: Double,
-        watcherEndpoints: List<String>,
-        traceparent: String? ->
-        val sub = subs[subscriptionId] ?: return@Coroutine emptyList<String>()
-        if (traceparent != null) {
-          sub.publishNullTraced(
-            seq.toLong().toULong(),
-            ts.toLong().toULong(),
-            watcherEndpoints,
-            traceparent,
-          )
-        } else {
-          sub.publishNull(
-            seq.toLong().toULong(),
-            ts.toLong().toULong(),
-            watcherEndpoints,
-          )
-        }
-      }
-
-    AsyncFunction("unsubscribe") { subscriptionId: String ->
-      subs.remove(subscriptionId)?.destroy()
-      Unit
-    }
-
-    // ── Durable trail (iroh-docs) — see docs/social/ARCHITECTURE.md §5–6 ──────────────────
-
-    AsyncFunction("docsWrite") Coroutine
-      {
-        subscriptionId: String,
-        seq: Double,
-        fix: Map<String, Double>,
-        recipientEndpoints: List<String>,
-        traceparent: String? ->
-        val n = node ?: throw IllegalStateException("call createNode first")
-        if (traceparent != null) {
-          n.docsWriteRatchetedTraced(
-            subscriptionId,
-            seq.toLong().toULong(),
-            locationFixOf(fix),
-            recipientEndpoints,
-            traceparent,
-          )
-        } else {
-          n.docsWriteRatcheted(
-            subscriptionId,
-            seq.toLong().toULong(),
-            locationFixOf(fix),
-            recipientEndpoints,
-          )
-        }
-      }
-
-    AsyncFunction("docsWriteNull") Coroutine
-      {
-        subscriptionId: String,
-        seq: Double,
-        ts: Double,
-        watcherEndpoints: List<String>,
-        traceparent: String? ->
-        val n = node ?: throw IllegalStateException("call createNode first")
-        if (traceparent != null) {
-          n.docsWriteNullRatchetedTraced(
-            subscriptionId,
-            seq.toLong().toULong(),
-            ts.toLong().toULong(),
-            watcherEndpoints,
-            traceparent,
-          )
-        } else {
-          n.docsWriteNullRatcheted(
-            subscriptionId,
-            seq.toLong().toULong(),
-            ts.toLong().toULong(),
-            watcherEndpoints,
-          )
-        }
-      }
 
     // ── ratchet sessions + §4.6 recovery ────────────────────────────────────────────────
     //
@@ -1113,30 +937,6 @@ class IrohLocationModule : Module() {
         n.resyncCount(peerEndpoint).toLong()
       }
 
-    /// Publish our half of a resync exchange to `recipientRecvPubs`. HPKE-sealed, necessarily:
-    /// this is the message that re-establishes a ratchet, so it cannot depend on one.
-    AsyncFunction("publishResync") Coroutine
-      { recipientRecvPubs: List<String> ->
-        val n = node ?: throw IllegalStateException("call createNode first")
-        n.publishResync(recipientRecvPubs)
-      }
-
-    /// Look for this peer's resync record and restart the session from it, publishing our own
-    /// half first if we have not. Returns whether a session was installed; `false` covers "no
-    /// record yet", "stale", and "already applied", none of which are errors.
-    AsyncFunction("pollResync") Coroutine
-      { peerEndpoint: String, peerRecvPub: String ->
-        val n = node ?: throw IllegalStateException("call createNode first")
-        n.pollResync(peerEndpoint, peerRecvPub)
-      }
-
-    /// Drop our in-flight resync ephemeral once every peer has been restarted.
-    AsyncFunction("clearResync") Coroutine
-      { ->
-        val n = node ?: throw IllegalStateException("call createNode first")
-        n.clearResync()
-      }
-
     /// Forget this peer's session entirely — unfriend or revoke.
     AsyncFunction("forgetSession") Coroutine
       { peerEndpoint: String ->
@@ -1157,57 +957,6 @@ class IrohLocationModule : Module() {
       { peerTickets: List<String>, traceparent: String? ->
         val n = node ?: throw IllegalStateException("call createNode first")
         n.syncLatest(peerTickets, traceparent)
-      }
-
-    AsyncFunction("pushTrail") Coroutine
-      { peerTickets: List<String>, traceparent: String? ->
-        val n = node ?: throw IllegalStateException("call createNode first")
-        n.pushTrail(peerTickets, traceparent)
-      }
-
-    /// The per-peer-deadline push, which breaks on the stash instead of waiting 30 s on phones that
-    /// are asleep. Like `publishIntroduction`, declared in TS and called (guarded) for as long as it
-    /// existed in Rust, and exported by neither platform — so every push took the flat-budget
-    /// fallback. Found by the export-parity test.
-    AsyncFunction("pushTrailBudgeted") Coroutine
-      { peers: List<Map<String, Any>>, traceparent: String? ->
-        val n = node ?: throw IllegalStateException("call createNode first")
-        val dials =
-          peers.map {
-            PeerDial(
-              ticket = it["ticket"] as String,
-              budgetMs = ((it["budgetMs"] as? Number)?.toLong() ?: 0L).coerceAtLeast(0L).toULong(),
-            )
-          }
-        n.pushTrailBudgeted(dials, traceparent).map {
-          mapOf(
-            "peer" to it.peer,
-            "outcome" to it.outcome,
-            "latencyMs" to it.latencyMs?.toDouble(),
-            "entriesSent" to it.entriesSent.toDouble(),
-            "budgetMs" to it.budgetMs.toDouble(),
-          )
-        }
-      }
-
-    AsyncFunction("uploadTrailContent") Coroutine
-      { baseUrl: String, psk: String? ->
-        val n = node ?: throw IllegalStateException("call createNode first")
-        n.uploadTrailContent(baseUrl, psk).toDouble()
-      }
-
-    // Live-mode request channel (ARCHITECTURE §9c). Writes OUR single control slot, superseding
-    // any previous message from us; needs a `pushTrail` afterwards like any other docs write.
-    AsyncFunction("docsWriteControl") Coroutine
-      { msg: Map<String, Any?>, recipients: List<String> ->
-        val n = node ?: throw IllegalStateException("call createNode first")
-        n.docsWriteControl(controlMsgOf(msg), recipients.map { it.hexToBytes() })
-      }
-
-    AsyncFunction("readControl") Coroutine
-      { author: String ->
-        val n = node ?: throw IllegalStateException("call createNode first")
-        n.readControl(author.hexToBytes()).map { controlMsgToMap(it) }
       }
 
     AsyncFunction("readLatest") Coroutine

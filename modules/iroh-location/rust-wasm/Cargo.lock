@@ -2157,7 +2157,6 @@ name = "iroh-location-wasm"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "async-channel",
  "blake3",
  "chacha20poly1305",
  "console_error_panic_hook",
@@ -2183,7 +2182,6 @@ dependencies = [
  "tracing-subscriber-wasm",
  "wasm-bindgen",
  "wasm-bindgen-futures",
- "wasm-streams",
  "x25519-dalek",
  "zeroize",
 ]

@@ -98,7 +98,7 @@ fn haversine_metres(a: &LocationFix, b: &LocationFix) -> f64 {
     2.0 * R * h.sqrt().min(1.0).asin()
 }
 
-/// Whether the charge level suspends publishing. The only backoff that still applies in live mode.
+/// Whether the charge level suspends publishing: a hard stop rather than a slow-down.
 pub fn critically_low(battery: &BatteryState) -> bool {
     battery.level < SUSPEND_BELOW_LEVEL && !battery.charging
 }

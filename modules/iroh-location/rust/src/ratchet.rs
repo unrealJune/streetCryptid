@@ -66,14 +66,14 @@ pub const SESSION_ID_LEN: usize = 16;
 /// Sized against how long a READER can be away, not against how often a sender publishes. The
 /// sender's chain only resets when it receives a new ratchet key from us, and we only produce
 /// one by opening something — which on iOS happens only while the app is mounted. Meanwhile
-/// every tick spends two positions (the gossip and docs lanes each call `next_wraps`). It was
-/// 512, sized for "a few hundred hashes" on the assumption that the peer replies each interval;
-/// that is ~21 h of not opening the app at the 5-minute cadence, and on 2026-10-09 a Pixel spent
-/// 570 positions on an iPhone whose owner had not opened the app for 25 h, which then could not
-/// open anything from it until a restart. 2^17 is ~7 months at the 5-minute cadence and ~18 h of
-/// iOS live mode at its ~1 s. A walk is one blake3 per position with no allocation, so the worst
-/// case is tens of milliseconds, and the counter is inside the author's signature: only a friend
-/// can ask for it. The window gates nothing about secrecy — skipped keys are never stored, and a
+/// every tick spends a position (two, before 2026-11, when a separate gossip lane sealed its own
+/// copy of each fix). It was 512, sized for "a few hundred hashes" on the assumption that the
+/// peer replies each interval; at two a tick that was ~21 h of not opening the app at the
+/// 5-minute cadence, and on 2026-10-09 a Pixel spent 570 positions on an iPhone whose owner had
+/// not opened the app for 25 h, which then could not open anything from it until a restart. 2^17
+/// is over a year at the 5-minute cadence. A walk is one blake3 per position with no allocation,
+/// so the worst case is tens of milliseconds, and the counter is inside the author's signature:
+/// only a friend can ask for it. The window gates nothing about secrecy — skipped keys are never stored, and a
 /// chain key can be walked arbitrarily far by anyone who holds it, with or without this check.
 pub const DEFAULT_ACCEPT_WINDOW: u32 = 1 << 17;
 
@@ -616,8 +616,8 @@ impl RatchetState {
         keys: &mut impl RatchetKeySource,
     ) -> Result<MessageKey, RatchetError> {
         // A new ratchet public key from the peer is the only thing that advances the DH epoch.
-        // NOT `NeighborUp`: the gossip topic is per author, so its neighbours are the whole pool
-        // and a neighbour coming up may be someone else entirely (§4.2).
+        // NOT a peer connecting: replication peers are the whole pool, so a peer coming up may be
+        // someone else entirely (§4.2).
         if self.dh_peer != Some(header.sender_ratchet_pub) {
             // Once we hold a receiving chain, a new key must belong to a strictly later epoch.
             // This is what refuses an old envelope replayed out of the stash archive: its key and

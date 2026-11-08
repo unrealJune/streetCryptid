@@ -1,26 +1,37 @@
-//! Durable **last-write-wins** fix path — the iroh-docs half of the location core.
+//! The location transport: one **last-write-wins** iroh-docs slot per author, replicated live.
 //!
 //! See `docs/social/ARCHITECTURE.md` §2, §5–6 and `docs/social/FORWARD-SECRECY.md` §4.4.
-//! Alongside the live iroh-gossip broadcast (in [`crate`]'s
-//! [`Subscription`](crate::Subscription)), the current fix is *also* written to a replicated
-//! iroh-docs namespace under a **single key per author** (`hex(author)/fix`), each write
-//! superseding the last. There is deliberately no durable history: the replica answers
-//! "where is this friend now", never "where have they been" — offline recovery of missed
-//! fixes was removed with the forward-secrecy work. Because docs stores the **exact same
-//! sealed envelope bytes** as gossip (see [`crate::crypto`]), per-recipient revocation
-//! carries over unchanged: a dropped recipient may keep replicating the ciphertext but has
-//! no wrap, so the bytes are opaque to it.
+//! Every fix is ratchet-sealed once and written to the author's OWN namespace under a **single
+//! key per author** (`hex(author)/fix`), each write superseding the last. There is deliberately
+//! no durable history: the replica answers "where is this friend now", never "where have they
+//! been". Per-recipient revocation is a property of the envelope, not of the transport: a dropped
+//! recipient may keep replicating the ciphertext but has no wrap, so the bytes are opaque to it.
+//!
+//! ## How an entry moves
+//! Every namespace — ours and each friend's — is put into the iroh-docs live engine when the
+//! node starts ([`TrailDocs::init`]), and stays there for the life of the process. That one call
+//! is what makes a replica both *serve* (inbound reconciliation is refused for a namespace that
+//! is not syncing) and *broadcast* (a local write goes out as a gossip `Op::Put` on the
+//! namespace's topic only while it is syncing). Three things then land a friend's entry here,
+//! and all three end in the same `InsertRemote`:
+//! * the friend's own push — a reconciliation it opens with us after a write;
+//! * the live engine's broadcast of that write to the namespace's swarm, while we are in it;
+//! * our pull — a reconciliation we open with the stash or a friend ([`TrailDocs::sync_all`]).
+//!
+//! A per-namespace watch task ([`ReplicaObserver`]) reports each one exactly once, whichever of
+//! the three carried it. iroh-gossip is still in the process, but only as the live engine's
+//! transport for those broadcasts; nothing in this crate opens a gossip topic of its own.
 //!
 //! ## What lives here
 //! * [`TrailDocs`] — wraps the persistent `Docs` replica store (own namespace + imported
 //!   friend namespaces) and the iroh-blobs content store the entries point at.
-//! * **Pure** helpers ([`encode_key`], [`decode_key`], [`encode_ctl_key`],
+//! * **Pure** helpers ([`encode_key`], [`decode_key`], [`encode_nul_key`], [`encode_rsy_key`],
 //!   [`keys_to_prune`]) holding the key-encoding and explicit-pruning logic, covered by
 //!   `#[cfg(test)]` without a live iroh node.
 //!
-//! Superseded versions of an overwritten key still exist in the replica (same reason
-//! `single_latest_per_key` is load-bearing for control messages) — reclaiming them is the
-//! retention work of FORWARD-SECRECY.md §5.1/§7 step 2, not this module's keying.
+//! Superseded versions of an overwritten key still exist in the replica (which is why
+//! `single_latest_per_key` is load-bearing on every read) — reclaiming them is the retention work
+//! of FORWARD-SECRECY.md §5.1/§7 step 2, not this module's keying.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -29,6 +40,8 @@ use std::sync::Arc;
 use anyhow::{anyhow, Result};
 use iroh::EndpointAddr;
 use iroh_blobs::api::Store as BlobsStore;
+use iroh_blobs::Hash;
+use iroh_docs::ContentStatus;
 use iroh_docs::{
     api::{
         protocol::{AddrInfoOptions, ShareMode},
@@ -40,8 +53,9 @@ use iroh_docs::{
     AuthorId, NamespaceId,
 };
 use n0_future::join_all;
+use n0_future::task::AbortOnDropHandle;
 use n0_future::time::{timeout, Duration, Instant};
-use n0_future::StreamExt;
+use n0_future::{Stream, StreamExt};
 use tokio::sync::Mutex;
 use zeroize::Zeroizing;
 
@@ -77,8 +91,8 @@ pub const KEY_SEP: u8 = b'/';
 /// Filename (under `data_dir`) holding the persisted trail `NamespaceId`, so our own trail
 /// namespace is stable across [`crate::LocationNode`] restarts even though iroh-docs mints a
 /// fresh namespace on `create()`. Mirrors [`crate::profile::PROFILE_NS_FILE`]; without it a
-/// restart would orphan every friend's stored trail read-ticket (durable/stash backfill would
-/// silently break while the live gossip path kept working).
+/// restart would orphan every friend's stored trail read-ticket. Superseded by the namespace
+/// book's secret and kept only so a downgrade finds the same namespace.
 pub const TRAIL_NS_FILE: &str = "trail-namespace.bin";
 
 /// Read a persisted 32-byte namespace id from `path`, or `None` if absent / malformed. Lives
@@ -140,8 +154,8 @@ pub const FIX_TAG: &str = "fix";
 /// `hex(author)/fix`.
 ///
 /// The envelope `seq` deliberately left the key (FORWARD-SECRECY.md §4.4): it stays inside the
-/// signed envelope for replay rejection, but the replica holds one overwritten slot per author —
-/// structurally identical to the control-message path — so there is no durable history to key.
+/// signed envelope for replay rejection, but the replica holds one overwritten slot per author,
+/// so there is no durable history to key.
 pub fn encode_key(author: &[u8]) -> Vec<u8> {
     let mut key = hex_encode(author).into_bytes();
     key.push(KEY_SEP);
@@ -151,9 +165,9 @@ pub fn encode_key(author: &[u8]) -> Vec<u8> {
 
 /// Decode a key produced by [`encode_key`] back into the author bytes.
 ///
-/// Returns `None` for a control key (see [`encode_ctl_key`]: the literal `ctl` lead is not valid
-/// hex) and for pre-LWW `hex(author)/{seq:020}` keys left in a replica by older builds — their
-/// history is deliberately invisible to current readers.
+/// Returns `None` for the null and resync lanes (their `nul`/`rsy` leads are not valid hex) and
+/// for keys older builds left in a replica — pre-LWW `hex(author)/{seq:020}` fixes and the retired
+/// `ctl/hex(author)` live-mode requests. Those are deliberately invisible to current readers.
 pub fn decode_key(key: &[u8]) -> Option<Vec<u8>> {
     let pos = key.iter().position(|&b| b == KEY_SEP)?;
     if &key[pos + 1..] != FIX_TAG.as_bytes() {
@@ -162,34 +176,6 @@ pub fn decode_key(key: &[u8]) -> Option<Vec<u8>> {
     let author_hex = std::str::from_utf8(&key[..pos]).ok()?;
     hex_decode(author_hex)
 }
-
-/// Literal leading segment marking a **control** entry rather than a location fix.
-///
-/// Control entries (live-mode requests — ARCHITECTURE §9c) are written to the author's OWN
-/// namespace next to their fix slot, but must never be mistaken for one. The `ctl` lead gives
-/// that for free: [`decode_key`] rejects `"ctl"` as a hex author, so every fix reader skips
-/// control entries without change. Chosen deliberately over a `hex(author)/ctl` layout, which
-/// would share the fix key's author prefix and force every reader to filter.
-pub const CTL_TAG: &str = "ctl";
-
-/// Encode a control entry key as `ctl/hex(author)` — deliberately **one slot per author**.
-///
-/// Unlike fixes, control entries carry no history: re-writing the key supersedes the previous
-/// message, so the replica holds exactly one per author forever rather than accumulating a row
-/// per live-mode request that every poll would then re-read and the stash would replicate for
-/// good. Latest-wins is also the right semantics — "I want to watch you now" and "cancel" both
-/// describe the current intent, so a superseded request is never one we wanted to act on.
-/// Replay/dedup identity lives in the payload's nonce + ts, not in the key.
-pub fn encode_ctl_key(author: &[u8]) -> Vec<u8> {
-    let mut key = CTL_TAG.as_bytes().to_vec();
-    key.push(KEY_SEP);
-    key.extend_from_slice(hex_encode(author).as_bytes());
-    key
-}
-
-// No `decode_ctl_key`: control entries are fetched by exact key (see `TrailDocs::read_ctl`), so
-// nothing needs the inverse. The invariant that matters — that fix readers cannot see these keys
-// — is asserted in `fix_readers_ignore_control_keys` below.
 
 /// Literal leading segment marking a **null fix** — a watcher's cadence keep-alive
 /// (FORWARD-SECRECY.md §4.1) rather than a position.
@@ -200,8 +186,8 @@ pub fn encode_ctl_key(author: &[u8]) -> Vec<u8> {
 /// Sharing one slot would mean each tick's second envelope silently supersedes the first, so a
 /// device that both shares and watches could never keep both lanes durable.
 ///
-/// Like [`CTL_TAG`], the `nul` lead is not valid hex, so [`decode_key`] rejects it and every fix
-/// reader skips null entries without change.
+/// The `nul` lead is not valid hex, so [`decode_key`] rejects it and every fix reader skips null
+/// entries without change.
 pub const NUL_TAG: &str = "nul";
 
 /// Encode the null-fix key as `nul/hex(author)` — one overwritten slot per author.
@@ -219,9 +205,9 @@ pub fn encode_nul_key(author: &[u8]) -> Vec<u8> {
 /// Decode a key produced by [`encode_nul_key`] back into the author bytes.
 ///
 /// The mirror of [`decode_key`] for the null lane. Both are needed by
-/// [`TrailDocs::read_latest_sealed`], which must return the two lanes and no others: the control
-/// and resync lanes are not fix envelopes and would fail `verify_v3` anyway, but skipping them by
-/// key is cheaper and states the intent.
+/// [`TrailDocs::read_latest_sealed`], which must return the two lanes and no others: the resync
+/// lane is not a fix envelope and would fail `verify_v3` anyway, but skipping it by key is
+/// cheaper and states the intent.
 pub fn decode_nul_key(key: &[u8]) -> Option<Vec<u8>> {
     let pos = key.iter().position(|&b| b == KEY_SEP)?;
     if &key[..pos] != NUL_TAG.as_bytes() {
@@ -234,11 +220,10 @@ pub fn decode_nul_key(key: &[u8]) -> Option<Vec<u8>> {
 /// Note one delivered entry against the author it belongs to. Pure, so the newest-wins rule is
 /// testable without a live reconciliation.
 ///
-/// Non-fix keys (control, resync, pre-LWW) are ignored: those lanes are not what "delivered a
-/// friend's location" means, and attributing a fix to the peer that happened to hand over a live
-/// mode request would be a plausible-looking lie.
-/// Returns the author the key named, when it was a fix-lane slot (`None` for control, resync and
-/// anything else, which are not recorded).
+/// Only the two fix lanes (`fix` and `nul`) count. A resync record or a key an older build left
+/// behind is not what "delivered a friend's location" means, and attributing a fix to the peer
+/// that happened to hand one over would be a plausible-looking lie. Returns the author the key
+/// named when it was a fix-lane slot, `None` (and nothing recorded) otherwise.
 fn record_serving_peer(
     peers: &mut HashMap<[u8; 32], ServingPeer>,
     key: &[u8],
@@ -258,10 +243,9 @@ fn record_serving_peer(
 
 /// Literal leading segment marking a **resync record** (FORWARD-SECRECY.md §4.6).
 ///
-/// Its own lane rather than the control lane, for the same reason the null fix needed one: both
-/// are one overwritten slot per author, and a resync record sharing a slot with a live-mode
-/// request would mean asking to watch someone cancels your attempt to re-establish a session
-/// with them. Not valid hex, so fix readers skip it.
+/// Its own lane for the same reason the null fix needed one: every lane is one overwritten slot
+/// per author, so a record sharing a slot with a fix would supersede it. Not valid hex, so fix
+/// readers skip it.
 pub const RSY_TAG: &str = "rsy";
 
 /// Encode the resync key as `rsy/hex(author)` — **one slot per author, not per pair**.
@@ -290,19 +274,6 @@ pub fn keys_to_prune(entries: &[(Vec<u8>, u64)], older_than_ts: u64) -> Vec<Vec<
 }
 
 // ── Live-node wrapper ───────────────────────────────────────────────────────────────────
-
-/// The latest decrypted fix for one author, read from the durable replica. `payload` is the
-/// still-encoded [`crate::LocationFix`] bytes — the caller (lib.rs) owns the postcard decode so
-/// this module stays decoupled from the UniFFI record type. `author`/`seq` come from the opened
-/// envelope (signed), not from the docs key.
-#[derive(Debug, Clone)]
-pub struct LatestFix {
-    pub author: Vec<u8>,
-    pub seq: u64,
-    /// Decrypted fix bytes. Zeroizing so a friend's coordinates are scrubbed when this drops
-    /// rather than left in freed heap; see [`crypto::Opened::payload`].
-    pub payload: Zeroizing<Vec<u8>>,
-}
 
 /// One author's fix slot as it exists in the LOCAL durable replica — presence, never payload.
 ///
@@ -361,26 +332,18 @@ pub struct PushReport {
 /// Which of the three things a dialled peer did.
 ///
 /// The distinction between [`Failed`](PeerOutcome::Failed) and [`Silent`](PeerOutcome::Silent) is
-/// the entire diagnostic point. Measured over 7 days, 74% of pushes burned the full 30s budget with
-/// `peers_failed = 0` — the missing peers had not refused, they had said **nothing**, so the
+/// the entire diagnostic point. Measured over 7 days, 74% of pushes burned the full 30s deadline
+/// with `peers_failed = 0` — the missing peers had not refused, they had said **nothing**, so the
 /// "everyone has reported" break condition could never be satisfied. Counting them together would
-/// hide exactly the population the budget model exists to stop waiting for.
+/// hide the asleep phones that cost a push its whole deadline.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PeerOutcome {
     /// Reconciled. `entries_sent` is meaningful.
     Finished,
     /// Reported an error — refused, or a reachable peer that could not complete.
     Failed,
-    /// Never reported at all before its budget expired. An asleep phone looks like this.
+    /// Never reported at all before the deadline. An asleep phone looks like this.
     Silent,
-    /// Granted a budget of zero and deliberately not waited for.
-    ///
-    /// Distinct from [`Silent`](Self::Silent) because it is a statement about US, not about the
-    /// peer: we predicted it would not answer and declined to hold a background wake open. Keeping
-    /// the two apart is what makes the model auditable — a rising `skipped` count with friends
-    /// still reachable by other means is the signature of a predictor that has become too
-    /// aggressive, and it would be invisible if these were filed as silence.
-    Skipped,
 }
 
 impl PeerOutcome {
@@ -390,27 +353,19 @@ impl PeerOutcome {
             Self::Finished => "finished",
             Self::Failed => "failed",
             Self::Silent => "silent",
-            Self::Skipped => "skipped",
         }
     }
 }
 
-/// Complete a push's per-peer record: everything that never reported, plus everything we declined
-/// to wait for, folded in alongside the peers that did report.
+/// Complete a push's per-peer record: every dialled peer that never reported is folded in as
+/// [`PeerOutcome::Silent`] alongside the peers that did.
 ///
-/// Pure, and separated out for that reason — it decides the shape of the data the budget model is
-/// later fitted on, so it is worth testing without standing up an iroh node (see the module header
-/// on `#[cfg(test)]` coverage of the pure helpers).
-///
-/// The two things it must not do, both of which lose the signal the model needs: file a peer that
-/// was never dialled as `Silent` (that is a fact about our prediction, not about the peer), and
-/// drop the record entirely when nobody answered (a push where every peer stayed quiet is the most
-/// informative row there is).
+/// Pure, and separated out for that reason, so it is tested without standing up an iroh node. It
+/// must never drop the record when nobody answered: a push where every peer stayed quiet is the
+/// most informative row there is.
 fn finish_outcomes(
     mut reported: Vec<PeerPushOutcome>,
     outstanding: &[[u8; 32]],
-    skipped: &[[u8; 32]],
-    budgets: &HashMap<[u8; 32], u64>,
 ) -> Vec<PeerPushOutcome> {
     for peer in outstanding {
         reported.push(PeerPushOutcome {
@@ -418,28 +373,16 @@ fn finish_outcomes(
             outcome: PeerOutcome::Silent,
             latency_ms: None,
             entries_sent: 0,
-            budget_ms: budgets.get(peer).copied().unwrap_or_default(),
-        });
-    }
-    for peer in skipped {
-        reported.push(PeerPushOutcome {
-            peer: *peer,
-            outcome: PeerOutcome::Skipped,
-            latency_ms: None,
-            entries_sent: 0,
-            budget_ms: 0,
         });
     }
     reported.sort_by_key(|outcome| outcome.peer);
     reported
 }
 
-/// One peer's contribution to a push, recorded so the budget model can be fitted against reality.
+/// One peer's contribution to a push, the row behind each `trail.push.peer` span.
 ///
-/// This is the row `features/social/core/peer-reachability.ts` learns from, and it is deliberately
-/// per-peer-per-push rather than aggregated: the model conditions on `(peer, presence state)`, and
-/// an aggregate `peers_finished` count cannot say WHICH peer answered or how long it took. Without
-/// these rows no predictor can be validated, which is why they land before the budgets do.
+/// Per-peer-per-push rather than aggregated, because an aggregate `peers_finished` count cannot
+/// say WHICH peer answered or how long it took.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PeerPushOutcome {
     /// The peer's endpoint id.
@@ -450,8 +393,6 @@ pub struct PeerPushOutcome {
     pub latency_ms: Option<u64>,
     /// Entries handed to THIS peer. Zero unless [`PeerOutcome::Finished`].
     pub entries_sent: u64,
-    /// The deadline this peer was granted, so a truncated dial is distinguishable from a real one.
-    pub budget_ms: u64,
 }
 
 /// Who served an author's slot in the most recent reconciliation that carried it.
@@ -463,6 +404,167 @@ pub struct PeerPushOutcome {
 struct ServingPeer {
     peer: [u8; 32],
     entry_ts: u64,
+}
+
+/// The peers a docs read ticket names, with each address's relays scrubbed to ones this node
+/// knows (a ticket's relay is history, not an address; see `relay::scrub_addr`). Empty for a
+/// ticket that does not parse.
+fn ticket_peers(ticket: &str) -> Vec<EndpointAddr> {
+    match ticket.parse::<iroh_docs::DocTicket>() {
+        Ok(parsed) => parsed
+            .nodes
+            .into_iter()
+            .map(crate::relay::scrub_addr)
+            .collect(),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// Who is told when friend entries land in the replica. Implemented by the node
+/// (`ReplicaWatch` in [`crate`]); the web build passes none.
+///
+/// Both calls are made from a namespace's watch task, which iroh-docs' live actor waits on: its
+/// subscriber channels are bounded and it `send().await`s into them, so a watcher that blocks
+/// stalls every namespace's sync. Implementations must return promptly and push real work onto a
+/// task of their own.
+pub trait ReplicaObserver: Send + Sync + 'static {
+    /// `(serving peer, author)` for every fix-lane entry delivered since the last call — the
+    /// receive-side `peer.contact` evidence. One pair per entry, unsorted and not deduplicated.
+    fn delivered(&self, deliveries: Vec<([u8; 32], [u8; 32])>);
+    /// Authors whose newest entry (either fix lane) is now readable locally — the entry AND its
+    /// content. Each author at most once per call.
+    fn readable(&self, authors: Vec<[u8; 32]>);
+}
+
+/// How long a watch task holds a report open for more entries before handing it over. One sync
+/// can land a dozen authors within milliseconds; the app re-reads the whole replica per report.
+const REPLICA_COALESCE: Duration = Duration::from_millis(250);
+
+/// A report is handed over at this size without waiting for the burst to end.
+const REPLICA_FLUSH_AT: usize = 256;
+
+/// The state one namespace's watch task carries between events. Pure, so the "report each
+/// delivery once, and an author only once its content is local" rules are testable without a
+/// live engine.
+#[derive(Default)]
+struct WatchBatch {
+    delivered: Vec<([u8; 32], [u8; 32])>,
+    readable: Vec<[u8; 32]>,
+    /// Authors whose newest entry landed before its content did, by the hash that will complete
+    /// it. Keyed by author, so a newer entry replaces the wait rather than adding one, and a hash
+    /// that never arrives costs one slot per author rather than growing for ever.
+    awaiting: HashMap<[u8; 32], Hash>,
+}
+
+impl WatchBatch {
+    fn mark_readable(&mut self, author: [u8; 32]) {
+        if !self.readable.contains(&author) {
+            self.readable.push(author);
+        }
+    }
+
+    /// A fix-lane entry from `from` for `author` arrived; `status` is the LOCAL content status.
+    fn insert(&mut self, from: [u8; 32], author: [u8; 32], hash: Hash, status: ContentStatus) {
+        self.delivered.push((from, author));
+        match status {
+            ContentStatus::Complete => {
+                self.awaiting.remove(&author);
+                self.mark_readable(author);
+            }
+            ContentStatus::Incomplete | ContentStatus::Missing => {
+                self.awaiting.insert(author, hash);
+            }
+        }
+    }
+
+    /// The content behind `hash` is now local.
+    fn content_ready(&mut self, hash: Hash) {
+        let ready: Vec<[u8; 32]> = self
+            .awaiting
+            .iter()
+            .filter(|(_, waiting)| **waiting == hash)
+            .map(|(author, _)| *author)
+            .collect();
+        for author in ready {
+            self.awaiting.remove(&author);
+            self.mark_readable(author);
+        }
+    }
+
+    fn pending(&self) -> bool {
+        !self.delivered.is_empty() || !self.readable.is_empty()
+    }
+
+    fn full(&self) -> bool {
+        self.delivered.len() + self.readable.len() >= REPLICA_FLUSH_AT
+    }
+
+    fn flush(&mut self, observer: &dyn ReplicaObserver) {
+        if !self.delivered.is_empty() {
+            observer.delivered(std::mem::take(&mut self.delivered));
+        }
+        if !self.readable.is_empty() {
+            observer.readable(std::mem::take(&mut self.readable));
+        }
+    }
+}
+
+/// One namespace's watch: every entry a peer hands this replica, however it arrived.
+///
+/// Runs until the subscription ends (the namespace left the engine, or the node shut down) or
+/// its handle is dropped. Holds only clones — never the [`TrailDocs`] — so it cannot keep a
+/// stopped node's replica alive.
+async fn watch_namespace(
+    ns: NamespaceId,
+    mut events: impl Stream<Item = Result<LiveEvent>> + Unpin,
+    serving_peers: Arc<Mutex<HashMap<[u8; 32], ServingPeer>>>,
+    observer: Arc<dyn ReplicaObserver>,
+) {
+    let mut batch = WatchBatch::default();
+    loop {
+        let next = if batch.pending() {
+            match timeout(REPLICA_COALESCE, events.next()).await {
+                Ok(next) => next,
+                Err(_) => {
+                    batch.flush(observer.as_ref());
+                    continue;
+                }
+            }
+        } else {
+            events.next().await
+        };
+        match next {
+            Some(Ok(LiveEvent::InsertRemote {
+                from,
+                entry,
+                content_status,
+            })) => {
+                let from = *from.as_bytes();
+                let author = {
+                    let mut peers = serving_peers.lock().await;
+                    record_serving_peer(&mut peers, entry.key(), from, entry.timestamp())
+                };
+                if let Some(author) = author {
+                    batch.insert(from, author, entry.content_hash(), content_status);
+                }
+            }
+            Some(Ok(LiveEvent::ContentReady { hash })) => batch.content_ready(hash),
+            Some(Ok(_)) => {}
+            Some(Err(error)) => {
+                tracing::warn!(
+                    sc.namespace = %crate::telemetry::short_hex(&ns.to_bytes()),
+                    error = %error,
+                    "trail.watch: replica subscription failed; this namespace is no longer watched"
+                );
+                break;
+            }
+            None => break,
+        }
+        if batch.full() {
+            batch.flush(observer.as_ref());
+        }
+    }
+    batch.flush(observer.as_ref());
 }
 
 /// Wraps an iroh-docs replica: our own namespace (we are its sole writer) plus any friend
@@ -488,8 +590,13 @@ pub struct TrailDocs {
     ///
     /// Deliberately in-memory and delivery-scoped. An entry already in the replica produces no
     /// `InsertRemote`, so a read after a quiet sync reports no peer — which is the truth: nobody
-    /// delivered it this time.
-    serving_peers: Mutex<HashMap<[u8; 32], ServingPeer>>,
+    /// delivered it this time. Shared with the watch tasks, which record every delivery.
+    serving_peers: Arc<Mutex<HashMap<[u8; 32], ServingPeer>>>,
+    /// Told about every friend entry that lands; `None` on the web.
+    observer: Option<Arc<dyn ReplicaObserver>>,
+    /// One watch task per namespace, aborted when its entry is dropped. A std lock: it is only
+    /// ever held to insert or remove, never across an await.
+    watchers: std::sync::Mutex<HashMap<[u8; 32], AbortOnDropHandle<()>>>,
 }
 
 impl TrailDocs {
@@ -503,19 +610,31 @@ impl TrailDocs {
     /// Without one (the web build's in-memory store) the namespace id file under `data_dir` is
     /// the only memory, as before. The caller is responsible for having registered the
     /// `Docs`/`Blobs`/`Gossip` protocols on the iroh [`Router`](iroh::protocol::Router).
+    ///
+    /// Every namespace is then put into the live engine (see [`Self::go_live`]) — the one step
+    /// that makes this replica serve, broadcast and receive. Until 2026-11 a reopened friend
+    /// namespace was not, so a restarted node refused every friend's push until its own first
+    /// pull happened to name that namespace.
     pub async fn init(
         docs: Docs,
         blobs: BlobsStore,
         data_dir: PathBuf,
         book: Option<Arc<NamespaceBook>>,
+        observer: Option<Arc<dyn ReplicaObserver>>,
     ) -> Result<Self> {
         let author = docs.author_default().await?;
         let ns_path = data_dir.join(TRAIL_NS_FILE);
         let legacy = read_ns_file(&ns_path);
 
         let mut handles = HashMap::new();
+        // Where each reopened friend namespace was last known to live: its read ticket's
+        // addresses, scrubbed like any other ticket-derived dial.
+        let mut bootstrap: HashMap<[u8; 32], Vec<EndpointAddr>> = HashMap::new();
         let own = match book.as_deref() {
             Some(book) => {
+                for friend in book.friends() {
+                    bootstrap.insert(friend.namespace, ticket_peers(&friend.ticket));
+                }
                 let own = ns_book::open_own_namespace(&docs, book, legacy).await?;
                 for doc in ns_book::reopen_friends(&docs, book).await {
                     handles.insert(doc.id().to_bytes(), doc);
@@ -534,15 +653,74 @@ impl TrailDocs {
         let _ = write_ns_file(&ns_path, &own.id().to_bytes());
         let own_ns = own.id();
         handles.insert(own_ns.to_bytes(), own);
-        Ok(Self {
+        let docs = Self {
             docs,
             blobs,
             author,
             own_ns,
             handles: Mutex::new(handles),
             book,
-            serving_peers: Mutex::new(HashMap::new()),
-        })
+            serving_peers: Arc::new(Mutex::new(HashMap::new())),
+            observer,
+            watchers: std::sync::Mutex::new(HashMap::new()),
+        };
+        let live: Vec<Doc> = docs.handles.lock().await.values().cloned().collect();
+        for doc in live {
+            let peers = bootstrap.remove(&doc.id().to_bytes()).unwrap_or_default();
+            if let Err(error) = docs.go_live(&doc, peers).await {
+                // Not fatal: the namespace still reads and writes locally, and the next push or
+                // pull that names it calls `start_sync` again.
+                tracing::warn!(
+                    sc.namespace = %crate::telemetry::short_hex(&doc.id().to_bytes()),
+                    error = %error,
+                    "trail: could not put a namespace into the live engine"
+                );
+            }
+        }
+        Ok(docs)
+    }
+
+    /// Watch `doc` (when there is an observer) and put it into the live engine, joining `peers`.
+    ///
+    /// Subscribes FIRST: `start_sync` opens reconciliations with `peers` and with every peer the
+    /// namespace has usefully synced with before (the engine remembers those itself, by id), and an
+    /// entry handed over before the watch exists would never be reported. `peers` carries the
+    /// addresses a friend's ticket recorded, so a node with no working address lookup can still
+    /// reach the friend; remembered peers are dialled through the endpoint's lookup alone.
+    ///
+    /// Only friend namespaces are watched: we are our own namespace's only writer, so nothing a
+    /// peer hands over there is news to the app.
+    async fn go_live(&self, doc: &Doc, peers: Vec<EndpointAddr>) -> Result<()> {
+        if let (Some(observer), true) = (&self.observer, doc.id() != self.own_ns) {
+            let events = doc.subscribe().await?;
+            self.watch(doc.id(), events, observer.clone());
+        }
+        doc.start_sync(peers).await
+    }
+
+    /// Start (or replace) the watch task for `ns`.
+    fn watch(
+        &self,
+        ns: NamespaceId,
+        events: impl Stream<Item = Result<LiveEvent>> + Unpin + Send + 'static,
+        observer: Arc<dyn ReplicaObserver>,
+    ) {
+        let task = n0_future::task::spawn(watch_namespace(
+            ns,
+            events,
+            self.serving_peers.clone(),
+            observer,
+        ));
+        self.watchers
+            .lock()
+            .expect("watchers lock")
+            .insert(ns.to_bytes(), AbortOnDropHandle::new(task));
+    }
+
+    /// Stop every watch task. Called on shutdown, before the router closes, so no task reports a
+    /// delivery to an app that is going away.
+    pub fn stop_watching(&self) {
+        self.watchers.lock().expect("watchers lock").clear();
     }
 
     /// Our own trail namespace id.
@@ -568,7 +746,7 @@ impl TrailDocs {
     ///
     /// Transport failures are different in kind — an unreachable or refusing stash is not a
     /// property of one slot — so they are counted and the last one is returned once the loop has
-    /// still given every slot a chance. That keeps `trail.push.app` reporting a genuine stash
+    /// still given every slot a chance. That keeps `trail.content.upload` reporting a genuine stash
     /// outage while no longer reporting a backlog of untracked slots as one.
     #[cfg(not(target_arch = "wasm32"))]
     pub async fn upload_own_latest(
@@ -709,17 +887,17 @@ impl TrailDocs {
     /// Recorded in the book, so every later start reopens it whether or not JS runs.
     pub async fn import_ticket(&self, ticket: &str) -> Result<NamespaceId> {
         let mut parsed: iroh_docs::DocTicket = ticket.parse().map_err(|e| anyhow!("{e}"))?;
-        // A ticket names the relays its owner had when it was minted; see `relay::scrub_addr`.
-        parsed.nodes = parsed
-            .nodes
-            .into_iter()
-            .map(crate::relay::scrub_addr)
-            .collect();
-        let doc = self.docs.import(parsed).await?;
+        parsed.nodes = ticket_peers(ticket);
+        // Subscribed before the ticket's peers are dialled, so the first reconciliation — the
+        // one that brings a new friend's current position — is reported like any other.
+        let (doc, events) = self.docs.import_and_subscribe(parsed).await?;
         let ns = doc.id();
         if ns != self.own_ns {
             if let Some(book) = &self.book {
                 book.add_friend(ns.to_bytes(), ticket)?;
+            }
+            if let Some(observer) = &self.observer {
+                self.watch(ns, Box::pin(events), observer.clone());
             }
         }
         self.handles.lock().await.insert(ns.to_bytes(), doc);
@@ -738,6 +916,10 @@ impl TrailDocs {
             Some(book) => book.remove_friend(ns.to_bytes())?,
             None => false,
         };
+        self.watchers
+            .lock()
+            .expect("watchers lock")
+            .remove(&ns.to_bytes());
         let handle = self.handles.lock().await.remove(&ns.to_bytes());
         if let Some(doc) = &handle {
             let _ = doc.leave().await;
@@ -754,24 +936,11 @@ impl TrailDocs {
     }
 
     /// Write a sealed envelope to `ns` under the author's single LWW key (FORWARD-SECRECY §4.4),
-    /// superseding the previous fix. `envelope` must be the identical bytes broadcast on gossip
-    /// so revocation carries over.
+    /// superseding the previous fix. Local only: the live engine broadcasts it if the namespace is
+    /// syncing, and [`Self::push`] reconciles it with the peers that should have it.
     pub async fn write(&self, ns: NamespaceId, author: &[u8], envelope: Vec<u8>) -> Result<()> {
         let doc = self.doc_for(ns).await?;
         doc.set_bytes(self.author, encode_key(author), envelope)
-            .await?;
-        Ok(())
-    }
-
-    /// Write a sealed **control** envelope to `ns` under `ctl/hex(author)` (ARCHITECTURE §9c).
-    ///
-    /// Same sealing as a fix — the payload is a `ControlMsg`, not a `LocationFix`, and is wrapped
-    /// only for the recipient it addresses, so the stash and every other pool member see opaque
-    /// bytes. Writers use their OWN namespace: a user is the sole writer of their trail, and the
-    /// recipient already replicates it, so this needs no new grant or transport.
-    pub async fn write_ctl(&self, ns: NamespaceId, author: &[u8], envelope: Vec<u8>) -> Result<()> {
-        let doc = self.doc_for(ns).await?;
-        doc.set_bytes(self.author, encode_ctl_key(author), envelope)
             .await?;
         Ok(())
     }
@@ -789,52 +958,11 @@ impl TrailDocs {
         Ok(())
     }
 
-    /// Read + decrypt `author`'s current control entry across **every** known namespace.
-    ///
-    /// Returns at most one payload per namespace holding one (normally exactly one, in the
-    /// author's own namespace). Entries we cannot open are skipped — a control message addressed
-    /// to someone else is indistinguishable from noise, by design. No `since_ts` filtering here:
-    /// the payload is a `ControlMsg`, so freshness is the caller's to judge after decoding.
-    pub async fn read_ctl(
-        &self,
-        author: &[u8],
-        recv_secret: &[u8],
-    ) -> Result<Vec<Zeroizing<Vec<u8>>>> {
-        let namespaces: Vec<NamespaceId> = {
-            let handles = self.handles.lock().await;
-            handles.keys().map(|b| NamespaceId::from(*b)).collect()
-        };
-        let key = encode_ctl_key(author);
-        let mut out = Vec::new();
-        for ns in namespaces {
-            let doc = self.doc_for(ns).await?;
-            // `single_latest_per_key` is load-bearing: the control key is overwritten in place, so
-            // superseded versions still exist in the replica and a plain query would resurrect a
-            // cancelled request. Same shape as `profile::read_latest`.
-            let query = Query::single_latest_per_key()
-                .key_exact(key.clone())
-                .build();
-            let entry = match doc.get_one(query).await? {
-                Some(e) => e,
-                None => continue,
-            };
-            let bytes = match self.blobs.blobs().get_bytes(entry.content_hash()).await {
-                Ok(b) => b,
-                Err(_) => continue, // content not yet available locally
-            };
-            if let Ok(opened) = crypto::open(recv_secret, &bytes) {
-                out.push(opened.payload);
-            }
-        }
-        Ok(out)
-    }
-
     /// Read the **still-sealed** current envelope per author from both fix lanes, across every
     /// known namespace.
     ///
-    /// The v3 counterpart of [`Self::read_latest`]. Opening a ratcheted envelope needs the
-    /// per-friend session state (FORWARD-SECRECY §4.7), which lives above this module — so this
-    /// hands back bytes and lets the caller decide. Skipping the decrypt here also keeps the
+    /// Opening a ratcheted envelope needs the per-friend session state (FORWARD-SECRECY §4.7),
+    /// which lives above this module — so this hands back bytes and lets the caller decide. Skipping the decrypt here also keeps the
     /// §4.2 ordering intact: the caller verifies the signature before any session state moves.
     ///
     /// **Both** the `hex(author)/fix` and `nul/hex(author)` lanes are returned, and that is
@@ -858,7 +986,7 @@ impl TrailDocs {
                 let is_fix = decode_key(entry.key()).is_some();
                 let is_null = decode_nul_key(entry.key()).is_some();
                 if !is_fix && !is_null {
-                    continue; // control entry, resync record, or pre-LWW key
+                    continue; // resync record, or a key an older build left behind
                 }
                 match self.blobs.blobs().get_bytes(entry.content_hash()).await {
                     Ok(bytes) => out.push(bytes.to_vec()),
@@ -871,8 +999,8 @@ impl TrailDocs {
 
     /// Write a sealed **resync record** to `ns` under `rsy/hex(author)` (FORWARD-SECRECY §4.6).
     ///
-    /// HPKE-sealed like a control message rather than ratcheted, necessarily: this is the message
-    /// that re-establishes a ratchet, so it cannot depend on one existing.
+    /// HPKE-sealed ([`crypto::seal`]) rather than ratcheted, necessarily: this is the message that
+    /// re-establishes a ratchet, so it cannot depend on one existing.
     pub async fn write_rsy(&self, ns: NamespaceId, author: &[u8], envelope: Vec<u8>) -> Result<()> {
         let doc = self.doc_for(ns).await?;
         doc.set_bytes(self.author, encode_rsy_key(author), envelope)
@@ -880,7 +1008,7 @@ impl TrailDocs {
         Ok(())
     }
 
-    /// Read + decrypt `author`'s current resync record across every known namespace.
+    /// Read + decrypt `author`'s current control record across every known namespace.
     ///
     /// **Only a record `author` signed is returned.** The slot key names an author but proves
     /// nothing — every friend writes its own namespace, and every friend's namespace is scanned
@@ -890,9 +1018,9 @@ impl TrailDocs {
     /// envelope for B would then be readable by C. The prekeys inside a record are not signed
     /// individually; this signature is their only authentication.
     ///
-    /// Same shape as [`Self::read_ctl`], including the load-bearing `single_latest_per_key`: the
-    /// slot is overwritten in place, so a plain query would resurrect a superseded record and
-    /// walk the session backwards into a root the peer has already moved off.
+    /// `single_latest_per_key` is load-bearing: the slot is overwritten in place, so a plain
+    /// query would resurrect a superseded record and walk the session backwards into a root the
+    /// peer has already moved off.
     pub async fn read_rsy(
         &self,
         author: &[u8],
@@ -925,55 +1053,18 @@ impl TrailDocs {
         Ok(out)
     }
 
-    /// Read + decrypt the **latest** fix per author across every known namespace (own + imported
-    /// friends). Entries we cannot open (not addressed to us / revoked / our own outbound
-    /// envelopes) and non-fix keys (control entries, pre-LWW keys) are silently skipped.
-    ///
-    /// `single_latest_per_key` is load-bearing here for the same reason as on the control path:
-    /// the fix key is overwritten in place, so superseded versions still exist in the replica and
-    /// a plain query would resurrect them.
-    pub async fn read_latest(&self, recv_secret: &[u8]) -> Result<Vec<LatestFix>> {
-        let mut out = Vec::new();
-        for ns in self.namespaces().await {
-            let doc = self.doc_for(ns).await?;
-            let query = Query::single_latest_per_key().build();
-            let stream = doc.get_many(query).await?;
-            tokio::pin!(stream);
-            while let Some(entry) = stream.next().await {
-                let entry = entry?;
-                if decode_key(entry.key()).is_none() {
-                    continue; // control entry or pre-LWW key
-                }
-                let bytes = match self.blobs.blobs().get_bytes(entry.content_hash()).await {
-                    Ok(b) => b,
-                    Err(_) => continue, // content not yet available locally
-                };
-                if let Ok(opened) = crypto::open(recv_secret, &bytes) {
-                    out.push(LatestFix {
-                        author: opened.author.to_vec(),
-                        seq: opened.seq,
-                        payload: opened.payload,
-                    });
-                }
-            }
-        }
-        Ok(out)
-    }
-
     /// What this replica can **serve**, per author, across every known namespace — metadata only.
     ///
-    /// `friend_latest` and the trail cache are APP storage: they are written by the live gossip
-    /// lane too, so a fix that arrived over gossip is in them while the docs replica holds nothing
-    /// (a pool member has a READ ticket and cannot write to the author's namespace). Reconciliation
-    /// serves out of the replica, so "we have seen this author's fix" and "we can hand this
-    /// author's fix to someone else" are genuinely different questions and only this one answers
-    /// the second.
+    /// `friend_latest` and the trail cache are APP storage: they keep a fix after its slot was
+    /// superseded, pruned or never had its content land, so "we have seen this author's fix" and
+    /// "we can hand this author's fix to someone else" are genuinely different questions.
+    /// Reconciliation serves out of the replica, and only this answers the second.
     ///
     /// **No decryption.** `seq` and `fix_ts` come from the envelope's signed-but-plaintext header
     /// via [`crypto::envelope_header`] — a signature check, not an unwrap — so this reports
     /// presence for every author in the replica including the ones whose payloads are not
-    /// addressed to us. The fix lane only (`hex(author)/fix`); control, null and resync slots are
-    /// not the thing a relay is asked to serve.
+    /// addressed to us. The fix lane only (`hex(author)/fix`); null and resync slots are not the
+    /// thing a relay is asked to serve.
     ///
     /// `has_content` separates the ways a slot can be useless: `content_len() == 0`, a docs record
     /// whose blob never landed locally, and a blob that is not a readable signed envelope. In
@@ -992,7 +1083,7 @@ impl TrailDocs {
                 let entry = entry?;
                 let author = match decode_key(entry.key()) {
                     Some(author) => author,
-                    None => continue, // control, null, resync, or pre-LWW key
+                    None => continue, // null, resync, or a key an older build left behind
                 };
                 let bytes = if entry.content_len() == 0 {
                     None
@@ -1026,8 +1117,8 @@ impl TrailDocs {
     }
 
     /// Reconcile `ns` with `peers` and wait (bounded) for the exchange + content transfer to
-    /// settle. Pull-only plumbing: decrypt/read happens afterwards via [`Self::read_latest`],
-    /// so there is no per-entry surfacing and no sink.
+    /// settle. Pull-only plumbing: decrypt/read happens afterwards via
+    /// [`Self::read_latest_sealed`], and the namespace's watch task reports what landed.
     ///
     /// Returns every `(serving peer, author)` delivered into the replica during the pass, for
     /// `peer.contact` (see [`crate::contact::tally_pull`]), and how the wait ended.
@@ -1124,55 +1215,33 @@ impl TrailDocs {
     ///
     /// Calling it repeatedly is cheap: `start_sync` is a no-op once the namespace is already
     /// syncing, and the engine keeps broadcasting subsequent writes for the process's lifetime.
+    ///
+    /// `budget` is a deadline, not a wait: the exchange ends as soon as every dialled peer has
+    /// reported. With no peers the namespace is still handed to the live engine, and nothing is
+    /// waited for.
     pub async fn push(
         &self,
         ns: NamespaceId,
-        peers: Vec<(EndpointAddr, Duration)>,
+        peers: Vec<EndpointAddr>,
+        budget: Duration,
     ) -> Result<Option<PushReport>> {
         let doc = self.doc_for(ns).await?;
         let mut events = doc.subscribe().await?;
 
         let started_at = Instant::now();
-        // Per-peer deadlines rather than one budget for the whole exchange. The old single
-        // `PUSH_TIMEOUT_SECS` deadline broke only when every dialled peer had reported, so ONE
-        // asleep phone cost the full 30s even though the stash and an awake friend had both
-        // answered in about a second — measured as 74% of all pushes, 41.7 hours a week.
-        //
-        // A budget is a DEADLINE, not a wait: a peer granted 20s that answers in 400ms costs
-        // 400ms. Being generous costs nothing; the saving comes from granting a peer we expect to
-        // stay silent a budget of zero, which drops it from `pending` before the loop even starts.
-        let mut pending: HashMap<[u8; 32], Instant> = HashMap::new();
-        let mut budgets: HashMap<[u8; 32], u64> = HashMap::new();
-        let mut skipped: Vec<[u8; 32]> = Vec::new();
-        let mut addrs: Vec<EndpointAddr> = Vec::with_capacity(peers.len());
-        for (addr, budget) in peers {
-            let peer = *addr.id.as_bytes();
-            budgets.insert(peer, budget.as_millis() as u64);
-            if budget.is_zero() {
-                skipped.push(peer);
-                continue;
-            }
-            pending.insert(peer, started_at + budget);
-            addrs.push(addr);
-        }
+        let deadline = started_at + budget;
+        let mut pending: std::collections::HashSet<[u8; 32]> =
+            peers.iter().map(|addr| *addr.id.as_bytes()).collect();
 
         let mut report = PushReport::default();
-        // Nobody was worth waiting for. Still hand the data to the live engine — `start_sync` marks
-        // the namespace syncing, so these peers reconcile on their own whenever they next wake —
-        // but do not hold a background wake open watching for events that will not come.
-        if addrs.is_empty() {
+        if peers.is_empty() {
             doc.start_sync(Vec::new()).await?;
-            report.per_peer = finish_outcomes(Vec::new(), &[], &skipped, &budgets);
             return Ok(Some(report));
         }
-        doc.start_sync(addrs).await?;
+        doc.start_sync(peers).await?;
 
         while !pending.is_empty() {
-            // The loop's own deadline is the LAST peer deadline still outstanding — anything
-            // shorter would abandon a peer still inside its budget.
-            let now = Instant::now();
-            let next = pending.values().copied().max().unwrap_or(now);
-            let remaining = next.saturating_duration_since(now);
+            let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
                 break;
             }
@@ -1180,10 +1249,8 @@ impl TrailDocs {
                 Ok(Some(Ok(LiveEvent::SyncFinished(ev)))) => {
                     let peer = *ev.peer.as_bytes();
                     let latency_ms = started_at.elapsed().as_millis() as u64;
-                    let budget_ms = budgets.get(&peer).copied().unwrap_or_default();
-                    // A peer we granted no budget can still report — `start_sync` was never told
-                    // about it, but a live-engine event for it may already be in flight. Record it
-                    // rather than dropping it: it is free evidence for the model.
+                    // A peer this push did not dial can still report — the live engine may be
+                    // reconciling with it from an earlier `start_sync`. Record it all the same.
                     pending.remove(&peer);
                     match &ev.result {
                         Ok(details) => {
@@ -1195,7 +1262,6 @@ impl TrailDocs {
                                 outcome: PeerOutcome::Finished,
                                 latency_ms: Some(latency_ms),
                                 entries_sent: sent,
-                                budget_ms,
                             });
                         }
                         Err(err) => {
@@ -1213,22 +1279,21 @@ impl TrailDocs {
                                 outcome: PeerOutcome::Failed,
                                 latency_ms: Some(latency_ms),
                                 entries_sent: 0,
-                                budget_ms,
                             });
                         }
                     }
                 }
                 Ok(Some(Ok(_))) => continue,
                 Ok(Some(Err(err))) => return Err(err),
-                // Stream ended, or the last outstanding budget expired. Either way the peers still
+                // Stream ended, or the deadline passed. Either way the peers still
                 // in `pending` never spoke. The namespace stays marked syncing, so later writes in
                 // this process broadcast — we just cannot confirm them here.
                 Ok(None) | Err(_) => break,
             }
         }
 
-        let outstanding: Vec<[u8; 32]> = pending.keys().copied().collect();
-        report.per_peer = finish_outcomes(report.per_peer, &outstanding, &skipped, &budgets);
+        let outstanding: Vec<[u8; 32]> = pending.into_iter().collect();
+        report.per_peer = finish_outcomes(report.per_peer, &outstanding);
         Ok(Some(report))
     }
 
@@ -1366,13 +1431,15 @@ impl TrailDocs {
 
     /// Reconcile **every** known namespace (own + friends) with `peers`, so each friend's latest
     /// fix (and our own outbound slot) is exchanged. Read the results afterwards with
-    /// [`Self::read_latest`].
+    /// [`Self::read_latest_sealed`].
     ///
     /// A namespace that fails is logged and skipped rather than aborting the run: these are
     /// independent replicas, and short-circuiting on the first error meant one friend whose doc
     /// couldn't be opened silently blocked the refresh for everyone after them in the map.
     ///
     /// Returns every `(serving peer, author)` delivered across all namespaces, for `peer.contact`.
+    /// The web replica's refresh; the mobile node goes through [`Self::sync_all_until`].
+    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
     pub async fn sync_all(&self, peers: Vec<EndpointAddr>) -> Result<Vec<([u8; 32], [u8; 32])>> {
         Ok(self.sync_all_until(peers, None).await?.delivered)
     }
@@ -1586,17 +1653,12 @@ pub(crate) mod tests {
     // ── key encoding round-trip ──────────────────────────────────────────────────────────
     // ── per-peer push accounting ─────────────────────────────────────────────────────────
 
-    fn budget_map(entries: &[([u8; 32], u64)]) -> HashMap<[u8; 32], u64> {
-        entries.iter().copied().collect()
-    }
-
     fn finished(peer: [u8; 32], latency_ms: u64, entries: u64) -> PeerPushOutcome {
         PeerPushOutcome {
             peer,
             outcome: PeerOutcome::Finished,
             latency_ms: Some(latency_ms),
             entries_sent: entries,
-            budget_ms: 5_000,
         }
     }
 
@@ -1606,46 +1668,16 @@ pub(crate) mod tests {
         // `None` here and threw the whole push away.
         let a = [0xaau8; 32];
         let b = [0xbbu8; 32];
-        let out = finish_outcomes(
-            Vec::new(),
-            &[a, b],
-            &[],
-            &budget_map(&[(a, 5_000), (b, 7_000)]),
-        );
+        let out = finish_outcomes(Vec::new(), &[a, b]);
         assert_eq!(out.len(), 2);
         assert!(out.iter().all(|p| p.outcome == PeerOutcome::Silent));
         assert!(out.iter().all(|p| p.latency_ms.is_none()));
-        // The budget each one was granted survives, so a truncated dial stays distinguishable.
-        assert_eq!(out.iter().find(|p| p.peer == b).unwrap().budget_ms, 7_000);
-    }
-
-    #[test]
-    fn skipped_is_not_filed_as_silence() {
-        // Silence is a fact about the peer; skipped is a fact about our prediction. Conflating
-        // them would hide a predictor that had become too aggressive.
-        let dialled = [0x01u8; 32];
-        let declined = [0x02u8; 32];
-        let out = finish_outcomes(
-            vec![finished(dialled, 400, 2)],
-            &[],
-            &[declined],
-            &budget_map(&[(dialled, 5_000)]),
-        );
-        let declined_row = out.iter().find(|p| p.peer == declined).unwrap();
-        assert_eq!(declined_row.outcome, PeerOutcome::Skipped);
-        assert_eq!(declined_row.budget_ms, 0);
-        assert!(declined_row.latency_ms.is_none());
     }
 
     #[test]
     fn answered_peers_keep_their_latency_and_entries() {
         let peer = [0x07u8; 32];
-        let out = finish_outcomes(
-            vec![finished(peer, 913, 3)],
-            &[],
-            &[],
-            &budget_map(&[(peer, 5_000)]),
-        );
+        let out = finish_outcomes(vec![finished(peer, 913, 3)], &[]);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].latency_ms, Some(913));
         assert_eq!(out[0].entries_sent, 3);
@@ -1654,19 +1686,15 @@ pub(crate) mod tests {
 
     #[test]
     fn every_dialled_peer_appears_exactly_once() {
-        // The measured shape: stash and one friend answer, one parked phone never does, and one
-        // peer we predicted asleep was never dialled at all.
+        // The measured shape: stash and one friend answer, one parked phone never does.
         let stash = [0x10u8; 32];
         let awake = [0x20u8; 32];
         let asleep = [0x30u8; 32];
-        let declined = [0x40u8; 32];
         let out = finish_outcomes(
             vec![finished(stash, 800, 1), finished(awake, 1_100, 1)],
             &[asleep],
-            &[declined],
-            &budget_map(&[(stash, 5_700), (awake, 7_200), (asleep, 2_500)]),
         );
-        assert_eq!(out.len(), 4);
+        assert_eq!(out.len(), 3);
         let mut peers: Vec<[u8; 32]> = out.iter().map(|p| p.peer).collect();
         let sorted = {
             let mut copy = peers.clone();
@@ -1675,28 +1703,21 @@ pub(crate) mod tests {
         };
         assert_eq!(peers, sorted, "outcomes must be in a stable order");
         peers.dedup();
-        assert_eq!(peers.len(), 4, "no peer may be double-counted");
+        assert_eq!(peers.len(), 3, "no peer may be double-counted");
         assert_eq!(
             out.iter()
                 .filter(|p| p.outcome == PeerOutcome::Silent)
                 .count(),
             1
         );
-        assert_eq!(
-            out.iter()
-                .filter(|p| p.outcome == PeerOutcome::Skipped)
-                .count(),
-            1
-        );
     }
 
     #[test]
-    fn outcome_names_are_stable_across_the_ffi_boundary() {
-        // JS matches on these strings to fold observations; renaming one silently stops learning.
+    fn outcome_names_are_stable() {
+        // Dashboards and the TraceQL cookbook match on these `peer.outcome` strings.
         assert_eq!(PeerOutcome::Finished.as_str(), "finished");
         assert_eq!(PeerOutcome::Failed.as_str(), "failed");
         assert_eq!(PeerOutcome::Silent.as_str(), "silent");
-        assert_eq!(PeerOutcome::Skipped.as_str(), "skipped");
     }
 
     #[test]
@@ -1757,54 +1778,43 @@ pub(crate) mod tests {
         assert_eq!(peers.get(&author).map(|s| s.peer), Some(old_peer));
     }
 
-    /// A control or resync entry says nothing about who delivered a location.
+    /// A resync entry, or a retired control entry an older build left behind, says nothing about
+    /// who delivered a location.
     #[test]
     fn serving_peer_ignores_non_fix_lanes() {
         let author = [0x22u8; 32];
         let peer = [0x33u8; 32];
         let mut peers = HashMap::new();
-        record_serving_peer(&mut peers, &encode_ctl_key(&author), peer, 10);
+        let retired_ctl = format!("ctl/{}", hex_encode(&author)).into_bytes();
+        record_serving_peer(&mut peers, &retired_ctl, peer, 10);
         record_serving_peer(&mut peers, &encode_rsy_key(&author), peer, 10);
         record_serving_peer(&mut peers, b"abab/00000000000000000001", peer, 10);
         assert!(peers.is_empty());
     }
 
-    // ── control-entry keys (ARCHITECTURE §9c) ────────────────────────────────────────────
-
-    /// The whole point of the `ctl/` lead: fix readers must skip control entries untouched.
-    /// If this ever fails, control payloads start reaching `read_latest` and the presence UI,
-    /// which would try to decode a `ControlMsg` as a `LocationFix`.
+    /// A retired `ctl/hex(author)` entry is still in replicas written by older builds, and fix
+    /// readers must keep skipping it untouched.
     #[test]
-    fn fix_readers_ignore_control_keys() {
+    fn fix_readers_ignore_retired_control_keys() {
         let author = [0x11u8; 32];
-        let ctl = encode_ctl_key(&author);
-        // `decode_key` refuses it, so `read_latest` / `sync_direct` drop it on the floor.
+        let ctl = format!("ctl/{}", hex_encode(&author)).into_bytes();
         assert!(decode_key(&ctl).is_none());
-        assert_ne!(ctl, encode_key(&author));
+        assert!(decode_nul_key(&ctl).is_none());
     }
 
-    /// One slot per author: the key must not vary, or superseding would not work.
-    #[test]
-    fn ctl_key_is_stable_per_author() {
-        let a = [3u8; 32];
-        let b = [4u8; 32];
-        assert_eq!(encode_ctl_key(&a), encode_ctl_key(&a));
-        assert_ne!(encode_ctl_key(&a), encode_ctl_key(&b));
-    }
-
-    /// The null lane must be invisible to fix readers and must not collide with either other
-    /// lane — the whole point of giving it its own key is that a tick's two envelopes, wrapped
-    /// for disjoint recipient sets, both survive.
+    /// The null lane must be invisible to fix readers and must not collide with the fix lane —
+    /// the whole point of giving it its own key is that a tick's two envelopes, wrapped for
+    /// disjoint recipient sets, both survive.
     #[test]
     fn null_keys_are_their_own_lane() {
         let author = [0x11u8; 32];
         let nul = encode_nul_key(&author);
         assert!(decode_key(&nul).is_none());
         assert_ne!(nul, encode_key(&author));
-        assert_ne!(nul, encode_ctl_key(&author));
+        assert_ne!(nul, encode_rsy_key(&author));
     }
 
-    /// One overwritten slot per author, same as the fix and control lanes.
+    /// One overwritten slot per author, same as the fix lane.
     #[test]
     fn nul_key_is_stable_per_author() {
         let a = [5u8; 32];
@@ -1831,9 +1841,9 @@ pub(crate) mod tests {
         assert!(keys_to_prune(&entries, 100).is_empty());
     }
 
-    // ── revocation carries over to the durable path (reuses crypto.rs) ───────────────────
-    // The durable path stores the SAME sealed bytes as gossip, so an envelope written to docs
-    // still decrypts for a recipient and is opaque to a non-recipient / revoked peer.
+    // ── revocation carries over to the replica (reuses crypto.rs) ─────────────────────────────
+    // The replica stores sealed bytes, so an envelope written to docs still decrypts for a
+    // recipient and is opaque to a non-recipient / revoked peer.
     #[test]
     fn docs_envelope_decrypts_for_recipient_opaque_to_revoked() {
         use ed25519_dalek::SigningKey;
@@ -1876,8 +1886,8 @@ pub(crate) mod tests {
     //
     // iroh-docs mints a fresh namespace on every `create()`. Before the persistence fix,
     // `TrailDocs::init` called `create()` unconditionally, so each restart rotated our trail
-    // namespace and orphaned every friend's stored read-ticket (durable/stash backfill silently
-    // broke while the live gossip path kept working). These tests pin the reuse behaviour.
+    // namespace and orphaned every friend's stored read-ticket, so every friend read a namespace
+    // nobody wrote again. These tests pin the reuse behaviour.
 
     use iroh::{Endpoint, RelayMode, SecretKey};
     use iroh_blobs::store::fs::FsStore;
@@ -1927,7 +1937,8 @@ pub(crate) mod tests {
 
     // ── LWW: a second publish leaves exactly one readable entry per author ───────────────────
     // The FORWARD-SECRECY.md §7 step 1 acceptance test: the replica answers "current fix",
-    // never history. `read_latest` must yield one entry per author, carrying the newest seq.
+    // never history. `read_latest_sealed` must yield one entry per author, carrying the newest
+    // seq, and the null and resync lanes beside it must not read as fixes.
     #[tokio::test]
     async fn second_publish_leaves_one_readable_entry_per_author() {
         use ed25519_dalek::SigningKey;
@@ -1935,7 +1946,7 @@ pub(crate) mod tests {
 
         let dir = scratch_dir("lww");
         let fx = spawn_docs(&dir).await;
-        let td = TrailDocs::init(fx.docs.clone(), fx.blobs.clone(), dir.clone(), None)
+        let td = TrailDocs::init(fx.docs.clone(), fx.blobs.clone(), dir.clone(), None, None)
             .await
             .unwrap();
         let ns = td.own_namespace();
@@ -1950,27 +1961,31 @@ pub(crate) mod tests {
         td.write(ns, &author, e1).await.unwrap();
         td.write(ns, &author, e2).await.unwrap();
 
-        let latest = td.read_latest(&b_sk).await.unwrap();
+        let latest = td.read_latest_sealed().await.unwrap();
         assert_eq!(
             latest.len(),
             1,
             "one readable entry per author, not history"
         );
-        assert_eq!(latest[0].author, author.to_vec());
-        assert_eq!(latest[0].seq, 2, "the second publish supersedes the first");
-        assert_eq!(latest[0].payload.as_slice(), b"second");
+        let bytes = &latest[0];
+        assert_eq!(crypto::envelope_header(bytes).unwrap().author, author);
+        let opened = crypto::open(&b_sk, bytes).unwrap();
+        assert_eq!(opened.seq, 2, "the second publish supersedes the first");
+        assert_eq!(opened.payload.as_slice(), b"second");
 
-        // A control entry in the same namespace stays invisible to fix readers.
-        let ctl = crypto::seal(&seed, &author, 0, 3000, 0, b"ctl-msg", &[b_pk]).unwrap();
-        td.write_ctl(ns, &author, ctl).await.unwrap();
-        let latest = td.read_latest(&b_sk).await.unwrap();
-        assert_eq!(latest.len(), 1, "control entries must not read as fixes");
-        assert_eq!(latest[0].payload.as_slice(), b"second");
+        // A resync record in the same namespace is not a fix.
+        let rsy = crypto::seal(&seed, &author, 0, 3000, 0, b"rsy-record", &[b_pk]).unwrap();
+        td.write_rsy(ns, &author, rsy).await.unwrap();
+        assert_eq!(
+            td.read_latest_sealed().await.unwrap().len(),
+            1,
+            "resync records must not read as fixes"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    // ── a resync record is authenticated by its signer, never by its slot ───────────────────
+    // ── a control record is authenticated by its signer, never by its slot ──────────────────
     //
     // Three parties: we (A) are friends with B and C. C writes a record into a slot named for B,
     // sealed to us and carrying C's prekey. Accepting it would make us restart our session with
@@ -1978,13 +1993,13 @@ pub(crate) mod tests {
     // open every envelope we seal for B. The slot key is chosen by the writer; only the
     // signature says who wrote it.
     #[tokio::test]
-    async fn a_resync_record_is_read_only_from_the_author_it_names() {
+    async fn a_control_record_is_read_only_from_the_author_it_names() {
         use ed25519_dalek::SigningKey;
         use rand::rngs::OsRng;
 
         let dir = scratch_dir("rsy-binding");
         let fx = spawn_docs(&dir).await;
-        let td = TrailDocs::init(fx.docs.clone(), fx.blobs.clone(), dir.clone(), None)
+        let td = TrailDocs::init(fx.docs.clone(), fx.blobs.clone(), dir.clone(), None, None)
             .await
             .unwrap();
         let ns = td.own_namespace();
@@ -2009,7 +2024,7 @@ pub(crate) mod tests {
         td.write_rsy(ns, &b_author, forged).await.unwrap();
         assert!(
             td.read_rsy(&b_author, &a_sk).await.unwrap().is_empty(),
-            "a record C signed must never be read as B's resync record"
+            "a record C signed must never be read as B's control record"
         );
 
         // B's own record in the same slot is read.
@@ -2052,7 +2067,7 @@ pub(crate) mod tests {
         let dir = scratch_dir("stable");
         let fx = spawn_docs(&dir).await;
 
-        let first = TrailDocs::init(fx.docs.clone(), fx.blobs.clone(), dir.clone(), None)
+        let first = TrailDocs::init(fx.docs.clone(), fx.blobs.clone(), dir.clone(), None, None)
             .await
             .unwrap();
         let ns1 = first.own_namespace();
@@ -2064,7 +2079,7 @@ pub(crate) mod tests {
         );
 
         // A second init over the same data_dir (a restart) must REUSE the namespace, not mint one.
-        let second = TrailDocs::init(fx.docs.clone(), fx.blobs.clone(), dir.clone(), None)
+        let second = TrailDocs::init(fx.docs.clone(), fx.blobs.clone(), dir.clone(), None, None)
             .await
             .unwrap();
         assert_eq!(
@@ -2082,12 +2097,12 @@ pub(crate) mod tests {
         let d2 = scratch_dir("distinct-b");
 
         let fx1 = spawn_docs(&d1).await;
-        let ns_a = TrailDocs::init(fx1.docs.clone(), fx1.blobs.clone(), d1.clone(), None)
+        let ns_a = TrailDocs::init(fx1.docs.clone(), fx1.blobs.clone(), d1.clone(), None, None)
             .await
             .unwrap()
             .own_namespace();
         let fx2 = spawn_docs(&d2).await;
-        let ns_b = TrailDocs::init(fx2.docs.clone(), fx2.blobs.clone(), d2.clone(), None)
+        let ns_b = TrailDocs::init(fx2.docs.clone(), fx2.blobs.clone(), d2.clone(), None, None)
             .await
             .unwrap()
             .own_namespace();
@@ -2110,7 +2125,7 @@ pub(crate) mod tests {
         write_ns_file(&dir.join(TRAIL_NS_FILE), &stale).unwrap();
 
         let fx = spawn_docs(&dir).await;
-        let td = TrailDocs::init(fx.docs.clone(), fx.blobs.clone(), dir.clone(), None)
+        let td = TrailDocs::init(fx.docs.clone(), fx.blobs.clone(), dir.clone(), None, None)
             .await
             .unwrap();
         let ns = td.own_namespace();
@@ -2149,6 +2164,7 @@ pub(crate) mod tests {
             fx.blobs.clone(),
             first_replica.clone(),
             Some(book(&state)),
+            None,
         )
         .await
         .unwrap()
@@ -2162,6 +2178,7 @@ pub(crate) mod tests {
             fx2.blobs.clone(),
             wiped.clone(),
             Some(book(&state)),
+            None,
         )
         .await
         .unwrap();
@@ -2188,10 +2205,16 @@ pub(crate) mod tests {
         let replica = scratch_dir("book-legacy");
         let fx = spawn_docs(&replica).await;
         // An install from before the book: the id file is the only record.
-        let legacy = TrailDocs::init(fx.docs.clone(), fx.blobs.clone(), replica.clone(), None)
-            .await
-            .unwrap()
-            .own_namespace();
+        let legacy = TrailDocs::init(
+            fx.docs.clone(),
+            fx.blobs.clone(),
+            replica.clone(),
+            None,
+            None,
+        )
+        .await
+        .unwrap()
+        .own_namespace();
 
         let book = book(&state);
         let upgraded = TrailDocs::init(
@@ -2199,6 +2222,7 @@ pub(crate) mod tests {
             fx.blobs.clone(),
             replica.clone(),
             Some(book.clone()),
+            None,
         )
         .await
         .unwrap();
@@ -2220,6 +2244,7 @@ pub(crate) mod tests {
             fx2.blobs.clone(),
             wiped.clone(),
             Some(book),
+            None,
         )
         .await
         .unwrap();
@@ -2239,6 +2264,7 @@ pub(crate) mod tests {
             friend_fx.blobs.clone(),
             friend_dir.clone(),
             None,
+            None,
         )
         .await
         .unwrap();
@@ -2252,6 +2278,7 @@ pub(crate) mod tests {
             fx.blobs.clone(),
             replica.clone(),
             Some(book(&state)),
+            None,
         )
         .await
         .unwrap();
@@ -2264,6 +2291,7 @@ pub(crate) mod tests {
             fx.blobs.clone(),
             replica.clone(),
             Some(book(&state)),
+            None,
         )
         .await
         .unwrap();
@@ -2280,6 +2308,7 @@ pub(crate) mod tests {
             fx2.blobs.clone(),
             wiped.clone(),
             Some(book(&state)),
+            None,
         )
         .await
         .unwrap();
@@ -2294,6 +2323,7 @@ pub(crate) mod tests {
             fx2.blobs.clone(),
             wiped.clone(),
             Some(book(&state)),
+            None,
         )
         .await
         .unwrap();
@@ -2314,6 +2344,7 @@ pub(crate) mod tests {
             fx.blobs.clone(),
             replica.clone(),
             Some(book(&state)),
+            None,
         )
         .await
         .unwrap();
@@ -2337,5 +2368,337 @@ pub(crate) mod tests {
         std::fs::write(state.join(ns_book::TRAIL_BOOK_FILE), b"\xff\xff not a book").unwrap();
         assert!(NamespaceBook::open(&state, ns_book::TRAIL_BOOK_FILE).is_err());
         let _ = std::fs::remove_dir_all(&state);
+    }
+
+    // ── The replica watch ─────────────────────────────────────────────────────────────────────
+    //
+    // The docs-only transport's one receive path: every entry a peer hands a friend namespace is
+    // reported once, and its author is announced once the content is local — never before, or
+    // the app's read would find an entry it cannot open yet and report nothing.
+
+    #[derive(Default)]
+    struct Seen {
+        delivered: std::sync::Mutex<Vec<([u8; 32], [u8; 32])>>,
+        readable: std::sync::Mutex<Vec<Vec<[u8; 32]>>>,
+    }
+
+    impl Seen {
+        fn readable(&self) -> Vec<Vec<[u8; 32]>> {
+            self.readable.lock().unwrap().clone()
+        }
+
+        fn times_readable(&self, author: [u8; 32]) -> usize {
+            self.readable()
+                .iter()
+                .filter(|report| report.contains(&author))
+                .count()
+        }
+
+        fn delivered(&self) -> Vec<([u8; 32], [u8; 32])> {
+            self.delivered.lock().unwrap().clone()
+        }
+    }
+
+    impl ReplicaObserver for Seen {
+        fn delivered(&self, deliveries: Vec<([u8; 32], [u8; 32])>) {
+            self.delivered.lock().unwrap().extend(deliveries);
+        }
+
+        fn readable(&self, authors: Vec<[u8; 32]>) {
+            self.readable.lock().unwrap().push(authors);
+        }
+    }
+
+    const PEER: [u8; 32] = [1; 32];
+    const MAYA: [u8; 32] = [2; 32];
+    const JUNE: [u8; 32] = [3; 32];
+
+    fn flushed(batch: &mut WatchBatch) -> Seen {
+        let seen = Seen::default();
+        batch.flush(&seen);
+        seen
+    }
+
+    #[test]
+    fn an_entry_whose_content_is_local_is_readable_at_once() {
+        let mut batch = WatchBatch::default();
+        batch.insert(PEER, MAYA, Hash::new(b"one"), ContentStatus::Complete);
+        assert!(batch.pending());
+        let seen = flushed(&mut batch);
+        assert_eq!(seen.delivered(), vec![(PEER, MAYA)]);
+        assert_eq!(seen.readable(), vec![vec![MAYA]]);
+    }
+
+    #[test]
+    fn an_entry_is_readable_only_once_its_content_lands() {
+        let mut batch = WatchBatch::default();
+        let hash = Hash::new(b"one");
+        batch.insert(PEER, MAYA, hash, ContentStatus::Missing);
+        let seen = flushed(&mut batch);
+        assert_eq!(
+            seen.delivered(),
+            vec![(PEER, MAYA)],
+            "the delivery counts now"
+        );
+        assert!(seen.readable().is_empty(), "but nothing is readable yet");
+        assert!(!batch.pending());
+
+        batch.content_ready(Hash::new(b"someone else's"));
+        assert!(!batch.pending(), "unrelated content completes nothing");
+        batch.content_ready(hash);
+        let seen = flushed(&mut batch);
+        assert!(seen.delivered().is_empty(), "a delivery is reported once");
+        assert_eq!(seen.readable(), vec![vec![MAYA]]);
+
+        batch.content_ready(hash);
+        assert!(!batch.pending(), "and an author once per entry");
+    }
+
+    #[test]
+    fn a_newer_entry_replaces_the_wait() {
+        let mut batch = WatchBatch::default();
+        let (old, new) = (Hash::new(b"old"), Hash::new(b"new"));
+        batch.insert(PEER, MAYA, old, ContentStatus::Incomplete);
+        batch.insert(PEER, MAYA, new, ContentStatus::Missing);
+        flushed(&mut batch);
+        batch.content_ready(old);
+        assert!(
+            !batch.pending(),
+            "the superseded entry's content is not the newest entry's"
+        );
+        batch.content_ready(new);
+        assert_eq!(flushed(&mut batch).readable(), vec![vec![MAYA]]);
+    }
+
+    #[test]
+    fn a_newer_complete_entry_ends_an_older_wait() {
+        let mut batch = WatchBatch::default();
+        let old = Hash::new(b"old");
+        batch.insert(PEER, MAYA, old, ContentStatus::Missing);
+        batch.insert(PEER, MAYA, Hash::new(b"new"), ContentStatus::Complete);
+        assert_eq!(flushed(&mut batch).readable(), vec![vec![MAYA]]);
+        batch.content_ready(old);
+        assert!(!batch.pending(), "nothing is still waiting on the old hash");
+    }
+
+    #[test]
+    fn an_author_is_announced_once_per_report_however_many_entries_land() {
+        let mut batch = WatchBatch::default();
+        batch.insert(PEER, MAYA, Hash::new(b"fix"), ContentStatus::Complete);
+        batch.insert(PEER, MAYA, Hash::new(b"null"), ContentStatus::Complete);
+        batch.insert(PEER, JUNE, Hash::new(b"june"), ContentStatus::Complete);
+        let seen = flushed(&mut batch);
+        assert_eq!(seen.delivered().len(), 3, "every delivery is evidence");
+        assert_eq!(seen.readable(), vec![vec![MAYA, JUNE]]);
+    }
+
+    #[test]
+    fn an_empty_batch_reports_nothing_and_a_full_one_says_so() {
+        let mut batch = WatchBatch::default();
+        let seen = flushed(&mut batch);
+        assert!(seen.delivered().is_empty() && seen.readable().is_empty());
+        for i in 0..REPLICA_FLUSH_AT {
+            assert!(!batch.full());
+            batch.insert(
+                PEER,
+                MAYA,
+                Hash::new(i.to_le_bytes()),
+                ContentStatus::Missing,
+            );
+        }
+        assert!(batch.full());
+        flushed(&mut batch);
+        assert!(!batch.full() && !batch.pending());
+    }
+
+    /// A replica on a real endpoint that serves docs, blobs and gossip — what two phones are.
+    struct LiveReplica {
+        td: TrailDocs,
+        endpoint: Endpoint,
+        _router: iroh::protocol::Router,
+    }
+
+    async fn live_replica(
+        dir: &std::path::Path,
+        book: Option<Arc<NamespaceBook>>,
+        observer: Option<Arc<dyn ReplicaObserver>>,
+    ) -> LiveReplica {
+        let endpoint = Endpoint::builder(iroh::endpoint::presets::N0)
+            .secret_key(SecretKey::generate())
+            .relay_mode(RelayMode::Disabled)
+            .bind()
+            .await
+            .expect("bind test endpoint");
+        let gossip = Gossip::builder().spawn(endpoint.clone());
+        let blobs = FsStore::load(dir.join("blobs"))
+            .await
+            .expect("load test blobs");
+        let docs = iroh_docs::protocol::Docs::persistent(dir.to_path_buf())
+            .spawn(endpoint.clone(), (*blobs).clone(), gossip.clone())
+            .await
+            .expect("spawn test docs");
+        let router = iroh::protocol::Router::builder(endpoint.clone())
+            .accept(iroh_gossip::ALPN, gossip)
+            .accept(
+                iroh_blobs::ALPN,
+                iroh_blobs::BlobsProtocol::new(&blobs, None),
+            )
+            .accept(iroh_docs::ALPN, docs.clone())
+            .spawn();
+        let td = TrailDocs::init(docs, (*blobs).clone(), dir.to_path_buf(), book, observer)
+            .await
+            .expect("init trail");
+        // A read ticket carries the addresses the endpoint has at the time; with no relay that
+        // is only its direct ones, which take a moment to appear after the bind.
+        for _ in 0..200 {
+            if !endpoint.addr().is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        LiveReplica {
+            td,
+            endpoint,
+            _router: router,
+        }
+    }
+
+    async fn until(what: &str, mut check: impl FnMut() -> bool) {
+        for _ in 0..600 {
+            if check() {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        panic!("timed out waiting for {what}");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_friend_write_reaches_a_watching_replica_with_no_pull() {
+        let a_dir = scratch_dir("live-author");
+        let b_dir = scratch_dir("live-reader");
+        let author_node = live_replica(&a_dir, None, None).await;
+        let seen = Arc::new(Seen::default());
+        let reader = live_replica(&b_dir, None, Some(seen.clone())).await;
+        let ns = author_node.td.own_namespace();
+        let a = &author_node.td;
+
+        a.write(ns, &MAYA, b"sealed one".to_vec()).await.unwrap();
+        let ticket = a.read_ticket(ns).await.unwrap();
+        reader.td.import_ticket(&ticket).await.unwrap();
+        until("the imported entry is announced", || {
+            seen.times_readable(MAYA) >= 1
+        })
+        .await;
+        let from = *author_node.endpoint.id().as_bytes();
+        assert!(
+            seen.delivered().contains(&(from, MAYA)),
+            "the delivery names the peer that served it: {:?}",
+            seen.delivered()
+        );
+
+        // Nothing on the reader is called from here on: no import, no sync, no push.
+        a.write(ns, &MAYA, b"sealed two".to_vec()).await.unwrap();
+        until("the next write is announced", || {
+            seen.times_readable(MAYA) >= 2
+        })
+        .await;
+        a.write_nul(ns, &MAYA, b"sealed null".to_vec())
+            .await
+            .unwrap();
+        until("a null-lane write is announced too", || {
+            seen.times_readable(MAYA) >= 3
+        })
+        .await;
+        let held = reader.td.read_latest_sealed().await.unwrap();
+        assert!(held.contains(&b"sealed two".to_vec()), "{held:?}");
+        assert!(held.contains(&b"sealed null".to_vec()), "{held:?}");
+
+        // A control record is not a position; its slot is not announced.
+        let before = seen.readable().len();
+        a.write_rsy(ns, &MAYA, b"control".to_vec()).await.unwrap();
+        a.write(ns, &JUNE, b"june's".to_vec()).await.unwrap();
+        until("the write after it is announced", || {
+            seen.times_readable(JUNE) >= 1
+        })
+        .await;
+        let after: Vec<Vec<[u8; 32]>> = seen.readable()[before..].to_vec();
+        assert!(
+            after.iter().all(|report| !report.contains(&MAYA)),
+            "the control record must not announce its author: {after:?}"
+        );
+
+        for dir in [a_dir, b_dir] {
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    /// `leave` alone already stops the namespace syncing; the watch is aborted as well so an entry
+    /// the engine was mid-way through handing over cannot reach the app after the friend is gone.
+    /// This pins the outcome, which is what the app relies on, not which of the two delivers it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn forgetting_a_friend_stops_its_watch() {
+        let a_dir = scratch_dir("forget-author");
+        let b_dir = scratch_dir("forget-reader");
+        let author_node = live_replica(&a_dir, None, None).await;
+        let seen = Arc::new(Seen::default());
+        let reader = live_replica(&b_dir, None, Some(seen.clone())).await;
+        let ns = author_node.td.own_namespace();
+        let a = &author_node.td;
+
+        a.write(ns, &MAYA, b"before".to_vec()).await.unwrap();
+        let ticket = a.read_ticket(ns).await.unwrap();
+        reader.td.import_ticket(&ticket).await.unwrap();
+        until("the friend is announced", || seen.times_readable(MAYA) >= 1).await;
+
+        assert!(reader.td.forget_ticket(&ticket).await.unwrap());
+        a.write(ns, &MAYA, b"after".to_vec()).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        assert_eq!(
+            seen.times_readable(MAYA),
+            1,
+            "a removed friend's writes must not reach the app"
+        );
+
+        for dir in [a_dir, b_dir] {
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    /// A start reaches a booked friend from the addresses its ticket recorded, with nothing else to
+    /// go on: no address lookup (none is configured here), no peer the replica remembers (it is a
+    /// fresh one, as after a wipe), and a friend that has never heard of this endpoint. The
+    /// remembered-peer path dials by id alone, so on a phone whose lookup is failing — the
+    /// 2026-10-11 DNS outage — a rebuilt node would otherwise replicate nothing until a pull.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_start_reaches_a_booked_friend_from_its_ticket_alone() {
+        let a_dir = scratch_dir("ticket-author");
+        let state = scratch_dir("ticket-state");
+        let first_dir = scratch_dir("ticket-first");
+        let fresh_dir = scratch_dir("ticket-fresh");
+        let author_node = live_replica(&a_dir, None, None).await;
+        let ns = author_node.td.own_namespace();
+        author_node
+            .td
+            .write(ns, &MAYA, b"sealed".to_vec())
+            .await
+            .unwrap();
+        let ticket = author_node.td.read_ticket(ns).await.unwrap();
+        {
+            let first = live_replica(&first_dir, Some(book(&state)), None).await;
+            first.td.import_ticket(&ticket).await.unwrap();
+        }
+
+        let seen = Arc::new(Seen::default());
+        let fresh = live_replica(&fresh_dir, Some(book(&state)), Some(seen.clone())).await;
+        assert!(fresh.td.namespaces().await.contains(&ns));
+        until("the booked friend's entry arrives on its own", || {
+            seen.times_readable(MAYA) >= 1
+        })
+        .await;
+
+        for dir in [a_dir, state, first_dir, fresh_dir] {
+            let _ = std::fs::remove_dir_all(&dir);
+        }
     }
 }

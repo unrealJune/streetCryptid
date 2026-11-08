@@ -1895,13 +1895,12 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
   private func ingest(fix: LocationFix, battery: BatteryState) async {
     reporter.noteWorkStarted()
     defer { reporter.noteWorkFinished() }
-    guard let subscription = await ensureStarted() else {
+    guard let node = await ensureStarted() else {
       handOff(kind: "fix", fix: fix, battery: battery)
       return
     }
     do {
-      let outcome = try await subscription.ingestFix(
-        subscriptionId: Self.subscriptionId,
+      let outcome = try await node.ingestFix(
         fix: fix,
         battery: battery,
         intervalMs: slotIntervalMs,
@@ -1930,13 +1929,12 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
   private func heartbeat(battery: BatteryState, parked: Bool?) async {
     reporter.noteWorkStarted()
     defer { reporter.noteWorkFinished() }
-    guard let subscription = await ensureStarted() else {
+    guard let node = await ensureStarted() else {
       handOff(kind: "heartbeat", fix: nil, battery: battery, parked: parked)
       return
     }
     do {
-      let outcome = try await subscription.heartbeatFix(
-        subscriptionId: Self.subscriptionId,
+      let outcome = try await node.heartbeatFix(
         battery: battery,
         intervalMs: slotIntervalMs,
         nowMs: UInt64(Date().timeIntervalSince1970 * 1000),
@@ -2214,8 +2212,8 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
         + "pending=\(outcome.pending) suspended=\(outcome.suspended)")
   }
 
-  /// The own-topic subscription on the process's node, taking the background lease if needed —
-  /// or `nil` when a mounted app should get the capture instead.
+  /// The process's node, taking the background lease if needed — or `nil` when a mounted app
+  /// should get the capture instead.
   ///
   /// `nil` has three causes and only the first is routine: a mounted app is wired (`eventSink`)
   /// and runs the pipeline's front half itself; the device has no identity yet (a fresh install
@@ -2227,21 +2225,14 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
   /// constructions in a minute on 2026-09-16) or race a sibling delivery (three in a second on
   /// 2026-09-29). Now `NodeHost` builds at most one node per process and hands every caller the
   /// same one; concurrent deliveries simply queue on its transition lock.
-  private func ensureStarted() async -> Subscription? {
+  private func ensureStarted() async -> LocationNode? {
     if eventSink != nil { return nil }
     do {
       let roots = nodeStorageRoots()
-      guard
-        let node = try await nodeHost().acquireBackground(
-          secrets: KeychainDeviceSecrets.shared,
-          dataRoot: roots.data.path,
-          stateRoot: roots.state.path)
-      else {
-        return nil
-      }
-      // `nil` listener: never silence a mounted app's own-topic listener, and stay silent when
-      // there is none. Inbound envelopes land in the replica either way.
-      return try await node.ownSubscription(bootstrap: [], listener: nil)
+      return try await nodeHost().acquireBackground(
+        secrets: KeychainDeviceSecrets.shared,
+        dataRoot: roots.data.path,
+        stateRoot: roots.state.path)
     } catch {
       NSLog("[iroh-location] background node unavailable: \(error.localizedDescription)")
       return nil
@@ -2301,19 +2292,6 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
     @unknown default: return "unknown"
     }
   }
-
-  /// Accepted for API parity and ignored: a node owns a single trail namespace, so the Rust side
-  /// takes this as `_subscription_id`.
-  private static let subscriptionId = "background"
-}
-
-/// Inbound fixes still land in the durable replica; nothing here needs to surface them.
-private final class SilentFixListener: FixListener {
-  func onFix(
-    author: Data, seq: UInt64, fix: LocationFix, backfill: Bool, via: String, viaPeer: String?
-  ) {}
-  func onOpaque(author: Data, seq: UInt64) {}
-  func onStatus(status: String) {}
 }
 
 /// The background-task assertion one pull holds, and the context its expiration handler reports.

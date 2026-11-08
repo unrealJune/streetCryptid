@@ -9,14 +9,15 @@ import {
  * Regression tests for the "app freezes after pairing with a friend" storm.
  *
  * Reproduced off a real device's `streetcryptid.events.db`: 956 `fix.received.app` spans landed in a
- * single ~10s window — one friend's entire multi-day trail arriving as docs backfill the moment
- * reconciliation caught up. Three separate amplifiers turned that into an unresponsive app:
+ * single ~10s window — one friend's entire multi-day trail arriving the moment docs reconciliation
+ * caught up. Three separate amplifiers turned that into an unresponsive app:
  *
  * 1. every one of those fixes fanned out a trail-change notification, and the provider answered
  *    each by re-reading the WHOLE trail out of SQLite and re-rendering the map — O(n²) in the
  *    trail size, on the JS thread, which is why only the (native-driven) map gesture kept working;
- * 2. every `syncTrail` re-read and re-wrote the entire replica from ts 0, and live mode runs one
- *    every 8s — so the cost above was also paid on a timer, forever, for as long as anyone watched;
+ * 2. every `syncTrail` re-read and re-wrote the entire replica from ts 0, and the (since retired)
+ *    live mode ran one every 8s — so the cost above was also paid on a timer, for as long as anyone
+ *    watched;
  * 3. the transport-diagnostics poll compared snapshots with `JSON.stringify`, whose key order is
  *    not stable across UniFFI calls, so it logged a fat "changed" record every 4s in perpetuity
  *    (391 of 410 polls on the device were byte-identical once key-sorted).
@@ -40,15 +41,6 @@ class FakeNativeModule {
     return 'doc-self';
   }
   async importDocTicket() {}
-  async deriveTopic(id: string) {
-    return `topic-${id}`;
-  }
-  async subscribe(topic: string) {
-    return `sub-${topic}`;
-  }
-  async unsubscribe() {}
-  async publish() {}
-  async docsWrite() {}
   async syncLatest() {}
   async pruneTrail() {}
 
@@ -171,30 +163,34 @@ describe('backfill storm', () => {
     setTelemetryForTesting(undefined);
   });
 
-  it('coalesces trail-change notifications across a backfill burst', async () => {
+  it('coalesces a burst of replica announcements into one read and one repaint', async () => {
     const svc = makeService();
     await svc.init('@me', 'mothman');
     await svc.addFriend(friend);
+    const readsBefore = mockHolder.mod.readLatestCalls;
 
     let notifications = 0;
     svc.onTrailChange(() => {
       notifications += 1;
     });
 
-    // One friend's whole trail arriving at once, the way docs reconciliation delivers it.
+    // One friend's whole trail landing at once, the way docs reconciliation delivers it: every
+    // entry is announced as it lands.
     for (let seq = 1; seq <= 500; seq += 1) {
-      mockHolder.mod.emit('onFix', {
+      mockHolder.mod.trailFixes.push({
         author: 'bb22',
         seq,
         fix: { lat: 47.6, lon: -122.3, accuracyM: 10, headingDeg: 0, ts: 1_000 + seq },
-        backfill: true,
       });
+      mockHolder.mod.emit('onReplicaChanged', { authors: ['bb22'] });
     }
     await flush();
     await settle();
+    await settle();
 
     // Before the fix this was 500 — each one re-reading the entire trail out of SQLite and
-    // re-rendering the map.
+    // re-rendering the map. Now it is one decrypting read of the replica per burst.
+    expect(mockHolder.mod.readLatestCalls - readsBefore).toBe(1);
     expect(notifications).toBeLessThanOrEqual(2);
     expect(notifications).toBeGreaterThan(0);
     // A friend's history is deliberately not retained: the burst collapses to their newest fix,
@@ -226,8 +222,9 @@ describe('backfill storm', () => {
 
     await svc.syncTrail(0);
 
-    // The second sync must not re-store what it already has. Live mode fires one every 8 seconds,
-    // and re-ingesting on each is what pinned the JS thread. The watermark is what skips it.
+    // The second sync must not re-store what it already has. Syncs run on every foreground and
+    // replica notification, and re-ingesting on each is what pinned the JS thread. The watermark is
+    // what skips it.
     expect(mockHolder.mod.readLatestCalls).toBe(2);
     expect(snapshots.at(-1)?.lastSyncRecovered).toBe(0);
   });

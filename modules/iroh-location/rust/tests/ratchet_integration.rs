@@ -119,12 +119,7 @@ async fn bootstrap_and_prime(
         (b, a)
     };
     first
-        .docs_write_ratcheted(
-            "prime".into(),
-            0,
-            fix_at(1),
-            vec![hex(&second.endpoint_id())],
-        )
+        .docs_write_ratcheted(0, fix_at(1), vec![hex(&second.endpoint_id())])
         .await
         .expect("initiator's priming publish");
     replicate(first, stash, second).await;
@@ -155,12 +150,7 @@ async fn responder_window_blocks_the_responder_until_the_initiator_speaks() {
 
     // The responder has a session but no sending chain.
     let dropped = responder
-        .docs_write_ratcheted(
-            "test".into(),
-            1,
-            fix_at(1000),
-            vec![hex(&initiator.endpoint_id())],
-        )
+        .docs_write_ratcheted(1, fix_at(1000), vec![hex(&initiator.endpoint_id())])
         .await
         .expect("publish returns rather than failing");
     assert_eq!(
@@ -174,12 +164,7 @@ async fn responder_window_blocks_the_responder_until_the_initiator_speaks() {
 
     // The initiator speaks; the responder's DH ratchet gives it a sending chain.
     initiator
-        .docs_write_ratcheted(
-            "test".into(),
-            1,
-            fix_at(2000),
-            vec![hex(&responder.endpoint_id())],
-        )
+        .docs_write_ratcheted(1, fix_at(2000), vec![hex(&responder.endpoint_id())])
         .await
         .expect("initiator publishes");
     replicate(initiator, &stash, responder).await;
@@ -189,12 +174,7 @@ async fn responder_window_blocks_the_responder_until_the_initiator_speaks() {
         .expect("responder reads");
 
     let dropped = responder
-        .docs_write_ratcheted(
-            "test".into(),
-            2,
-            fix_at(3000),
-            vec![hex(&initiator.endpoint_id())],
-        )
+        .docs_write_ratcheted(2, fix_at(3000), vec![hex(&initiator.endpoint_id())])
         .await
         .expect("responder publishes");
     assert!(
@@ -220,7 +200,7 @@ async fn a_ratcheted_fix_crosses_the_durable_path_and_the_stash_stays_blind() {
     let friend_id = hex(&friend.endpoint_id());
 
     let dropped = author
-        .docs_write_ratcheted("test".into(), 1, fix_at(1234), vec![friend_id])
+        .docs_write_ratcheted(1, fix_at(1234), vec![friend_id])
         .await
         .expect("author seals a ratcheted fix");
     assert!(
@@ -238,15 +218,6 @@ async fn a_ratcheted_fix_crosses_the_durable_path_and_the_stash_stays_blind() {
             .expect("stash reads")
             .is_empty(),
         "the stash must not be able to open a ratcheted envelope"
-    );
-    // Nor can the pre-ratchet path help it: v2 `open` refuses a v3 envelope outright.
-    assert!(
-        stash
-            .read_latest()
-            .await
-            .expect("stash reads v2")
-            .is_empty(),
-        "the stash must not open a v3 envelope through the v2 path either"
     );
 
     let recovered = friend
@@ -278,7 +249,7 @@ async fn both_directions_ratchet_over_the_wire() {
     let a_id = a.endpoint_id();
     let b_id = b.endpoint_id();
 
-    a.docs_write_ratcheted("test".into(), 1, fix_at(1000), vec![hex(&b_id)])
+    a.docs_write_ratcheted(1, fix_at(1000), vec![hex(&b_id)])
         .await
         .expect("a publishes");
     replicate(&a, &stash, &b).await;
@@ -292,7 +263,7 @@ async fn both_directions_ratchet_over_the_wire() {
     );
 
     // b only has a sending chain now that a's first envelope performed its DH ratchet.
-    b.docs_write_ratcheted("test".into(), 1, fix_at(2000), vec![hex(&a_id)])
+    b.docs_write_ratcheted(1, fix_at(2000), vec![hex(&a_id)])
         .await
         .expect("b publishes");
     replicate(&b, &stash, &a).await;
@@ -323,12 +294,7 @@ async fn a_recipient_outside_the_wrap_set_reads_nothing() {
     bootstrap_and_prime(&author, &revoked, &stash).await;
 
     author
-        .docs_write_ratcheted(
-            "test".into(),
-            1,
-            fix_at(1234),
-            vec![hex(&shared_with.endpoint_id())],
-        )
+        .docs_write_ratcheted(1, fix_at(1234), vec![hex(&shared_with.endpoint_id())])
         .await
         .expect("author publishes to one friend only");
 
@@ -366,7 +332,7 @@ async fn an_unbootstrapped_recipient_is_reported_as_dropped() {
 
     let stranger_id = hex(&stranger.endpoint_id());
     let dropped = author
-        .docs_write_ratcheted("test".into(), 1, fix_at(1234), vec![stranger_id.clone()])
+        .docs_write_ratcheted(1, fix_at(1234), vec![stranger_id.clone()])
         .await
         .expect("publish still succeeds for the others");
 
@@ -392,12 +358,7 @@ async fn sessions_persist_across_publishes() {
 
     for seq in 1..=3u64 {
         let dropped = author
-            .docs_write_ratcheted(
-                "test".into(),
-                seq,
-                fix_at(1000 + seq),
-                vec![friend_id.clone()],
-            )
+            .docs_write_ratcheted(seq, fix_at(1000 + seq), vec![friend_id.clone()])
             .await
             .expect("author publishes");
         assert!(

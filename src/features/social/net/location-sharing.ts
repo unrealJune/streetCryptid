@@ -12,10 +12,9 @@ import {
   type NativeLocationFix,
   type NativeRatchetEvent,
   type NodeKeys,
-  type OnFixEvent,
   type OnFriendsPulledEvent,
   type OnNativeFixEvent,
-  type OnOpaqueEvent,
+  type OnReplicaChangedEvent,
   type PairEvent,
   type PairResult,
   type PairStateRecord,
@@ -55,32 +54,15 @@ import {
 } from '../core/pairing-code';
 import { isPairingFigureIndex } from '../core/pairing-figures';
 import { BUMP_SEARCH_DURATION_MS } from '../core/pairing-countdown';
-import type { PeerKind } from '../core/peer-reachability';
 import { hasVerifiedProfile } from '../core/persona-reveal';
-import { buildFriendPresence, type PresenceState } from '../core/presence';
 import * as pool from '../core/pool';
-import {
-  type DialOutcome,
-  foldOutcomes,
-  inferStashPeer,
-  loadReachability,
-  loadStashPeer,
-  planDials,
-  type PlannedDial,
-  reachabilityKey,
-  type ReachabilityMap,
-  saveReachability,
-  saveStashPeer,
-} from './peer-reachability-store';
 import { mergeProfileIntoFriend } from '../core/profile';
 import type {
   ContactCard,
   Friend,
-  IncomingFix,
   LocationFix,
   PairingMethod,
   RatchetAckKind,
-  RatchetAckSource,
   RatchetActivity,
   SelfIdentity,
 } from '../core/types';
@@ -91,7 +73,12 @@ import {
   readBackgroundAccessGranted,
 } from './background/location-permissions';
 import type { CadenceProvider, CadenceTarget } from './background/cadence-controller';
-import { createTrailStore, type TrailPoint, type TrailStore } from './background/trail-store';
+import {
+  createTrailStore,
+  type TrailPoint,
+  type TrailStore,
+  UNRESOLVED_VIA,
+} from './background/trail-store';
 import type { PersistentKV } from './background/persistent-kv';
 import {
   handOverNativeBackground as handOverNative,
@@ -114,8 +101,6 @@ import {
   loadTransportPreferences,
   savePool,
   saveRatchetActivity,
-  saveRatchetDrops,
-  type RatchetDropCounts,
   loadSharingEnabled,
   clearLegacyShareInterval,
   saveSharingEnabled,
@@ -374,7 +359,6 @@ export interface SharingSnapshot {
   transports: TransportPreferences;
   /** Bilateral-pairing / nearby-discovery state. */
   pairing: PairingSnapshot;
-  /** Live-mode request state (ARCHITECTURE §9c). */
   /** Per-friend forward-secrecy health — who is not receiving our fixes, and why (§4.5, §4.6). */
   sessions: SessionHealthSnapshot;
   /** Latest signed fix/null return envelopes successfully opened from each friend. */
@@ -404,15 +388,15 @@ export type RatchetDropReason = 'no_session' | 'lapsed';
 export interface SessionHealthSnapshot {
   /** Endpoint id → health, for every friend that is not `ok`. Absent means healthy. */
   byFriend: Record<string, SessionHealth>;
-  /** When the resync driver last ran, or null if it has not yet. */
+  /** When session health was last read back from native, or null if it has not been yet. */
   lastCheckedAt: number | null;
 }
 
 export interface LocationSharingInitOptions {
   /**
-   * Headless mode restores only the identity, pool, and outbound topic needed
-   * to drain captured fixes. It skips profile publication, inbound listeners,
-   * friend subscriptions, and pairing timers.
+   * Headless mode restores only the identity, the pool and the friends' trail
+   * namespaces needed to drain captured fixes and read what landed. It skips
+   * profile publication, the replica watch, profile imports and pairing timers.
    */
   mode?: 'interactive' | 'headless';
 }
@@ -420,7 +404,6 @@ export interface LocationSharingInitOptions {
 export type BackgroundAccess = 'unknown' | 'foreground' | 'full';
 
 type SnapshotListener = (snapshot: SharingSnapshot) => void;
-type FixListener = (fix: IncomingFix) => void;
 type LocalFixListener = (fix: LocationFix) => void;
 type TrailChangeListener = () => void;
 type ErrorListener = (message: string) => void;
@@ -533,24 +516,28 @@ export function profileBackfillDelayMs(attempts: number): number {
 /**
  * How long trail-change notifications are gathered before the fan-out fires.
  *
- * Docs reconciliation does not trickle: catching up with a friend delivers their whole retained
- * trail as one burst of `onFix` events (956 in ~10s on the device this was diagnosed from). Every
- * listener answers a notification by re-reading the entire trail, so a per-fix fan-out is O(n²) in
- * the trail size and pins the JS thread for minutes — the app stops responding to everything except
- * the map gesture, which the native side drives.
+ * Docs reconciliation does not trickle: catching up with a friend lands a burst of entries in the
+ * replica, and each one raises `onReplicaChanged` (956 fixes in ~10s on the device this was first
+ * diagnosed from). Every listener answers a notification by re-reading the entire trail, so a
+ * per-entry fan-out is O(n²) in the trail size and pins the JS thread for minutes — the app stops
+ * responding to everything except the map gesture, which the native side drives.
  *
- * Coalescing makes that burst one refresh. The window is short enough to stay imperceptible for the
- * ordinary case of a single fix arriving on its own.
+ * Coalescing makes that burst one replica read and one refresh. The window is short enough to stay
+ * imperceptible for the ordinary case of a single entry arriving on its own. The same window
+ * gathers the replica notifications themselves ({@link LocationSharingService.scheduleReplicaRefresh}).
  */
 export const TRAIL_CHANGE_COALESCE_MS = 250;
 
 /**
- * How many §4.6 resyncs with one friend before we stop and ask the humans to re-pair.
+ * How many §4.6 session restarts with one friend before the UI stops saying "recovering" and asks
+ * the humans to re-pair.
  *
  * The design is explicit that "a resync loop surfaces a 're-pair with this friend' prompt rather
- * than retrying forever". Three is enough to absorb the ordinary causes — a stash that withheld a
- * record, a phone that was off — while a session that has been rebuilt three times and still does
- * not work is telling us something a fourth rebuild will not fix.
+ * than retrying forever". Recovery itself runs in the native drain (`PublishSink::recover`); this
+ * only judges the attempt count it reports (`resyncCount`) in {@link
+ * LocationSharingService.refreshSessionHealth}. Three is enough to absorb the ordinary causes — a
+ * stash that withheld a record, a phone that was off — while a session that has been rebuilt three
+ * times and still does not work is telling us something a fourth rebuild will not fix.
  */
 const RESYNC_ATTEMPT_LIMIT = 3;
 
@@ -559,18 +546,6 @@ function sameEntries<V>(a: ReadonlyMap<string, V>, b: ReadonlyMap<string, V>): b
   if (a.size !== b.size) return false;
   for (const [key, value] of a) if (b.get(key) !== value) return false;
   return true;
-}
-
-/**
- * Normalize a ratcheted publish's return value into a dropped-recipient list.
- *
- * The native calls return `string[]`, but an installed iOS binary built before the ratcheted
- * lanes returns nothing at all (Swift bindings regenerate only on macOS, so a device can be
- * running an older XCFramework against newer JS). Treating that as "nobody was dropped" is the
- * right reading: those builds also seal v2, where there is no session to be missing.
- */
-function droppedFrom(result: string[] | void | undefined): string[] {
-  return Array.isArray(result) ? result : [];
 }
 
 function errorMessage(e: unknown): string {
@@ -598,18 +573,6 @@ function stableStringify(value: unknown): string {
   });
 }
 
-/**
- * Orchestrates the friend location-sharing feature: owns the native node, the sharing pool, the
- * topic subscriptions, the durable trail, and the background location service. See
- * docs/social/ARCHITECTURE.md §5–6, §9.
- *
- * - We publish our own fixes on OUR topic (`deriveTopic(self.endpointId)`), wrapped only for the
- *   friends we currently share with (revocation = drop them from the wrap list). Each fix is
- *   broadcast live (gossip) AND mirrored to the durable iroh-docs trail (same sealed bytes).
- * - We subscribe to each added friend's topic to receive THEIR fixes (live + backfilled).
- * - The background service (started via {@link startBackground}) samples GPS foreground and
- *   background and feeds fixes through a {@link LocationEngine} into {@link publishFix}.
- */
 /** The wire shape of a fix. One conversion, used by both the mounted and headless entry points. */
 function toNativeFix(fix: LocationFix): NativeLocationFix {
   return {
@@ -638,6 +601,22 @@ async function readBatteryForNative(): Promise<BatteryState> {
   }
 }
 
+/**
+ * Orchestrates the friend location-sharing feature: owns the native node, the sharing pool, the
+ * replicated trail, and the background location service. See docs/social/ARCHITECTURE.md §5–6, §9.
+ *
+ * There is ONE transport for positions: iroh-docs replicas.
+ *
+ * - Our own fixes go through the native drain ({@link nativeDrain}): the Rust gate decides what to
+ *   publish, seals each fix for the friends we currently share with (revocation = drop them from
+ *   the wrap set the node holds, {@link pushSharingRecipients}) and writes it to OUR namespace, from
+ *   where iroh-docs' live engine and an explicit push carry it to every pool member and the stash.
+ * - A friend's fixes arrive by replication into the namespace we imported from their docs ticket
+ *   ({@link connectFriend}). The node announces each change (`onReplicaChanged`), and
+ *   {@link refreshTrailFromReplica} opens what landed. Nothing else delivers a friend's position.
+ * - The background service (started via {@link startBackground}) samples GPS foreground and
+ *   background and feeds fixes through a {@link LocationEngine} into the same native drain.
+ */
 export class LocationSharingService {
   private mod: IrohLocationNativeModule | null = null;
   private keys: NodeKeys | null = null;
@@ -662,35 +641,38 @@ export class LocationSharingService {
   private poolRestored = false;
   private status = 'idle';
   /**
-   * Friends the last publish could not reach, and the human-actionable reason (§4.5).
+   * Friends the last native seal could not reach, and the human-actionable reason (§4.5).
    *
-   * Rebuilt from each publish rather than accumulated: a friend who re-pairs or opens their app
-   * simply stops appearing, with no separate clearing path to forget. Only `no_session` and
-   * `lapsed` land here — see {@link LocationSharing.noteDroppedRecipients}.
+   * Rebuilt from each seal report rather than accumulated: a friend who re-pairs or opens their
+   * app simply stops appearing, with no separate clearing path to forget. Only `no_session` and
+   * `lapsed` land here — see {@link refreshSessionHealth}.
    */
   private droppedRecipients = new Map<string, RatchetDropReason>();
-  /** Last verdict per friend from the resync driver. See {@link runResyncDriver}. */
+  /** Last verdict per friend, read from native recovery. See {@link refreshSessionHealth}. */
   private sessionVerdicts = new Map<string, SessionHealth>();
   private sessionsCheckedAt: number | null = null;
-  /** Guards against a slow driver pass overlapping the next tick's. */
-  private resyncInFlight = false;
 
-  private mySubId: string | null = null;
-  private mySubRecipients = '';
-  private readonly friendSubs = new Map<string, string>();
-  private readonly removingFriends = new Set<string>();
-  private seq = 0;
   /**
-   * Whether the native counter has been seeded and is now authoritative.
-   *
-   * False on a binary that predates `nextSeq`, and false until `adoptNativeSeq` has handed the
-   * persisted floor down. Both cases keep the old SecureStore path, which is monotonic on its own
-   * — the one thing that must never happen is drawing from native before it knows the floor.
+   * Friends whose namespaces this node has opened ({@link connectFriend}), so a restore or a
+   * rebind does not import the same tickets twice. Cleared whenever the node is rebuilt.
    */
-  private nativeSeq = false;
+  private readonly connectedFriends = new Set<string>();
+  /**
+   * The newest native write of the sharing set / delivery config, so a publish that must see the
+   * pool as it is NOW (an introduction to a friend just added) can wait for it. Never rejects.
+   */
+  private recipientsMirror: Promise<void> = Promise.resolve();
+  private deliveryMirror: Promise<void> = Promise.resolve();
+  private readonly removingFriends = new Set<string>();
+  /**
+   * The keychain RESERVATION for `seq`, not a mirror of the native counter (`state-store.ts`).
+   * Native issues every value; this only ever stays ahead of it.
+   */
+  private seq = 0;
+  /** The start-up `seedSeq` failed and has not landed since; see `retryPendingSeqSeed`. */
+  private seqSeedPending = false;
 
   private readonly snapshotListeners = new Set<SnapshotListener>();
-  private readonly fixListeners = new Set<FixListener>();
   private readonly localFixListeners = new Set<LocalFixListener>();
   private readonly trailChangeListeners = new Set<TrailChangeListener>();
   /** Pending coalesced trail-change fan-out; see {@link TRAIL_CHANGE_COALESCE_MS}. */
@@ -699,15 +681,17 @@ export class LocationSharingService {
    * Highest `fix.ts` already pulled out of the durable replica, per author.
    *
    * Without it `refreshTrailFromReplica` re-read and re-wrote every entry a friend has ever
-   * published on every single sync — and live mode runs a sync every
-   * {@link LIVE_WATCH_PULL_INTERVAL_MS}, so the whole trail was decrypted and re-inserted into
-   * SQLite eight seconds apart for as long as anyone was watching. Cleared per author whenever
+   * published on every single read — and a read follows every replica change and every tick of the
+   * presence pull clock (`presenceSyncIntervalMs`), so the whole trail was decrypted and
+   * re-inserted into SQLite seconds apart for as long as anyone was watching. Cleared per author whenever
    * their cached points are dropped, or a re-added friend would never be re-read.
    */
   private readonly replicaWatermarks = new Map<string, { ts: number; seq: number }>();
   private readonly errorListeners = new Set<ErrorListener>();
-  private fixSub: Removable | null = null;
-  private opaqueSub: Removable | null = null;
+  /** The node's friend-replica announcements; see {@link scheduleReplicaRefresh}. */
+  private replicaSub: Removable | null = null;
+  /** Pending coalesced replica read; see {@link TRAIL_CHANGE_COALESCE_MS}. */
+  private replicaRefreshTimer: ReturnType<typeof setTimeout> | null = null;
   private ratchetActivity: Record<string, RatchetActivity> = {};
 
   // Bilateral pairing / nearby discovery runtime.
@@ -884,12 +868,6 @@ export class LocationSharingService {
   });
   /** Durable KV for the sharing pool. */
   private readonly kv: PersistentKV = createPersistentKV();
-  /**
-   * Last-known reachability estimates, cached so a push can log what the model BELIEVED without a
-   * second read. Only ever a mirror of what {@link learnFromPush} persisted — the store is the
-   * source of truth, because the pushes that matter happen in short-lived headless processes.
-   */
-  private lastReachability: ReachabilityMap = {};
 
   /** Whether {@link hydrateFromStore} has already run for this service instance. */
   private hydratedFromStore = false;
@@ -920,16 +898,6 @@ export class LocationSharingService {
   private bgRefreshHandlerStop: (() => void) | null = null;
   private bgLifecycleStop: (() => void) | null = null;
   private bgCadenceStop: (() => Promise<void>) | null = null;
-  /** Auto-revert timer for a bounded live-tracking window; null when ambient. */
-  private liveTrackingTimer: ReturnType<typeof setTimeout> | null = null;
-  /**
-   * Polls friends' control slots for live-mode requests (ARCHITECTURE §9c). Deliberately its OWN
-   * timer rather than riding {@link heartbeatTimer}: the share interval is user-selectable
-   * (1/5/15 min), so the heartbeat would make requests 15-min-slow on the long cadence and
-   * needlessly chatty on the short one. Keeping them separate also keeps the publish cadence — a
-   * security property, see §9 — untangled from this read traffic. A constant-rate poll leaks
-   * nothing about movement.
-   */
   /** True on the MOUNTED service only — the one that owns the process-wide native node. */
   private ownsNativeRuntime = false;
   /**
@@ -1001,11 +969,6 @@ export class LocationSharingService {
     } catch {
       // A stash we cannot name is still a stash we can use.
     }
-  }
-
-  /** The stash dial ticket to fold into subscribe() bootstrap sets, or [] when disabled. */
-  private stashBootstrap(): string[] {
-    return this.stashEnabled() && this.stashTicket ? [this.stashTicket] : [];
   }
 
   /** Current opt-in state for the UI: whether a stash exists and whether it's turned on. */
@@ -1105,8 +1068,7 @@ export class LocationSharingService {
 
   /**
    * Choose how sealed envelopes leave this phone. Persists the choice; when the choice resolves
-   * to the stash, grants it replication of our own + friends' trail namespaces and folds its
-   * ticket into our subscription.
+   * to the stash, grants it replication of our own + friends' trail namespaces.
    *
    * Switching AWAY matters as much as switching to: the push targets mirrored into the native
    * store are what the background path reads, so a mode change that did not reach
@@ -1116,10 +1078,7 @@ export class LocationSharingService {
   async setDeliveryMode(mode: DeliveryMode): Promise<void> {
     this.deliveryMode = mode;
     await saveDeliveryMode(this.kv, mode);
-    if (this.stashEnabled()) {
-      await this.syncStashGrants();
-      await this.ensureMySubscription();
-    }
+    if (this.stashEnabled()) await this.syncStashGrants();
     // The opt-in is half of what the native drain pushes to, so it has to travel with the choice.
     // Opting out matters as much as opting in: it is what stops the background path uploading to a
     // stash the user has just turned off.
@@ -1175,9 +1134,8 @@ export class LocationSharingService {
    * the one identifier here that a third party can resolve to a real person, and registering it
    * against namespaces told the stash which namespace was OURS: with bilateral pairing, your token
    * appeared against every friend's namespace and never your own, so the missing one identified
-   * you by set complement. Live mode's request channel polls instead (§9c), so nothing needs a
-   * wake. The cost is that trail delivery is no longer nudged seconds after a publish — it now
-   * lands on the next poll / periodic backfill.
+   * you by set complement. The cost is that trail delivery is no longer nudged seconds after a
+   * publish — unless both phones are syncing live, it lands on the next pull / periodic refresh.
    */
   private async syncStashGrants(): Promise<void> {
     if (!this.stashEnabled()) return;
@@ -1326,10 +1284,9 @@ export class LocationSharingService {
       // Publish our profile so friends can replicate it; web reports epoch 0 (no capability).
       this.profileEpoch = await this.safePublishProfile();
       this.profileTicketStr = await this.safeProfileTicket();
-      this.fixSub = this.mod.addListener('onFix', (event: OnFixEvent) => this.handleFix(event));
-      this.opaqueSub = this.mod.addListener('onOpaque', (event: OnOpaqueEvent) =>
-        this.handleOpaque(event)
-      );
+      // Before `restorePool` opens the friends' namespaces, so nothing that lands as they open
+      // goes unannounced.
+      this.attachReplicaWatch();
     }
     await this.markInitPhase('restore-pool', interactive);
     await this.restorePool(interactive);
@@ -1484,11 +1441,6 @@ export class LocationSharingService {
     return () => this.snapshotListeners.delete(listener);
   }
 
-  onFix(listener: FixListener): () => void {
-    this.fixListeners.add(listener);
-    return () => this.fixListeners.delete(listener);
-  }
-
   /** Subscribe to this device's latest foreground/background GPS fix. */
   onLocalFix(listener: LocalFixListener): () => void {
     this.localFixListeners.add(listener);
@@ -1496,7 +1448,7 @@ export class LocationSharingService {
     return () => this.localFixListeners.delete(listener);
   }
 
-  /** Subscribe to durable trail changes (self publish, live receive, or sync backfill). */
+  /** Subscribe to trail changes (our own publish, or a friend's fix read from the replica). */
   onTrailChange(listener: TrailChangeListener): () => void {
     this.trailChangeListeners.add(listener);
     return () => this.trailChangeListeners.delete(listener);
@@ -1526,26 +1478,25 @@ export class LocationSharingService {
     if (this.removingFriends.has(card.endpointId)) return;
     this.state = pool.addFriend(this.state, card);
     this.recordPoolChange('added', card.endpointId, 'contact-card');
-    await this.subscribeToFriend(card);
+    await this.connectFriend(card);
     await this.persistPool();
     this.emit();
   }
 
   async shareWith(endpointId: string): Promise<void> {
     this.state = pool.shareWith(this.state, endpointId);
-    await this.ensureMySubscription();
     await this.persistPool();
     this.emit();
   }
 
   async revoke(endpointId: string): Promise<void> {
     this.state = pool.revoke(this.state, endpointId);
-    // No re-subscribe needed: future fixes simply omit their wrap.
+    // Nothing to tear down: `persistPool` mirrors the sharing set, and future fixes omit their wrap.
     await this.persistPool();
     this.emit();
   }
 
-  /** Remove a friend locally, revoke future fixes, and tear down their live subscription. */
+  /** Remove a friend locally, revoke future fixes, and forget their namespaces and session. */
   async removeFriend(endpointId: string): Promise<void> {
     await this.removeFriendLocally(endpointId, { forgetRatchet: true });
   }
@@ -1561,18 +1512,18 @@ export class LocationSharingService {
     if (!this.state.friends[endpointId] || this.removingFriends.has(endpointId)) return;
 
     const wasSharing = pool.isSharingWith(this.state, endpointId);
-    const friendSubId = this.friendSubs.get(endpointId);
+    const wasConnected = this.connectedFriends.has(endpointId);
     const mod = this.mod;
     const previousState = this.state;
 
     this.removingFriends.add(endpointId);
-    this.friendSubs.delete(endpointId);
+    this.connectedFriends.delete(endpointId);
     this.state = pool.removeFriend(this.state, endpointId);
     try {
       await this.persistPool();
     } catch (error) {
       this.state = previousState;
-      if (friendSubId) this.friendSubs.set(endpointId, friendSubId);
+      if (wasConnected) this.connectedFriends.add(endpointId);
       this.removingFriends.delete(endpointId);
       throw error;
     }
@@ -1597,9 +1548,6 @@ export class LocationSharingService {
     this.emit();
 
     const cleanup: Promise<void>[] = [];
-    if (mod && friendSubId) {
-      cleanup.push(mod.unsubscribe(friendSubId));
-    }
     // Destroy the ratchet session with them (§4.2). Not merely tidiness: the state is chain keys
     // for a relationship that no longer exists, and §5.4 makes erasure an explicit design surface
     // — keeping it would leave material on disk whose only remaining use is to a seized device.
@@ -1666,7 +1614,6 @@ export class LocationSharingService {
           })
       );
     }
-    if (wasSharing) cleanup.push(this.ensureMySubscription());
     cleanup.push(
       this.trail.removeFriend(endpointId).then(() => {
         // Their cached fix is gone, so the watermark must go with them — otherwise re-adding this
@@ -1932,18 +1879,7 @@ export class LocationSharingService {
     // No poll may start against the node being replaced; `rebindNode` reopens the gate even if
     // this throws.
     this.pairingPoll.rebindStart();
-    this.fixSub?.remove();
-    this.fixSub = null;
-    this.opaqueSub?.remove();
-    this.opaqueSub = null;
-
-    const subscriptionIds = [...(this.mySubId ? [this.mySubId] : []), ...this.friendSubs.values()];
-    await Promise.allSettled(
-      subscriptionIds.map((subscriptionId) => mod.unsubscribe(subscriptionId))
-    );
-    this.friendSubs.clear();
-    this.mySubId = null;
-    this.mySubRecipients = '';
+    this.connectedFriends.clear();
     this.pairSessions = [];
     this.pendingPairRequests = [];
     this.verifications = [];
@@ -1972,14 +1908,12 @@ export class LocationSharingService {
     this.docTicketStr = await this.safeDocTicket();
     this.profileEpoch = await this.safePublishProfile();
     this.profileTicketStr = await this.safeProfileTicket();
-    this.fixSub = mod.addListener('onFix', (event: OnFixEvent) => this.handleFix(event));
-    this.opaqueSub = mod.addListener('onOpaque', (event: OnOpaqueEvent) =>
-      this.handleOpaque(event)
-    );
+    // The replica watch is held by the node, and this may be a new one (the fallback path always
+    // is). Watching again is idempotent.
+    this.attachReplicaWatch();
 
     await this.importFriendProfiles();
-    for (const friend of pool.friendList(this.state)) await this.subscribeToFriend(friend);
-    await this.ensureMySubscription();
+    await this.connectAllFriends();
     if (restorePairingReady) {
       await mod.setPairingReady(true);
       this.pairingReadyFlag = true;
@@ -2016,31 +1950,32 @@ export class LocationSharingService {
    * both — and the reveal screen still offers REJECT until then. Acknowledging is the moment the
    * human says "keep this friend", which is the first moment sealing anything for them is honest.
    *
-   * Best-effort in every direction: guarded because a phone can be running an older binary than
-   * the JS bundle, swallowed because a friend who has to wait for the next slot is the behaviour
-   * we had before this existed.
+   * Native seals for the sharing set IT holds, so the pair's change to that set has to have
+   * landed first: {@link persistPool} only starts the native writes, and an introduction that
+   * overtook them would go out sealed for yesterday's set. It waits for the writes rather than
+   * making the pool change wait, so acknowledging stays a local decision.
+   *
+   * Best-effort: swallowed because a friend who has to wait for the next slot is the behaviour we
+   * had before this existed.
    */
   private async publishIntroduction(): Promise<void> {
     const mod = this.mod;
-    if (!mod || typeof mod.publishIntroduction !== 'function') return;
+    if (!mod) return;
     try {
-      // The recipient set has to be on the wire before anything is sealed for it, and the pair
-      // added a friend: without this the envelope goes out sealed for yesterday's set.
-      await this.ensureMySubscription();
-      if (!this.mySubId) return;
-      await mod.publishIntroduction(this.mySubId);
+      await Promise.all([this.recipientsMirror, this.deliveryMirror]);
+      await mod.publishIntroduction();
     } catch {
       // The next slot will carry it.
     }
   }
 
   /**
-   * Wire up a freshly acknowledged friend: subscriptions, then the introduction, then a trail sync.
+   * Wire up a freshly acknowledged friend: open their namespaces, then the introduction, then a
+   * trail sync.
    *
    * Deliberately NOT awaited by {@link decideDiscovery} — see the note there. Ordered rather than
-   * parallel because the steps depend on each other: {@link publishIntroduction} seals for the
-   * recipient set {@link ensureMySubscription} puts on the wire, so running them together is how
-   * you publish an envelope sealed for yesterday's set.
+   * parallel so the first sync already has the friend's namespace open to reconcile, and the
+   * introduction it carries is already in our replica.
    *
    * Instrumented as one span because until now there was NOTHING between `pool.friend_added` and
    * the first fix a friend sees, and that gap is exactly where a pair that "worked" stops working.
@@ -2059,7 +1994,7 @@ export class LocationSharingService {
    * Wait for any acknowledge-time friend wiring still in flight.
    *
    * {@link decideDiscovery} deliberately does not await {@link connectNewFriend}, so something has
-   * to. Shutdown does, because tearing the native module out from under a half-finished subscribe
+   * to. Shutdown does, because tearing the native module out from under a half-finished ticket import
    * is how you get a rejection with nobody left to report it to; tests do, because "eventually"
    * is not a thing a test can assert.
    */
@@ -2079,8 +2014,7 @@ export class LocationSharingService {
     const started = Date.now();
     try {
       for (const [name, step] of [
-        ['subscribe', () => this.subscribeToFriend(friend)],
-        ['my_subscription', () => this.ensureMySubscription()],
+        ['connect', () => this.connectFriend(friend)],
         ['introduction', () => this.publishIntroduction()],
         ['trail_sync', () => this.syncTrail(0)],
       ] as const) {
@@ -2168,13 +2102,13 @@ export class LocationSharingService {
       }
       // ADOPT FIRST, WIRE UP AFTER — and never the other way round.
       //
-      // The pool write above is the friendship. Everything below is plumbing for it: a gossip
-      // subscribe, a docs ticket import, an introduction publish. All three reach the network for
-      // a peer we have never dialled before, none of them is required for the friend to exist,
-      // and `restorePool` re-runs every one of them on the next launch.
+      // The pool write above is the friendship. Everything below is plumbing for it: the ticket
+      // imports and an introduction publish. Both can reach the network for a peer we have never
+      // dialled before, neither is required for the friend to exist, and `restorePool` re-runs the
+      // imports on the next launch.
       //
       // They used to be awaited here, and that is what "I hit acknowledge and the app froze" was:
-      // `subscribeToFriend` held the node-wide native lock across a dial to an
+      // the friend's subscribe held the node-wide native lock across a dial to an
       // internet-unreachable Pixel, so ACKNOWLEDGE never returned, `pool.friend_added` was never
       // recorded, the pairing poll stopped within the second, and the phone needed a force-quit
       // (2026-09-17 00:50 UTC; the peer gave up and unfriended a minute later). The native lock is
@@ -2650,7 +2584,7 @@ export class LocationSharingService {
     this.emit();
   }
 
-  /** True once the node is bound and can publish (the {@link FixPublisher} contract). */
+  /** True once the node is bound and can publish. */
   isReady(): boolean {
     return this.mod !== null && this.status === 'ready';
   }
@@ -2678,43 +2612,33 @@ export class LocationSharingService {
    * Pixel spent eleven and a half hours unable to do while spooling 446 real fixes.
    */
   private nativeDrain(): NativeDrain {
-    const outcomeOf = (raw: NativeIngestOutcome): DrainOutcome => ({
-      accepted: raw.accepted,
-      rejection: raw.rejection,
-      enqueued: raw.enqueued,
-      published: raw.published,
-      pending: raw.pending,
-      suspended: raw.suspended,
-    });
+    const outcomeOf = (raw: NativeIngestOutcome): DrainOutcome => {
+      if (raw.published > 0) this.topUpSeqReservation();
+      return {
+        accepted: raw.accepted,
+        rejection: raw.rejection,
+        enqueued: raw.enqueued,
+        published: raw.published,
+        pending: raw.pending,
+        suspended: raw.suspended,
+      };
+    };
     return {
+      // Nothing to establish first: the node holds the sharing set and the delivery targets
+      // itself, so a node that is up can publish. (These used to need a live gossip subscription,
+      // and a moment without one latched the engine into `error` for the life of the process —
+      // an iPhone on 2026-09-01, twelve `engine.failed` spans through an entire drive.)
       ingest: async (fix, battery, intervalMs) => {
         const mod = this.mod;
-        if (!mod?.ingestFix) throw new Error('ingestFix: native module not bound');
-        // Re-establish the subscription rather than fail on its absence — the step `publishFix`
-        // took and this path lost when it replaced it.
-        //
-        // `mySubId` is nulled by anything that rebinds the node (`rebind`, a pool change that
-        // resubscribes, a shutdown) and is only restored by whoever calls this. Without the call,
-        // a moment without a subscription becomes permanent: every capture throws, the engine
-        // latches into `error`, and it stays there for the life of the process even once a
-        // subscription exists again. That is what an iPhone did on 2026-09-01 — twelve
-        // `engine.failed` spans in two minutes, all `ingestFix: no active subscription`, through an
-        // entire drive.
-        //
-        // Cheap to repeat: it compares a signature of the bootstrap set and returns immediately
-        // when nothing has changed, which is every call but the first.
-        await this.ensureMySubscription();
-        if (!this.mySubId) throw new Error('ingestFix: no active subscription');
-        return outcomeOf(await mod.ingestFix(this.mySubId, toNativeFix(fix), battery, intervalMs));
+        if (!mod) throw new Error('ingestFix: native module not bound');
+        await this.retryPendingSeqSeed();
+        return outcomeOf(await mod.ingestFix(toNativeFix(fix), battery, intervalMs));
       },
       heartbeat: async (battery, intervalMs, parked) => {
         const mod = this.mod;
-        if (!mod?.heartbeatFix) throw new Error('heartbeatFix: native module not bound');
-        // Same reason as `ingest` above: the heartbeat is the only thing publishing on a phone that
-        // is not moving, so it is the last place that should give up on a missing subscription.
-        await this.ensureMySubscription();
-        if (!this.mySubId) throw new Error('heartbeatFix: no active subscription');
-        return outcomeOf(await mod.heartbeatFix(this.mySubId, battery, intervalMs, parked));
+        if (!mod) throw new Error('heartbeatFix: native module not bound');
+        await this.retryPendingSeqSeed();
+        return outcomeOf(await mod.heartbeatFix(battery, intervalMs, parked));
       },
     };
   }
@@ -2742,310 +2666,15 @@ export class LocationSharingService {
   }
 
   /**
-   * Seal `fix` for the current recipients, broadcast it live (gossip) and mirror it to the durable
-   * trail (docs). Returns the monotonic `seq` assigned. **Throws** when the node isn't ready so the
-   * outbox drain retains the fix rather than dropping it — never returns a placeholder seq.
-   * Satisfies {@link FixPublisher} so the background {@link LocationEngine} can drive it.
-   */
-  async publishFix(fix: LocationFix, parent?: SpanContext): Promise<number> {
-    // Spans below join the native `gossip.publish`/`docs.write` (same sc.author + sc.seq) and,
-    // via the envelope hash those record, the stash + receiving phones.
-    const stashReplicationEnabled = this.stashEnabled();
-    const span = getTelemetry().startSpan('publish.fix', {
-      parent,
-      attributes: {
-        'sc.author': this.keys ? this.keys.endpointId.slice(0, 10) : undefined,
-        'stash.client_configured': this.stash.configured,
-        'stash.ticket_configured': this.stashTicket !== null,
-        'stash.opted_in': this.deliveryMode === 'stash',
-        'stash.replication_enabled': stashReplicationEnabled,
-      },
-    });
-    try {
-      if (!this.mod) throw new Error('publishFix: native module not bound');
-      await this.ensureMySubscription();
-      if (!this.mySubId) throw new Error('publishFix: no active subscription');
-      const seq = await this.nextSeq();
-      span.setAttribute('sc.seq', seq);
-      const native: NativeLocationFix = {
-        lat: fix.lat,
-        lon: fix.lon,
-        accuracyM: fix.accuracyM,
-        headingDeg: fix.headingDeg,
-        ts: fix.ts,
-      };
-      // Endpoint ids, not receiving keys: the fix lanes are envelope v3, wrapped under each
-      // friend's ratchet session (FORWARD-SECRECY.md §4.7).
-      const recipients = pool.recipientEndpoints(this.state);
-      span.setAttributes({
-        recipients: recipients.length,
-        payload_type: 'location-fix',
-        payload_ts: fix.ts,
-        payload_accuracy_m: fix.accuracyM,
-        payload_heading_deg: fix.headingDeg,
-        transport_paths: 'gossip-live,docs-durable',
-      });
-      const traceparent = getTelemetry().enabled ? traceparentFor(span.context) : null;
-      span.addEvent('gossip.publish.started', {
-        recipients: recipients.length,
-        payload_ts: fix.ts,
-      });
-      const liveDropped = droppedFrom(
-        await this.mod.publish(this.mySubId, seq, native, recipients, traceparent)
-      );
-      span.addEvent('gossip.publish.completed', { dropped: liveDropped.length });
-      try {
-        // Durable mirror: same sealed bytes, so per-recipient revocation carries over (ARCHITECTURE §6).
-        const dropped = droppedFrom(
-          await this.mod.docsWrite(this.mySubId, seq, native, recipients, traceparent)
-        );
-        this.noteDroppedRecipients(dropped, span);
-        span.addEvent('docs.write.completed', {
-          'stash.replication_enabled': stashReplicationEnabled,
-          dropped: dropped.length,
-        });
-      } catch (err) {
-        // Best effort; the live path already delivered. A later syncTrail can reconcile — but the
-        // durable/stash mirror is what OFFLINE peers backfill from, so its failure is a real reason
-        // a friend never sees this fix. Log it (→ Loki) alongside the span event.
-        const reason = err instanceof Error ? err.message : String(err);
-        span.addEvent('docs.write.failed', { reason });
-        getTelemetry().log(
-          'warn',
-          `docs.write failed (durable mirror missed; offline peers won't backfill this fix): ${reason}`,
-          { 'sc.seq': seq }
-        );
-      }
-      await this.trail.appendOwn(fix, seq);
-      this.notifyTrailChanged();
-      await this.publishNullFix(fix.ts, span.context);
-      // After both lanes, so a session the resync exchange just restored is used from the next
-      // tick rather than this one — and so a slow driver pass never delays the fix itself.
-      await this.runResyncDriver();
-      // Stamped only on the success path: the whole value of `last_publish_age_ms` is that it
-      // says when a fix last actually made it out, not when one was last attempted.
-      await stampWatermark(this.kv, 'publish').catch(() => undefined);
-      span.setStatus('ok');
-      return seq;
-    } catch (err) {
-      span.recordError(err);
-      throw err;
-    } finally {
-      span.end();
-    }
-  }
-
-  /**
-   * Drive §4.6 recovery for every friend whose session has stopped working.
+   * Publish a fresh GPS fix immediately, without waiting for the next slot. A developer
+   * diagnostic: it goes through the SAME native pipeline as every other capture — the confidence
+   * gate, the seal, the replica write and the push to the pool and the stash — so the resulting
+   * ping can be followed end to end and proves the real path rather than a side door.
    *
-   * The schedule cannot heal itself: a desynced session stays desynced until *something* notices
-   * and runs the resync exchange. This is that something. One pass per publish tick, which is the
-   * right cadence because the exchange completes across two ticks (each side publishes its half,
-   * then applies the other's) and the cost when nothing is wrong is one cheap native call per
-   * friend.
-   *
-   * Deliberately not a retry loop. Recovery that keeps recovering is not recovering, so past
-   * `RESYNC_ATTEMPT_LIMIT` the verdict becomes `recovery-failed` and we stop — the honest move at
-   * that point is to send the two humans back to an in-person bump, not to keep churning sessions
-   * on their behalf.
-   */
-  private async runResyncDriver(): Promise<void> {
-    const mod = this.mod;
-    if (!mod || this.resyncInFlight) return;
-    // Absent on iOS binaries built before the §4.6 API (Swift bindings regenerate only on macOS).
-    if (typeof mod.isDesynced !== 'function' || typeof mod.pollResync !== 'function') return;
-
-    this.resyncInFlight = true;
-    const verdicts = new Map<string, SessionHealth>();
-    try {
-      for (const friend of pool.friendList(this.state)) {
-        const desynced = await mod.isDesynced(friend.endpointId).catch(() => false);
-        if (!desynced) {
-          verdicts.set(friend.endpointId, 'ok');
-          continue;
-        }
-        const attempts =
-          typeof mod.resyncCount === 'function'
-            ? await mod.resyncCount(friend.endpointId).catch(() => 0)
-            : 0;
-        if (attempts >= RESYNC_ATTEMPT_LIMIT) {
-          verdicts.set(friend.endpointId, 'recovery-failed');
-          getTelemetry().log(
-            'warn',
-            `resync has run ${attempts}× with ${friend.endpointId.slice(0, 10)} without sticking; ` +
-              'asking the humans to re-pair instead',
-            { 'sc.peer': friend.endpointId.slice(0, 10), 'sc.resync_count': attempts }
-          );
-          continue;
-        }
-        // `pollResync` publishes our half first when we have not, so a single call from each side
-        // completes the exchange — which matters because the side that noticed the desync and the
-        // side that caused it are usually not the same one.
-        const applied = await mod
-          .pollResync(friend.endpointId, friend.recvPublic)
-          .catch(() => false);
-        verdicts.set(friend.endpointId, applied ? 'ok' : 'desynced');
-        if (applied) {
-          getTelemetry().log('info', `resynced with ${friend.endpointId.slice(0, 10)}`, {
-            'sc.peer': friend.endpointId.slice(0, 10),
-          });
-        }
-      }
-
-      // The resync ephemeral is NOT dropped here. A peer can apply our record after we stop
-      // needing it, and only that secret lets us join the root it moved to — so the native
-      // driver keeps it for as long as the record is acceptable and drops it itself
-      // (`recover_sessions`). Clearing it on restore is how a pair split on 2026-10-02.
-    } finally {
-      this.resyncInFlight = false;
-      this.sessionVerdicts = verdicts;
-      this.sessionsCheckedAt = Date.now();
-      this.emit();
-    }
-  }
-
-  /**
-   * Record which friends a ratcheted publish left out, and why (FORWARD-SECRECY.md §4.5).
-   *
-   * A short wrap list is not a partial success — the friends named here did not receive this fix,
-   * and nothing else in the system will notice. Two of the reasons are states a *human* has to
-   * resolve, so they are held on the friend and surfaced in the UI rather than only logged:
-   *
-   * - `no_session` — no ratchet session, because the pair predates envelope v3 or the session was
-   *   forgotten. Only an in-person re-pair fixes this; sessions are rooted by the SAS bump alone.
-   * - `lapsed` — they have not contributed a ratchet key within `T_lapse`, which usually means
-   *   their device has not run the app for a day. Distinct from revoked, and distinct from stale.
-   *
-   * The other two are transient — `no_sending_chain` clears on the next tick once the initiator's
-   * first envelope lands, and `state_unavailable` is a storage failure that §4.6 recovery handles
-   * — so they are telemetered but never shown.
-   */
-  private noteDroppedRecipients(dropped: string[], span: Span): void {
-    if (dropped.length === 0) {
-      void this.persistDropCounts({ total: 0, lapsed: 0, noSession: 0 });
-      if (this.droppedRecipients.size > 0) {
-        this.droppedRecipients.clear();
-        this.emit();
-      }
-      return;
-    }
-    const next = new Map<string, RatchetDropReason>();
-    let lapsed = 0;
-    let noSession = 0;
-    for (const entry of dropped) {
-      const sep = entry.lastIndexOf(':');
-      if (sep <= 0) continue;
-      const endpointId = entry.slice(0, sep);
-      const reason = entry.slice(sep + 1) as RatchetDropReason;
-      const actionable = reason === 'no_session' || reason === 'lapsed';
-      if (actionable) next.set(endpointId, reason);
-      if (reason === 'lapsed') lapsed += 1;
-      if (reason === 'no_session') noSession += 1;
-      // `no_sending_chain` is a responder waiting for the initiator's first envelope and clears
-      // itself next tick, so it stays at debug; everything else means a friend missed this fix.
-      getTelemetry().log(
-        (reason as string) === 'no_sending_chain' ? 'debug' : 'warn',
-        `fix not delivered to ${endpointId.slice(0, 10)}: ${reason}`,
-        { 'sc.peer': endpointId.slice(0, 10), 'sc.drop_reason': reason }
-      );
-    }
-    // On the span as well as in the logs. A log line is only findable by someone who already
-    // suspects this; span attributes are what the span-derived metrics and the device-health
-    // dashboard can count, and "this publish reached nobody" deserves to be countable.
-    span.setAttribute('ratchet.dropped', dropped.length);
-    span.setAttribute('ratchet.dropped_lapsed', lapsed);
-    span.setAttribute('ratchet.dropped_no_session', noSession);
-    if (lapsed > 0 || noSession > 0) {
-      span.setAttribute('sc.drop_reason', lapsed >= noSession ? 'lapsed' : 'no_session');
-    }
-    span.addEvent('ratchet.recipients_dropped', { count: dropped.length });
-    void this.persistDropCounts({ total: dropped.length, lapsed, noSession });
-    this.droppedRecipients = next;
-    // Emit rather than coalesce: this is once-per-tick, and "your friend is not receiving your
-    // location" is exactly the kind of change a 250 ms debounce should not sit on.
-    this.emit();
-  }
-
-  /**
-   * Mirror the drop counts to storage so `device.health` can report them.
-   *
-   * `device.health` is emitted from the periodic refresh, which does not necessarily share a
-   * process with the publish that dropped the recipients — so it cannot read them off this
-   * instance. Best-effort by design: failing to record the count must never fail the publish it
-   * describes.
-   */
-  private async persistDropCounts(counts: RatchetDropCounts): Promise<void> {
-    try {
-      await saveRatchetDrops(this.kv, counts);
-    } catch {
-      /* best-effort: telemetry must not be able to fail the tick */
-    }
-  }
-
-  /**
-   * Publish the tick's **watcher** envelope: a null fix — no position, an empty padded payload —
-   * wrapped for every friend we are NOT sharing with (FORWARD-SECRECY.md §4.1).
-   *
-   * Symmetric lanes: a one-directional watcher edge still carries an envelope from us on the same
-   * cadence a sharer's does, so the relationship runs the protocol in both directions and the
-   * stash — which sees constant-length ciphertext either way — cannot tell which edges are which.
-   * Ratcheted since §4.2 landed, and that is what makes the symmetry real rather than cosmetic:
-   * this envelope carries our ratchet contribution to those friends, which is what keeps a
-   * watch-only edge from lapsing at `T_lapse`.
-   *
-   * Best effort by design: the real fix has already been published and its `seq` returned, and a
-   * watcher edge carries no position, so a failure here must not fail the tick or make the outbox
-   * retain (and re-publish) a fix that already went out. It is a distinct `seq` from the real fix
-   * — two envelopes, never the same `(author, seq)` — and lands in its own durable slot, so the
-   * two lanes cannot supersede each other.
-   */
-  private async publishNullFix(ts: number, parent?: SpanContext): Promise<void> {
-    const mod = this.mod;
-    const subId = this.mySubId;
-    if (!mod || !subId) return;
-    const watchers = pool.watcherEndpoints(this.state);
-    if (watchers.length === 0) return;
-    // Absent on iOS binaries built before this API (Swift bindings regenerate only on macOS).
-    if (typeof mod.publishNull !== 'function') return;
-
-    const span = getTelemetry().startSpan('publish.null', {
-      parent,
-      attributes: {
-        'sc.author': this.keys ? this.keys.endpointId.slice(0, 10) : undefined,
-        recipients: watchers.length,
-        payload_type: 'null-fix',
-        payload_ts: ts,
-      },
-    });
-    try {
-      const seq = await this.nextSeq();
-      span.setAttribute('sc.seq', seq);
-      const traceparent = getTelemetry().enabled ? traceparentFor(span.context) : null;
-      const liveDropped = droppedFrom(await mod.publishNull(subId, seq, ts, watchers, traceparent));
-      span.addEvent('gossip.publish.completed', { dropped: liveDropped.length });
-      if (typeof mod.docsWriteNull === 'function') {
-        const dropped = droppedFrom(await mod.docsWriteNull(subId, seq, ts, watchers, traceparent));
-        this.noteDroppedRecipients(dropped, span);
-        span.addEvent('docs.write.completed', { dropped: dropped.length });
-      }
-      span.setStatus('ok');
-    } catch (err) {
-      // Never rethrow: see the doc comment — the real fix of this tick is already on the wire.
-      const reason = err instanceof Error ? err.message : String(err);
-      span.recordError(err);
-      getTelemetry().log(
-        'warn',
-        `null fix publish failed (watcher edges miss this tick): ${reason}`
-      );
-    } finally {
-      span.end();
-    }
-  }
-
-  /**
-   * Capture and publish a fresh GPS fix immediately, bypassing the motion/battery sampling gate.
-   * This is intentionally a developer diagnostic path: the normal publish span, durable mirror,
-   * and local trail update still run so the resulting ping can be followed end to end.
+   * The gate still applies: a fix it refuses is an error here, not a quiet no-op. What it skips is
+   * the slot grid — when the fix is accepted into a slot that is already covered, it goes out as
+   * an off-grid introduction of the position just accepted. Returns the newest `seq` this device
+   * has issued (0 on a binary that cannot say).
    */
   async forceLocationPush(
     fix: LocationFix,
@@ -3055,14 +2684,26 @@ export class LocationSharingService {
       attributes: { trigger },
     });
     try {
-      if (!this.isReady()) throw new Error('Friend sync is not ready to publish a location.');
+      const mod = this.mod;
+      if (!mod || !this.isReady()) {
+        throw new Error('Friend sync is not ready to publish a location.');
+      }
+      const battery = await readBatteryForNative();
+      let outcome = await this.nativeDrain().ingest(fix, battery, SHARE_INTERVAL_MS);
+      if (outcome.rejection) {
+        throw new Error(`The location gate refused this fix: ${outcome.rejection}.`);
+      }
+      span.setAttribute('slot_published', outcome.published);
+      if (outcome.published === 0) {
+        const raw = await mod.publishIntroduction();
+        outcome = { ...outcome, published: raw.published, pending: raw.pending };
+      }
+      span.setAttribute('published', outcome.published);
       this.recordLocalFix(fix);
-      const seq = await this.publishFix(fix, span.context);
+      await this.takeOwnPublished();
+      this.notifyTrailChanged();
+      const seq = typeof mod.currentSeq === 'function' ? await mod.currentSeq() : 0;
       span.setAttribute('sc.seq', seq);
-      // Push too, or this diagnostic lies: `publishFix` alone leaves the envelope in the local
-      // replica, so the ping it claims you can "follow end to end" would stop at this device and
-      // reproduce the very bug you'd be using it to chase.
-      await this.pushTrail(span.context);
       span.setStatus('ok');
       return seq;
     } catch (error) {
@@ -3077,11 +2718,10 @@ export class LocationSharingService {
    * What this device's durable replica can **serve**, one record per author in it.
    *
    * The honest answer to "can this device relay author X". `friend_latest` and the trail cache
-   * cannot answer it: the live gossip lane writes them too, and a fix that arrived that way never
-   * enters the author's docs namespace (we hold a READ ticket and cannot write there), while
-   * reconciliation serves out of that namespace and nothing else. Used by the dev command channel
-   * so a failing relay run distinguishes "the relay had nothing to give" from "the transfer
-   * failed".
+   * cannot answer it: they hold what this device managed to OPEN, while reconciliation serves the
+   * sealed entries in the namespace and nothing else, and the two differ whenever an entry was not
+   * sealed for us. Used by the dev command channel so a failing relay run distinguishes "the relay
+   * had nothing to give" from "the transfer failed".
    *
    * No location data in the result — presence, not payload.
    */
@@ -3099,11 +2739,12 @@ export class LocationSharingService {
    * Every endpoint worth dialing for a durable exchange, in dial order: the trail stash when it is
    * enabled and configured, then every pool member.
    *
-   * Both halves of the durable path use this — {@link syncTrail} to pull and {@link pushTrail} to
-   * push — deliberately through one helper, because they drifted apart once already: the receive
-   * side was generalised to the pool and the send side was left addressing only the stash, so an
-   * author's fix went to the durable server and to nobody else and peer relay only worked when a
-   * friend happened to dial the author.
+   * Both halves of the durable path use this — {@link syncTrail} to pull and
+   * {@link pushDeliveryConfig}, which hands the native drain its push targets — deliberately
+   * through one helper, because they drifted apart once already: the receive side was generalised
+   * to the pool and the send side was left addressing only the stash, so an author's fix went to
+   * the durable server and to nobody else and peer relay only worked when a friend happened to
+   * dial the author.
    *
    * No new exposure. ARCHITECTURE.md §6 is explicit that "access is the Wrap, not swarm
    * membership", and the whole encrypted envelope is already replicated to every pool member — so
@@ -3112,139 +2753,6 @@ export class LocationSharingService {
    *
    * The stash goes first when enabled: it is always-on and usually answers immediately.
    */
-  /**
-   * Decide how long each durable peer is worth waiting for on the next push.
-   *
-   * Presence is computed here rather than in the native layer because this is the only place that
-   * has it — Rust sees tickets, not friends — and because
-   * `features/social/core/peer-reachability.ts` conditions on the presence state, which is what
-   * lets a parked Android phone (process alive behind the foreground service, answers instantly)
-   * and a parked iPhone (riding `BGProcessing` wakes, not there) diverge without the model ever
-   * naming a platform.
-   *
-   * Best-effort: any failure reading the trail or the stored estimates falls back to the priors,
-   * because a push with guessed budgets is enormously better than no push.
-   */
-  private async planPeerDials(stashEnabled: boolean): Promise<PlannedDial[]> {
-    const friends = pool.friendList(this.state);
-    let presenceByEndpoint = new Map<string, PresenceState>();
-    let reachability: ReachabilityMap = {};
-    let stashPeer: string | null = null;
-    try {
-      const [latest, stored, knownStash] = await Promise.all([
-        this.friendLatest(),
-        loadReachability(this.kv),
-        loadStashPeer(this.kv),
-      ]);
-      reachability = stored;
-      stashPeer = knownStash;
-      presenceByEndpoint = new Map(
-        buildFriendPresence({
-          friends,
-          latest,
-          selfFix: this.latestLocalFix ?? null,
-        }).map((presence) => [presence.friend.endpointId.toLowerCase(), presence.state])
-      );
-    } catch {
-      // Fall through on the priors.
-    }
-    const peers: {
-      ticket: string;
-      endpointHex: string | null;
-      kind: PeerKind;
-      presence: PresenceState;
-    }[] = [];
-    if (stashEnabled && this.stashTicket) {
-      peers.push({
-        ticket: this.stashTicket,
-        // `resolveStashEndpointId` decodes this from the ticket at start-up and is the direct
-        // answer. The learned fallback covers a binary without `endpointIdFromTicket`, where the
-        // stash is instead recognised as the reported peer that is not a friend.
-        endpointHex: this.stashEndpointId?.toLowerCase() ?? stashPeer,
-        kind: 'stash',
-        presence: 'unknown',
-      });
-    }
-    for (const friend of friends) {
-      if (!friend.ticket) continue;
-      const endpointHex = friend.endpointId.toLowerCase();
-      peers.push({
-        ticket: friend.ticket,
-        endpointHex,
-        kind: 'friend',
-        presence: presenceByEndpoint.get(endpointHex) ?? 'unknown',
-      });
-    }
-    return planDials(peers, reachability);
-  }
-
-  /**
-   * Fold a push's per-peer outcomes back into the stored estimate, and record the training rows.
-   *
-   * The span emitted per peer here is NOT redundant with the `trail.push.peer` span the native side
-   * emits. Rust knows what each peer did; only this side knows the presence state it was in and
-   * what the model believed about it beforehand — and those are exactly the columns needed to fit
-   * the priors. Without them the logs can say a peer went silent but not that parked iPhones go
-   * silent, which is the whole hypothesis.
-   */
-  private async learnFromPush(
-    plan: readonly PlannedDial[],
-    outcomes: readonly DialOutcome[],
-    parent?: SpanContext
-  ): Promise<void> {
-    const now = Date.now();
-    const byEndpoint = new Map(
-      plan.filter((dial) => dial.endpointHex).map((dial) => [dial.endpointHex as string, dial])
-    );
-    const telemetry = getTelemetry();
-    if (telemetry.enabled) {
-      for (const outcome of outcomes) {
-        const endpointHex = outcome.peer.toLowerCase();
-        const dial = byEndpoint.get(endpointHex);
-        const believed = dial?.endpointHex
-          ? this.lastReachability[reachabilityKey(dial.endpointHex, dial.presence)]
-          : undefined;
-        telemetry
-          .startSpan('trail.push.peer.app', {
-            parent,
-            attributes: {
-              'sc.peer': endpointHex.slice(0, 10),
-              'peer.kind': dial?.kind ?? 'stash',
-              // The conditioning variable. This is the column the native span cannot carry.
-              'peer.presence': dial?.presence ?? 'unknown',
-              'peer.outcome': outcome.outcome,
-              'peer.budget_ms': outcome.budgetMs,
-              'peer.latency_ms': typeof outcome.latencyMs === 'number' ? outcome.latencyMs : -1,
-              'peer.answered': outcome.outcome === 'finished',
-              entries_sent: outcome.entriesSent,
-              // What the model believed going in, so a prediction can be scored against the
-              // result rather than merely described.
-              'peer.predicted_answer_rate': believed?.answerRate ?? -1,
-              'peer.samples': believed?.samples ?? 0,
-            },
-          })
-          .end();
-      }
-    }
-    try {
-      const current = await loadReachability(this.kv);
-      const next = foldOutcomes(current, plan, outcomes, now);
-      await saveReachability(this.kv, next);
-      this.lastReachability = next;
-      if (!(await loadStashPeer(this.kv))) {
-        const inferred = inferStashPeer(
-          outcomes,
-          plan
-            .filter((dial) => dial.kind === 'friend' && dial.endpointHex)
-            .map((dial) => dial.endpointHex as string)
-        );
-        if (inferred) await saveStashPeer(this.kv, inferred);
-      }
-    } catch {
-      // Losing an update costs accuracy on the next push, never delivery on this one.
-    }
-  }
-
   private durablePeerTickets(): string[] {
     return [
       ...(this.stashEnabled() && this.stashTicket ? [this.stashTicket] : []),
@@ -3322,113 +2830,12 @@ export class LocationSharingService {
   }
 
   /**
-   * Push our own durable trail to the stash **and to every pool member**. **Call this after
-   * publishing**, or the fixes stay on this device: `docsWrite` writes the local replica, and
-   * iroh-docs only broadcasts a local insert for namespaces `start_sync` has marked as syncing —
-   * which nothing in a publish-only context does. Without it an offline friend has nothing to
-   * reconcile from, which is invisible while both phones are online (live gossip covers it) and
-   * total when they aren't.
-   *
-   * Pushing to the pool and not only the stash is what makes peer relay (ARCHITECTURE.md §1.3/§6)
-   * the normal flow rather than luck. Addressing only the stash meant a pool member gained the
-   * author's entries solely if it happened to dial the author itself during a {@link syncTrail}
-   * window — so with the stash off there was no durable copy anywhere, and a friend could not
-   * relay a fix it had never been sent. Now a friend with the app open holds the author's entries
-   * as they are published and can hand them on the moment the author goes dark.
-   *
-   * Best-effort and cheap to repeat: once a namespace is syncing, later writes broadcast on their
-   * own for the lifetime of the process, so the steady-state cost is one connection per member. A
-   * headless wake pays a cold dial per member — the same cost shape the stash-only push already
-   * paid, scaled by pool size.
-   */
-  async pushTrail(parent?: SpanContext): Promise<void> {
-    if (!this.mod) return;
-    const peerTickets = this.durablePeerTickets();
-    const stashEnabled = this.stashEnabled();
-    const plan = await this.planPeerDials(stashEnabled);
-    const budgetMaxMs = plan.reduce((max, dial) => Math.max(max, dial.budgetMs), 0);
-    const span = getTelemetry().startSpan('trail.push.app', {
-      parent,
-      attributes: {
-        'sc.author': this.keys ? this.keys.endpointId.slice(0, 10) : undefined,
-        stash: stashEnabled,
-        'sync.peers': peerTickets.length,
-        // The deadline the model granted this push, and how many peers it declined to wait for.
-        // Both are on the parent span so a run can be read at a glance without joining the
-        // per-peer rows.
-        'push.budget_max_ms': budgetMaxMs,
-        'push.peers_skipped': plan.filter((dial) => dial.budgetMs === 0).length,
-      },
-    });
-    try {
-      // Nothing to push to — no stash, no friends — so there is no durable mirror to make. Not
-      // merely an optimisation: `start_sync([])` still waits out the native push timeout, and on a
-      // headless wake that is a hard multi-second block on iOS's background budget for no work.
-      if (peerTickets.length === 0) {
-        span.setStatus('ok');
-        return;
-      }
-      // iOS Swift bindings regenerate only on macOS (`just bindgen-ios`), so a dev client built
-      // before this export exists will not have it. That is a broken build, not a supported
-      // configuration: silently returning would strand every fix on the device and look exactly
-      // like the delivery bug this call exists to prevent, so say so.
-      if (typeof this.mod.pushTrail !== 'function') {
-        throw new Error('native module must be rebuilt: pushTrail is missing (just bindgen-ios)');
-      }
-      const budgeted = this.mod.pushTrailBudgeted;
-      if (typeof budgeted === 'function') {
-        const outcomes = await budgeted.call(
-          this.mod,
-          plan.map((dial) => ({ ticket: dial.ticket, budgetMs: dial.budgetMs })),
-          getTelemetry().enabled ? traceparentFor(span.context) : null
-        );
-        await this.learnFromPush(plan, outcomes, span.context);
-      } else {
-        // A phone can be running an older binary than the JS bundle, so the flat-budget push stays
-        // the fallback rather than a hard failure. It costs the old 30s worst case; it does not
-        // strand anything.
-        span.setAttribute('push.budgeted', false);
-        await this.mod.pushTrail(
-          peerTickets,
-          getTelemetry().enabled ? traceparentFor(span.context) : null
-        );
-      }
-      // Content upload is stash-only, and gated on the OPT-IN rather than on the stash merely
-      // being configured. `stashConfig` is build-time env; `stashEnabled()` is the user's answer.
-      // Testing the former would PUT sealed envelopes to the durable server for a user who
-      // switched it off — into a namespace `syncStashGrants` never registered, so it would also
-      // fail on every tick and bury real push failures in the noise.
-      if (stashEnabled && this.stashConfig) {
-        const uploadTrailContent = this.mod.uploadTrailContent;
-        if (!uploadTrailContent) {
-          throw new Error('native module must be rebuilt for durable stash delivery');
-        }
-        const uploaded = await uploadTrailContent(this.stashConfig.baseUrl, this.stashConfig.psk);
-        span.setAttribute('content_uploaded', uploaded);
-      }
-      await stampWatermark(this.kv, 'push').catch(() => undefined);
-      span.setStatus('ok');
-    } catch (err) {
-      // A failure means these fixes only reach friends who are online now — exactly the gap the
-      // durable path exists to close — so log it, don't swallow it silently.
-      const reason = err instanceof Error ? err.message : String(err);
-      span.addEvent('native.push.failed', { reason });
-      getTelemetry().log(
-        'warn',
-        `trail push failed (fixes not mirrored to the stash or the pool; offline friends won't see them): ${reason}`
-      );
-      span.setStatus('error', reason);
-    } finally {
-      span.end();
-    }
-  }
-
-  /**
    * Read every author's current decrypted fix out of the durable replica and merge it into the
    * local store. Returns how many FRIEND fixes were newly stored.
    *
-   * Two things keep this cheap, and both matter — live mode runs one of these every
-   * {@link LIVE_WATCH_PULL_INTERVAL_MS}:
+   * This is the ONLY way a friend's position reaches the app: it runs after every replica change
+   * the node announces ({@link scheduleReplicaRefresh}), after every {@link syncTrail}, and on the
+   * presence pull clock. Two things keep it cheap, and both matter:
    *
    * - there is nothing to collapse. Each namespace holds a single overwritten slot, so a friend
    *   who has been away for a week reconciles into exactly one entry, not a week of them. This is
@@ -3454,12 +2861,7 @@ export class LocationSharingService {
     let recoveredFriendFixes = 0;
     for (const nf of events) {
       if (known.has(nf.author)) {
-        this.recordRatchetActivity(
-          nf.author,
-          nf.kind === 'null' ? 'null' : 'fix',
-          nf.seq,
-          'durable'
-        );
+        this.recordRatchetActivity(nf.author, nf.kind === 'null' ? 'null' : 'fix', nf.seq);
       }
       if (!nf.fix) continue;
       const fix = {
@@ -3468,9 +2870,9 @@ export class LocationSharingService {
         accuracyM: nf.fix.accuracyM,
         headingDeg: nf.fix.headingDeg,
         ts: nf.fix.ts,
-        // The durable path carries the envelope stamps too. It has to: a phone that was offline
-        // when a friend parked learns about it from the replica, not from live gossip, and that is
-        // exactly the case where "is she parked or gone" is being asked.
+        // Carried through rather than dropped: these are the only things that distinguish a friend
+        // who has parked from a friend whose phone has died, and both look like a frozen dot
+        // without them.
         ...(nf.fix.state !== undefined ? { state: nf.fix.state } : {}),
         ...(nf.fix.publishedDeltaS !== undefined
           ? { publishedDeltaS: nf.fix.publishedDeltaS }
@@ -3479,7 +2881,7 @@ export class LocationSharingService {
       // `sinceTs` is the caller's inclusive lower bound; the watermark is what we have already
       // ingested. Compared on `(ts, seq)` so a republish at the same timestamp is not mistaken for
       // the entry we already hold — the store is last-write-wins regardless, but skipping here is
-      // what stops live mode re-writing and re-rendering the same slot every 8 seconds.
+      // what stops every replica notification re-writing and re-rendering the same slot.
       if (nf.fix.ts < sinceTs) continue;
       const seen = this.replicaWatermarks.get(nf.author);
       if (seen && (nf.fix.ts < seen.ts || (nf.fix.ts === seen.ts && nf.seq <= seen.seq))) continue;
@@ -3500,17 +2902,35 @@ export class LocationSharingService {
         // `recordLocalFix` ignores anything older than what it holds, so replays cost nothing.
         this.recordLocalFix(fix);
       } else if (known.has(nf.author)) {
+        // A peer is named only for a slot that was actually DELIVERED into the replica since the
+        // last read; an entry that was already there produces no attribution and stays the coarse
+        // `sync` label. So a peer is exactly what promotes this to `docs` — "replicated from a
+        // peer" — rather than "read out of the local replica, source unknown".
+        const via = nf.viaPeer ? ('docs' as const) : UNRESOLVED_VIA;
+        // App-level delivery marker: the native side says an entry landed and opened; this says
+        // the app actually surfaced it. One per NEW fix, after the watermark, so a repeat read of
+        // the same slot is not counted twice.
+        getTelemetry()
+          .startSpan('fix.received.app', {
+            attributes: {
+              'sc.author': nf.author.slice(0, 10),
+              'sc.seq': nf.seq,
+              payload_type: 'location-fix',
+              payload_ts: nf.fix.ts,
+              payload_accuracy_m: nf.fix.accuracyM,
+              payload_heading_deg: nf.fix.headingDeg,
+              transport_path: via,
+              ...(nf.viaPeer ? { transport_peer: nf.viaPeer.slice(0, 10) } : {}),
+            },
+          })
+          .end();
         await this.trail.recordFriendLatest({
           author: nf.author,
           seq: nf.seq,
           fix,
           receivedAt: Date.now(),
-          backfill: true,
-          // A peer is named only for a slot that was actually DELIVERED into the replica by this
-          // sync; an entry that was already there produces no attribution and stays the coarse
-          // `sync` label. So a peer is exactly what promotes this to `docs` — "reconciled from a
-          // peer's replica" — rather than "read out of the durable trail, source unknown".
-          ...(nf.viaPeer ? { via: 'docs' as const, viaPeer: nf.viaPeer } : {}),
+          via,
+          ...(nf.viaPeer ? { viaPeer: nf.viaPeer } : {}),
         });
         recoveredFriendFixes += 1;
       } else {
@@ -3576,7 +2996,7 @@ export class LocationSharingService {
 
   /**
    * Start the background location service: real GPS (foreground + OS background), gated by the
-   * battery-aware sampling policy, feeding fixes through a durable outbox into {@link publishFix}.
+   * battery-aware sampling policy, feeding fixes into the native publish pipeline (`publish.rs`).
    * Native-only. See docs/social/ARCHITECTURE.md §9.
    */
   async startBackground(config?: Partial<CadenceTarget>): Promise<BackgroundAccess> {
@@ -3800,12 +3220,8 @@ export class LocationSharingService {
 
   /**
    * (Re)arm the heartbeat timer at `intervalMs`. Replaces any running timer, so it is safe to call
-   * on every cadence change.
-   *
-   * The interval is not always the share interval: live mode needs its own, much shorter, tick.
-   * With live mode's 25 m OS distance filter a stationary phone is delivered no fixes at all, so
-   * the live keepalive can only come from a timer — and a 5-minute one cannot deliver a 30-second
-   * keepalive. See `LocationEngine.heartbeat`.
+   * on every cadence change. A stationary phone is delivered no fixes at all, so its slots are
+   * filled from this timer. See `LocationEngine.heartbeat`.
    */
   private armHeartbeat(intervalMs: number): void {
     if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
@@ -3864,10 +3280,6 @@ export class LocationSharingService {
    * empty event log after a relaunch, having published nothing at all.
    */
   private async teardownBackground(): Promise<void> {
-    if (this.liveTrackingTimer) {
-      clearTimeout(this.liveTrackingTimer);
-      this.liveTrackingTimer = null;
-    }
     if (this.heartbeatTimer) {
       clearInterval(this.heartbeatTimer);
       this.heartbeatTimer = null;
@@ -3933,24 +3345,6 @@ export class LocationSharingService {
     this.emit();
   }
 
-  // ── Live-mode request channel (ARCHITECTURE §9c) ─────────────────────────────────────────
-
-  /** Stop the pull once no live session remains, so it can never outlive the windows it serves. */
-
-  /** One pull tick. Serialized: a slow reconciliation must not overlap the next tick. */
-
-  /** Stop `endpointId`'s live session immediately (the user's "stop" action). */
-
-  /** Start the live-request poll. Idempotent; runs only while background sharing is on. */
-
-  /**
-   * Wait for an in-flight headless session, but never long enough to be mistaken for a broken app.
-   *
-   * The chain has its own (much longer) watchdog — see `native-runtime-owner.ts` — which is about
-   * keeping later *sessions* alive. This deadline is about the person holding the phone: five
-   * seconds of splash is a slow launch, ninety is a bug report. Overrunning it is recorded rather
-   * than swallowed, because proceeding means accepting the clobber risk this await exists to avoid.
-   */
   /**
    * Whether the installed binary adopts the process-wide node rather than clobbering it.
    *
@@ -3982,6 +3376,14 @@ export class LocationSharingService {
     });
   }
 
+  /**
+   * Wait for an in-flight headless session, but never long enough to be mistaken for a broken app.
+   *
+   * The chain has its own (much longer) watchdog — see `native-runtime-owner.ts` — which is about
+   * keeping later *sessions* alive. This deadline is about the person holding the phone: five
+   * seconds of splash is a slow launch, ninety is a bug report. Overrunning it is recorded rather
+   * than swallowed, because proceeding means accepting the clobber risk this await exists to avoid.
+   */
   private async awaitRuntimeIdleBounded(): Promise<void> {
     // A force-quit relaunch is the most likely thing to follow a teardown hang — the user kills the
     // frozen app and reopens it — so this launch is often the first context able to report it.
@@ -4037,8 +3439,8 @@ export class LocationSharingService {
     // Stop callbacks synchronously before awaiting native teardown.
     this.stopBumpPolling(true, 'shutdown');
     // Let acknowledge-time wiring finish before the module goes away. Bounded like every other
-    // teardown await on this path (AGENTS.md: never `await` native teardown unbounded) — a
-    // subscribe that is itself stuck must not become the reason shutdown never returns.
+    // teardown await on this path (AGENTS.md: never `await` native teardown unbounded) — an
+    // import that is itself stuck must not become the reason shutdown never returns.
     await Promise.race([
       Promise.all([this.awaitFriendWiring(), this.awaitPostReadyWork()]),
       new Promise<void>((resolve) => {
@@ -4051,10 +3453,6 @@ export class LocationSharingService {
       clearTimeout(this.trailChangeTimer);
       this.trailChangeTimer = null;
     }
-    if (this.liveTrackingTimer) {
-      clearTimeout(this.liveTrackingTimer);
-      this.liveTrackingTimer = null;
-    }
     if (this.heartbeatTimer) {
       clearInterval(this.heartbeatTimer);
       this.heartbeatTimer = null;
@@ -4065,18 +3463,17 @@ export class LocationSharingService {
     this.bgRefreshHandlerStop = null;
     this.bgLifecycleStop?.();
     this.bgLifecycleStop = null;
-    this.fixSub?.remove();
-    this.fixSub = null;
-    this.opaqueSub?.remove();
-    this.opaqueSub = null;
+    if (this.replicaRefreshTimer) {
+      clearTimeout(this.replicaRefreshTimer);
+      this.replicaRefreshTimer = null;
+    }
+    this.replicaSub?.remove();
+    this.replicaSub = null;
     const mod = this.mod;
-    const subscriptionIds = [...(this.mySubId ? [this.mySubId] : []), ...this.friendSubs.values()];
     this.mod = null;
     this.status = 'stopped';
-    this.friendSubs.clear();
-    this.mySubId = null;
+    this.connectedFriends.clear();
     this.snapshotListeners.clear();
-    this.fixListeners.clear();
     this.localFixListeners.clear();
     this.trailChangeListeners.clear();
     this.errorListeners.clear();
@@ -4087,9 +3484,11 @@ export class LocationSharingService {
     if (mod) {
       work.push(
         (async () => {
-          await Promise.allSettled(
-            subscriptionIds.map((subscriptionId) => mod.unsubscribe(subscriptionId))
-          );
+          try {
+            mod.unwatchReplica?.();
+          } catch {
+            // The node is going away regardless; the host drops the watch with the last lease.
+          }
           await mod.shutdown();
         })()
       );
@@ -4128,8 +3527,12 @@ export class LocationSharingService {
     }
   }
 
-  /** Restore the persisted pool and re-establish subscriptions so sharing resumes after a reload. */
-  private async restorePool(subscribeToFriends = true): Promise<void> {
+  /**
+   * Restore the persisted pool and open every friend's namespaces, so sharing resumes after a
+   * reload. Headless (`interactive` false) opens the trail namespaces only: a short wake reads
+   * positions and has no screen to show a persona edit on.
+   */
+  private async restorePool(interactive = true): Promise<void> {
     const persisted = await loadPool(this.kv);
     // Set either way, and before the early return: a device with nothing persisted HAS a known
     // pool, it is just empty, and mirroring that empty set is correct. What must never reach native
@@ -4138,28 +3541,27 @@ export class LocationSharingService {
     this.poolRestored = true;
     if (!persisted) return;
     this.state = persisted;
-    if (subscribeToFriends) {
-      for (const friend of pool.friendList(this.state)) {
-        try {
-          await this.subscribeToFriend(friend);
-        } catch {
-          // A single bad card shouldn't block restoring the rest.
-        }
-      }
+    if (interactive) {
+      await this.connectAllFriends();
     } else {
-      // Headless: no gossip subscriptions (nothing is listening), but we still MUST re-open the
-      // friends' trail namespaces. Native `syncTrail` reconciles the namespaces in its handle
-      // cache, and a fresh process starts with only our own in it — so without this the periodic
-      // backfill silently syncs nothing but our own trail and can never recover a friend's fixes.
       await this.importFriendTrails();
     }
-    // Any friend at all, not just the ones we share position with: watcher edges publish null
-    // fixes on the same cadence (FORWARD-SECRECY.md §4.1), and that needs our own topic open.
-    if (pool.friendList(this.state).length > 0) {
+  }
+
+  /**
+   * {@link connectFriend} for the whole pool, each friend on its own. A single bad card must not
+   * stop the rest from being restored, and on a rebind it must not stop the pairing gate from
+   * reopening behind it; it stays unconnected, so the next rebind or launch retries it.
+   */
+  private async connectAllFriends(): Promise<void> {
+    for (const friend of pool.friendList(this.state)) {
       try {
-        await this.ensureMySubscription();
-      } catch {
-        // ignore
+        await this.connectFriend(friend);
+      } catch (error) {
+        getTelemetry().log('warn', 'friend: could not open their namespaces', {
+          'sc.peer': friend.endpointId.slice(0, 10),
+          reason: error instanceof Error ? error.message : String(error),
+        });
       }
     }
   }
@@ -4167,7 +3569,9 @@ export class LocationSharingService {
   /**
    * Re-import every friend's docs read-ticket so their trail namespace is open in the native
    * handle cache. Idempotent (iroh-docs re-imports the capability for a namespace it already has)
-   * and cheap — it's the replication half of a grant, with no gossip membership.
+   * and cheap: no dial waits on it. A node built from a current binary has already reopened them
+   * from its book (`ns_book.rs`); this keeps an older one, which started with only our own
+   * namespace, from syncing nothing but our own trail.
    */
   private async importFriendTrails(): Promise<void> {
     if (!this.mod) return;
@@ -4241,6 +3645,44 @@ export class LocationSharingService {
   }
 
   /**
+   * Mirror the delivery set down to native — the companion to {@link pushSharingRecipients}.
+   *
+   * That call tells the native drain who to seal for; this one tells it who to hand the sealed
+   * bytes to. A device with the first and not the second seals correctly, writes its local replica,
+   * reports success, and reaches only whoever happens to be in the live engine's swarm for our
+   * namespace — nobody, on a background wake. That is exactly what two phones did all day on
+   * 2026-08-31 — full outboxes, healthy publishes, and a stash that received nothing from either.
+   *
+   * This is the ONLY push list: every publish — the mounted app's, a headless wake's, the native
+   * runtime's with no JS alive — ends in the native drain, which pushes to these peers itself
+   * (`NodeSink::flush`). It is {@link durablePeerTickets}, the same list {@link syncTrail} pulls
+   * from, so sending and receiving cannot drift apart.
+   *
+   * Fire-and-forget and best-effort, as {@link pushSharingRecipients}: failing to record where to
+   * send must not fail the pool change that prompted it, and the entries stay in the local replica
+   * for the next push either way.
+   */
+  private pushDeliveryConfig(): void {
+    const mod = this.mod;
+    if (typeof mod?.setDeliveryConfig !== 'function') return;
+    const peerTickets = this.durablePeerTickets();
+    // Gated on the OPT-IN, not on the stash being built into this bundle (`stashConfig` is
+    // build-time env; `stashEnabled()` is the user's answer). Passing a base URL for a user who
+    // switched the stash off would PUT sealed envelopes into a namespace `syncStashGrants` never
+    // registered — and fail on every drain, burying real push failures in the noise.
+    const stash = this.stashEnabled() ? this.stashConfig : null;
+    this.deliveryMirror = mod
+      .setDeliveryConfig(peerTickets, stash?.baseUrl ?? null, stash?.psk ?? null)
+      .catch((err: unknown) => {
+        getTelemetry().log('warn', 'delivery: could not mirror the push targets to native', {
+          reason: err instanceof Error ? err.message : String(err),
+          peers: peerTickets.length,
+          stash: Boolean(stash),
+        });
+      });
+  }
+
+  /**
    * Mirror the sharing set down to native, where the drain path can read it with no JS alive.
    *
    * Every pool change goes through {@link persistPool}, so hanging this here is what keeps the two
@@ -4252,43 +3694,6 @@ export class LocationSharingService {
    * `recipients.rs`. The authority for "can this person read my location" stays the ratchet
    * session, which this list can only ever narrow.
    */
-  /**
-   * Mirror the delivery set down to native — the companion to {@link pushSharingRecipients}.
-   *
-   * That call tells the native drain who to seal for; this one tells it who to hand the sealed
-   * bytes to. A device with the first and not the second seals correctly, writes its local replica,
-   * reports success, and delivers nothing: `docsWrite` is local-only and iroh-docs broadcasts a
-   * local insert solely for namespaces the live engine has marked as syncing, which a publish-only
-   * context never does. That is exactly what two phones did all day on 2026-08-31 — full outboxes,
-   * healthy publishes, and a stash that received nothing from either.
-   *
-   * Same list as {@link durablePeerTickets} on purpose: whichever path publishes has to reach the
-   * same peers, and two lists that could drift is how the JS and native paths would start
-   * delivering to different sets.
-   *
-   * Fire-and-forget and best-effort, as {@link pushSharingRecipients}: failing to record where to
-   * send must not fail the pool change that prompted it, and the entries stay in the local replica
-   * for the next push either way.
-   */
-  private pushDeliveryConfig(): void {
-    const mod = this.mod;
-    if (typeof mod?.setDeliveryConfig !== 'function') return;
-    const peerTickets = this.durablePeerTickets();
-    // Gated on the OPT-IN, not on the stash being built into this bundle — the same distinction
-    // `pushTrail` draws. Passing a base URL for a user who switched the stash off would PUT sealed
-    // envelopes into a namespace `syncStashGrants` never registered.
-    const stash = this.stashEnabled() ? this.stashConfig : null;
-    void mod
-      .setDeliveryConfig(peerTickets, stash?.baseUrl ?? null, stash?.psk ?? null)
-      .catch((err: unknown) => {
-        getTelemetry().log('warn', 'delivery: could not mirror the push targets to native', {
-          reason: err instanceof Error ? err.message : String(err),
-          peers: peerTickets.length,
-          stash: Boolean(stash),
-        });
-      });
-  }
-
   private pushSharingRecipients(): void {
     // Never mirror a pool we have not loaded. The list would be empty, the write is durable, and
     // the result is a phone that publishes sealed for nobody while every JS-side reading of "who
@@ -4313,30 +3718,35 @@ export class LocationSharingService {
     // Watchers in the same call. A watch-only edge receives no position but still needs our ratchet
     // contribution on the same cadence, or it lapses at T_lapse — the failure a20036e fixed once.
     const watchers = pool.watcherEndpoints(this.state);
-    void mod.setSharingRecipients(recipients, watchers).catch((err: unknown) => {
-      getTelemetry().log('warn', 'recipients: could not mirror the sharing set to native', {
-        reason: err instanceof Error ? err.message : String(err),
-        recipients: recipients.length,
-        watchers: watchers.length,
-      });
-    });
+    const writes: Promise<unknown>[] = [
+      mod.setSharingRecipients(recipients, watchers).catch((err: unknown) => {
+        getTelemetry().log('warn', 'recipients: could not mirror the sharing set to native', {
+          reason: err instanceof Error ? err.message : String(err),
+          recipients: recipients.length,
+          watchers: watchers.length,
+        });
+      }),
+    ];
     // Every friend's receiving key, for native session recovery (§4.6). The resync record is
     // sealed to it, the ratchet session does not carry it, and a headless wake has no pool to ask —
     // so without this the only driver of recovery left would have nothing to seal for.
     if (typeof mod.setRecipientKeys === 'function') {
       const friends = pool.friendList(this.state);
-      void mod
-        .setRecipientKeys(
-          friends.map((f) => f.endpointId),
-          friends.map((f) => f.recvPublic)
-        )
-        .catch((err: unknown) => {
-          getTelemetry().log('warn', 'recipients: could not mirror receiving keys to native', {
-            reason: err instanceof Error ? err.message : String(err),
-            friends: friends.length,
-          });
-        });
+      writes.push(
+        mod
+          .setRecipientKeys(
+            friends.map((f) => f.endpointId),
+            friends.map((f) => f.recvPublic)
+          )
+          .catch((err: unknown) => {
+            getTelemetry().log('warn', 'recipients: could not mirror receiving keys to native', {
+              reason: err instanceof Error ? err.message : String(err),
+              friends: friends.length,
+            });
+          })
+      );
     }
+    this.recipientsMirror = Promise.all(writes).then(() => undefined);
   }
 
   /**
@@ -4429,14 +3839,6 @@ export class LocationSharingService {
   }
 
   /**
-   * Hand the native counter our persisted value once, so the two schemes cannot overlap.
-   *
-   * Called after `start`, because the native store is claimed there. `seedSeq` is monotone, so
-   * calling it on every launch is harmless: after the first migration the floor is always at or
-   * below where native already is, and raising can only ever skip values. Best-effort — a phone
-   * whose binary predates the API keeps the JS path, which is exactly what the guard is for.
-   */
-  /**
    * Claim the next block of `seq` values in the keychain, ahead of native issuing them.
    *
    * Runs after `seedSeq` so it reserves from where the counter ACTUALLY is, and the write lands
@@ -4465,24 +3867,49 @@ export class LocationSharingService {
     }
   }
 
+  /**
+   * Keep the reservation ahead of a counter the foreground just advanced. A local read, and only
+   * after a drain that actually published; best-effort, because the standing reservation already
+   * covers what was just issued.
+   */
+  private topUpSeqReservation(): void {
+    const mod = this.mod;
+    if (!mod || typeof mod.currentSeq !== 'function') return;
+    void mod
+      .currentSeq()
+      .then((current) =>
+        current + SEQ_RESERVATION_LOW_WATER >= this.seq ? this.reserveSeqAhead(mod) : undefined
+      )
+      .catch(() => undefined);
+  }
+
+  /**
+   * Hand the native counter our persisted reservation, so a wiped `state_dir` cannot re-issue a
+   * value this identity already published.
+   *
+   * Called after `start`, because the native store is claimed there. `seedSeq` is monotone, so
+   * calling it on every launch is harmless: the floor is at or above where native already is, and
+   * raising can only ever skip values.
+   */
   private async adoptNativeSeq(): Promise<void> {
     const mod = this.mod;
-    if (!mod || typeof mod.seedSeq !== 'function' || typeof mod.nextSeq !== 'function') return;
+    if (!mod || typeof mod.seedSeq !== 'function') return;
     try {
       // `this.seq` is the keychain RESERVATION, not a mirror of the native counter — see
       // `state-store.ts`. Seeding from it is the wipe-recovery: on iOS the keychain survives app
       // deletion and `state_dir` does not, so a reinstall meets a native counter of 0 and this
       // lifts it back above everything this identity ever published.
       await mod.seedSeq(this.seq);
-      this.nativeSeq = true;
+      this.seqSeedPending = false;
       await this.reserveSeqAhead(mod);
     } catch (err) {
-      // Staying on the JS path is correct here rather than fatal: it is the scheme this device
-      // was already using, and it is monotonic on its own. What we must not do is start using
-      // native without the floor, which would re-issue every seq below it.
+      // Not fatal: the native counter is persisted in `state_dir` and monotonic on its own. The
+      // floor only matters after a reinstall wiped it, and the next drain this context drives
+      // tries again before it publishes (`retryPendingSeqSeed`).
+      this.seqSeedPending = true;
       getTelemetry().log(
         'warn',
-        'seq: could not adopt the native counter, staying on SecureStore',
+        'seq: could not seed the native counter from the keychain reservation',
         {
           reason: err instanceof Error ? err.message : String(err),
         }
@@ -4490,32 +3917,16 @@ export class LocationSharingService {
     }
   }
 
-  private async nextSeq(): Promise<number> {
-    const mod = this.mod;
-    if (this.nativeSeq && typeof mod?.nextSeq === 'function') {
-      // Native persists before it resolves, so the fail-stop guarantee the old path got from
-      // `saveSeq` throwing is preserved: a counter that cannot be written throws here and the
-      // publish aborts rather than risking reuse.
-      const seq = await mod.nextSeq();
-      // Top up the RESERVATION rather than mirroring the value just issued. Mirroring would lower
-      // the persisted number below values already on the wire, which is the rewind `state-store.ts`
-      // describes; the reservation must stay at or above everything issued. It still serves the
-      // downgrade case it was written for — an OTA that rolls this bundle back onto the same binary
-      // resumes from a number ABOVE the counter, so it skips rather than re-issues — and it now
-      // also survives the reinstall case, which a mirror never could.
-      //
-      // Best-effort and deliberately AFTER the authoritative write: the standing reservation
-      // already covers this publish, so a failed top-up is not a reason to abort it.
-      if (seq + SEQ_RESERVATION_LOW_WATER >= this.seq) {
-        void this.reserveSeqAhead(mod).catch(() => undefined);
-      }
-      return seq;
-    }
-    this.seq += 1;
-    // Persist BEFORE the caller puts this seq on the wire, so a kill mid-publish can't reuse it
-    // (a lagging persisted seq would collide `author/seq` docs keys for a rejoining peer).
-    await saveSeq(this.seq);
-    return this.seq;
+  /**
+   * Seed again before a publish this context drives, if the seed at start did not land.
+   *
+   * A failed seed after a reinstall leaves native counting from 0 under values this identity
+   * already published. Nothing in JS issues `seq` any more, so the only thing JS can still do is
+   * hand native the floor before asking it to publish. Never throws: `adoptNativeSeq` reports its
+   * own failure and leaves the retry armed.
+   */
+  private async retryPendingSeqSeed(): Promise<void> {
+    if (this.seqSeedPending) await this.adoptNativeSeq();
   }
 
   private async safeDocTicket(): Promise<string | null> {
@@ -4527,158 +3938,56 @@ export class LocationSharingService {
     }
   }
 
-  private async subscribeToFriend(card: Friend): Promise<void> {
-    if (!this.mod || this.friendSubs.has(card.endpointId)) return;
+  /**
+   * Open a friend's namespaces on this node: their trail (where their sealed position lands) and
+   * their profile (where their persona edits land). This is the friend's whole half of the
+   * transport — there is nothing to subscribe to and nothing to dial.
+   *
+   * Importing the read ticket is local bookkeeping first: it opens a replica handle, records the
+   * namespace in the node's book so every later start reopens it with or without JS
+   * (`ns_book.rs`), grants the stash, and joins the namespace to the docs live engine, which
+   * dials the ticket's peers in the background and keeps their slot current while both phones are
+   * up. None of that waits on the friend being reachable — offline recovery must never be
+   * contingent on the peer it recovers from, which is the failure ARCHITECTURE.md §9 warns about
+   * and the reason relay-e2e.sh once could not recover a fix a friend was demonstrably holding.
+   *
+   * A failed trail import is NOT swallowed: it is the only way this friend's position can reach
+   * us, so the friend stays unconnected and the next {@link restorePool} or rebind retries it. A
+   * failed profile import is: we keep whatever profile fields the card already carried.
+   */
+  private async connectFriend(card: Friend): Promise<void> {
+    const mod = this.mod;
+    if (!mod || this.connectedFriends.has(card.endpointId)) return;
     const stillCurrent = () =>
       !this.removingFriends.has(card.endpointId) &&
       this.state.friends[card.endpointId]?.pairingSessionId === card.pairingSessionId &&
       this.state.friends[card.endpointId]?.ticket === card.ticket;
     if (!stillCurrent()) return;
-    const topic = await this.mod.deriveTopic(card.endpointId);
-    // Bootstrap a friend's topic from the WHOLE pool, not just that friend.
-    //
-    // The swarm for A's topic contains everyone A shares with, so any of them is a valid entry
-    // point into it — and if A is offline, they are the ONLY entry points. Bootstrapping solely
-    // from `card.ticket` meant that when A went down, a rejoining device could not reach the
-    // swarm where A's fixes were still being held by C and D, which is the case §1.3 exists for.
-    // `ensureMySubscription` already does exactly this for our own topic; this is the same idea
-    // applied to the topics we subscribe to.
-    //
-    // Ordered with the topic's owner first: they are the authoritative source when they are up,
-    // and gossip bootstrap tries the list in order.
-    const poolBootstrap = pool
-      .friendList(this.state)
-      .filter((friend) => friend.endpointId !== card.endpointId)
-      .map((friend) => friend.ticket)
-      .filter((ticket): ticket is string => Boolean(ticket));
-    // DURABLE FIRST, LIVE SECOND. Importing the trail namespace is local bookkeeping — it opens a
-    // replica handle and needs no network — whereas `subscribe` dials this friend's bootstrap set.
-    // Doing them in the other order made offline recovery depend on a live dial succeeding: when
-    // the friend was down, `subscribe` failed, `restorePool` swallowed it per-friend ("a single
-    // bad card shouldn't block restoring the rest"), and `importDocTicket` was never reached. The
-    // device then held no replica for that author, so `syncTrail` had nothing to reconcile and
-    // reported success having recovered nothing — precisely the failure ARCHITECTURE.md §9 warns
-    // about, and the reason relay-e2e.sh could not recover a fix a friend was demonstrably
-    // holding. Offline recovery must not be contingent on the peer being reachable; that is what
-    // it is for.
     if (card.docTicket) {
-      try {
-        await this.mod.importDocTicket(card.docTicket);
-      } catch {
-        // Non-fatal: live gossip still works; only offline recovery of their trail is affected.
-      }
-      // Also grant the stash replication of their trail so we can catch up while both are offline.
-      // No push token — see `syncStashGrants`. A binary with the native grant has already done
-      // this inside `importDocTicket`.
-      if (this.stashEnabled() && typeof this.mod.grantStash !== 'function') {
+      await mod.importDocTicket(card.docTicket);
+      // A binary with the native grant has already registered their trail with the stash inside
+      // `importDocTicket`; an older one needs the HTTP fallback. No push token — see
+      // `syncStashGrants`.
+      if (this.stashEnabled() && typeof mod.grantStash !== 'function') {
         void this.stash.registerNamespace({ readTicket: card.docTicket }).catch(() => {
           /* best-effort */
         });
       }
     }
-    const subId = await this.mod.subscribe(topic, [
-      card.ticket,
-      ...poolBootstrap,
-      ...this.stashBootstrap(),
-    ]);
-    if (!stillCurrent()) {
-      await this.mod.unsubscribe(subId);
-      return;
-    }
-    this.friendSubs.set(card.endpointId, subId);
-    // Replicate + live-sync their profile namespace so identity updates land automatically (§3).
     if (card.profileTicket) {
       try {
-        await this.mod.importProfileTicket(card.profileTicket);
+        await mod.importProfileTicket(card.profileTicket);
       } catch {
         // Non-fatal: we keep whatever profile fields the card already carried.
       }
     }
+    // Removed (or re-paired) while the imports were in flight: `removeFriendLocally` has already
+    // forgotten the tickets, so marking it connected would only stop a re-add from importing.
+    if (!stillCurrent()) return;
+    this.connectedFriends.add(card.endpointId);
   }
 
-  /** (Re)subscribe our own topic so the swarm includes everyone we share with. */
-  private async ensureMySubscription(): Promise<void> {
-    if (!this.mod || !this.keys) return;
-    const bootstrap = [
-      ...pool.recipients(this.state).map((f) => f.ticket),
-      ...this.stashBootstrap(),
-    ];
-    const signature = bootstrap.slice().sort().join('|');
-    if (this.mySubId && signature === this.mySubRecipients) return;
-
-    if (this.mySubId) {
-      await this.mod.unsubscribe(this.mySubId);
-      this.mySubId = null;
-    }
-    const topic = await this.mod.deriveTopic(this.keys.endpointId);
-    this.mySubId = await this.mod.subscribe(topic, bootstrap);
-    this.mySubRecipients = signature;
-  }
-
-  private handleFix(event: OnFixEvent): void {
-    const telemetry = getTelemetry();
-    // App-level delivery marker: the native `gossip.receive` span says the envelope arrived and
-    // decrypted; this one says the app actually surfaced it (or that a non-friend/removing gate
-    // ate it — the last place a ping can silently die).
-    const known = !!this.state.friends[event.author] && !this.removingFriends.has(event.author);
-    const span = telemetry.startSpan('fix.received.app', {
-      attributes: {
-        'sc.author': event.author.slice(0, 10),
-        'sc.seq': event.seq,
-        payload_type: 'location-fix',
-        payload_ts: event.fix.ts,
-        payload_accuracy_m: event.fix.accuracyM,
-        payload_heading_deg: event.fix.headingDeg,
-        transport_path: event.via ?? (event.backfill ? 'durable-trail' : 'live-gossip'),
-        ...(event.viaPeer ? { transport_peer: event.viaPeer.slice(0, 10) } : {}),
-        ...(known ? {} : { 'sc.drop_reason': 'unknown-or-removing-author' }),
-      },
-    });
-    span.end();
-    if (!this.state.friends[event.author] || this.removingFriends.has(event.author)) return;
-    this.recordRatchetActivity(event.author, 'fix', event.seq, event.backfill ? 'durable' : 'live');
-
-    const fix: IncomingFix = {
-      author: event.author,
-      seq: event.seq,
-      fix: {
-        lat: event.fix.lat,
-        lon: event.fix.lon,
-        accuracyM: event.fix.accuracyM,
-        headingDeg: event.fix.headingDeg,
-        ts: event.fix.ts,
-        // Carried through rather than dropped: these are the only things that distinguish a
-        // friend who has parked from a friend whose phone has died, and both look like a frozen
-        // dot without them.
-        ...(event.fix.state !== undefined ? { state: event.fix.state } : {}),
-        ...(event.fix.publishedDeltaS !== undefined
-          ? { publishedDeltaS: event.fix.publishedDeltaS }
-          : {}),
-      },
-      receivedAt: Date.now(),
-      ...(event.backfill ? { backfill: true } : {}),
-      ...(event.via ? { via: event.via } : {}),
-      ...(event.viaPeer ? { viaPeer: event.viaPeer } : {}),
-    };
-    void this.trail
-      .recordFriendLatest(fix)
-      .then(() => this.notifyTrailChanged())
-      .catch((error: unknown) => this.reportError(error));
-    this.fixListeners.forEach((l) => l(fix));
-  }
-
-  private handleOpaque(event: OnOpaqueEvent): void {
-    if (event.kind !== 'null' || !event.author || event.seq <= 0) return;
-    if (!this.state.friends[event.author] || this.removingFriends.has(event.author)) return;
-    this.recordRatchetActivity(event.author, 'null', event.seq, 'live');
-  }
-
-  private recordRatchetActivity(
-    author: string,
-    kind: RatchetAckKind,
-    seq: number,
-    source: RatchetAckSource
-  ): void {
+  private recordRatchetActivity(author: string, kind: RatchetAckKind, seq: number): void {
     const current = this.ratchetActivity[author] ?? { fix: null, null: null };
     const previous = current[kind];
     if (previous && seq <= previous.seq) return;
@@ -4687,7 +3996,7 @@ export class LocationSharingService {
       ...this.ratchetActivity,
       [author]: {
         ...current,
-        [kind]: { seq, receivedAt, source },
+        [kind]: { seq, receivedAt },
       },
     };
     recordEventLog({
@@ -4697,28 +4006,102 @@ export class LocationSharingService {
       action: `ratchet.ack.${kind}`,
       summary: `${kind} ack from ${author.slice(0, 10)} at seq ${seq}`,
       status: 'ok',
-      transport: source,
-      details: { peer: author.slice(0, 10), seq, kind, source },
+      details: { peer: author.slice(0, 10), seq, kind },
     });
     getTelemetry().log('debug', `ratchet ${kind} response received`, {
       'sc.peer': author.slice(0, 10),
       'sc.seq': seq,
       'sc.lane': kind,
-      source,
     });
     void saveRatchetActivity(this.kv, this.ratchetActivity);
     this.emit();
   }
 
   /**
-   * Move the app's own-position dot, ignoring anything older than what we already hold.
+   * Ask the node to announce replica changes, so a friend's new slot reaches the map as soon as it
+   * replicates rather than on the next tick of the presence pull clock.
    *
-   * Fed from the replica read in {@link refreshTrailFromReplica} and from
-   * {@link forceLocationPush}. It is deliberately NOT fed from raw provider fixes: the confidence
-   * gate exists because a phone sometimes reports a position kilometres away, and rendering that
-   * before discarding it would throw the user's own marker across town for a frame. What reaches
-   * here has already been through the gate, in Rust, on its way to the wire.
+   * Idempotent, and called again after anything that may have replaced the node (a rebind, the
+   * shutdown + create fallback): the JS listener survives, but a native module that dropped its
+   * runtime has dropped the watch with it. An older binary without `watchReplica` simply has no
+   * announcements; the pull clock still reads the replica.
    */
+  private attachReplicaWatch(): void {
+    const mod = this.mod;
+    if (!mod) return;
+    if (!this.replicaSub) {
+      this.replicaSub =
+        mod.addListener?.('onReplicaChanged', (event: OnReplicaChangedEvent) => {
+          this.scheduleReplicaRefresh(event.authors);
+        }) ?? null;
+    }
+    try {
+      mod.watchReplica?.();
+    } catch (err) {
+      getTelemetry().log('warn', 'replica: could not watch for changes', {
+        reason: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  /**
+   * Coalesce replica announcements into one read. Reconciliation lands entries in bursts — a
+   * catch-up after a day apart is a slot per friend plus their null slots, all within a second —
+   * and every read decrypts the whole replica, so one read per burst is the only sane rate. See
+   * {@link TRAIL_CHANGE_COALESCE_MS}.
+   */
+  private scheduleReplicaRefresh(authors: readonly string[]): void {
+    if (this.status === 'stopped') return;
+    // Our own namespace only changes by our own hand; a stranger's slot is not ours to read.
+    if (
+      authors.length > 0 &&
+      !authors.some((author) => this.state.friends[author] && !this.removingFriends.has(author))
+    ) {
+      return;
+    }
+    if (this.replicaRefreshTimer !== null) return;
+    this.replicaRefreshTimer = setTimeout(() => {
+      this.replicaRefreshTimer = null;
+      void this.readReplicaInto('trail.refresh.replica', { 'replica.authors': authors.length });
+    }, TRAIL_CHANGE_COALESCE_MS);
+  }
+
+  /**
+   * Read the replica into the trail store and repaint, under one span. A replica read only, never
+   * a dial: whatever landed is already on this device.
+   */
+  private async readReplicaInto(name: string, attributes: Attributes): Promise<void> {
+    const span = getTelemetry().startSpan(name, { attributes });
+    try {
+      const recovered = await this.refreshTrailFromReplica(0);
+      span.setAttribute('recovered', recovered);
+      span.setStatus('ok');
+      this.notifyTrailChanged();
+      this.emit();
+    } catch (error) {
+      span.recordError(error);
+      span.setStatus('error', error instanceof Error ? error.message : String(error));
+    } finally {
+      span.end();
+    }
+  }
+
+  /**
+   * The native runtime pulled friends' fixes into the replica while this app was off screen.
+   *
+   * The pull is native because the app's own pull clock runs only on screen, and a pocketed app
+   * used to see nothing until it was opened (2026-10-09: 4892 wakes, 0 pulls). This is the local
+   * half: read what landed into the trail store, so the map is already current when it is opened
+   * rather than a network round trip later.
+   */
+  private async handleNativePull(event: OnFriendsPulledEvent): Promise<void> {
+    await this.readReplicaInto('trail.refresh.native_pull', {
+      'pull.trigger': event.trigger,
+      'pull.entries': event.entries,
+      'pull.elapsed_ms': event.elapsedMs,
+    });
+  }
+
   /**
    * Publish a capture the native runtime could not publish itself, and move our own dot to it.
    *
@@ -4731,35 +4114,6 @@ export class LocationSharingService {
    * phone sometimes reports a position kilometres away, and rendering that before discarding it
    * would throw the user's own marker across town for a frame.
    */
-  /**
-   * The native runtime pulled friends' fixes into the replica while this app was off screen.
-   *
-   * The pull is native because the app's own pull clock runs only on screen, and a pocketed app
-   * used to see nothing until it was opened (2026-10-09: 4892 wakes, 0 pulls). This is the local
-   * half: read what landed into the trail store, so the map is already current when it is opened
-   * rather than a network round trip later. A replica read only — no dial.
-   */
-  private async handleNativePull(event: OnFriendsPulledEvent): Promise<void> {
-    const span = getTelemetry().startSpan('trail.refresh.native_pull', {
-      attributes: {
-        'pull.trigger': event.trigger,
-        'pull.entries': event.entries,
-        'pull.elapsed_ms': event.elapsedMs,
-      },
-    });
-    try {
-      const recovered = await this.refreshTrailFromReplica(0);
-      span.setAttribute('recovered', recovered);
-      span.setStatus('ok');
-      this.notifyTrailChanged();
-      this.emit();
-    } catch (error) {
-      span.setStatus('error', error instanceof Error ? error.message : String(error));
-    } finally {
-      span.end();
-    }
-  }
-
   private async handleNativeCapture(event: OnNativeFixEvent): Promise<void> {
     const engine = this.engine;
     // No engine means sharing is not running here; the capture is not ours to publish.
@@ -4813,6 +4167,15 @@ export class LocationSharingService {
     }
   }
 
+  /**
+   * Move the app's own-position dot, ignoring anything older than what we already hold.
+   *
+   * Fed from the replica read in {@link refreshTrailFromReplica}, from the native capture hand-off
+   * and from {@link forceLocationPush}. It is deliberately NOT fed from raw provider fixes: the
+   * confidence gate exists because a phone sometimes reports a position kilometres away, and
+   * rendering that before discarding it would throw the user's own marker across town for a frame.
+   * What reaches here has already been through the gate, in Rust, on its way to the wire.
+   */
   private recordLocalFix(fix: LocationFix): void {
     if (this.latestLocalFix && fix.ts < this.latestLocalFix.ts) return;
     this.latestLocalFix = fix;
@@ -4823,9 +4186,9 @@ export class LocationSharingService {
    * Read per-friend forward-secrecy health back from native, where publishing and recovery happen.
    *
    * `droppedRecipients` and `sessionVerdicts` — the "needs re-pair" / "lapsed" / "recovery failed"
-   * states on a friend's row — were written by the JS `publishFix` and `runResyncDriver`. The
-   * native drain replaced both, so the only thing still writing them was the debug Push button,
-   * and a friend dropped from every envelope for a week showed as healthy. Native records who each
+   * states on a friend's row — used to be written by a JS publish path and a JS resync driver. The
+   * native drain replaced both, after which nothing wrote them at all, and a friend dropped from
+   * every envelope for a week showed as healthy. Native records who each
    * envelope left out (`lastSealReport().droppedPeers`) and runs §4.6 recovery itself
    * (`PublishSink::recover`); this only reads the outcome, so it never races that driver.
    *
@@ -5064,8 +4427,8 @@ export class LocationSharingService {
 
   /**
    * After restore, read each friend's current profile (from their imported ticket) and merge it.
-   * The tickets themselves are re-imported by {@link subscribeToFriend} during `restorePool`, so
-   * the live watcher is already re-armed by the time this runs; this only picks up what the local
+   * The tickets themselves are re-imported by {@link connectFriend} during `restorePool`, so the
+   * live watcher is already re-armed by the time this runs; this only picks up what the local
    * replica holds. Friends still missing a profile are retried by {@link backfillMissingProfiles}.
    */
   private async importFriendProfiles(attempt?: number): Promise<void> {

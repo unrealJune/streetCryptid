@@ -13,8 +13,8 @@
 //! already holds: [`crate::recipients`] stores endpoint ids, and an id without an addr is not
 //! dialable on a cold start.
 //!
-//! Without this store the native drain path could seal an envelope, gossip it to an empty swarm,
-//! write it to a replica nobody reconciles with, and report success — which is precisely what two
+//! Without this store the native drain path could seal an envelope, write it to a replica nobody
+//! reconciles with, and report success — which is precisely what two
 //! phones did all day on 2026-08-31 while the stash received nothing from either.
 //!
 //! # Staleness
