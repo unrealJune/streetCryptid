@@ -8769,6 +8769,15 @@ public struct RepeaterRoster: Equatable, Hashable {
      * Whose trails it carries (endpoint ids), the owner included when enrolled.
      */
     public var members: [String]
+    /**
+     * Friends whose repeater cards list it and who are in it themselves (endpoint ids). Empty for
+     * a roster this phone knows only by claiming or enrolling.
+     */
+    public var vouchers: [String]
+    /**
+     * Enrolling would be accepted, as far as this phone can tell: open, or an invite naming us.
+     */
+    public var canEnrol: Bool
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
@@ -8787,7 +8796,14 @@ public struct RepeaterRoster: Equatable, Hashable {
          */carried: UInt32, 
         /**
          * Whose trails it carries (endpoint ids), the owner included when enrolled.
-         */members: [String]) {
+         */members: [String], 
+        /**
+         * Friends whose repeater cards list it and who are in it themselves (endpoint ids). Empty for
+         * a roster this phone knows only by claiming or enrolling.
+         */vouchers: [String], 
+        /**
+         * Enrolling would be accepted, as far as this phone can tell: open, or an invite naming us.
+         */canEnrol: Bool) {
         self.rosterId = rosterId
         self.owner = owner
         self.mine = mine
@@ -8796,6 +8812,8 @@ public struct RepeaterRoster: Equatable, Hashable {
         self.repeaters = repeaters
         self.carried = carried
         self.members = members
+        self.vouchers = vouchers
+        self.canEnrol = canEnrol
     }
 
     
@@ -8821,7 +8839,9 @@ public struct FfiConverterTypeRepeaterRoster: FfiConverterRustBuffer {
                 carriesMe: FfiConverterBool.read(from: &buf), 
                 repeaters: FfiConverterSequenceString.read(from: &buf), 
                 carried: FfiConverterUInt32.read(from: &buf), 
-                members: FfiConverterSequenceString.read(from: &buf)
+                members: FfiConverterSequenceString.read(from: &buf), 
+                vouchers: FfiConverterSequenceString.read(from: &buf), 
+                canEnrol: FfiConverterBool.read(from: &buf)
         )
     }
 
@@ -8834,6 +8854,8 @@ public struct FfiConverterTypeRepeaterRoster: FfiConverterRustBuffer {
         FfiConverterSequenceString.write(value.repeaters, into: &buf)
         FfiConverterUInt32.write(value.carried, into: &buf)
         FfiConverterSequenceString.write(value.members, into: &buf)
+        FfiConverterSequenceString.write(value.vouchers, into: &buf)
+        FfiConverterBool.write(value.canEnrol, into: &buf)
     }
 }
 

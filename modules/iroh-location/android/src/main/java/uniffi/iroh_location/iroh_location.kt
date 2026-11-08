@@ -10954,6 +10954,17 @@ data class RepeaterRoster (
      * Whose trails it carries (endpoint ids), the owner included when enrolled.
      */
     var `members`: List<kotlin.String>
+    , 
+    /**
+     * Friends whose repeater cards list it and who are in it themselves (endpoint ids). Empty for
+     * a roster this phone knows only by claiming or enrolling.
+     */
+    var `vouchers`: List<kotlin.String>
+    , 
+    /**
+     * Enrolling would be accepted, as far as this phone can tell: open, or an invite naming us.
+     */
+    var `canEnrol`: kotlin.Boolean
     
 ){
     
@@ -10978,6 +10989,8 @@ public object FfiConverterTypeRepeaterRoster: FfiConverterRustBuffer<RepeaterRos
             FfiConverterSequenceString.read(buf),
             FfiConverterUInt.read(buf),
             FfiConverterSequenceString.read(buf),
+            FfiConverterSequenceString.read(buf),
+            FfiConverterBoolean.read(buf),
         )
     }
 
@@ -10989,7 +11002,9 @@ public object FfiConverterTypeRepeaterRoster: FfiConverterRustBuffer<RepeaterRos
             FfiConverterBoolean.allocationSize(value.`carriesMe`) +
             FfiConverterSequenceString.allocationSize(value.`repeaters`) +
             FfiConverterUInt.allocationSize(value.`carried`) +
-            FfiConverterSequenceString.allocationSize(value.`members`)
+            FfiConverterSequenceString.allocationSize(value.`members`) +
+            FfiConverterSequenceString.allocationSize(value.`vouchers`) +
+            FfiConverterBoolean.allocationSize(value.`canEnrol`)
     )
 
     override fun write(value: RepeaterRoster, buf: ByteBuffer) {
@@ -11001,6 +11016,8 @@ public object FfiConverterTypeRepeaterRoster: FfiConverterRustBuffer<RepeaterRos
             FfiConverterSequenceString.write(value.`repeaters`, buf)
             FfiConverterUInt.write(value.`carried`, buf)
             FfiConverterSequenceString.write(value.`members`, buf)
+            FfiConverterSequenceString.write(value.`vouchers`, buf)
+            FfiConverterBoolean.write(value.`canEnrol`, buf)
     }
 }
 
