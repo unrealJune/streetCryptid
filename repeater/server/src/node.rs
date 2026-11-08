@@ -6,6 +6,22 @@
 //! read-tickets, watches each for new remote entries, and nudges subscribers via the [`Waker`].
 //! Nothing is written to disk; a restart clears the replica and devices re-register.
 //!
+//! ## Persistent mode: a repeater
+//! The same node also runs on disk ([`Storage::Persistent`]) as a **repeater**: a self-hosted,
+//! ciphertext-blind replica that lives on a laptop, a desktop or a Pi and is merely *more likely*
+//! to be awake than a phone (streetCryptid `docs/social/REPEATERS.md`). Three things differ, and
+//! only three:
+//! * the replica and blobs are on disk, and every grant is written to a [`NamespaceBook`], so a
+//!   restart reopens every namespace without a phone having to grant it again;
+//! * on start, entries already in the replica are adopted into the content ledger, so content that
+//!   had not landed before the restart is still chased;
+//! * it reconciles every namespace with **sibling repeaters** ([`StashNode::sync_peers`]), so two
+//!   repeaters that were up at different times converge without any phone in the middle.
+//!
+//! Everything else — reconciliation, content settling, retention — is the stash's code, unchanged.
+//! Blob GC is not wired for the on-disk store yet (`REPEATERS.md`, phase 3): retention releases the
+//! ledger's reference, but the bytes stay on disk until it is.
+//!
 //! ## Content is not entries
 //! iroh-docs reconciliation moves *entry records*; the bytes they name are a separate iroh-blobs
 //! transfer, and the engine's built-in downloader gets exactly one shot at the author. Phones
@@ -23,6 +39,7 @@
 //! together are fully unit-tested.
 
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -37,7 +54,10 @@ use axum::{
     Json, Router as AxumRouter,
 };
 use iroh::{protocol::Router, Endpoint, RelayMap, RelayMode, SecretKey};
-use iroh_blobs::{store::mem::MemStore, BlobsProtocol, Hash};
+use iroh_blobs::{
+    store::{fs::FsStore, mem::MemStore},
+    BlobsProtocol, Hash,
+};
 use iroh_docs::{api::Doc, engine::LiveEvent, protocol::Docs, store::Query, DocTicket};
 use iroh_gossip::net::Gossip;
 use iroh_tickets::endpoint::EndpointTicket;
@@ -46,8 +66,10 @@ use tokio::sync::Mutex;
 
 use crate::api::{parse_namespace_hex, parse_platform, validate_register, RegisterRequest};
 use crate::auth::{authorize, bearer_token};
+use crate::book::NamespaceBook;
 use crate::content::ContentIndex;
 use crate::mls::{Admission, DeliveryService, EnvelopeRef, PassthroughDelivery};
+use crate::repeater::{Repeater, RepeaterProtocol};
 use crate::retention::{release_decisions, RetentionEntry, RetentionPolicy};
 use crate::subscriptions::{NamespaceId as NsBytes, NamespaceRegistry, PushSubscription};
 use crate::waker::{NoopWaker, Waker};
@@ -87,6 +109,30 @@ pub fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
+/// Lowercase hex of a 32-byte id — how the grant book keys namespaces and members.
+pub(crate) fn full_hex(bytes: &[u8; 32]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn parse_hex_32(hex: &str) -> Option<[u8; 32]> {
+    if hex.len() != 64 {
+        return None;
+    }
+    let mut out = [0u8; 32];
+    for (i, byte) in out.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(hex.get(2 * i..2 * i + 2)?, 16).ok()?;
+    }
+    Some(out)
+}
+
+/// The namespace a docs read ticket names.
+pub fn ticket_namespace(ticket: &str) -> Result<NsBytes> {
+    let ticket: DocTicket = ticket
+        .parse()
+        .map_err(|e| anyhow!("parse doc ticket: {e}"))?;
+    Ok(ticket.capability.id().to_bytes())
+}
+
 /// Why an opaque-content upload was or was not stored.
 ///
 /// One variant per response the writer should behave differently about — see
@@ -103,6 +149,16 @@ pub enum PutOutcome {
     UntrackedHash,
     /// The body does not hash to the address in the URL. Never retryable as-is.
     HashMismatch,
+}
+
+/// Where a node keeps its replica.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Storage {
+    /// RAM only: the hosted stash. A restart clears everything and phones re-grant.
+    Memory,
+    /// On disk under this directory: a repeater. `docs/` holds the replica, `blobs/` the
+    /// ciphertext, and `namespaces.json` the [`NamespaceBook`] of every grant.
+    Persistent(PathBuf),
 }
 
 /// The always-on, ciphertext-blind stash node.
@@ -123,7 +179,14 @@ pub struct StashNode {
     /// release policy decides no unreleased docs entry still needs the hash, so a fetch is retried
     /// for as long as the entry is worth serving.
     tracked: Mutex<HashMap<Hash, TrackedEntry>>,
-    _router: Router,
+    /// Every grant, on disk — `Some` only for [`Storage::Persistent`]. See [`crate::book`].
+    book: Option<std::sync::Mutex<NamespaceBook>>,
+    /// The repeater protocol's state — `Some` exactly when `book` is. See [`crate::repeater`].
+    repeater: Option<Arc<Repeater>>,
+    /// The node's own background tasks (settle loop, namespace watchers), aborted by
+    /// [`StashNode::shutdown`] so their `Arc<Self>` clones release the on-disk stores.
+    tasks: std::sync::Mutex<Vec<tokio::task::AbortHandle>>,
+    router: Router,
 }
 
 /// A replicated entry the settle loop is shepherding toward "servable".
@@ -180,6 +243,32 @@ impl StashNode {
         delivery: Arc<dyn DeliveryService>,
         waker: Arc<dyn Waker>,
     ) -> Result<Arc<Self>> {
+        Self::spawn_with(
+            Storage::Memory,
+            secret,
+            retention,
+            relay_urls,
+            relay_token,
+            delivery,
+            waker,
+        )
+        .await
+    }
+
+    /// [`Self::spawn`], choosing where the replica lives. With [`Storage::Persistent`] this is a
+    /// repeater: it reopens every namespace in its book before returning, and fails rather than
+    /// starting empty when the book cannot be read.
+    pub async fn spawn_with(
+        storage: Storage,
+        secret: SecretKey,
+        retention: RetentionPolicy,
+        relay_urls: &[String],
+        relay_token: Option<&str>,
+        delivery: Arc<dyn DeliveryService>,
+        waker: Arc<dyn Waker>,
+    ) -> Result<Arc<Self>> {
+        // The repeater signs its certs with the key it answers dials with.
+        let seed = secret.to_bytes();
         let mut endpoint_builder =
             Endpoint::builder(iroh::endpoint::presets::N0).secret_key(secret);
         if !relay_urls.is_empty() {
@@ -208,28 +297,60 @@ impl StashNode {
         // `forget` drops the reference → the next sweep frees the bytes. Without this a RAM-only
         // process would grow for its entire lifetime once it started storing content for real.
         let content = Arc::new(std::sync::Mutex::new(ContentIndex::new()));
-        let protect = content.clone();
-        let mem = MemStore::new_with_opts(iroh_blobs::store::mem::Options {
-            gc_config: Some(iroh_blobs::store::GcConfig {
-                interval: std::time::Duration::from_secs(GC_INTERVAL_SECS),
-                add_protected: Some(Arc::new(
-                    move |live: &mut std::collections::HashSet<Hash>| {
-                        let protect = protect.clone();
-                        Box::pin(async move {
-                            for hash in protect.lock().expect("content index poisoned").referenced()
-                            {
-                                live.insert(Hash::from_bytes(hash));
-                            }
-                            iroh_blobs::store::ProtectOutcome::Continue
-                        })
-                    },
-                )),
-            }),
-        });
-        let docs = Docs::memory()
-            .spawn(endpoint.clone(), (*mem).clone(), gossip.clone())
-            .await
-            .map_err(|e| anyhow!("spawn docs: {e}"))?;
+        let (blobs, docs, book, repeater): (iroh_blobs::api::Store, Docs, _, _) = match &storage {
+            Storage::Memory => {
+                let protect = content.clone();
+                let mem = MemStore::new_with_opts(iroh_blobs::store::mem::Options {
+                    gc_config: Some(iroh_blobs::store::GcConfig {
+                        interval: std::time::Duration::from_secs(GC_INTERVAL_SECS),
+                        add_protected: Some(Arc::new(
+                            move |live: &mut std::collections::HashSet<Hash>| {
+                                let protect = protect.clone();
+                                Box::pin(async move {
+                                    for hash in
+                                        protect.lock().expect("content index poisoned").referenced()
+                                    {
+                                        live.insert(Hash::from_bytes(hash));
+                                    }
+                                    iroh_blobs::store::ProtectOutcome::Continue
+                                })
+                            },
+                        )),
+                    }),
+                });
+                let docs = Docs::memory()
+                    .spawn(endpoint.clone(), (*mem).clone(), gossip.clone())
+                    .await
+                    .map_err(|e| anyhow!("spawn docs: {e}"))?;
+                ((*mem).clone(), docs, None, None)
+            }
+            Storage::Persistent(dir) => {
+                // The same stores the phones use (`modules/iroh-location/rust/src/lib.rs`). No GC
+                // config yet: the content ledger only learns what the replica holds in `restore`
+                // below, and a sweep that ran before then would find nothing protected and delete
+                // every blob on disk. Disk GC waits for a ledger rebuilt before the store opens
+                // (REPEATERS.md, phase 3).
+                let docs_dir = dir.join("docs");
+                std::fs::create_dir_all(&docs_dir)
+                    .map_err(|e| anyhow!("create {}: {e}", docs_dir.display()))?;
+                let book =
+                    NamespaceBook::load(dir.join("namespaces.json")).map_err(|e| anyhow!("{e}"))?;
+                let fs = FsStore::load(dir.join("blobs"))
+                    .await
+                    .map_err(|e| anyhow!("load blob store: {e}"))?;
+                let docs = Docs::persistent(docs_dir)
+                    .spawn(endpoint.clone(), (*fs).clone(), gossip.clone())
+                    .await
+                    .map_err(|e| anyhow!("spawn persistent docs: {e}"))?;
+                let repeater = Arc::new(Repeater::open(dir, &seed)?);
+                (
+                    (*fs).clone(),
+                    docs,
+                    Some(std::sync::Mutex::new(book)),
+                    Some(repeater),
+                )
+            }
+        };
 
         // Blob writes stay disabled (`None` ⇒ `EventMask::DEFAULT`, which refuses pushes). Having
         // the writer *push* its ciphertext looks like the obvious fix for a sleepy author, but
@@ -237,16 +358,22 @@ impl StashNode {
         // and `execute_push` returns success without any acknowledgement — so it could never tell a
         // phone whether it is safe to sleep. The stash pulls instead (see `settle_once`) and
         // reports content presence over the control API, which is a real delivery receipt.
-        let router = Router::builder(endpoint.clone())
+        let mut router = Router::builder(endpoint.clone())
             .accept(iroh_gossip::ALPN, gossip.clone())
-            .accept(iroh_blobs::ALPN, BlobsProtocol::new(&mem, None))
-            .accept(iroh_docs::ALPN, docs.clone())
-            .spawn();
+            .accept(iroh_blobs::ALPN, BlobsProtocol::new(&blobs, None))
+            .accept(iroh_docs::ALPN, docs.clone());
+        if let Some(repeater) = &repeater {
+            router = router.accept(
+                streetcryptid_repeater::wire::ALPN,
+                RepeaterProtocol::new(repeater.clone()),
+            );
+        }
+        let router = router.spawn();
 
         let node = Arc::new(Self {
             endpoint,
             docs,
-            blobs: (*mem).clone(),
+            blobs,
             registry: Arc::new(NamespaceRegistry::new()),
             delivery,
             waker,
@@ -254,10 +381,360 @@ impl StashNode {
             handles: Mutex::new(HashMap::new()),
             content,
             tracked: Mutex::new(HashMap::new()),
-            _router: router,
+            book,
+            repeater,
+            tasks: std::sync::Mutex::new(Vec::new()),
+            router,
         });
-        tokio::spawn(node.clone().run_settle_loop());
+        if let Some(repeater) = &node.repeater {
+            repeater.attach(&node);
+        }
+        let settle = tokio::spawn(node.clone().run_settle_loop());
+        node.track_task(settle.abort_handle());
+        if let Err(e) = node.restore().await {
+            node.shutdown().await;
+            return Err(e);
+        }
+        // A roster that moved on while this node was down is applied once at start.
+        if let Some(state) = node.repeater.as_ref().and_then(|r| r.roster_state()) {
+            node.enforce_roster(&state).await;
+        }
         Ok(node)
+    }
+
+    /// Reopen every namespace in the book: import its capability again (idempotent), mark it
+    /// syncing so the live engine serves it, start its watcher, and adopt whatever the replica
+    /// already holds. A grant that fails to reopen fails the start — a repeater that quietly came
+    /// back without one of its namespaces is the stash's restart outage again, on a laptop.
+    #[tracing::instrument(
+        name = "repeater.restore",
+        skip_all,
+        fields(namespaces = tracing::field::Empty, adopted = tracing::field::Empty)
+    )]
+    async fn restore(self: &Arc<Self>) -> Result<()> {
+        let grants = match &self.book {
+            Some(book) => book.lock().expect("namespace book poisoned").grants(),
+            None => return Ok(()),
+        };
+        let mut adopted = 0usize;
+        for (_, grant) in &grants {
+            let ns = self
+                .register_as(&grant.ticket, None, grant.granted_by.as_deref())
+                .await
+                .map_err(|e| anyhow!("reopen a granted namespace: {e}"))?;
+            if let Some(doc) = self.handle(ns).await {
+                adopted += self.adopt_stored_entries(ns, &doc).await?;
+            }
+        }
+        let span = tracing::Span::current();
+        span.record("namespaces", grants.len());
+        span.record("adopted", adopted);
+        tracing::info!(
+            namespaces = grants.len(),
+            adopted,
+            "repeater: reopened every granted namespace"
+        );
+        Ok(())
+    }
+
+    /// Put the entries a persistent replica already holds on the content ledger. The watcher only
+    /// sees entries that arrive from now on, so without this a restart forgets that an entry's
+    /// bytes never landed and nothing would ever fetch them. Returns how many entries were adopted.
+    async fn adopt_stored_entries(&self, ns: NsBytes, doc: &Doc) -> Result<usize> {
+        let stream = doc.get_many(Query::all().build()).await?;
+        tokio::pin!(stream);
+        let mut adopted = 0;
+        while let Some(entry) = stream.next().await {
+            let entry = entry?;
+            let hash = entry.content_hash();
+            let present = self.blobs.blobs().has(hash).await.unwrap_or(false);
+            {
+                let mut content = self.content.lock().expect("content index poisoned");
+                content.want(ns, *hash.as_bytes());
+                if present {
+                    content.mark_present(*hash.as_bytes());
+                }
+            }
+            adopted += 1;
+            if present {
+                continue;
+            }
+            // Missing bytes: chase them. Who delivered the record before the restart is not
+            // recorded, and the author is the one peer the key names.
+            let (author, seq) = decode_author_seq(entry.key());
+            let Some(source) = <[u8; 32]>::try_from(author.as_slice())
+                .ok()
+                .and_then(|bytes| iroh::EndpointId::from_bytes(&bytes).ok())
+            else {
+                continue;
+            };
+            self.tracked
+                .lock()
+                .await
+                .entry(hash)
+                .or_insert_with(|| TrackedEntry {
+                    namespace: ns,
+                    author,
+                    delivered_by: source,
+                    seq,
+                    first_seen_ms: now_ms(),
+                    content_present: false,
+                    // The process that received the record owned its wake.
+                    woken: true,
+                    next_attempt_ms: 0,
+                    attempts: 0,
+                });
+        }
+        Ok(adopted)
+    }
+
+    /// Reconcile every namespace this node holds with `peers` — sibling repeaters.
+    ///
+    /// Siblings are not guaranteed to be up, which is why this runs on a timer
+    /// ([`Self::run_peer_sync_loop`]) rather than once: two repeaters that were each awake at a
+    /// different time converge the next time they overlap, with no phone in between. A sibling
+    /// that is down costs a failed dial and nothing else. Content follows the records the ordinary
+    /// way: the watcher records the sibling as the delivering peer and the settle loop fetches the
+    /// bytes from it. Returns how many namespaces a sync was started for.
+    #[tracing::instrument(
+        name = "repeater.peer_sync",
+        skip_all,
+        fields(peers = peers.len(), namespaces = tracing::field::Empty)
+    )]
+    pub async fn sync_peers(&self, peers: &[iroh::EndpointAddr]) -> usize {
+        if peers.is_empty() {
+            return 0;
+        }
+        let docs: Vec<(NsBytes, Doc)> = self
+            .handles
+            .lock()
+            .await
+            .iter()
+            .map(|(ns, doc)| (*ns, doc.clone()))
+            .collect();
+        let mut started = 0;
+        for (ns, doc) in docs {
+            match doc.start_sync(peers.to_vec()).await {
+                Ok(()) => started += 1,
+                Err(e) => tracing::warn!(
+                    sc.namespace = %crate::telemetry::short_hex(&ns),
+                    error = %e,
+                    "repeater: could not start a sibling sync"
+                ),
+            }
+        }
+        tracing::Span::current().record("namespaces", started);
+        started
+    }
+
+    /// Periodic [`Self::sync_peers`]; runs until the process exits. Returns at once without peers.
+    pub async fn run_peer_sync_loop(
+        self: Arc<Self>,
+        peers: Vec<iroh::EndpointAddr>,
+        interval: std::time::Duration,
+    ) {
+        if peers.is_empty() {
+            return;
+        }
+        let mut ticker = tokio::time::interval(interval);
+        loop {
+            ticker.tick().await;
+            self.sync_peers(&peers).await;
+        }
+    }
+
+    /// Stop the node and release its stores: abort its own tasks, then close the router, which
+    /// shuts the docs engine and the blob store down with it. A persistent node must do this
+    /// before its directory can be opened again in the same process.
+    pub async fn shutdown(&self) {
+        let tasks: Vec<_> = self
+            .tasks
+            .lock()
+            .expect("task list poisoned")
+            .drain(..)
+            .collect();
+        for task in tasks {
+            task.abort();
+        }
+        if let Err(e) = self.router.shutdown().await {
+            tracing::warn!(error = %e, "stash: router did not shut down cleanly");
+        }
+    }
+
+    fn track_task(&self, task: tokio::task::AbortHandle) {
+        self.tasks.lock().expect("task list poisoned").push(task);
+    }
+
+    /// This node's endpoint address, for a sibling repeater or a test reader to dial.
+    pub fn endpoint_addr(&self) -> iroh::EndpointAddr {
+        self.endpoint.addr()
+    }
+
+    pub fn endpoint(&self) -> &Endpoint {
+        &self.endpoint
+    }
+
+    /// The repeater state, for a persistent node.
+    pub fn repeater(&self) -> Option<&Arc<Repeater>> {
+        self.repeater.as_ref()
+    }
+
+    /// Carry `ticket`'s namespace on behalf of `member`, who the caller has already checked is
+    /// carried and owns the namespace, and reconcile it with `carriers` from now on. `None` when
+    /// the member is at `limit` namespaces already.
+    pub async fn grant_for(
+        self: &Arc<Self>,
+        member: &[u8; 32],
+        ticket: &str,
+        carriers: &[[u8; 32]],
+        limit: usize,
+    ) -> Result<Option<NsBytes>> {
+        let member_hex = full_hex(member);
+        let ns_hex = full_hex(&ticket_namespace(ticket)?);
+        {
+            let book = self
+                .book
+                .as_ref()
+                .ok_or_else(|| anyhow!("only a persistent node takes grants"))?
+                .lock()
+                .expect("namespace book poisoned");
+            let already_theirs = book
+                .get(&ns_hex)
+                .is_some_and(|grant| grant.granted_by.as_deref() == Some(member_hex.as_str()));
+            if !already_theirs && book.count_granted_by(&member_hex) >= limit {
+                return Ok(None);
+            }
+        }
+        let ns = self.register_as(ticket, None, Some(&member_hex)).await?;
+        if let Some(book) = &self.book {
+            book.lock()
+                .expect("namespace book poisoned")
+                .set_carriers(&ns_hex, carriers.iter().map(full_hex).collect())
+                .map_err(|e| anyhow!("{e}"))?;
+        }
+        Ok(Some(ns))
+    }
+
+    /// Reconcile each held namespace with the co-carriers its member named: their other
+    /// repeaters, often in someone else's roster. This is what makes two people's repeaters that
+    /// carry one trail converge while the phone that writes it is asleep — plain iroh-docs sync,
+    /// started from here because nothing else would introduce the two. Returns how many syncs
+    /// were started.
+    #[tracing::instrument(name = "repeater.carrier_sync", skip_all, fields(started = tracing::field::Empty))]
+    pub async fn sync_carriers(&self) -> usize {
+        let wanted: Vec<(NsBytes, Vec<iroh::EndpointAddr>)> = match &self.book {
+            None => return 0,
+            Some(book) => book
+                .lock()
+                .expect("namespace book poisoned")
+                .grants()
+                .into_iter()
+                .filter_map(|(ns_hex, grant)| {
+                    let ns = parse_hex_32(&ns_hex)?;
+                    let peers: Vec<iroh::EndpointAddr> = grant
+                        .carriers
+                        .iter()
+                        .filter_map(|hex| parse_hex_32(hex))
+                        .filter_map(|id| iroh::EndpointId::from_bytes(&id).ok())
+                        .map(iroh::EndpointAddr::from)
+                        .collect();
+                    (!peers.is_empty()).then_some((ns, peers))
+                })
+                .collect(),
+        };
+        let mut started = 0;
+        for (ns, peers) in wanted {
+            let Some(doc) = self.handle(ns).await else {
+                continue;
+            };
+            match doc.start_sync(peers).await {
+                Ok(()) => started += 1,
+                Err(e) => tracing::warn!(
+                    sc.namespace = %crate::telemetry::short_hex(&ns),
+                    error = %e,
+                    "repeater: could not start a co-carrier sync"
+                ),
+            }
+        }
+        tracing::Span::current().record("started", started);
+        started
+    }
+
+    /// Stop carrying every namespace granted on behalf of someone `state` no longer carries.
+    pub async fn enforce_roster(&self, state: &streetcryptid_repeater::roster::RosterState) {
+        let carried: HashSet<String> = state.carried.iter().map(full_hex).collect();
+        let doomed: Vec<String> = match &self.book {
+            Some(book) => book
+                .lock()
+                .expect("namespace book poisoned")
+                .grants()
+                .into_iter()
+                .filter(|(_, grant)| {
+                    grant
+                        .granted_by
+                        .as_ref()
+                        .is_some_and(|member| !carried.contains(member))
+                })
+                .map(|(ns, _)| ns)
+                .collect(),
+            None => return,
+        };
+        for ns_hex in doomed {
+            if let Some(ns) = parse_hex_32(&ns_hex) {
+                if let Err(e) = self.release(ns).await {
+                    tracing::warn!(error = %e, "repeater: could not release a namespace");
+                }
+            }
+        }
+    }
+
+    /// Stop carrying a namespace: forget the grant, leave the doc so the live engine stops
+    /// syncing it, and drop its content from the ledger. What is on disk is not deleted here; it
+    /// is unreachable to the ledger and goes when disk GC lands (REPEATERS.md, phase 3).
+    #[tracing::instrument(
+        name = "repeater.release",
+        skip_all,
+        fields(sc.namespace = %crate::telemetry::short_hex(&ns))
+    )]
+    pub async fn release(&self, ns: NsBytes) -> Result<()> {
+        if let Some(book) = &self.book {
+            book.lock()
+                .expect("namespace book poisoned")
+                .remove(&full_hex(&ns))
+                .map_err(|e| anyhow!("{e}"))?;
+        }
+        let doc = self.handles.lock().await.remove(&ns);
+        if let Some(doc) = doc {
+            if let Err(e) = doc.leave().await {
+                tracing::warn!(error = %e, "repeater: leaving a released namespace failed");
+            }
+        }
+        self.registry.forget(&ns);
+        self.content
+            .lock()
+            .expect("content index poisoned")
+            .forget_namespace(&ns);
+        self.tracked
+            .lock()
+            .await
+            .retain(|_, entry| entry.namespace != ns);
+        tracing::info!("repeater: stopped carrying a namespace");
+        Ok(())
+    }
+
+    /// Which of `hashes` are held in full — the receipt a phone reads before it stops waiting.
+    pub async fn have(&self, hashes: &[[u8; 32]]) -> Vec<bool> {
+        let mut present = Vec::with_capacity(hashes.len());
+        for hash in hashes {
+            present.push(
+                self.blobs
+                    .blobs()
+                    .has(Hash::from_bytes(*hash))
+                    .await
+                    .unwrap_or(false),
+            );
+        }
+        present
     }
 
     /// How many replicated entries are still missing their bytes, and how many are tracked.
@@ -361,6 +838,16 @@ impl StashNode {
         read_ticket: &str,
         subscription: Option<PushSubscription>,
     ) -> Result<NsBytes> {
+        self.register_as(read_ticket, subscription, None).await
+    }
+
+    /// [`Self::register`], recording which carried member the grant is for (persistent nodes).
+    pub(crate) async fn register_as(
+        self: &Arc<Self>,
+        read_ticket: &str,
+        subscription: Option<PushSubscription>,
+        granted_by: Option<&str>,
+    ) -> Result<NsBytes> {
         let ticket: DocTicket = read_ticket
             .parse()
             .map_err(|e| anyhow!("parse doc ticket: {e}"))?;
@@ -394,6 +881,16 @@ impl StashNode {
             }
         };
 
+        // A repeater writes the grant down before reporting success, so a grant it acknowledged is
+        // one it reopens after a restart. A book that cannot be written fails the grant: the phone
+        // retries, which beats a repeater that forgets what it said yes to.
+        if let Some(book) = &self.book {
+            book.lock()
+                .expect("namespace book poisoned")
+                .insert(&full_hex(&ns_bytes), read_ticket, granted_by)
+                .map_err(|e| anyhow!("{e}"))?;
+        }
+
         let first = self.registry.register(ns_bytes, subscription);
         tracing::Span::current().record("first_watch", first);
         if first {
@@ -421,7 +918,8 @@ impl StashNode {
     /// Watch one namespace: on each new *remote* entry, run the delivery-service admission check
     /// (passthrough today) and, if admitted, wake the namespace's subscribers.
     fn spawn_watch(self: Arc<Self>, ns_bytes: NsBytes, doc: Doc) {
-        tokio::spawn(async move {
+        let node = self.clone();
+        let task = tokio::spawn(async move {
             let mut events = match doc.subscribe().await {
                 Ok(e) => e,
                 Err(e) => {
@@ -512,6 +1010,7 @@ impl StashNode {
                 }
             }
         });
+        node.track_task(task.abort_handle());
     }
 
     async fn handle(&self, ns: NsBytes) -> Option<Doc> {
@@ -1870,3 +2369,7 @@ mod live_tests {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "repeater_tests.rs"]
+mod repeater_tests;

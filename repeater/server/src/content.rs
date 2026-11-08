@@ -127,6 +127,23 @@ impl ContentIndex {
         !still_referenced
     }
 
+    /// Drop every hash `ns` references — a namespace this node stopped carrying. Hashes another
+    /// namespace still names stay referenced. Returns the hashes nobody references any more.
+    pub fn forget_namespace(&mut self, ns: &NamespaceId) -> Vec<ContentHash> {
+        let Some(hashes) = self.by_namespace.remove(ns) else {
+            return Vec::new();
+        };
+        let mut released = Vec::new();
+        for hash in hashes {
+            let still_referenced = self.by_namespace.values().any(|h| h.contains(&hash));
+            if !still_referenced {
+                self.state.remove(&hash);
+                released.push(hash);
+            }
+        }
+        released
+    }
+
     /// How many referenced blobs are still missing their bytes. **Non-zero and not falling is the
     /// symptom of a blobless stash** — entries arriving, payloads not.
     pub fn missing_count(&self) -> usize {
@@ -158,6 +175,20 @@ mod tests {
     const NS_A: NamespaceId = [1u8; 32];
     const NS_B: NamespaceId = [2u8; 32];
     const HASH: ContentHash = [9u8; 32];
+
+    #[test]
+    fn forgetting_a_namespace_keeps_hashes_another_still_names() {
+        let mut index = ContentIndex::new();
+        index.want(NS_A, HASH);
+        index.want(NS_B, HASH);
+        index.want(NS_A, [8u8; 32]);
+        let mut released = index.forget_namespace(&NS_A);
+        released.sort();
+        assert_eq!(released, vec![[8u8; 32]]);
+        assert!(index.is_tracked_for(&NS_B, &HASH));
+        assert_eq!(index.tracked_count(), 1);
+        assert!(index.forget_namespace(&NS_A).is_empty());
+    }
     const OTHER: ContentHash = [8u8; 32];
 
     #[test]

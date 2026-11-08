@@ -75,6 +75,14 @@ impl NamespaceRegistry {
         is_new
     }
 
+    /// Stop knowing `ns` at all — a namespace this node no longer carries — so a later grant
+    /// imports and watches it afresh. Returns whether it was known.
+    pub fn forget(&self, ns: &NamespaceId) -> bool {
+        let mut g = self.inner.lock().expect("registry mutex poisoned");
+        g.subs.remove(ns);
+        g.known.remove(ns)
+    }
+
     /// Drop one device's push subscription from `ns`. Returns `true` iff it was present. The
     /// namespace stays "known" (still replicated) — unsubscribing only stops the wake, matching
     /// `DELETE /v1/namespaces/{id}/subscription`.
