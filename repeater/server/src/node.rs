@@ -364,7 +364,7 @@ impl StashNode {
             .accept(iroh_docs::ALPN, docs.clone());
         if let Some(repeater) = &repeater {
             router = router.accept(
-                crate::repeater_proto::ALPN,
+                streetcryptid_repeater::wire::ALPN,
                 RepeaterProtocol::new(repeater.clone()),
             );
         }
@@ -580,11 +580,13 @@ impl StashNode {
     }
 
     /// Carry `ticket`'s namespace on behalf of `member`, who the caller has already checked is
-    /// carried and owns the namespace. `None` when the member is at `limit` namespaces already.
+    /// carried and owns the namespace, and reconcile it with `carriers` from now on. `None` when
+    /// the member is at `limit` namespaces already.
     pub async fn grant_for(
         self: &Arc<Self>,
         member: &[u8; 32],
         ticket: &str,
+        carriers: &[[u8; 32]],
         limit: usize,
     ) -> Result<Option<NsBytes>> {
         let member_hex = full_hex(member);
@@ -604,11 +606,62 @@ impl StashNode {
             }
         }
         let ns = self.register_as(ticket, None, Some(&member_hex)).await?;
+        if let Some(book) = &self.book {
+            book.lock()
+                .expect("namespace book poisoned")
+                .set_carriers(&ns_hex, carriers.iter().map(full_hex).collect())
+                .map_err(|e| anyhow!("{e}"))?;
+        }
         Ok(Some(ns))
     }
 
+    /// Reconcile each held namespace with the co-carriers its member named: their other
+    /// repeaters, often in someone else's roster. This is what makes two people's repeaters that
+    /// carry one trail converge while the phone that writes it is asleep — plain iroh-docs sync,
+    /// started from here because nothing else would introduce the two. Returns how many syncs
+    /// were started.
+    #[tracing::instrument(name = "repeater.carrier_sync", skip_all, fields(started = tracing::field::Empty))]
+    pub async fn sync_carriers(&self) -> usize {
+        let wanted: Vec<(NsBytes, Vec<iroh::EndpointAddr>)> = match &self.book {
+            None => return 0,
+            Some(book) => book
+                .lock()
+                .expect("namespace book poisoned")
+                .grants()
+                .into_iter()
+                .filter_map(|(ns_hex, grant)| {
+                    let ns = parse_hex_32(&ns_hex)?;
+                    let peers: Vec<iroh::EndpointAddr> = grant
+                        .carriers
+                        .iter()
+                        .filter_map(|hex| parse_hex_32(hex))
+                        .filter_map(|id| iroh::EndpointId::from_bytes(&id).ok())
+                        .map(iroh::EndpointAddr::from)
+                        .collect();
+                    (!peers.is_empty()).then_some((ns, peers))
+                })
+                .collect(),
+        };
+        let mut started = 0;
+        for (ns, peers) in wanted {
+            let Some(doc) = self.handle(ns).await else {
+                continue;
+            };
+            match doc.start_sync(peers).await {
+                Ok(()) => started += 1,
+                Err(e) => tracing::warn!(
+                    sc.namespace = %crate::telemetry::short_hex(&ns),
+                    error = %e,
+                    "repeater: could not start a co-carrier sync"
+                ),
+            }
+        }
+        tracing::Span::current().record("started", started);
+        started
+    }
+
     /// Stop carrying every namespace granted on behalf of someone `state` no longer carries.
-    pub async fn enforce_roster(&self, state: &crate::roster::RosterState) {
+    pub async fn enforce_roster(&self, state: &streetcryptid_repeater::roster::RosterState) {
         let carried: HashSet<String> = state.carried.iter().map(full_hex).collect();
         let doomed: Vec<String> = match &self.book {
             Some(book) => book

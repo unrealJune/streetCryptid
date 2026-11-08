@@ -6,6 +6,9 @@ publish = false
 license = "AGPL-3.0-or-later"
 description = "streetCryptid always-on, ciphertext-blind, stateless iroh-docs replica + push-to-sync waker (offline trail delivery)"
 
+[workspace]
+members = ["repeater"]
+
 [lib]
 name = "trail_stash"
 
@@ -49,11 +52,11 @@ otel = [
 serde = { version = "1", features = ["derive"] }
 serde_json = "1" # push-payload construction (pure, tested) + live JSON
 thiserror = "2"
-# Repeater roster signatures and wire (pure, tested without a node). ed25519-dalek 2 is the same
-# major as streetCryptid's core, which signs the ops this crate verifies.
+# The roster and the repeater wire, shared with streetCryptid's core (which git-depends on it).
+streetcryptid-repeater = { path = "repeater" }
+# Repeater identity (live) and the persisted roster.
 ed25519-dalek = "2"
 postcard = { version = "1", default-features = false, features = ["alloc"] }
-blake3 = "1"
 
 # --- live node only (see `live` feature). Versions match modules/iroh-location/rust so the
 # stash speaks the exact same docs/blobs/gossip protocols as the phones. ---

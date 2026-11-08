@@ -9,16 +9,16 @@
 //!
 //! ## Claiming, and why it attests the owner
 //! An unclaimed repeater holds a one-time **claim secret**, shown only on its own console as a
-//! claim link ([`crate::repeater_proto::claim_link`]) and replaced every [`CLAIM_WINDOW_MS`]. A
+//! claim link ([`streetcryptid_repeater::wire::claim_link`]) and replaced every [`CLAIM_WINDOW_MS`]. A
 //! `Claim` must present it, and must come from the endpoint that signed the roster's genesis — the
 //! QUIC handshake authenticates the caller, so "the phone at my console" and "the owner the roster
 //! names" are the same key or the claim is refused. The repeater then signs a [`RepeaterCert`]
-//! over `(roster, owner, itself)`. See [`crate::roster`] for how that cert, the owner's
+//! over `(roster, owner, itself)`. See [`streetcryptid_repeater::roster`] for how that cert, the owner's
 //! `AddRepeater`, and a friend's card make the full chain.
 //!
 //! ## Granting, and why it attests the namespace
 //! A carried member hands over a namespace with a proof signed by that **namespace's own key**
-//! ([`crate::repeater_proto::sign_grant`]). Only the namespace's writer holds that key; friends
+//! ([`streetcryptid_repeater::wire::sign_grant`]). Only the namespace's writer holds that key; friends
 //! hold read tickets for each other's trails, and without the proof enrolling would let anyone
 //! volunteer a friend's trail to be carried. When a member stops being carried, every namespace
 //! granted on their behalf is released.
@@ -34,11 +34,13 @@ use iroh::protocol::{AcceptError, ProtocolHandler};
 use iroh::{Endpoint, EndpointAddr};
 
 use crate::node::{now_ms, StashNode};
-use crate::repeater_proto::{
-    declared_len, decode_body, encode, secrets_match, verify_grant, Refusal, Request, Response,
-    ALPN, MAX_HAVE_HASHES, MAX_NAMESPACES_PER_MEMBER, MAX_PUBLISH_OPS,
+use streetcryptid_repeater::roster::{
+    CertBody, EndpointId, RepeaterCert, Roster, RosterState, SignedOp,
 };
-use crate::roster::{CertBody, EndpointId, RepeaterCert, Roster, RosterState, SignedOp};
+use streetcryptid_repeater::wire::{
+    declared_len, decode_body, encode, secrets_match, verify_grant, Refusal, Request, Response,
+    ALPN, MAX_CARRIERS, MAX_HAVE_HASHES, MAX_NAMESPACES_PER_MEMBER, MAX_PUBLISH_OPS,
+};
 
 /// How long a claim secret stays valid before the repeater replaces it.
 pub const CLAIM_WINDOW_MS: u64 = 30 * 60 * 1000;
@@ -178,9 +180,9 @@ impl Repeater {
             let (mut accepted, mut pending, mut refused) = (0u32, 0u32, 0u32);
             for op in ops {
                 match next.insert(op) {
-                    Ok(crate::roster::Inserted::Accepted) => accepted += 1,
-                    Ok(crate::roster::Inserted::Pending) => pending += 1,
-                    Ok(crate::roster::Inserted::Known) => {}
+                    Ok(streetcryptid_repeater::roster::Inserted::Accepted) => accepted += 1,
+                    Ok(streetcryptid_repeater::roster::Inserted::Pending) => pending += 1,
+                    Ok(streetcryptid_repeater::roster::Inserted::Known) => {}
                     Err(_) => refused += 1,
                 }
             }
@@ -248,7 +250,11 @@ impl Repeater {
                     ops: roster.export(),
                 }
             }
-            Request::Grant { ticket, proof } => self.grant(remote, &ticket, &proof).await,
+            Request::Grant {
+                ticket,
+                proof,
+                carriers,
+            } => self.grant(remote, &ticket, &proof, &carriers).await,
             Request::Have { hashes } => {
                 if hashes.len() > MAX_HAVE_HASHES {
                     return refused(Refusal::TooMany);
@@ -309,8 +315,17 @@ impl Repeater {
         Response::Claimed { cert }
     }
 
-    async fn grant(&self, remote: EndpointId, ticket: &str, proof: &[u8]) -> Response {
+    async fn grant(
+        &self,
+        remote: EndpointId,
+        ticket: &str,
+        proof: &[u8],
+        carriers: &[EndpointId],
+    ) -> Response {
         let refused = |reason| Response::Refused { reason };
+        if carriers.len() > MAX_CARRIERS {
+            return refused(Refusal::TooMany);
+        }
         let carried = match self.roster.lock().expect("roster poisoned").as_ref() {
             None => return refused(Refusal::NotClaimed),
             Some(roster) => roster.is_carried(&remote),
@@ -327,8 +342,13 @@ impl Repeater {
         if !verify_grant(&namespace, &self.id, &remote, proof) {
             return refused(Refusal::BadProof);
         }
+        let carriers: Vec<EndpointId> = carriers
+            .iter()
+            .copied()
+            .filter(|id| *id != self.id && *id != remote)
+            .collect();
         match node
-            .grant_for(&remote, ticket, MAX_NAMESPACES_PER_MEMBER)
+            .grant_for(&remote, ticket, &carriers, MAX_NAMESPACES_PER_MEMBER)
             .await
         {
             Ok(Some(namespace)) => Response::Granted { namespace },
@@ -412,6 +432,7 @@ pub async fn run_sibling_loop(node: Arc<StashNode>, extra: Vec<EndpointAddr>, in
                 .await;
         }
         node.sync_peers(&peers).await;
+        node.sync_carriers().await;
     }
 }
 

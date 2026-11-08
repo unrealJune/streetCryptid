@@ -37,9 +37,7 @@ pub mod content;
 pub mod log_redaction;
 pub mod mls;
 pub mod push;
-pub mod repeater_proto;
 pub mod retention;
-pub mod roster;
 pub mod subscriptions;
 pub mod waker;
 

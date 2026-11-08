@@ -14,7 +14,9 @@
 //!   roster's owner, and it attests exactly that owner and roster in a cert it signs;
 //! * only a carried member can have a namespace carried, and only a namespace they own (its own
 //!   key signs the grant); removing the member releases it;
-//! * sibling repeaters converge on the roster with no phone in between.
+//! * sibling repeaters converge on the roster with no phone in between;
+//! * two repeaters in *different* people's rosters that carry one trail converge on it with each
+//!   other, through plain iroh-docs sync, while the phone that writes it is gone.
 //!
 //! The writer and reader here are plain iroh-docs nodes doing exactly what the phone's `docs.rs`
 //! does: the writer dials out (`start_sync` with the repeater's address), and the reader imports
@@ -27,8 +29,8 @@ use ed25519_dalek::SigningKey;
 use iroh_docs::api::protocol::{AddrInfoOptions, ShareMode};
 
 use crate::repeater::call;
-use crate::repeater_proto::{sign_grant, Refusal, Request, Response};
-use crate::roster::{Action, OpBody, Policy, Roster, SignedOp};
+use streetcryptid_repeater::roster::{Action, OpBody, Policy, Roster, SignedOp};
+use streetcryptid_repeater::wire::{sign_grant, Refusal, Request, Response};
 
 /// A fresh directory per test (no tempdir crate in the dependency tree).
 fn scratch(name: &str) -> PathBuf {
@@ -517,6 +519,7 @@ async fn only_a_carried_member_can_have_their_own_namespace_carried() -> Result<
     let grant = Request::Grant {
         ticket: phone.ticket.clone(),
         proof: proof.clone(),
+        carriers: vec![],
     };
 
     // Not enrolled yet.
@@ -541,6 +544,7 @@ async fn only_a_carried_member_can_have_their_own_namespace_carried() -> Result<
         &Request::Grant {
             ticket: phone.ticket.clone(),
             proof: forged,
+            carriers: vec![],
         },
     )
     .await?;
@@ -650,5 +654,90 @@ async fn sibling_repeaters_share_the_roster() -> Result<()> {
 
     first.shutdown().await;
     second.shutdown().await;
+    Ok(())
+}
+
+/// Enrol `phone` in `node`'s roster and have the node carry its namespace, naming `carriers`.
+async fn enrol_and_grant(
+    node: &StashNode,
+    roster: &mut Roster,
+    phone: &Phone,
+    seed: u8,
+    carriers: Vec<[u8; 32]>,
+) -> Result<()> {
+    let enroll = sign_onto(roster, seed, Action::Enroll { invite: None });
+    call(
+        &phone.endpoint,
+        node.endpoint_addr(),
+        &Request::Publish { ops: vec![enroll] },
+    )
+    .await?;
+    let repeater_id = *node.endpoint_addr().id.as_bytes();
+    let member = *phone.endpoint.id().as_bytes();
+    let granted = call(
+        &phone.endpoint,
+        node.endpoint_addr(),
+        &Request::Grant {
+            ticket: phone.ticket.clone(),
+            proof: sign_grant(&phone.ns_secret, &repeater_id, &member),
+            carriers,
+        },
+    )
+    .await?;
+    match granted {
+        Response::Granted { .. } => Ok(()),
+        other => Err(anyhow!("grant refused: {other:?}")),
+    }
+}
+
+#[tokio::test]
+async fn repeaters_in_different_rosters_converge_on_a_trail_they_both_carry() -> Result<()> {
+    // Two people's repeaters, each in its owner's own roster; neither roster knows the other.
+    let a = spawn_repeater(&scratch("cross-a"), 111).await?;
+    let b = spawn_repeater(&scratch("cross-b"), 112).await?;
+    let (_owner_a, mut roster_a) = claim(&a, 113, None, Policy::Open).await?;
+    let (_owner_b, mut roster_b) = claim(&b, 114, None, Policy::Open).await?;
+    let (a_id, b_id) = (
+        *a.endpoint_addr().id.as_bytes(),
+        *b.endpoint_addr().id.as_bytes(),
+    );
+
+    // One phone enrols in both, and names each repeater to the other as a co-carrier.
+    let payload = b"sealed-envelope-carried-across-rosters";
+    let phone = Phone::spawn(115, payload).await?;
+    enrol_and_grant(&a, &mut roster_a, &phone, 115, vec![b_id]).await?;
+    enrol_and_grant(&b, &mut roster_b, &phone, 115, vec![a_id]).await?;
+
+    // The phone reaches only the first, then is gone.
+    phone.doc.start_sync(vec![a.endpoint_addr()]).await?;
+    wait_servable(&a, 1, "the repeater the phone reached").await;
+    let ticket = phone.ticket.clone();
+    phone.vanish().await;
+
+    // The second repeater's own carrier sync fetches it — no sibling list, no phone.
+    let mut converged = false;
+    for _ in 0..30 {
+        assert_eq!(b.sync_carriers().await, 1);
+        for _ in 0..20 {
+            if b.content_stats() == (0, 1) {
+                converged = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        if converged {
+            break;
+        }
+    }
+    assert!(
+        converged,
+        "the co-carrier never got the trail: {:?}",
+        b.content_stats()
+    );
+
+    let bytes = read_through(116, &ticket, b.endpoint_addr()).await?;
+    assert_eq!(bytes, payload);
+    a.shutdown().await;
+    b.shutdown().await;
     Ok(())
 }

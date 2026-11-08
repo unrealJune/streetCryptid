@@ -57,6 +57,10 @@ pub struct Grant {
     /// roster (the control API, or a test), which nothing revokes.
     #[serde(default)]
     pub granted_by: Option<String>,
+    /// The member's other repeaters carrying this namespace (lowercase hex endpoint ids), which
+    /// the repeater reconciles it with. Set by the member's grant; kept across re-registration.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub carriers: Vec<String>,
 }
 
 /// The persisted set of granted namespaces.
@@ -105,12 +109,38 @@ impl NamespaceBook {
         let grant = Grant {
             ticket: read_ticket.to_string(),
             granted_by: granted_by.map(str::to_string),
+            carriers: self
+                .data
+                .namespaces
+                .get(namespace_hex)
+                .map(|g| g.carriers.clone())
+                .unwrap_or_default(),
         };
         if self.data.namespaces.get(namespace_hex) == Some(&grant) {
             return Ok(false);
         }
         let mut next = self.data.clone();
         next.namespaces.insert(namespace_hex.to_string(), grant);
+        write_atomic(&self.path, &next)?;
+        self.data = next;
+        Ok(true)
+    }
+
+    /// Replace a held namespace's co-carriers. Returns whether anything changed; a namespace that
+    /// is not held is left alone.
+    pub fn set_carriers(
+        &mut self,
+        namespace_hex: &str,
+        carriers: Vec<String>,
+    ) -> Result<bool, BookError> {
+        match self.data.namespaces.get(namespace_hex) {
+            Some(grant) if grant.carriers != carriers => {}
+            _ => return Ok(false),
+        }
+        let mut next = self.data.clone();
+        if let Some(grant) = next.namespaces.get_mut(namespace_hex) {
+            grant.carriers = carriers;
+        }
         write_atomic(&self.path, &next)?;
         self.data = next;
         Ok(true)
@@ -245,6 +275,20 @@ mod tests {
         let book = NamespaceBook::load(&path).unwrap();
         assert_eq!(book.count_granted_by("m1"), 1);
         assert_eq!(book.get("cc").unwrap().granted_by, None);
+    }
+
+    #[test]
+    fn carriers_survive_a_reregistration_and_a_reload() {
+        let path = scratch("carriers").join("namespaces.json");
+        let mut book = NamespaceBook::load(&path).unwrap();
+        assert!(!book.set_carriers("aa", vec!["r2".into()]).unwrap());
+        book.insert("aa", "docaaa", Some("m1")).unwrap();
+        assert!(book.set_carriers("aa", vec!["r2".into()]).unwrap());
+        assert!(!book.set_carriers("aa", vec!["r2".into()]).unwrap());
+        // Restore re-registers every grant through `insert`; that must not drop the list.
+        assert!(!book.insert("aa", "docaaa", Some("m1")).unwrap());
+        let book = NamespaceBook::load(&path).unwrap();
+        assert_eq!(book.get("aa").unwrap().carriers, vec!["r2".to_string()]);
     }
 
     #[test]

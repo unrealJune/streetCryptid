@@ -142,7 +142,7 @@ async fn print_claim_links(node: Arc<StashNode>) {
                     "\nUnclaimed repeater. Scan or paste this in streetCryptid (Settings > Repeaters > \
                      Claim) within {} minutes:\n\n  {}\n",
                     trail_stash::repeater::CLAIM_WINDOW_MS / 60_000,
-                    trail_stash::repeater_proto::claim_link(&node.node_ticket(), &secret)
+                    streetcryptid_repeater::wire::claim_link(&node.node_ticket(), &secret)
                 );
                 last = Some(secret);
             }

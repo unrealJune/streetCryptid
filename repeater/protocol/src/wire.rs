@@ -1,5 +1,6 @@
 //! The `streetcryptid/repeater/1` wire: what a phone (or a sibling repeater) asks a repeater, and
-//! what it answers. Pure — the live handler is `repeater.rs`.
+//! what it answers. Pure: framing, messages and proofs as bytes. The live handler is trail-stash's
+//! `repeater.rs`, the client is the app core's; each brings its own iroh.
 //!
 //! One request per bi-stream, each a length-prefixed postcard frame, one connection per exchange.
 //! The caller's identity is the iroh endpoint that dialled (authenticated by the QUIC handshake),
@@ -31,6 +32,8 @@ pub const MAX_PUBLISH_OPS: usize = 512;
 pub const MAX_HAVE_HASHES: usize = 256;
 /// The most namespaces one member may have a repeater carry (a phone has a trail and a profile).
 pub const MAX_NAMESPACES_PER_MEMBER: usize = 4;
+/// The most co-carriers one `Grant` may name.
+pub const MAX_CARRIERS: usize = 8;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Request {
@@ -48,7 +51,17 @@ pub enum Request {
     /// signature by the namespace's own key, which only its writer holds, so a member can have a
     /// repeater carry *their* trail and nobody else's. (Friends hold read tickets for each other's
     /// namespaces; without this, enrolling would let anyone volunteer a friend's trail.)
-    Grant { ticket: String, proof: Vec<u8> },
+    ///
+    /// `carriers` are the member's *other* repeaters carrying the same namespace, in rosters this
+    /// one may know nothing about (a friend's repeater the member enrolled in). The repeater
+    /// reconciles the namespace with them over iroh-docs, so two people's repeaters that carry
+    /// one trail converge with each other while the phone that writes it sleeps. Re-granting
+    /// replaces the list.
+    Grant {
+        ticket: String,
+        proof: Vec<u8>,
+        carriers: Vec<EndpointId>,
+    },
     /// Which of these content hashes are held in full.
     Have { hashes: Vec<[u8; 32]> },
 }
