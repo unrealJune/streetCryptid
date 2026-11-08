@@ -777,6 +777,8 @@ external fun uniffi_iroh_location_checksum_method_locationnode_ble_has_scan_hint
 ): Int
 external fun uniffi_iroh_location_checksum_method_locationnode_cancel_pair(
 ): Int
+external fun uniffi_iroh_location_checksum_method_locationnode_claim_repeater(
+): Int
 external fun uniffi_iroh_location_checksum_method_locationnode_clear_outbox(
 ): Int
 external fun uniffi_iroh_location_checksum_method_locationnode_clear_resync(
@@ -824,6 +826,8 @@ external fun uniffi_iroh_location_checksum_method_locationnode_forget_pair_sessi
 external fun uniffi_iroh_location_checksum_method_locationnode_forget_profile_ticket(
 ): Int
 external fun uniffi_iroh_location_checksum_method_locationnode_forget_session(
+): Int
+external fun uniffi_iroh_location_checksum_method_locationnode_grant_repeaters_now(
 ): Int
 external fun uniffi_iroh_location_checksum_method_locationnode_grant_stash_now(
 ): Int
@@ -905,6 +909,8 @@ external fun uniffi_iroh_location_checksum_method_locationnode_recv_public(
 ): Int
 external fun uniffi_iroh_location_checksum_method_locationnode_recv_secret(
 ): Int
+external fun uniffi_iroh_location_checksum_method_locationnode_repeater_rosters(
+): Int
 external fun uniffi_iroh_location_checksum_method_locationnode_resolve_bump_peer(
 ): Int
 external fun uniffi_iroh_location_checksum_method_locationnode_respond_pair(
@@ -920,6 +926,8 @@ external fun uniffi_iroh_location_checksum_method_locationnode_set_delivery_conf
 external fun uniffi_iroh_location_checksum_method_locationnode_set_pairing_ready(
 ): Int
 external fun uniffi_iroh_location_checksum_method_locationnode_set_recipient_keys(
+): Int
+external fun uniffi_iroh_location_checksum_method_locationnode_set_repeater_carried(
 ): Int
 external fun uniffi_iroh_location_checksum_method_locationnode_set_sharing_recipients(
 ): Int
@@ -1061,6 +1069,8 @@ external fun uniffi_iroh_location_fn_method_locationnode_ble_has_scan_hint(`ptr`
 ): Long
 external fun uniffi_iroh_location_fn_method_locationnode_cancel_pair(`ptr`: Long,`sessionId`: RustBuffer.ByValue,
 ): Long
+external fun uniffi_iroh_location_fn_method_locationnode_claim_repeater(`ptr`: Long,`link`: RustBuffer.ByValue,`open`: Byte,`carryMe`: Byte,
+): Long
 external fun uniffi_iroh_location_fn_method_locationnode_clear_outbox(`ptr`: Long,
 ): Long
 external fun uniffi_iroh_location_fn_method_locationnode_clear_resync(`ptr`: Long,
@@ -1108,6 +1118,8 @@ external fun uniffi_iroh_location_fn_method_locationnode_forget_pair_sessions(`p
 external fun uniffi_iroh_location_fn_method_locationnode_forget_profile_ticket(`ptr`: Long,`ticket`: RustBuffer.ByValue,
 ): Long
 external fun uniffi_iroh_location_fn_method_locationnode_forget_session(`ptr`: Long,`peerEndpointHex`: RustBuffer.ByValue,
+): Long
+external fun uniffi_iroh_location_fn_method_locationnode_grant_repeaters_now(`ptr`: Long,
 ): Long
 external fun uniffi_iroh_location_fn_method_locationnode_grant_stash_now(`ptr`: Long,
 ): Long
@@ -1189,6 +1201,8 @@ external fun uniffi_iroh_location_fn_method_locationnode_recv_public(`ptr`: Long
 ): RustBuffer.ByValue
 external fun uniffi_iroh_location_fn_method_locationnode_recv_secret(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
+external fun uniffi_iroh_location_fn_method_locationnode_repeater_rosters(`ptr`: Long,
+): Long
 external fun uniffi_iroh_location_fn_method_locationnode_resolve_bump_peer(`ptr`: Long,`timeoutMs`: Long,
 ): Long
 external fun uniffi_iroh_location_fn_method_locationnode_respond_pair(`ptr`: Long,`sessionId`: RustBuffer.ByValue,`accept`: Byte,
@@ -1204,6 +1218,8 @@ external fun uniffi_iroh_location_fn_method_locationnode_set_delivery_config(`pt
 external fun uniffi_iroh_location_fn_method_locationnode_set_pairing_ready(`ptr`: Long,`ready`: Byte,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
 external fun uniffi_iroh_location_fn_method_locationnode_set_recipient_keys(`ptr`: Long,`keys`: RustBuffer.ByValue,
+): Long
+external fun uniffi_iroh_location_fn_method_locationnode_set_repeater_carried(`ptr`: Long,`rosterId`: RustBuffer.ByValue,`carry`: Byte,
 ): Long
 external fun uniffi_iroh_location_fn_method_locationnode_set_sharing_recipients(`ptr`: Long,`recipientEndpoints`: RustBuffer.ByValue,`watcherEndpoints`: RustBuffer.ByValue,
 ): Long
@@ -1568,6 +1584,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_iroh_location_checksum_method_locationnode_cancel_pair() != 17903) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_iroh_location_checksum_method_locationnode_claim_repeater() != 9863) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_iroh_location_checksum_method_locationnode_clear_outbox() != 61861) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1638,6 +1657,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_iroh_location_checksum_method_locationnode_forget_session() != 58135) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_iroh_location_checksum_method_locationnode_grant_repeaters_now() != 37876) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_iroh_location_checksum_method_locationnode_grant_stash_now() != 41760) {
@@ -1760,6 +1782,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_iroh_location_checksum_method_locationnode_recv_secret() != 13424) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_iroh_location_checksum_method_locationnode_repeater_rosters() != 50455) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_iroh_location_checksum_method_locationnode_resolve_bump_peer() != 55036) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1782,6 +1807,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_iroh_location_checksum_method_locationnode_set_recipient_keys() != 16037) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_iroh_location_checksum_method_locationnode_set_repeater_carried() != 33375) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_iroh_location_checksum_method_locationnode_set_sharing_recipients() != 14453) {
@@ -3307,6 +3335,16 @@ public interface LocationNodeInterface {
     suspend fun `cancelPair`(`sessionId`: kotlin.ByteArray)
     
     /**
+     * Claim the repeater whose console printed `link` (`streetcryptid-repeater:...`), into the
+     * roster this phone owns (started here, `open` or invite-only, if there is none) and list
+     * it there. `carry_me` also enrols this phone, so the repeater carries our own trail.
+     *
+     * Fails without listing anything unless the repeater's signed cert names this phone, this
+     * roster and the machine that answered (see [`repeater::claim`]).
+     */
+    suspend fun `claimRepeater`(`link`: kotlin.String, `open`: kotlin.Boolean, `carryMe`: kotlin.Boolean): RepeaterClaim
+    
+    /**
      * Drop every queued fix (sign-out, or sharing turned off for good).
      */
     suspend fun `clearOutbox`()
@@ -3473,6 +3511,12 @@ public interface LocationNodeInterface {
      * Forget the session with this peer (un-friending, or a §4.6 restart).
      */
     suspend fun `forgetSession`(`peerEndpointHex`: kotlin.String)
+    
+    /**
+     * Ask every repeater that carries us to carry our namespaces now. Returns at once; reported
+     * as a `repeater.grant` span.
+     */
+    suspend fun `grantRepeatersNow`()
     
     /**
      * Grant the stash our namespaces now — what `syncStashGrants` in `location-sharing.ts` did
@@ -3788,6 +3832,11 @@ public interface LocationNodeInterface {
     fun `recvSecret`(): kotlin.ByteArray
     
     /**
+     * Every roster this phone knows, for the repeater settings.
+     */
+    suspend fun `repeaterRosters`(): List<RepeaterRoster>
+    
+    /**
      * Perform one foreground Bump rendezvous attempt using the same scanner/advertiser as the
      * iroh BLE transport. The scan is refreshed, fresh peers are ranked by RSSI, ambiguous crowds
      * fail closed, and the strongest peer's full identity is read + checked against its advertised
@@ -3865,6 +3914,13 @@ public interface LocationNodeInterface {
      * a friend with no key here falls back to their verified profile.
      */
     suspend fun `setRecipientKeys`(`keys`: List<RecipientKey>)
+    
+    /**
+     * Have a roster carry our trail, or stop (`carry`), and tell its repeaters. Returns whether
+     * it carries us now. A withdrawal is honoured by each repeater the moment the op reaches it;
+     * one asleep honours it when it next hears from a sibling or from us.
+     */
+    suspend fun `setRepeaterCarried`(`rosterId`: kotlin.String, `carry`: kotlin.Boolean): kotlin.Boolean
     
     /**
      * Replace the set of friends this device seals location envelopes for.
@@ -4255,6 +4311,35 @@ open class LocationNode: Disposable, AutoCloseable, LocationNodeInterface
         // lift function
         { Unit },
         
+        // Error FFI converter
+        LocationException.ErrorHandler,
+    )
+    }
+
+    
+    /**
+     * Claim the repeater whose console printed `link` (`streetcryptid-repeater:...`), into the
+     * roster this phone owns (started here, `open` or invite-only, if there is none) and list
+     * it there. `carry_me` also enrols this phone, so the repeater carries our own trail.
+     *
+     * Fails without listing anything unless the repeater's signed cert names this phone, this
+     * roster and the machine that answered (see [`repeater::claim`]).
+     */
+    @Throws(LocationException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `claimRepeater`(`link`: kotlin.String, `open`: kotlin.Boolean, `carryMe`: kotlin.Boolean) : RepeaterClaim {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_iroh_location_fn_method_locationnode_claim_repeater(
+                uniffiHandle,
+                FfiConverterString.lower(`link`),FfiConverterBoolean.lower(`open`),FfiConverterBoolean.lower(`carryMe`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_iroh_location_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_iroh_location_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterTypeRepeaterClaim.lift(it) },
         // Error FFI converter
         LocationException.ErrorHandler,
     )
@@ -4883,6 +4968,31 @@ open class LocationNode: Disposable, AutoCloseable, LocationNodeInterface
         
         // Error FFI converter
         LocationException.ErrorHandler,
+    )
+    }
+
+    
+    /**
+     * Ask every repeater that carries us to carry our namespaces now. Returns at once; reported
+     * as a `repeater.grant` span.
+     */
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `grantRepeatersNow`() {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_iroh_location_fn_method_locationnode_grant_repeaters_now(
+                uniffiHandle,
+                
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_void(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_iroh_location_rust_future_complete_void(future, continuation) },
+        { future -> UniffiLib.ffi_iroh_location_rust_future_free_void(future) },
+        // lift function
+        { Unit },
+        
+        // Error FFI converter
+        UniffiNullRustCallStatusErrorHandler,
     )
     }
 
@@ -5928,6 +6038,30 @@ open class LocationNode: Disposable, AutoCloseable, LocationNodeInterface
 
     
     /**
+     * Every roster this phone knows, for the repeater settings.
+     */
+    @Throws(LocationException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `repeaterRosters`() : List<RepeaterRoster> {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_iroh_location_fn_method_locationnode_repeater_rosters(
+                uniffiHandle,
+                
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_iroh_location_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_iroh_location_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterSequenceTypeRepeaterRoster.lift(it) },
+        // Error FFI converter
+        LocationException.ErrorHandler,
+    )
+    }
+
+    
+    /**
      * Perform one foreground Bump rendezvous attempt using the same scanner/advertiser as the
      * iroh BLE transport. The scan is refreshed, fresh peers are ranked by RSSI, ambiguous crowds
      * fail closed, and the strongest peer's full identity is read + checked against its advertised
@@ -6145,6 +6279,32 @@ open class LocationNode: Disposable, AutoCloseable, LocationNodeInterface
         // lift function
         { Unit },
         
+        // Error FFI converter
+        LocationException.ErrorHandler,
+    )
+    }
+
+    
+    /**
+     * Have a roster carry our trail, or stop (`carry`), and tell its repeaters. Returns whether
+     * it carries us now. A withdrawal is honoured by each repeater the moment the op reaches it;
+     * one asleep honours it when it next hears from a sibling or from us.
+     */
+    @Throws(LocationException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `setRepeaterCarried`(`rosterId`: kotlin.String, `carry`: kotlin.Boolean) : kotlin.Boolean {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_iroh_location_fn_method_locationnode_set_repeater_carried(
+                uniffiHandle,
+                FfiConverterString.lower(`rosterId`),FfiConverterBoolean.lower(`carry`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_i8(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_iroh_location_rust_future_complete_i8(future, continuation) },
+        { future -> UniffiLib.ffi_iroh_location_rust_future_free_i8(future) },
+        // lift function
+        { FfiConverterBoolean.lift(it) },
         // Error FFI converter
         LocationException.ErrorHandler,
     )
@@ -10603,6 +10763,125 @@ public object FfiConverterTypeRecipientKey: FfiConverterRustBuffer<RecipientKey>
 
 
 /**
+ * A repeater this phone just claimed, and the roster it joined (both lowercase hex).
+ */
+data class RepeaterClaim (
+    var `rosterId`: kotlin.String
+    , 
+    var `repeaterId`: kotlin.String
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeRepeaterClaim: FfiConverterRustBuffer<RepeaterClaim> {
+    override fun read(buf: ByteBuffer): RepeaterClaim {
+        return RepeaterClaim(
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: RepeaterClaim) = (
+            FfiConverterString.allocationSize(value.`rosterId`) +
+            FfiConverterString.allocationSize(value.`repeaterId`)
+    )
+
+    override fun write(value: RepeaterClaim, buf: ByteBuffer) {
+            FfiConverterString.write(value.`rosterId`, buf)
+            FfiConverterString.write(value.`repeaterId`, buf)
+    }
+}
+
+
+
+/**
+ * One roster this phone knows, as the repeater settings show it. Ids are lowercase hex.
+ */
+data class RepeaterRoster (
+    var `rosterId`: kotlin.String
+    , 
+    var `owner`: kotlin.String
+    , 
+    /**
+     * This phone owns it (it claimed the roster's first repeater).
+     */
+    var `mine`: kotlin.Boolean
+    , 
+    /**
+     * Anyone may enrol, rather than only whoever an inviter invited.
+     */
+    var `open`: kotlin.Boolean
+    , 
+    /**
+     * It carries this phone's own trail: the one opt-in there is.
+     */
+    var `carriesMe`: kotlin.Boolean
+    , 
+    var `repeaters`: List<kotlin.String>
+    , 
+    /**
+     * How many people's trails it carries.
+     */
+    var `carried`: kotlin.UInt
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeRepeaterRoster: FfiConverterRustBuffer<RepeaterRoster> {
+    override fun read(buf: ByteBuffer): RepeaterRoster {
+        return RepeaterRoster(
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterBoolean.read(buf),
+            FfiConverterBoolean.read(buf),
+            FfiConverterBoolean.read(buf),
+            FfiConverterSequenceString.read(buf),
+            FfiConverterUInt.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: RepeaterRoster) = (
+            FfiConverterString.allocationSize(value.`rosterId`) +
+            FfiConverterString.allocationSize(value.`owner`) +
+            FfiConverterBoolean.allocationSize(value.`mine`) +
+            FfiConverterBoolean.allocationSize(value.`open`) +
+            FfiConverterBoolean.allocationSize(value.`carriesMe`) +
+            FfiConverterSequenceString.allocationSize(value.`repeaters`) +
+            FfiConverterUInt.allocationSize(value.`carried`)
+    )
+
+    override fun write(value: RepeaterRoster, buf: ByteBuffer) {
+            FfiConverterString.write(value.`rosterId`, buf)
+            FfiConverterString.write(value.`owner`, buf)
+            FfiConverterBoolean.write(value.`mine`, buf)
+            FfiConverterBoolean.write(value.`open`, buf)
+            FfiConverterBoolean.write(value.`carriesMe`, buf)
+            FfiConverterSequenceString.write(value.`repeaters`, buf)
+            FfiConverterUInt.write(value.`carried`, buf)
+    }
+}
+
+
+
+/**
  * The per-session Short Authentication String challenge shown while a pair is `Verifying`.
  */
 data class SasChallenge (
@@ -12698,6 +12977,34 @@ public object FfiConverterSequenceTypeRecipientKey: FfiConverterRustBuffer<List<
         buf.putInt(value.size)
         value.iterator().forEach {
             FfiConverterTypeRecipientKey.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceTypeRepeaterRoster: FfiConverterRustBuffer<List<RepeaterRoster>> {
+    override fun read(buf: ByteBuffer): List<RepeaterRoster> {
+        val len = buf.getInt()
+        return List<RepeaterRoster>(len) {
+            FfiConverterTypeRepeaterRoster.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<RepeaterRoster>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeRepeaterRoster.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<RepeaterRoster>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeRepeaterRoster.write(it, buf)
         }
     }
 }

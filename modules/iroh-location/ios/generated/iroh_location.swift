@@ -1270,6 +1270,16 @@ public protocol LocationNodeProtocol: AnyObject, Sendable {
     func cancelPair(sessionId: Data) async throws 
     
     /**
+     * Claim the repeater whose console printed `link` (`streetcryptid-repeater:...`), into the
+     * roster this phone owns (started here, `open` or invite-only, if there is none) and list
+     * it there. `carry_me` also enrols this phone, so the repeater carries our own trail.
+     *
+     * Fails without listing anything unless the repeater's signed cert names this phone, this
+     * roster and the machine that answered (see [`repeater::claim`]).
+     */
+    func claimRepeater(link: String, `open`: Bool, carryMe: Bool) async throws  -> RepeaterClaim
+    
+    /**
      * Drop every queued fix (sign-out, or sharing turned off for good).
      */
     func clearOutbox() async throws 
@@ -1436,6 +1446,12 @@ public protocol LocationNodeProtocol: AnyObject, Sendable {
      * Forget the session with this peer (un-friending, or a §4.6 restart).
      */
     func forgetSession(peerEndpointHex: String) async throws 
+    
+    /**
+     * Ask every repeater that carries us to carry our namespaces now. Returns at once; reported
+     * as a `repeater.grant` span.
+     */
+    func grantRepeatersNow() async 
     
     /**
      * Grant the stash our namespaces now — what `syncStashGrants` in `location-sharing.ts` did
@@ -1751,6 +1767,11 @@ public protocol LocationNodeProtocol: AnyObject, Sendable {
     func recvSecret()  -> Data
     
     /**
+     * Every roster this phone knows, for the repeater settings.
+     */
+    func repeaterRosters() async throws  -> [RepeaterRoster]
+    
+    /**
      * Perform one foreground Bump rendezvous attempt using the same scanner/advertiser as the
      * iroh BLE transport. The scan is refreshed, fresh peers are ranked by RSSI, ambiguous crowds
      * fail closed, and the strongest peer's full identity is read + checked against its advertised
@@ -1828,6 +1849,13 @@ public protocol LocationNodeProtocol: AnyObject, Sendable {
      * a friend with no key here falls back to their verified profile.
      */
     func setRecipientKeys(keys: [RecipientKey]) async throws 
+    
+    /**
+     * Have a roster carry our trail, or stop (`carry`), and tell its repeaters. Returns whether
+     * it carries us now. A withdrawal is honoured by each repeater the moment the op reaches it;
+     * one asleep honours it when it next hears from a sibling or from us.
+     */
+    func setRepeaterCarried(rosterId: String, carry: Bool) async throws  -> Bool
     
     /**
      * Replace the set of friends this device seals location envelopes for.
@@ -2210,6 +2238,31 @@ open func cancelPair(sessionId: Data)async throws   {
             completeFunc: ffi_iroh_location_rust_future_complete_void,
             freeFunc: ffi_iroh_location_rust_future_free_void,
             liftFunc: { $0 },
+            errorHandler: FfiConverterTypeLocationError_lift
+        )
+}
+    
+    /**
+     * Claim the repeater whose console printed `link` (`streetcryptid-repeater:...`), into the
+     * roster this phone owns (started here, `open` or invite-only, if there is none) and list
+     * it there. `carry_me` also enrols this phone, so the repeater carries our own trail.
+     *
+     * Fails without listing anything unless the repeater's signed cert names this phone, this
+     * roster and the machine that answered (see [`repeater::claim`]).
+     */
+open func claimRepeater(link: String, `open`: Bool, carryMe: Bool)async throws  -> RepeaterClaim  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_iroh_location_fn_method_locationnode_claim_repeater(
+                    self.uniffiCloneHandle(),
+                    FfiConverterString.lower(link),FfiConverterBool.lower(`open`),FfiConverterBool.lower(carryMe)
+                )
+            },
+            pollFunc: ffi_iroh_location_rust_future_poll_rust_buffer,
+            completeFunc: ffi_iroh_location_rust_future_complete_rust_buffer,
+            freeFunc: ffi_iroh_location_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeRepeaterClaim_lift,
             errorHandler: FfiConverterTypeLocationError_lift
         )
 }
@@ -2731,6 +2784,28 @@ open func forgetSession(peerEndpointHex: String)async throws   {
             freeFunc: ffi_iroh_location_rust_future_free_void,
             liftFunc: { $0 },
             errorHandler: FfiConverterTypeLocationError_lift
+        )
+}
+    
+    /**
+     * Ask every repeater that carries us to carry our namespaces now. Returns at once; reported
+     * as a `repeater.grant` span.
+     */
+open func grantRepeatersNow()async   {
+    return
+        try!  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_iroh_location_fn_method_locationnode_grant_repeaters_now(
+                    self.uniffiCloneHandle()
+                    
+                )
+            },
+            pollFunc: ffi_iroh_location_rust_future_poll_void,
+            completeFunc: ffi_iroh_location_rust_future_complete_void,
+            freeFunc: ffi_iroh_location_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: nil
+            
         )
 }
     
@@ -3620,6 +3695,26 @@ open func recvSecret() -> Data  {
 }
     
     /**
+     * Every roster this phone knows, for the repeater settings.
+     */
+open func repeaterRosters()async throws  -> [RepeaterRoster]  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_iroh_location_fn_method_locationnode_repeater_rosters(
+                    self.uniffiCloneHandle()
+                    
+                )
+            },
+            pollFunc: ffi_iroh_location_rust_future_poll_rust_buffer,
+            completeFunc: ffi_iroh_location_rust_future_complete_rust_buffer,
+            freeFunc: ffi_iroh_location_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterSequenceTypeRepeaterRoster.lift,
+            errorHandler: FfiConverterTypeLocationError_lift
+        )
+}
+    
+    /**
      * Perform one foreground Bump rendezvous attempt using the same scanner/advertiser as the
      * iroh BLE transport. The scan is refreshed, fresh peers are ranked by RSSI, ambiguous crowds
      * fail closed, and the strongest peer's full identity is read + checked against its advertised
@@ -3806,6 +3901,28 @@ open func setRecipientKeys(keys: [RecipientKey])async throws   {
             completeFunc: ffi_iroh_location_rust_future_complete_void,
             freeFunc: ffi_iroh_location_rust_future_free_void,
             liftFunc: { $0 },
+            errorHandler: FfiConverterTypeLocationError_lift
+        )
+}
+    
+    /**
+     * Have a roster carry our trail, or stop (`carry`), and tell its repeaters. Returns whether
+     * it carries us now. A withdrawal is honoured by each repeater the moment the op reaches it;
+     * one asleep honours it when it next hears from a sibling or from us.
+     */
+open func setRepeaterCarried(rosterId: String, carry: Bool)async throws  -> Bool  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_iroh_location_fn_method_locationnode_set_repeater_carried(
+                    self.uniffiCloneHandle(),
+                    FfiConverterString.lower(rosterId),FfiConverterBool.lower(carry)
+                )
+            },
+            pollFunc: ffi_iroh_location_rust_future_poll_i8,
+            completeFunc: ffi_iroh_location_rust_future_complete_i8,
+            freeFunc: ffi_iroh_location_rust_future_free_i8,
+            liftFunc: FfiConverterBool.lift,
             errorHandler: FfiConverterTypeLocationError_lift
         )
 }
@@ -8488,6 +8605,164 @@ public func FfiConverterTypeRecipientKey_lower(_ value: RecipientKey) -> RustBuf
 
 
 /**
+ * A repeater this phone just claimed, and the roster it joined (both lowercase hex).
+ */
+public struct RepeaterClaim: Equatable, Hashable {
+    public var rosterId: String
+    public var repeaterId: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(rosterId: String, repeaterId: String) {
+        self.rosterId = rosterId
+        self.repeaterId = repeaterId
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension RepeaterClaim: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeRepeaterClaim: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> RepeaterClaim {
+        return
+            try RepeaterClaim(
+                rosterId: FfiConverterString.read(from: &buf), 
+                repeaterId: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: RepeaterClaim, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.rosterId, into: &buf)
+        FfiConverterString.write(value.repeaterId, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeRepeaterClaim_lift(_ buf: RustBuffer) throws -> RepeaterClaim {
+    return try FfiConverterTypeRepeaterClaim.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeRepeaterClaim_lower(_ value: RepeaterClaim) -> RustBuffer {
+    return FfiConverterTypeRepeaterClaim.lower(value)
+}
+
+
+/**
+ * One roster this phone knows, as the repeater settings show it. Ids are lowercase hex.
+ */
+public struct RepeaterRoster: Equatable, Hashable {
+    public var rosterId: String
+    public var owner: String
+    /**
+     * This phone owns it (it claimed the roster's first repeater).
+     */
+    public var mine: Bool
+    /**
+     * Anyone may enrol, rather than only whoever an inviter invited.
+     */
+    public var `open`: Bool
+    /**
+     * It carries this phone's own trail: the one opt-in there is.
+     */
+    public var carriesMe: Bool
+    public var repeaters: [String]
+    /**
+     * How many people's trails it carries.
+     */
+    public var carried: UInt32
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(rosterId: String, owner: String, 
+        /**
+         * This phone owns it (it claimed the roster's first repeater).
+         */mine: Bool, 
+        /**
+         * Anyone may enrol, rather than only whoever an inviter invited.
+         */`open`: Bool, 
+        /**
+         * It carries this phone's own trail: the one opt-in there is.
+         */carriesMe: Bool, repeaters: [String], 
+        /**
+         * How many people's trails it carries.
+         */carried: UInt32) {
+        self.rosterId = rosterId
+        self.owner = owner
+        self.mine = mine
+        self.`open` = `open`
+        self.carriesMe = carriesMe
+        self.repeaters = repeaters
+        self.carried = carried
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension RepeaterRoster: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeRepeaterRoster: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> RepeaterRoster {
+        return
+            try RepeaterRoster(
+                rosterId: FfiConverterString.read(from: &buf), 
+                owner: FfiConverterString.read(from: &buf), 
+                mine: FfiConverterBool.read(from: &buf), 
+                open: FfiConverterBool.read(from: &buf), 
+                carriesMe: FfiConverterBool.read(from: &buf), 
+                repeaters: FfiConverterSequenceString.read(from: &buf), 
+                carried: FfiConverterUInt32.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: RepeaterRoster, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.rosterId, into: &buf)
+        FfiConverterString.write(value.owner, into: &buf)
+        FfiConverterBool.write(value.mine, into: &buf)
+        FfiConverterBool.write(value.`open`, into: &buf)
+        FfiConverterBool.write(value.carriesMe, into: &buf)
+        FfiConverterSequenceString.write(value.repeaters, into: &buf)
+        FfiConverterUInt32.write(value.carried, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeRepeaterRoster_lift(_ buf: RustBuffer) throws -> RepeaterRoster {
+    return try FfiConverterTypeRepeaterRoster.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeRepeaterRoster_lower(_ value: RepeaterRoster) -> RustBuffer {
+    return FfiConverterTypeRepeaterRoster.lower(value)
+}
+
+
+/**
  * The per-session Short Authentication String challenge shown while a pair is `Verifying`.
  */
 public struct SasChallenge: Equatable, Hashable {
@@ -10943,6 +11218,31 @@ fileprivate struct FfiConverterSequenceTypeRecipientKey: FfiConverterRustBuffer 
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypeRepeaterRoster: FfiConverterRustBuffer {
+    typealias SwiftType = [RepeaterRoster]
+
+    public static func write(_ value: [RepeaterRoster], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeRepeaterRoster.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [RepeaterRoster] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [RepeaterRoster]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeRepeaterRoster.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeTrailReplicaAuthor: FfiConverterRustBuffer {
     typealias SwiftType = [TrailReplicaAuthor]
 
@@ -11488,6 +11788,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_iroh_location_checksum_method_locationnode_cancel_pair() != 17903) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_iroh_location_checksum_method_locationnode_claim_repeater() != 9863) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_iroh_location_checksum_method_locationnode_clear_outbox() != 61861) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -11558,6 +11861,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_method_locationnode_forget_session() != 58135) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_iroh_location_checksum_method_locationnode_grant_repeaters_now() != 37876) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_method_locationnode_grant_stash_now() != 41760) {
@@ -11680,6 +11986,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_iroh_location_checksum_method_locationnode_recv_secret() != 13424) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_iroh_location_checksum_method_locationnode_repeater_rosters() != 50455) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_iroh_location_checksum_method_locationnode_resolve_bump_peer() != 55036) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -11702,6 +12011,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_method_locationnode_set_recipient_keys() != 16037) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_iroh_location_checksum_method_locationnode_set_repeater_carried() != 33375) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_method_locationnode_set_sharing_recipients() != 14453) {
