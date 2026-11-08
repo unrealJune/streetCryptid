@@ -1324,6 +1324,7 @@ class IrohLocationModule : Module() {
             "carriesMe" to r.carriesMe,
             "repeaters" to r.repeaters,
             "carried" to r.carried.toLong(),
+            "members" to r.members,
           )
         }
       }
@@ -1333,6 +1334,27 @@ class IrohLocationModule : Module() {
       { rosterId: String, carry: Boolean ->
         val n = node ?: throw IllegalStateException("call createNode first")
         n.setRepeaterCarried(rosterId, carry)
+      }
+
+    /// Owner only: who may enrol in our roster from now on. Never drops anyone already carried.
+    AsyncFunction("setRepeaterPolicy") Coroutine
+      { rosterId: String, open: Boolean ->
+        val n = node ?: throw IllegalStateException("call createNode first")
+        n.setRepeaterPolicy(rosterId, open)
+      }
+
+    /// Owner only: stop carrying a member's trail. Sticky until someone invites them again.
+    AsyncFunction("removeRepeaterMember") Coroutine
+      { rosterId: String, member: String ->
+        val n = node ?: throw IllegalStateException("call createNode first")
+        n.removeRepeaterMember(rosterId, member)
+      }
+
+    /// Owner only: take a machine out of our roster.
+    AsyncFunction("removeRepeater") Coroutine
+      { rosterId: String, repeaterId: String ->
+        val n = node ?: throw IllegalStateException("call createNode first")
+        n.removeRepeater(rosterId, repeaterId)
       }
 
     /// Ask every repeater that carries us to carry our namespaces now. Resolves at once; the

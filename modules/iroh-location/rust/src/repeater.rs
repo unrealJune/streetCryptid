@@ -56,6 +56,8 @@ pub enum RepeaterError {
     Attestation(&'static str),
     #[error("no such roster")]
     UnknownRoster,
+    #[error("only the roster's owner can change it")]
+    NotOwner,
     #[error("roster: {0}")]
     Roster(#[from] RosterError),
     #[error("{0}")]
@@ -424,6 +426,55 @@ pub async fn set_carried(
         .is_some_and(|state| state.carried.contains(&me)))
 }
 
+/// What an owner may change about their roster from the phone.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OwnerChange {
+    /// Who may enrol from now on. Never retroactive: nobody already carried is dropped.
+    Policy(Policy),
+    /// Stop carrying a member. Sticky: they cannot enrol again, even in an open roster, until
+    /// someone invites them after this.
+    RemoveMember(EndpointId),
+    /// Take a machine out of the roster.
+    RemoveRepeater(EndpointId),
+}
+
+/// Sign `change` into a roster this phone owns, and return every repeater to tell: the roster's
+/// machines from BEFORE the change, so a machine being removed hears it too.
+pub fn sign_owner_change(
+    key: &SigningKey,
+    book: &RosterBook,
+    roster: &RosterId,
+    change: OwnerChange,
+    now_ms: u64,
+) -> Result<BTreeSet<EndpointId>, RepeaterError> {
+    let before = book.state(roster).ok_or(RepeaterError::UnknownRoster)?;
+    if before.owner != key.verifying_key().to_bytes() {
+        return Err(RepeaterError::NotOwner);
+    }
+    let action = match change {
+        OwnerChange::Policy(policy) => Action::SetPolicy { policy },
+        OwnerChange::RemoveMember(member) => Action::Remove { member },
+        OwnerChange::RemoveRepeater(repeater) => Action::RemoveRepeater { repeater },
+    };
+    book.sign(roster, key, action, now_ms)?;
+    Ok(before.repeaters.into_keys().collect())
+}
+
+/// [`sign_owner_change`], then hand the roster to every repeater it names. A removal takes effect
+/// on each repeater the moment the op reaches it (the daemon releases a removed member's grants
+/// then); one asleep hears it from a sibling, or from us on the next grant pass.
+pub async fn change_roster(
+    endpoint: &Endpoint,
+    key: &SigningKey,
+    book: &RosterBook,
+    roster: &RosterId,
+    change: OwnerChange,
+    now_ms: u64,
+) -> Result<usize, RepeaterError> {
+    let targets = sign_owner_change(key, book, roster, change, now_ms)?;
+    Ok(publish_to(endpoint, book, roster, &targets).await)
+}
+
 /// Hand our whole copy of `roster` to each of its repeaters. Best-effort: a repeater that is
 /// asleep catches up from its siblings, or from us next time.
 pub async fn publish_everywhere(
@@ -431,11 +482,24 @@ pub async fn publish_everywhere(
     book: &RosterBook,
     roster: &RosterId,
 ) -> usize {
-    let (Some(ops), Some(state)) = (book.export(roster), book.state(roster)) else {
+    let Some(state) = book.state(roster) else {
+        return 0;
+    };
+    let targets: BTreeSet<EndpointId> = state.repeaters.into_keys().collect();
+    publish_to(endpoint, book, roster, &targets).await
+}
+
+async fn publish_to(
+    endpoint: &Endpoint,
+    book: &RosterBook,
+    roster: &RosterId,
+    targets: &BTreeSet<EndpointId>,
+) -> usize {
+    let Some(ops) = book.export(roster) else {
         return 0;
     };
     let mut reached = 0;
-    for repeater in state.repeaters.keys() {
+    for repeater in targets {
         let Ok(addr) = endpoint_addr(repeater) else {
             continue;
         };
@@ -634,6 +698,73 @@ mod tests {
         assert_eq!(grant_plan(&book.states(), &id(1)).len(), 1);
         book.sign(&roster, &key(1), Action::Withdraw, 9).unwrap();
         assert!(grant_plan(&book.states(), &id(1)).is_empty());
+    }
+
+    #[test]
+    fn an_owner_can_remove_a_member_and_they_cannot_simply_enrol_again() {
+        let book = RosterBook::open(&scratch("remove")).unwrap();
+        // An open roster: anyone may enrol, which is what makes the removal's stickiness matter.
+        let roster = roster_with(&book, 1, &[10], &[2]);
+        assert!(book.state(&roster).unwrap().carried.contains(&id(2)));
+
+        let targets =
+            sign_owner_change(&key(1), &book, &roster, OwnerChange::RemoveMember(id(2)), 5)
+                .unwrap();
+        assert_eq!(targets, BTreeSet::from([id(10)]));
+        assert!(!book.state(&roster).unwrap().carried.contains(&id(2)));
+
+        let _ = book.sign(&roster, &key(2), Action::Enroll { invite: None }, 6);
+        assert!(!book.state(&roster).unwrap().carried.contains(&id(2)));
+
+        // An invite made after the removal is what lets them back.
+        book.sign(&roster, &key(1), Action::Invite { member: id(2) }, 7)
+            .unwrap();
+        let _ = book.sign(&roster, &key(2), Action::Enroll { invite: None }, 8);
+        assert!(book.state(&roster).unwrap().carried.contains(&id(2)));
+    }
+
+    #[test]
+    fn only_the_owner_changes_a_roster_and_a_removed_machine_still_hears_it() {
+        let book = RosterBook::open(&scratch("owner")).unwrap();
+        let roster = roster_with(&book, 1, &[10, 11], &[1, 2]);
+        assert!(matches!(
+            sign_owner_change(&key(2), &book, &roster, OwnerChange::RemoveMember(id(1)), 5),
+            Err(RepeaterError::NotOwner)
+        ));
+
+        let targets = sign_owner_change(
+            &key(1),
+            &book,
+            &roster,
+            OwnerChange::RemoveRepeater(id(11)),
+            6,
+        )
+        .unwrap();
+        assert_eq!(targets, BTreeSet::from([id(10), id(11)]));
+        assert_eq!(
+            book.state(&roster)
+                .unwrap()
+                .repeaters
+                .keys()
+                .copied()
+                .collect::<Vec<_>>(),
+            vec![id(10)]
+        );
+
+        sign_owner_change(
+            &key(1),
+            &book,
+            &roster,
+            OwnerChange::Policy(Policy::Invite),
+            7,
+        )
+        .unwrap();
+        let state = book.state(&roster).unwrap();
+        assert_eq!(state.policy, Policy::Invite);
+        assert!(
+            state.carried.contains(&id(2)),
+            "a policy change is never retroactive"
+        );
     }
 
     #[test]

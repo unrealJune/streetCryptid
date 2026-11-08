@@ -229,9 +229,14 @@ roster, or a roster on someone's machine.
 
 The claim works like this:
 
-1. An unclaimed repeater prints a **claim link** on its own console:
-   `streetcryptid-repeater:<endpoint ticket>#<secret>`. The endpoint ticket carries the
-   repeater's full endpoint id, so scanning it is as strong as an SAS check.
+1. An unclaimed repeater prints a **claim link** on its own console, as a QR code and as text:
+   `https://streetcrypt.id/repeater#t=<endpoint ticket>&s=<secret>`. streetcrypt.id claims
+   `/repeater` as a Universal Link / App Link, so the phone's own camera opens Settings →
+   Repeaters with the link filled in; without the app, the page there hands off or offers the
+   link to paste. Both halves ride in the fragment, which is never sent to the server. The older
+   `streetcryptid-repeater:<endpoint ticket>#<secret>` shape still parses, on both sides. The
+   endpoint ticket carries the repeater's full endpoint id, so scanning it is as strong as an SAS
+   check.
 2. The secret is single use. It is replaced every 30 minutes, and a refused claim spends it, so a
    leaked code cannot be retried.
 3. The phone dials the repeater and sends `Claim { secret, ops }`. For a first repeater, `ops` is a
@@ -470,7 +475,7 @@ is this one.
    - Roster sync between siblings.
    - The claim link printed on the console. The HTTP control API is not served in repeater mode.
    - The shared crate (§3.4), and co-carriers across rosters (§6.1).
-   - Not yet: a scannable QR rendering of the link.
+   - The link as an https URL and a console QR code, opened by the phone's camera (trail-stash#9).
 2. **App.**
    - Built (core): the shared crate as a dependency; the roster book; `claimRepeater` with the
      cert check, `repeaterRosters`, `setRepeaterCarried`, and the grant pass on every start
@@ -478,11 +483,12 @@ is this one.
      phone.
    - A `repeaters` collection outside `friends`, with the invariant test.
    - `RepeaterCard` on the profile namespace, with cross-friend vouching.
-   - Built (UI): Settings → Repeaters (`src/features/repeaters`). My repeaters (claim by pasted
-     link, the policy for the first machine, carry my trail), Carrying my trail, and rosters this
-     phone knows; the Settings menu summarises them. A build without the calls hides the entry.
+   - Built (UI): Settings → Repeaters (`src/features/repeaters`). My repeaters (claim by a
+     scanned QR code or a pasted link, carry my trail, the policy, and removing members and
+     machines, each confirmed once), Carrying my trail, and rosters this phone knows; the Settings
+     menu summarises them. A build without the calls hides the entry.
    - Not yet: Available through friends and the Enrol prompt at pairing (both need
-     `RepeaterCard`), inviting, and scanning the link as a QR code.
+     `RepeaterCard`), inviting, and granting `inviter`.
    - Delivery: pushes to rosters I am enrolled in, pulls from friends' repeaters, the
      receipt-gated early break, isolation, and telemetry.
 3. **Operations.**

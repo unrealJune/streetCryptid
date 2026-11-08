@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { useLocalSearchParams } from 'expo-router';
 
 import { ThemedText } from '@/components/themed-text';
 import { CryptidThemes } from '@/constants/theme';
@@ -7,7 +8,7 @@ import { useColorScheme } from '@/hooks/use-color-scheme';
 
 import { ClaimRepeaterForm } from '../components/claim-repeater-form';
 import { RosterCard } from '../components/roster-card';
-import type { RosterView } from '../core/repeaters';
+import { checkClaimLink, type RosterView } from '../core/repeaters';
 import { useRepeaters } from '../hooks/use-repeaters';
 
 /**
@@ -15,19 +16,26 @@ import { useRepeaters } from '../hooks/use-repeaters';
  * trail, and the rosters this phone knows of that do not. A repeater is a computer that keeps
  * sealed trails it cannot read, so friends get yours while your phone sleeps.
  *
+ * A scanned claim QR code lands here as `?claim=` (see `+native-intent.tsx`), filled into the
+ * form but not claimed: the claim is where the roster's policy is chosen.
+ *
  * "Available through friends" (rosters learned from friends' `RepeaterCard`s) arrives with the
  * cards; until then a roster reaches this phone only by claiming one of its machines.
  */
 export default function RepeatersScreen() {
   const scheme = useColorScheme();
   const chrome = CryptidThemes[scheme === 'dark' ? 'deepsea' : 'daybreak'].chrome;
-  const { status, sections, error, busyRoster, claim, setCarried } = useRepeaters();
-  const [carryError, setCarryError] = useState<string | null>(null);
+  const repeaters = useRepeaters();
+  const { status, sections, error, busyRoster } = repeaters;
+  const [actionError, setActionError] = useState<string | null>(null);
+  const { claim } = useLocalSearchParams<{ claim?: string }>();
+  const scanned = typeof claim === 'string' ? checkClaimLink(claim) : null;
+  const initialLink = scanned?.ok ? scanned.link : undefined;
 
-  async function changeCarried(roster: RosterView, carry: boolean) {
-    setCarryError(null);
-    const failure = await setCarried(roster.rosterId, carry);
-    if (failure) setCarryError(failure);
+  async function run(outcome: Promise<string | null>) {
+    setActionError(null);
+    const failure = await outcome;
+    if (failure) setActionError(failure);
   }
 
   const card = (roster: RosterView) => (
@@ -35,8 +43,19 @@ export default function RepeatersScreen() {
       key={roster.rosterId}
       roster={roster}
       accent={chrome.green}
+      warning={chrome.amber}
       busy={busyRoster === roster.rosterId}
-      onCarryChange={(carry) => void changeCarried(roster, carry)}
+      onCarryChange={(carry) => void run(repeaters.setCarried(roster.rosterId, carry))}
+      owner={
+        roster.mine && repeaters.ownerControls
+          ? {
+              onPolicyChange: (open) => void run(repeaters.setPolicy(roster.rosterId, open)),
+              onRemoveMember: (member) => void run(repeaters.removeMember(roster.rosterId, member)),
+              onRemoveMachine: (machine) =>
+                void run(repeaters.removeMachine(roster.rosterId, machine)),
+            }
+          : undefined
+      }
     />
   );
 
@@ -55,24 +74,22 @@ export default function RepeatersScreen() {
       title="Repeaters"
       subtitle="Computers that keep your sealed trail for friends while your phone sleeps. They can never read it."
     >
-      {error ? (
+      {error || actionError ? (
         <ThemedText accessibilityRole="alert" type="small" style={{ color: chrome.amber }}>
-          {error}
-        </ThemedText>
-      ) : null}
-      {carryError ? (
-        <ThemedText accessibilityRole="alert" type="small" style={{ color: chrome.amber }}>
-          {carryError}
+          {actionError ?? error}
         </ThemedText>
       ) : null}
 
       <SettingsSection label="MY REPEATERS">
         {sections.mine ? card(sections.mine) : null}
         <ClaimRepeaterForm
+          // A second scan while the page is open replaces what the first one filled in.
+          key={initialLink ?? 'none'}
           accent={chrome.green}
           warning={chrome.amber}
           firstRepeater={sections.mine === null}
-          onClaim={claim}
+          initialLink={initialLink}
+          onClaim={repeaters.claim}
         />
       </SettingsSection>
 

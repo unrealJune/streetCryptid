@@ -1,6 +1,12 @@
 import type { NativeRepeaterRoster } from 'iroh-location';
 
-import { checkClaimLink, repeaterErrorCopy, repeatersSummary, rosterSections } from '../repeaters';
+import {
+  checkClaimLink,
+  isWebClaimLink,
+  repeaterErrorCopy,
+  repeatersSummary,
+  rosterSections,
+} from '../repeaters';
 
 const SECRET = 'ab'.repeat(32);
 const ME = '11'.repeat(32);
@@ -30,6 +36,22 @@ describe('checkClaimLink', () => {
     });
   });
 
+  it('turns the https URL a QR code carries into the shape the core parses', () => {
+    const link = `streetcryptid-repeater:endpointabc#${SECRET}`;
+    expect(checkClaimLink(`https://streetcrypt.id/repeater#t=endpointabc&s=${SECRET}`)).toEqual({
+      ok: true,
+      link,
+    });
+    // An intermediary that moved the fragment into the query, or upper-cased the hex.
+    expect(
+      checkClaimLink(`https://streetcrypt.id/repeater?t=endpointabc&s=${SECRET.toUpperCase()}`)
+    ).toEqual({ ok: true, link });
+    expect(checkClaimLink('https://streetcrypt.id/repeater#t=endpointabc').ok).toBe(false);
+    expect(checkClaimLink(`https://streetcrypt.id/repeaters#t=x&s=${SECRET}`).ok).toBe(false);
+    expect(isWebClaimLink('https://streetcrypt.id/repeater')).toBe(true);
+    expect(isWebClaimLink('https://streetcrypt.id/pair#token=x')).toBe(false);
+  });
+
   it('refuses anything the core would refuse, before dialling', () => {
     expect(checkClaimLink('https://streetcrypt.id/pair#token=x').ok).toBe(false);
     expect(checkClaimLink('streetcryptid-repeater:endpointabc').ok).toBe(false);
@@ -50,9 +72,24 @@ describe('rosterSections', () => {
       [{ endpointId: SAM.toUpperCase(), handle: '@sam' }]
     );
     expect(sections.mine).toMatchObject({ rosterId: 'c', ownerLabel: 'Your repeaters' });
-    expect(sections.mine?.machines).toEqual(['ffffff']);
+    expect(sections.mine?.machines).toEqual([{ id: 'ff'.repeat(32), short: 'ffffff' }]);
     expect(sections.carryingMe.map((r) => r.ownerLabel)).toEqual(['@sam’s repeaters']);
     expect(sections.others.map((r) => r.ownerLabel)).toEqual(['333333’s repeaters']);
+  });
+
+  it('lists who a roster carries, me first and by name', () => {
+    const sections = rosterSections(
+      [roster({ mine: true, owner: ME, members: [STRANGER, SAM, ME], carried: 3 })],
+      [{ endpointId: SAM, handle: '@sam' }],
+      ME.toUpperCase()
+    );
+    expect(sections.mine?.members.map((m) => [m.label, m.isMe])).toEqual([
+      ['You', true],
+      ['@sam', false],
+      ['333333', false],
+    ]);
+    // A binary that reports only the count lists nobody, rather than guessing.
+    expect(rosterSections([roster({ carried: 2 })], []).others[0].members).toEqual([]);
   });
 
   it('has nothing to show for a phone in no roster', () => {

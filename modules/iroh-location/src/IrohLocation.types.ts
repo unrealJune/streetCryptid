@@ -25,6 +25,11 @@ export interface NativeRepeaterRoster {
   repeaters: string[];
   /** How many people's trails it carries. */
   carried: number;
+  /**
+   * Whose trails it carries (endpoint ids). Optional: absent from binaries built before it, which
+   * report only the count.
+   */
+  members?: string[];
 }
 
 /** What one {@link IrohLocationApi.pushTelemetryNow} did. Mirrors Rust's `TelemetryPush`. */
@@ -1217,6 +1222,12 @@ export interface IrohLocationApi {
   repeaterRosters?(): Promise<NativeRepeaterRoster[]>;
   /** Have a roster carry our trail, or stop. Resolves whether it carries us now. */
   setRepeaterCarried?(rosterId: string, carry: boolean): Promise<boolean>;
+  /** Owner only: who may enrol from now on (`open`, or invite-only). Never retroactive. */
+  setRepeaterPolicy?(rosterId: string, open: boolean): Promise<void>;
+  /** Owner only: stop carrying `member`'s trail. Sticky until someone invites them again. */
+  removeRepeaterMember?(rosterId: string, member: string): Promise<void>;
+  /** Owner only: take a machine out of the roster. */
+  removeRepeater?(rosterId: string, repeaterId: string): Promise<void>;
   /** Ask every repeater that carries us to carry our namespaces now. Resolves at once. */
   grantRepeaters?(): Promise<void>;
 

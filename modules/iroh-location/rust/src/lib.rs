@@ -372,6 +372,8 @@ pub struct RepeaterRoster {
     pub repeaters: Vec<String>,
     /// How many people's trails it carries.
     pub carried: u32,
+    /// Whose trails it carries (endpoint ids), the owner included when enrolled.
+    pub members: Vec<String>,
 }
 
 /// A decrypted ratcheted envelope read from the durable replica.
@@ -1588,6 +1590,27 @@ impl LocationNode {
     /// the QUIC handshake alone that the phone dialling it is the one an op names.
     fn roster_key(&self) -> ed25519_dalek::SigningKey {
         ed25519_dalek::SigningKey::from_bytes(&self.identity_seed)
+    }
+
+    /// Sign an owner's change into our roster and tell its repeaters (see [`repeater::change_roster`]).
+    async fn change_roster(
+        &self,
+        roster_id: &str,
+        change: repeater::OwnerChange,
+    ) -> Result<(), LocationError> {
+        let roster = decode_id32(roster_id, "roster id")?;
+        let live = self.live().await?;
+        let book = self.roster_book().await?;
+        repeater::change_roster(
+            &live.endpoint,
+            &self.roster_key(),
+            &book,
+            &roster,
+            change,
+            now_ms(),
+        )
+        .await?;
+        Ok(())
     }
 
     /// Bring our rosters up to date from their repeaters, then ask every repeater that carries us
@@ -3739,6 +3762,7 @@ impl LocationNode {
                 carries_me: state.carried.contains(&me),
                 repeaters: state.repeaters.keys().map(|id| encode_hex(id)).collect(),
                 carried: state.carried.len() as u32,
+                members: state.carried.iter().map(|id| encode_hex(id)).collect(),
             })
             .collect())
     }
@@ -3751,9 +3775,7 @@ impl LocationNode {
         roster_id: String,
         carry: bool,
     ) -> Result<bool, LocationError> {
-        let roster: [u8; 32] = decode_hex(&roster_id)
-            .and_then(|bytes| bytes.try_into().ok())
-            .ok_or_else(|| LocationError::Decode("bad roster id".into()))?;
+        let roster = decode_id32(&roster_id, "roster id")?;
         let live = self.live().await?;
         let book = self.roster_book().await?;
         let carried = repeater::set_carried(
@@ -3769,6 +3791,46 @@ impl LocationNode {
             self.grant_repeaters("enrol").await;
         }
         Ok(carried)
+    }
+
+    /// Set who may enrol in the roster this phone owns (`open`, or invite-only) from now on.
+    /// Nobody already carried is dropped.
+    pub async fn set_repeater_policy(
+        &self,
+        roster_id: String,
+        open: bool,
+    ) -> Result<(), LocationError> {
+        let policy = if open {
+            streetcryptid_repeater::roster::Policy::Open
+        } else {
+            streetcryptid_repeater::roster::Policy::Invite
+        };
+        self.change_roster(&roster_id, repeater::OwnerChange::Policy(policy))
+            .await
+    }
+
+    /// Stop the roster this phone owns carrying `member`'s trail. Each repeater releases what it
+    /// held for them as the removal reaches it, and they cannot enrol again, even in an open
+    /// roster, until someone invites them after this.
+    pub async fn remove_repeater_member(
+        &self,
+        roster_id: String,
+        member: String,
+    ) -> Result<(), LocationError> {
+        let member = decode_id32(&member, "member id")?;
+        self.change_roster(&roster_id, repeater::OwnerChange::RemoveMember(member))
+            .await
+    }
+
+    /// Take a machine out of the roster this phone owns. It is told too, so it stops serving it.
+    pub async fn remove_repeater(
+        &self,
+        roster_id: String,
+        repeater_id: String,
+    ) -> Result<(), LocationError> {
+        let repeater = decode_id32(&repeater_id, "repeater id")?;
+        self.change_roster(&roster_id, repeater::OwnerChange::RemoveRepeater(repeater))
+            .await
     }
 
     /// Ask every repeater that carries us to carry our namespaces now. Returns at once; reported
@@ -5488,6 +5550,13 @@ fn decode_hex(s: &str) -> Option<Vec<u8>> {
         .step_by(2)
         .map(|i| u8::from_str_radix(&s[i..i + 2], 16).ok())
         .collect()
+}
+
+/// A 32-byte id (roster, endpoint) from the lowercase hex the repeater API speaks in.
+fn decode_id32(s: &str, what: &str) -> Result<[u8; 32], LocationError> {
+    decode_hex(s)
+        .and_then(|bytes| bytes.try_into().ok())
+        .ok_or_else(|| LocationError::Decode(format!("bad {what}")))
 }
 
 /// The bootstrap transcript: both identities and both ephemerals, canonically ordered.

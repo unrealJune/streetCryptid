@@ -17,6 +17,8 @@ interface ClaimRepeaterFormProps {
    * joins the roster as it is.
    */
   readonly firstRepeater: boolean;
+  /** A link that arrived from outside (a scanned QR code), filled in but not yet claimed. */
+  readonly initialLink?: string;
   /** Resolves `null` on success, or the words for why it failed. */
   readonly onClaim: (link: string, open: boolean, carryMe: boolean) => Promise<string | null>;
 }
@@ -30,14 +32,17 @@ export function ClaimRepeaterForm({
   accent,
   warning,
   firstRepeater,
+  initialLink,
   onClaim,
 }: ClaimRepeaterFormProps) {
   const theme = useTheme();
-  const [text, setText] = useState('');
+  const [text, setText] = useState(initialLink ?? '');
   const [open, setOpen] = useState(false);
   const [carryMe, setCarryMe] = useState(true);
   const [busy, setBusy] = useState(false);
-  const [status, setStatus] = useState<{ text: string; failed: boolean } | null>(null);
+  const [status, setStatus] = useState<{ text: string; failed: boolean } | null>(
+    initialLink ? { text: 'Scanned. Choose below, then claim it.', failed: false } : null
+  );
 
   async function paste() {
     const clip = await Clipboard.getStringAsync().catch(() => '');
@@ -68,8 +73,8 @@ export function ClaimRepeaterForm({
         <ThemedText type="smallBold">Add a repeater</ThemedText>
         <ThemedText type="small" themeColor="textSecondary">
           Run trail-stash as a repeater (with TRAIL_STASH_DATA_DIR set) on a computer that stays on.
-          Until it is claimed it prints a link starting streetcryptid-repeater:, and a fresh one
-          every 30 minutes. Paste it here.
+          Until it is claimed it shows a QR code and a link, fresh every 30 minutes. Scan the code
+          with your phone&apos;s camera, or paste the link here.
         </ThemedText>
       </View>
 

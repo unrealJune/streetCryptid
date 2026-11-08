@@ -1146,6 +1146,7 @@ public final class IrohLocationModule: Module {
         [
           "rosterId": r.rosterId, "owner": r.owner, "mine": r.mine, "open": r.open,
           "carriesMe": r.carriesMe, "repeaters": r.repeaters, "carried": Double(r.carried),
+          "members": r.members,
         ]
       }
     }
@@ -1154,6 +1155,24 @@ public final class IrohLocationModule: Module {
     AsyncFunction("setRepeaterCarried") { (rosterId: String, carry: Bool) async throws -> Bool in
       guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
       return try await node.setRepeaterCarried(rosterId: rosterId, carry: carry)
+    }
+
+    // Owner only: who may enrol in our roster from now on. Never drops anyone already carried.
+    AsyncFunction("setRepeaterPolicy") { (rosterId: String, open: Bool) async throws in
+      guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
+      try await node.setRepeaterPolicy(rosterId: rosterId, open: open)
+    }
+
+    // Owner only: stop carrying a member's trail. Sticky until someone invites them again.
+    AsyncFunction("removeRepeaterMember") { (rosterId: String, member: String) async throws in
+      guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
+      try await node.removeRepeaterMember(rosterId: rosterId, member: member)
+    }
+
+    // Owner only: take a machine out of our roster.
+    AsyncFunction("removeRepeater") { (rosterId: String, repeaterId: String) async throws in
+      guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
+      try await node.removeRepeater(rosterId: rosterId, repeaterId: repeaterId)
     }
 
     // Ask every repeater that carries us to carry our namespaces now. Resolves at once; the dials

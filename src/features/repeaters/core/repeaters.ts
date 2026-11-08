@@ -9,27 +9,86 @@ import type { NativeRepeaterRoster } from 'iroh-location';
 /** The prefix a repeater's console prints its claim link under (`streetcryptid-repeater` crate). */
 export const CLAIM_SCHEME = 'streetcryptid-repeater:';
 
+/**
+ * The same link as a URL any camera can open: `https://streetcrypt.id/repeater#t=<ticket>&s=<secret>`.
+ * Claimed as a Universal Link / App Link beside `/pair`, so scanning the repeater's QR code with
+ * the phone's own camera opens Settings → Repeaters with the link filled in. The ticket and the
+ * secret ride in the fragment, which is never sent to streetcrypt.id when the app is missing.
+ */
+export const CLAIM_WEB_HOST = 'streetcrypt.id';
+export const CLAIM_WEB_PATH = 'repeater';
+const CLAIM_WEB_PREFIX = `https://${CLAIM_WEB_HOST}/${CLAIM_WEB_PATH}`;
+
 export type ClaimLinkCheck = { ok: true; link: string } | { ok: false; reason: string };
 
+/** True when `s` is the https claim URL (possibly without its fragment). */
+export function isWebClaimLink(s: string): boolean {
+  if (!s.startsWith(CLAIM_WEB_PREFIX)) return false;
+  // Only a boundary may follow, so `/repeaters-guide` is never mistaken for a claim.
+  const rest = s.slice(CLAIM_WEB_PREFIX.length);
+  return rest === '' || rest.startsWith('/') || rest.startsWith('?') || rest.startsWith('#');
+}
+
+const CUT_SHORT = 'That link is cut short. Copy the whole line from the console.';
+
+function shaped(ticket: string, secret: string): ClaimLinkCheck {
+  if (ticket.length === 0 || /[\s#]/.test(ticket) || !/^[0-9a-fA-F]{64}$/.test(secret)) {
+    return { ok: false, reason: CUT_SHORT };
+  }
+  return { ok: true, link: `${CLAIM_SCHEME}${ticket}#${secret.toLowerCase()}` };
+}
+
 /**
- * Check a pasted claim link before dialling anything. Mirrors `parse_claim_link`: the scheme, a
- * non-empty endpoint ticket, `#`, and a 64-hex secret. Text around the link (a terminal line, a
- * chat message) is tolerated, because that is how a link copied from a console arrives.
+ * Check a claim link before dialling anything, and return it in the one shape the core parses
+ * (`streetcryptid-repeater:<ticket>#<64 hex>`, `parse_claim_link`). Takes either shape: the
+ * console's, or the https URL its QR code carries (fragment, or query if something in between
+ * moved it). Text around the link (a terminal line, a chat message) is tolerated, because that is
+ * how a link copied from a console arrives.
  */
 export function checkClaimLink(text: string): ClaimLinkCheck {
+  const web = text.indexOf(CLAIM_WEB_PREFIX);
+  if (web >= 0) {
+    const url = text.slice(web).split(/\s/)[0];
+    if (!isWebClaimLink(url)) {
+      return { ok: false, reason: 'Paste the link the repeater printed when it started.' };
+    }
+    const at = url.search(/[#?]/);
+    const params = new Map<string, string>();
+    for (const pair of (at < 0 ? '' : url.slice(at + 1)).split('&')) {
+      const eq = pair.indexOf('=');
+      if (eq > 0) params.set(pair.slice(0, eq), safeDecode(pair.slice(eq + 1)));
+    }
+    return shaped(params.get('t') ?? '', params.get('s') ?? '');
+  }
   const start = text.indexOf(CLAIM_SCHEME);
   if (start < 0) {
     return { ok: false, reason: 'Paste the link the repeater printed when it started.' };
   }
-  const link = text.slice(start).split(/\s/)[0];
-  const rest = link.slice(CLAIM_SCHEME.length);
+  const rest = text.slice(start).split(/\s/)[0].slice(CLAIM_SCHEME.length);
   const hash = rest.indexOf('#');
-  const ticket = hash < 0 ? '' : rest.slice(0, hash);
-  const secret = hash < 0 ? '' : rest.slice(hash + 1);
-  if (ticket.length === 0 || !/^[0-9a-fA-F]{64}$/.test(secret)) {
-    return { ok: false, reason: 'That link is cut short. Copy the whole line from the console.' };
+  return hash < 0
+    ? { ok: false, reason: CUT_SHORT }
+    : shaped(rest.slice(0, hash), rest.slice(hash + 1));
+}
+
+function safeDecode(s: string): string {
+  try {
+    return decodeURIComponent(s);
+  } catch {
+    return '';
   }
-  return { ok: true, link };
+}
+
+export interface RosterPerson {
+  readonly id: string;
+  /** "You", a friend's handle, or a short id for someone this phone does not know. */
+  readonly label: string;
+  readonly isMe: boolean;
+}
+
+export interface RosterMachine {
+  readonly id: string;
+  readonly short: string;
 }
 
 export interface RosterView {
@@ -39,10 +98,11 @@ export interface RosterView {
   readonly mine: boolean;
   readonly open: boolean;
   readonly carriesMe: boolean;
-  /** Short ids of the machines in it. */
-  readonly machines: readonly string[];
+  readonly machines: readonly RosterMachine[];
   /** How many people's trails it carries. */
   readonly carried: number;
+  /** Who it carries, me first; empty on a binary that reports only the count. */
+  readonly members: readonly RosterPerson[];
 }
 
 export interface RosterSections {
@@ -66,9 +126,17 @@ export function shortId(hex: string): string {
 
 export function rosterSections(
   rosters: readonly NativeRepeaterRoster[],
-  friends: readonly FriendName[]
+  friends: readonly FriendName[],
+  /** This phone's endpoint id, so it can be told apart in a member list. */
+  self: string | null = null
 ): RosterSections {
   const names = new Map(friends.map((f) => [f.endpointId.toLowerCase(), f.handle]));
+  const me = self?.toLowerCase() ?? null;
+  const person = (id: string): RosterPerson => {
+    const key = id.toLowerCase();
+    const isMe = key === me;
+    return { id, isMe, label: isMe ? 'You' : (names.get(key) ?? shortId(id)) };
+  };
   const view = (r: NativeRepeaterRoster): RosterView => ({
     rosterId: r.rosterId,
     ownerLabel: r.mine
@@ -77,8 +145,11 @@ export function rosterSections(
     mine: r.mine,
     open: r.open,
     carriesMe: r.carriesMe,
-    machines: r.repeaters.map(shortId),
+    machines: r.repeaters.map((id) => ({ id, short: shortId(id) })),
     carried: r.carried,
+    members: (r.members ?? [])
+      .map(person)
+      .sort((a, b) => Number(b.isMe) - Number(a.isMe) || a.label.localeCompare(b.label)),
   });
   const views = rosters.map(view);
   const byLabel = (a: RosterView, b: RosterView) => a.ownerLabel.localeCompare(b.ownerLabel);
@@ -109,8 +180,11 @@ export function repeaterErrorCopy(error: unknown): string {
   const cases: [RegExp, string][] = [
     [
       /BadClaimSecret/,
-      'The code has expired or was already used. Restart the repeater for a new link.',
+      'That code has expired or was already used. Use the newest one the repeater printed.',
     ],
+    [/removed, and not invited again/, 'The owner removed you. Only a new invite lets you back.'],
+    [/this roster is invite-only/, 'This roster is invite-only, and nobody has invited you to it.'],
+    [/only the roster's owner/, 'Only the owner can change this roster.'],
     [/AlreadyClaimed/, 'Someone has already claimed this repeater.'],
     [/BadClaimRoster/, 'The repeater refused this roster.'],
     [/NotClaimed/, 'Nobody has claimed this repeater yet.'],
