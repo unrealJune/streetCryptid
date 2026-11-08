@@ -882,6 +882,14 @@ impl TrailDocs {
 
     /// Read + decrypt `author`'s current resync record across every known namespace.
     ///
+    /// **Only a record `author` signed is returned.** The slot key names an author but proves
+    /// nothing — every friend writes its own namespace, and every friend's namespace is scanned
+    /// here — so a record is accepted only when the envelope's verified signer is the author the
+    /// caller asked for. Without that check any friend C could write `rsy/hex(B)` sealed to us,
+    /// carrying C's own prekey, and we would restart our session with B against it: every later
+    /// envelope for B would then be readable by C. The prekeys inside a record are not signed
+    /// individually; this signature is their only authentication.
+    ///
     /// Same shape as [`Self::read_ctl`], including the load-bearing `single_latest_per_key`: the
     /// slot is overwritten in place, so a plain query would resurrect a superseded record and
     /// walk the session backwards into a root the peer has already moved off.
@@ -909,8 +917,9 @@ impl TrailDocs {
                 Ok(b) => b,
                 Err(_) => continue,
             };
-            if let Ok(opened) = crypto::open(recv_secret, &bytes) {
-                out.push(opened.payload);
+            match crypto::open(recv_secret, &bytes) {
+                Ok(opened) if opened.author.as_slice() == author => out.push(opened.payload),
+                _ => continue,
             }
         }
         Ok(out)
@@ -1957,6 +1966,83 @@ pub(crate) mod tests {
         let latest = td.read_latest(&b_sk).await.unwrap();
         assert_eq!(latest.len(), 1, "control entries must not read as fixes");
         assert_eq!(latest[0].payload.as_slice(), b"second");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── a resync record is authenticated by its signer, never by its slot ───────────────────
+    //
+    // Three parties: we (A) are friends with B and C. C writes a record into a slot named for B,
+    // sealed to us and carrying C's prekey. Accepting it would make us restart our session with
+    // B against a key C holds, and C — who replicates our namespace as a friend — could then
+    // open every envelope we seal for B. The slot key is chosen by the writer; only the
+    // signature says who wrote it.
+    #[tokio::test]
+    async fn a_resync_record_is_read_only_from_the_author_it_names() {
+        use ed25519_dalek::SigningKey;
+        use rand::rngs::OsRng;
+
+        let dir = scratch_dir("rsy-binding");
+        let fx = spawn_docs(&dir).await;
+        let td = TrailDocs::init(fx.docs.clone(), fx.blobs.clone(), dir.clone(), None)
+            .await
+            .unwrap();
+        let ns = td.own_namespace();
+        let (a_sk, a_pk) = crypto::generate_recv_keypair();
+
+        let b = SigningKey::generate(&mut OsRng);
+        let b_author = b.verifying_key().to_bytes();
+        let c = SigningKey::generate(&mut OsRng);
+        let c_author = c.verifying_key().to_bytes();
+
+        // C's forgery: a valid envelope (C signed it, as C) in B's slot, sealed to A.
+        let forged = crypto::seal(
+            &c.to_bytes(),
+            &c_author,
+            0,
+            1_000,
+            0,
+            b"c's prekey, claiming to be b's",
+            &[a_pk.clone()],
+        )
+        .unwrap();
+        td.write_rsy(ns, &b_author, forged).await.unwrap();
+        assert!(
+            td.read_rsy(&b_author, &a_sk).await.unwrap().is_empty(),
+            "a record C signed must never be read as B's resync record"
+        );
+
+        // B's own record in the same slot is read.
+        let genuine = crypto::seal(
+            &b.to_bytes(),
+            &b_author,
+            0,
+            2_000,
+            0,
+            b"b's prekey",
+            &[a_pk.clone()],
+        )
+        .unwrap();
+        td.write_rsy(ns, &b_author, genuine).await.unwrap();
+        let read = td.read_rsy(&b_author, &a_sk).await.unwrap();
+        assert_eq!(read.len(), 1);
+        assert_eq!(read[0].as_slice(), b"b's prekey");
+
+        // And C's record is still C's: asking for C does not return B's.
+        let c_own = crypto::seal(
+            &c.to_bytes(),
+            &c_author,
+            0,
+            3_000,
+            0,
+            b"c's prekey",
+            &[a_pk],
+        )
+        .unwrap();
+        td.write_rsy(ns, &c_author, c_own).await.unwrap();
+        let read = td.read_rsy(&c_author, &a_sk).await.unwrap();
+        assert_eq!(read.len(), 1);
+        assert_eq!(read[0].as_slice(), b"c's prekey");
 
         let _ = std::fs::remove_dir_all(&dir);
     }
