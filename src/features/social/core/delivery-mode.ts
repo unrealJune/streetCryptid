@@ -67,8 +67,6 @@ export interface DeliveryModeCopy {
   readonly id: DeliveryMode;
   /** Sentence case, two to four words — the Shoreline rule for every headline and label. */
   readonly title: string;
-  /** Uppercase micro-label for the segmented control. */
-  readonly segment: string;
   readonly body: string;
   /** A second, quieter line. Present only where the mode has a real caveat to state. */
   readonly note: string | null;
@@ -90,14 +88,12 @@ export const DELIVERY_MODE_COPY: Readonly<Record<DeliveryMode, DeliveryModeCopy>
   mutual: {
     id: 'mutual',
     title: 'Mutual Friends',
-    segment: 'MUTUAL FRIENDS',
     body: mutualFriendRelayExplanation('unknown'),
     note: null,
   },
   stash: {
     id: 'stash',
     title: 'Mutuals + Stash Server',
-    segment: 'STASH',
     body: 'If your friends are offline and can’t receive your location updates, using stash will allow friends to catch up with your location updates when they come back online. Stash entries are encrypted and can only be read by your friends, and are auto deleted after a short period of time.',
     note: null,
   },

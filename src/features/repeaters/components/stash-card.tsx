@@ -11,6 +11,8 @@ interface StashCardProps {
   readonly retention: string;
   readonly accent: string;
   readonly busy: boolean;
+  /** False on a build with no stash deployed: the switch shows, but cannot be turned on. */
+  readonly available?: boolean;
   readonly onCarryChange: (carry: boolean) => void;
 }
 
@@ -20,7 +22,14 @@ interface StashCardProps {
  * Its switch is the delivery mode, the same setting Settings → Delivery shows, so the two can never
  * disagree about whether it carries you.
  */
-export function StashCard({ carriesMe, retention, accent, busy, onCarryChange }: StashCardProps) {
+export function StashCard({
+  carriesMe,
+  retention,
+  accent,
+  busy,
+  available = true,
+  onCarryChange,
+}: StashCardProps) {
   const theme = useTheme();
   return (
     <View style={[styles.card, { borderColor: theme.backgroundSelected }]}>
@@ -42,8 +51,8 @@ export function StashCard({ carriesMe, retention, accent, busy, onCarryChange }:
         <Switch
           accessibilityRole="switch"
           accessibilityLabel="Carry my trail on the streetCryptid stash"
-          disabled={busy}
-          value={carriesMe}
+          disabled={busy || !available}
+          value={carriesMe && available}
           onValueChange={onCarryChange}
           trackColor={{ true: accent, false: theme.backgroundSelected }}
         />
