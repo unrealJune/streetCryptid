@@ -94,8 +94,8 @@ postcard = { version = "1", features = ["alloc"] }
 thiserror = "2"
 # Repeaters (docs/social/REPEATERS.md): the roster, the attestation chain and the repeater wire,
 # shared byte for byte with the repeater daemon, which is built on the same crate. Pure (no iroh,
-# no I/O), so it brings no second iroh into the build. Pinned by rev; bump with the daemon.
-streetcryptid-repeater = { git = "https://github.com/unrealJune/trail-stash", rev = "fdeb6c32b68be57140a5f9741db4eb6cc670f1de" }
+# no I/O), so it brings no second iroh into the build. Pinned to a trail-stash release tag; bump it with the daemon.
+streetcryptid-repeater = { git = "https://github.com/unrealJune/trail-stash", tag = "v0.3.0" }
 # SCB3 map tiles arrive as per-tile gzip members (src/mvt.rs `decode_tile`). The pure-Rust
 # backend keeps iOS, Android and host builds free of a C toolchain.
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }

@@ -190,7 +190,7 @@ share that trap.
 
 The roster, the cert, the grant proof and the `streetcryptid/repeater/1` wire are one crate,
 `streetcryptid-repeater` (`trail-stash/rust/repeater`). Both the daemon and the app's core
-(`modules/iroh-location/rust/src/repeater.rs`, a git dependency pinned by rev) are built on it, so
+(`modules/iroh-location/rust/src/repeater.rs`, a git dependency pinned to a trail-stash release tag, v0.3.0 first) are built on it, so
 a phone signs ops with exactly the code that judges them on the repeater.
 
 The boundary is drawn so the crate holds only what both sides must agree on byte for byte:
