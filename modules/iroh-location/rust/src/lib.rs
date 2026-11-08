@@ -32,8 +32,6 @@ mod h3;
 pub mod isolation;
 /// `location.runtime` spans: the native location runtime reporting itself (see the module docs).
 pub mod location_runtime;
-/// `process.memory` spans: the platform runtime sampling its own process (see the module docs).
-pub mod process_memory;
 /// Festival-mesh radio capsules: the outer wrapper that carries an envelope over open
 /// radio without a linkable identity (pure; see `mesh.rs` and `docs/mesh/DESIGN.md`).
 pub mod mesh;
@@ -47,10 +45,14 @@ pub mod outbox;
 pub mod own_log;
 pub mod pad;
 mod pairing;
+/// `process.memory` spans: the platform runtime sampling its own process (see the module docs).
+pub mod process_memory;
 mod profile;
 pub mod publish;
 pub mod ratchet;
 pub mod recipients;
+/// Repeaters, the phone's half: rosters, claiming, enrolling, grants (docs/social/REPEATERS.md).
+pub mod repeater;
 pub mod restart;
 pub mod seq_store;
 pub mod session_store;
@@ -186,6 +188,15 @@ pub enum LocationError {
 impl From<crypto::CryptoError> for LocationError {
     fn from(e: crypto::CryptoError) -> Self {
         LocationError::Crypto(e.to_string())
+    }
+}
+
+impl From<repeater::RepeaterError> for LocationError {
+    fn from(e: repeater::RepeaterError) -> Self {
+        match e {
+            repeater::RepeaterError::BadLink => LocationError::Decode(e.to_string()),
+            _ => LocationError::Network(e.to_string()),
+        }
     }
 }
 
@@ -338,6 +349,29 @@ pub struct IncomingFix {
     pub author: Vec<u8>,
     pub seq: u64,
     pub fix: LocationFix,
+}
+
+/// A repeater this phone just claimed, and the roster it joined (both lowercase hex).
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct RepeaterClaim {
+    pub roster_id: String,
+    pub repeater_id: String,
+}
+
+/// One roster this phone knows, as the repeater settings show it. Ids are lowercase hex.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct RepeaterRoster {
+    pub roster_id: String,
+    pub owner: String,
+    /// This phone owns it (it claimed the roster's first repeater).
+    pub mine: bool,
+    /// Anyone may enrol, rather than only whoever an inviter invited.
+    pub open: bool,
+    /// It carries this phone's own trail: the one opt-in there is.
+    pub carries_me: bool,
+    pub repeaters: Vec<String>,
+    /// How many people's trails it carries.
+    pub carried: u32,
 }
 
 /// A decrypted ratcheted envelope read from the durable replica.
@@ -1536,6 +1570,82 @@ impl LocationNode {
         );
     }
 
+    /// The roster book, opened from `state_dir` the first time anything asks.
+    async fn roster_book(&self) -> Result<Arc<repeater::RosterBook>, LocationError> {
+        let mut slot = self.repeater_book.lock().await;
+        if let Some(book) = slot.as_ref() {
+            return Ok(book.clone());
+        }
+        let book = Arc::new(
+            repeater::RosterBook::open(&self.state_dir)
+                .map_err(|e| LocationError::Decode(e.to_string()))?,
+        );
+        *slot = Some(book.clone());
+        Ok(book)
+    }
+
+    /// The key this phone signs roster ops with: its endpoint key, so a repeater can tell from
+    /// the QUIC handshake alone that the phone dialling it is the one an op names.
+    fn roster_key(&self) -> ed25519_dalek::SigningKey {
+        ed25519_dalek::SigningKey::from_bytes(&self.identity_seed)
+    }
+
+    /// Bring our rosters up to date from their repeaters, then ask every repeater that carries us
+    /// to carry our trail and our profile (span `repeater.grant`). Like the stash grant: spawned,
+    /// best-effort, and run on every start, because a repeater asked while it slept was never
+    /// asked. A phone in no roster dials nothing.
+    async fn grant_repeaters(&self, reason: &'static str) {
+        use tracing::Instrument;
+        let Some(live) = self.live_opt().await else {
+            return;
+        };
+        let Ok(book) = self.roster_book().await else {
+            return;
+        };
+        let rosters = book.states().len();
+        if rosters == 0 {
+            return;
+        }
+        let me = self.roster_key().verifying_key().to_bytes();
+        let mut namespaces = Vec::new();
+        let trail = (
+            live.trail.read_ticket(live.trail.own_namespace()).await,
+            live.trail.own_namespace_secret().await,
+        );
+        if let (Ok(ticket), Ok(secret)) = trail {
+            namespaces.push(repeater::OwnNamespace { ticket, secret });
+        }
+        let profile = (
+            live.profile.ticket().await,
+            live.profile.own_namespace_secret().await,
+        );
+        if let (Ok(ticket), Ok(secret)) = profile {
+            namespaces.push(repeater::OwnNamespace { ticket, secret });
+        }
+        let span = tracing::info_span!(
+            "repeater.grant",
+            sc.author = %telemetry::short_hex(&self.author),
+            reason,
+            rosters,
+            namespaces = namespaces.len(),
+            refreshed = tracing::field::Empty,
+            granted = tracing::field::Empty,
+            failed = tracing::field::Empty,
+        );
+        let endpoint = live.endpoint.clone();
+        tokio::spawn(
+            async move {
+                let refreshed = repeater::refresh(&endpoint, &book).await;
+                let report = repeater::grant(&endpoint, &me, &book, &namespaces).await;
+                let current = tracing::Span::current();
+                current.record("refreshed", refreshed);
+                current.record("granted", report.granted);
+                current.record("failed", report.failed);
+            }
+            .instrument(span),
+        );
+    }
+
     /// Clone this node's live handles and RELEASE the node lock. See [`Live`].
     ///
     /// Every method below that touches the endpoint, gossip or the docs engines starts here. The
@@ -1579,6 +1689,9 @@ pub struct LocationNode {
     /// When the last full stash grant ran (ms), for the floor on the untracked-slots trigger.
     /// In memory on purpose: every process grants once at start regardless. See [`stash`].
     stash_grant_at: AtomicU64,
+    /// Every repeater roster this phone knows (see [`repeater`]), opened from `state_dir` on first
+    /// use. It claims nothing, so it has no part in `start` or `shutdown`.
+    repeater_book: Mutex<Option<Arc<repeater::RosterBook>>>,
     /// On-disk root for the persistent docs replica + blobs store (durable trail). Derived from
     /// the identity so it stays stable across restarts.
     ///
@@ -2336,6 +2449,7 @@ fn new_location_node_at(
         clock_offset_ms: std::sync::atomic::AtomicI64::new(0),
         ordinal,
         stash_grant_at: AtomicU64::new(0),
+        repeater_book: Mutex::new(None),
     });
     tracing::info!(
         node.ordinal = ordinal,
@@ -2741,6 +2855,8 @@ impl LocationNode {
         // namespace, and this is the only path that runs in a process with no JS. Spawned.
         self.grant_stash(StashGrant::All { floored: false }, "start")
             .await;
+        // And every repeater that carries us, for the same reason (see [`repeater`]).
+        self.grant_repeaters("start").await;
         Ok(())
     }
 
@@ -3570,6 +3686,95 @@ impl LocationNode {
     pub async fn grant_stash_now(&self) {
         self.grant_stash(StashGrant::All { floored: false }, "app")
             .await;
+    }
+
+    /// Claim the repeater whose console printed `link` (`streetcryptid-repeater:...`), into the
+    /// roster this phone owns (started here, `open` or invite-only, if there is none) and list
+    /// it there. `carry_me` also enrols this phone, so the repeater carries our own trail.
+    ///
+    /// Fails without listing anything unless the repeater's signed cert names this phone, this
+    /// roster and the machine that answered (see [`repeater::claim`]).
+    pub async fn claim_repeater(
+        &self,
+        link: String,
+        open: bool,
+        carry_me: bool,
+    ) -> Result<RepeaterClaim, LocationError> {
+        let live = self.live().await?;
+        let book = self.roster_book().await?;
+        let policy = if open {
+            streetcryptid_repeater::roster::Policy::Open
+        } else {
+            streetcryptid_repeater::roster::Policy::Invite
+        };
+        let claimed = repeater::claim(
+            &live.endpoint,
+            &self.roster_key(),
+            &book,
+            &link,
+            policy,
+            carry_me,
+            now_ms(),
+        )
+        .await?;
+        self.grant_repeaters("claim").await;
+        Ok(RepeaterClaim {
+            roster_id: encode_hex(&claimed.roster),
+            repeater_id: encode_hex(&claimed.repeater),
+        })
+    }
+
+    /// Every roster this phone knows, for the repeater settings.
+    pub async fn repeater_rosters(&self) -> Result<Vec<RepeaterRoster>, LocationError> {
+        let book = self.roster_book().await?;
+        let me = self.roster_key().verifying_key().to_bytes();
+        Ok(book
+            .states()
+            .into_iter()
+            .map(|state| RepeaterRoster {
+                roster_id: encode_hex(&state.id),
+                owner: encode_hex(&state.owner),
+                mine: state.owner == me,
+                open: state.policy == streetcryptid_repeater::roster::Policy::Open,
+                carries_me: state.carried.contains(&me),
+                repeaters: state.repeaters.keys().map(|id| encode_hex(id)).collect(),
+                carried: state.carried.len() as u32,
+            })
+            .collect())
+    }
+
+    /// Have a roster carry our trail, or stop (`carry`), and tell its repeaters. Returns whether
+    /// it carries us now. A withdrawal is honoured by each repeater the moment the op reaches it;
+    /// one asleep honours it when it next hears from a sibling or from us.
+    pub async fn set_repeater_carried(
+        &self,
+        roster_id: String,
+        carry: bool,
+    ) -> Result<bool, LocationError> {
+        let roster: [u8; 32] = decode_hex(&roster_id)
+            .and_then(|bytes| bytes.try_into().ok())
+            .ok_or_else(|| LocationError::Decode("bad roster id".into()))?;
+        let live = self.live().await?;
+        let book = self.roster_book().await?;
+        let carried = repeater::set_carried(
+            &live.endpoint,
+            &self.roster_key(),
+            &book,
+            &roster,
+            carry,
+            now_ms(),
+        )
+        .await?;
+        if carried {
+            self.grant_repeaters("enrol").await;
+        }
+        Ok(carried)
+    }
+
+    /// Ask every repeater that carries us to carry our namespaces now. Returns at once; reported
+    /// as a `repeater.grant` span.
+    pub async fn grant_repeaters_now(&self) {
+        self.grant_repeaters("app").await;
     }
 
     /// Where the native drain path will push right now. For diagnostics and `device.health`.

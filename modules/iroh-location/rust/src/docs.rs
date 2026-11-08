@@ -1345,6 +1345,20 @@ impl TrailDocs {
         Ok(ticket.to_string())
     }
 
+    /// Our own namespace's write key: what proves to a repeater that this trail is ours
+    /// (`streetcryptid_repeater::wire::sign_grant`). It never leaves the phone.
+    pub async fn own_namespace_secret(&self) -> Result<[u8; 32]> {
+        let doc = self.doc_for(self.own_ns).await?;
+        match doc
+            .share(ShareMode::Write, AddrInfoOptions::Id)
+            .await?
+            .capability
+        {
+            iroh_docs::Capability::Write(secret) => Ok(secret.to_bytes()),
+            iroh_docs::Capability::Read(_) => Err(anyhow!("our own trail is open read-only")),
+        }
+    }
+
     /// All namespaces we can read (own + imported friends).
     pub async fn namespaces(&self) -> Vec<NamespaceId> {
         self.handles

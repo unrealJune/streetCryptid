@@ -140,7 +140,7 @@ time, to the repeaters I can invite people to.
 ### 3.3 The roster is a signed operation log
 
 The roster is a hash-linked log of operations, each one signed by the endpoint key of the phone
-that made it (`trail-stash/src/roster.rs`):
+that made it (`roster.rs` in `streetcryptid-repeater`, see §3.4):
 
 ```
 Genesis { owner, policy, nonce }                 signed by owner; its op id is the roster id
@@ -185,6 +185,26 @@ share that trap.
   cannot forge any of it, because every op is signed by a phone.
 - The owner, carried members, inviters and the owner's repeaters can fetch it. Members can
   therefore see who else is carried; the enrol screen says so.
+
+### 3.4 One crate, both sides
+
+The roster, the cert, the grant proof and the `streetcryptid/repeater/1` wire are one crate,
+`streetcryptid-repeater` (`trail-stash/rust/repeater`). Both the daemon and the app's core
+(`modules/iroh-location/rust/src/repeater.rs`, a git dependency pinned by rev) are built on it, so
+a phone signs ops with exactly the code that judges them on the repeater.
+
+The boundary is drawn so the crate holds only what both sides must agree on byte for byte:
+
+| in `streetcryptid-repeater` | trail-stash only | app core only |
+| --- | --- | --- |
+| roster ops, rules, state | console claim window | the roster book (`repeaters.bin`) |
+| `RepeaterCert` | namespace book, release | claim flow + cert check |
+| requests, responses, framing | protocol handler, sibling/carrier sync | grant plan, enrol/withdraw |
+| grant proof, claim link | persistent node | `RepeaterCard` (to come) |
+
+It has no iroh, tokio or I/O. Each side brings its own iroh (the daemon is on 1.0, the app on
+1.4), and identities cross the boundary as raw 32-byte ed25519 keys, which is what endpoint ids
+and namespace ids both are. Both repositories are AGPL, so the dependency changes no licence.
 
 ## 4. Attestation and enrolment, without SAS
 
@@ -260,8 +280,8 @@ The same cards also tell your phone which repeaters carry a friend, which is wha
 
 ### 4.3 Granting a namespace, and proving it is yours
 
-After its `Enroll` is accepted, a member's phone sends `Grant { ticket, proof }` for each namespace
-it wants carried (its trail and its profile). The repeater checks two things:
+After its `Enroll` is accepted, a member's phone sends `Grant { ticket, proof, carriers }` for each
+namespace it wants carried (its trail and its profile). The repeater checks two things:
 
 - **The caller is carried.** That comes from the roster.
 - **The namespace is the caller's own.** `proof` is a signature by the **namespace's own key**
@@ -269,6 +289,10 @@ it wants carried (its trail and its profile). The repeater checks two things:
   read tickets for each other's trails, and without this check enrolling would let anyone
   volunteer a friend's trail to be carried. The proof is bound to the repeater and the caller, so
   it cannot be replayed elsewhere.
+
+`carriers` names the member's *other* repeaters carrying the same namespace (§6.1). It is a sync
+hint, not a permission: it comes from the authenticated member, at most eight, and re-granting
+replaces it.
 
 Each grant is recorded against its member in the grant book. When the member stops being carried,
 every namespace granted on their behalf is released:
@@ -367,6 +391,25 @@ default 5):
 
 A sibling that is down costs one failed dial per tick. Nothing waits on it.
 
+### 6.1 Repeaters in different people's rosters
+
+Rosters are per owner, and a person can be carried by several: their own, and any friend's they
+enrolled in. If A and B both run repeaters and each enrols in the other's roster, A's trail is
+carried by A's repeater and by B's. That needs no new mechanism:
+
+- A's phone enrols in B's roster like any member (policy `open`, or an invite from an inviter), and
+  B's phone in A's. Each is its own opt-in; nothing is reciprocal by default.
+- A's phone grants its namespaces to every repeater carrying it, and names each to the others as
+  **co-carriers**. A repeater reconciles each namespace with its co-carriers on the same timer as
+  its siblings, so A's repeater and B's converge on A's trail while A's phone sleeps, although
+  neither roster lists the other's repeater.
+- Readers need nothing: any friend of A can pull A's trail from either, as from any replica (§2.1).
+
+Everything between repeaters is iroh: roster ops over `streetcryptid/repeater/1` on the node's own
+endpoint, and trails over plain iroh-docs sync. There is no HTTP between repeaters, or between a
+phone and a repeater. trail-stash's `repeaters_in_different_rosters_converge_on_a_trail_they_both_carry`
+tests it end to end.
+
 ## 7. Service accounts (out of scope, but decided now)
 
 A Home Assistant presence sensor is the opposite of a repeater: **decrypt without swarm.** It
@@ -410,23 +453,29 @@ needs plaintext, so it must be in the wrap set. What the protocol already implie
 
 ## 9. Phases
 
-0. **Spike: the stash on disk, with siblings.** Built; trail-stash PR #7, CI green.
+All of the trail-stash work is one PR (trail-stash#8, with the spike folded in); all of the app's
+is this one.
+
+0. **Spike: the stash on disk, with siblings.** Built and green.
    - `Storage::Persistent`.
    - A grant book that is written before a grant is acknowledged and fails the start when
      unreadable.
    - Adoption of on-disk entries into the content ledger.
    - `sync_peers`, and a self-generated identity.
-1. **Roster and claim.** Built on `phase1/roster`; the daemon proves it without an app.
+1. **Roster and claim.** Built and green; the daemon proves it without an app.
    - The roster as a pure module: ops, signatures, replay rules, and order-independence as tests.
    - The `streetcryptid/repeater/1` protocol: `Claim`, `Publish`, `Fetch`, `Grant` with the
      namespace proof, and `Have`.
    - The cert, and carrying enforced and released by the daemon (reading stays open).
    - Roster sync between siblings.
    - The claim link printed on the console. The HTTP control API is not served in repeater mode.
+   - The shared crate (§3.4), and co-carriers across rosters (§6.1).
    - Not yet: a scannable QR rendering of the link.
 2. **App.**
-   - The roster code shared with the app's core, so the phone signs ops with the code that
-     verifies them.
+   - Built (core): the shared crate as a dependency; the roster book; `claimRepeater` with the
+     cert check, `repeaterRosters`, `setRepeaterCarried`, and the grant pass on every start
+     (`repeater.grant` span) with co-carriers. Unit-tested; untested against a live daemon from a
+     phone.
    - A `repeaters` collection outside `friends`, with the invariant test.
    - `RepeaterCard` on the profile namespace, with cross-friend vouching.
    - The claim flow, and the Enrol prompt at pairing and in the repeater menu.
@@ -444,9 +493,6 @@ needs plaintext, so it must be in the wrap set. What the protocol already implie
 - **Owner continuity.** The owner is a phone identity, so a lost phone orphans the roster until
   multi-device identity exists (`ARCHITECTURE.md` §9d). Should the owner be able to designate a
   co-owner?
-- **Sharing the roster code with the app.** The roster module is pure and uses ed25519-dalek 2 like
-  the app's core. Should the app depend on `trail-stash` (git dependency, AGPL), or should the
-  module be split into a small shared crate?
 - **Repeater as a pull accelerator.** A repeater that is up could pull friends' namespaces
   proactively from the stash, so that a LAN-local phone pulls from it quickly. That is a latency
   win to measure, not a design need.
