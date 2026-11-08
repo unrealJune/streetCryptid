@@ -55,6 +55,11 @@ export function RosterCard({
         <ThemedText type="small" themeColor="textSecondary">
           {detail}
         </ThemedText>
+        {roster.vouchers.length > 0 && !owner ? (
+          <ThemedText type="small" themeColor="textSecondary">
+            {`Vouched for by ${roster.vouchers.map((v) => v.label).join(', ')}`}
+          </ThemedText>
+        ) : null}
       </View>
 
       {owner ? null : machines > 0 ? (
@@ -69,17 +74,21 @@ export function RosterCard({
           <ThemedText type="small" themeColor="textSecondary">
             {roster.carriesMe
               ? 'Kept on these machines, sealed, for friends to pick up while your phone sleeps.'
-              : 'Off. These machines do not keep your trail.'}
+              : roster.canEnrol
+                ? 'Off. These machines do not keep your trail.'
+                : 'Invite only, and nobody has invited you yet.'}
           </ThemedText>
         </View>
-        <Switch
-          accessibilityRole="switch"
-          accessibilityLabel={`Carry my trail on ${roster.ownerLabel}`}
-          disabled={busy}
-          value={roster.carriesMe}
-          onValueChange={onCarryChange}
-          trackColor={{ true: accent, false: theme.backgroundSelected }}
-        />
+        {roster.carriesMe || roster.canEnrol ? (
+          <Switch
+            accessibilityRole="switch"
+            accessibilityLabel={`Carry my trail on ${roster.ownerLabel}`}
+            disabled={busy}
+            value={roster.carriesMe}
+            onValueChange={onCarryChange}
+            trackColor={{ true: accent, false: theme.backgroundSelected }}
+          />
+        ) : null}
       </View>
 
       {owner ? (

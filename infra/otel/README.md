@@ -460,9 +460,11 @@ exchange with a specific peer, at the four places a peer is named while data cro
 
 Attributes, all spanmetrics dimensions (so they keep for 90 days, not 7):
 
-- `contact.role` — `friend` | `stash` | `other`. Friends come from the native recipient store
-  (sharing + watching); the stash is the first delivery ticket when the stash is opted into. A
-  friend is checked first, so it can never be filed as the stash.
+- `contact.role` — `friend` | `stash` | `repeater` | `other`. Friends come from the native
+  recipient store (sharing + watching); the stash is the first delivery ticket when the stash is
+  opted into; a repeater is any machine in a roster this phone knows (`repeaters.bin`, including
+  rosters learned from friends' cards). A friend is checked first, then the stash, so neither can
+  be filed as anything else.
 - `contact.from_author` (receive only) — the peer handed over **its own** envelope. `friend` +
   `from_author=true` is the strongest statement there is: the author's phone was on the other end.
 - `contact.path` — `ble` | `lan` | `direct` | `relay` | `live`, the closest open path to that peer
@@ -490,6 +492,39 @@ sum by (service_instance_id, sc_peer) (
 # How friends' fixes reach us: the author directly, another friend, or the stash.
 sum by (contact_role, contact_from_author) (
   rate(traces_span_metrics_calls_total{span_name="peer.contact", contact_dir="recv"}[1h])) * 3600
+```
+
+**Production had none of these dimensions until 2026-11-08.** buttercup's
+`helmrelease-public.yaml` carried only the first six, so every panel above read empty there while
+working against this file's dev collector. Keep the two lists in step.
+
+## Where did this fix come from? (`fix.provenance`)
+
+`peer.contact` counts exchanges per peer. `fix.provenance` (Rust, `contact.rs`) counts **fixes**:
+one span for every friend's fix that reached this phone, at the moment it arrived, saying who
+handed it over. It fires on the gossip receive (one per delivered envelope) and on every docs pull
+(one per author slot a peer delivered), so JS-free background pulls are counted too.
+
+| attribute                   | values                                                                                         |
+| --------------------------- | ---------------------------------------------------------------------------------------------- |
+| `fix.lane`                  | `gossip` (live) \| `docs` (trail reconciliation)                                               |
+| `fix.source`                | `author` (their own phone), `friend` (another friend relayed it), `stash`, `repeater`, `other` |
+| `fix.path`                  | `ble` \| `lan` \| `direct` \| `relay` \| `live`, as on `peer.contact`                          |
+| `fix.repeater_owner`        | short id of the roster owner, when `fix.source = repeater` (span attribute, not a metric)      |
+| `sc.author` / `sc.via_peer` | whose fix, and who handed it over                                                              |
+
+`fix.lane`, `fix.source` and `fix.path` are spanmetrics dimensions. A slot that was already in the
+replica produces nothing: this is delivery, never presence.
+
+```promql
+# Where this phone's friends' fixes come from, per hour.
+sum by (fix_source, fix_lane) (
+  rate(traces_span_metrics_calls_total{span_name="fix.provenance"}[1h])) * 3600
+```
+
+```traceql
+# Fixes a repeater delivered, and whose repeater it was.
+{ name = "fix.provenance" && span.fix.source = "repeater" } | select(span.fix.repeater_owner, span.sc.author)
 ```
 
 ```traceql

@@ -30,6 +30,13 @@ export interface NativeRepeaterRoster {
    * report only the count.
    */
   members?: string[];
+  /**
+   * Friends whose repeater cards list this roster and who are in it (endpoint ids). Optional, as
+   * above: absent from binaries built before the cards.
+   */
+  vouchers?: string[];
+  /** Enrolling would be accepted, as far as this phone can tell: open, or an invite naming us. */
+  canEnrol?: boolean;
 }
 
 /** What one {@link IrohLocationApi.pushTelemetryNow} did. Mirrors Rust's `TelemetryPush`. */

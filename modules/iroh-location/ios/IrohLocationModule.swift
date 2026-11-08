@@ -1146,7 +1146,7 @@ public final class IrohLocationModule: Module {
         [
           "rosterId": r.rosterId, "owner": r.owner, "mine": r.mine, "open": r.open,
           "carriesMe": r.carriesMe, "repeaters": r.repeaters, "carried": Double(r.carried),
-          "members": r.members,
+          "members": r.members, "vouchers": r.vouchers, "canEnrol": r.canEnrol,
         ]
       }
     }

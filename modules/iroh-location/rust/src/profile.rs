@@ -542,6 +542,56 @@ impl ProfileDocs {
         Ok(in_book || handle.is_some())
     }
 
+    /// Put `bytes` under `key` in our own profile namespace, unless that is already what it holds.
+    /// Returns whether anything was written.
+    ///
+    /// For records that live beside the profile under their own key and signing context (today the
+    /// repeater card, `crate::repeater`), so that older readers, which look up [`PROFILE_KEY`]
+    /// only, never see them. Same arming rule as [`publish`](Self::publish).
+    pub async fn publish_key(&self, key: &[u8], bytes: Vec<u8>) -> Result<bool> {
+        if self.latest_key_bytes(self.own_ns, key).await?.as_deref() == Some(bytes.as_slice()) {
+            return Ok(false);
+        }
+        let doc = self.doc_for(self.own_ns).await?;
+        if let Err(err) = self.arm_publishing().await {
+            tracing::warn!(error = %err, "profile: start_sync failed; publish is local-only");
+        }
+        doc.set_bytes(self.author, key.to_vec(), bytes).await?;
+        Ok(true)
+    }
+
+    /// The newest bytes under `key` in every profile namespace we hold whose content has arrived,
+    /// our own included. Unverified: the caller checks whatever signature the record carries.
+    pub async fn read_key_everywhere(&self, key: &[u8]) -> Vec<Vec<u8>> {
+        let namespaces: Vec<NamespaceId> = self
+            .handles
+            .lock()
+            .await
+            .keys()
+            .map(|b| NamespaceId::from(*b))
+            .collect();
+        let mut out = Vec::new();
+        for ns in namespaces {
+            if let Ok(Some(bytes)) = self.latest_key_bytes(ns, key).await {
+                out.push(bytes);
+            }
+        }
+        out
+    }
+
+    async fn latest_key_bytes(&self, ns: NamespaceId, key: &[u8]) -> Result<Option<Vec<u8>>> {
+        let doc = self.doc_for(ns).await?;
+        let query = Query::single_latest_per_key().key_exact(key).build();
+        let entry = match doc.get_one(query).await? {
+            Some(e) => e,
+            None => return Ok(None),
+        };
+        match self.blobs.blobs().get_bytes(entry.content_hash()).await {
+            Ok(b) => Ok(Some(b.to_vec())),
+            Err(_) => Ok(None),
+        }
+    }
+
     /// The raw signed bytes of the newest record in `ns`, or `None` if there is no entry yet or
     /// its content has not replicated locally. These bytes are exactly what was signed, which is
     /// what makes them forwardable verbatim — see [`own_record_bytes`](Self::own_record_bytes).

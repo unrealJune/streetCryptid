@@ -18,6 +18,8 @@ const ROSTER: RosterView = {
     { id: '11'.repeat(32), label: 'You', isMe: true },
     { id: '22'.repeat(32), label: '@sam', isMe: false },
   ],
+  vouchers: [],
+  canEnrol: false,
 };
 
 describe('RosterCard', () => {
@@ -74,5 +76,23 @@ describe('RosterCard', () => {
       'Carry my trail on @sam’s repeaters',
     ]);
     expect(renderer.root.findAllByProps({ accessibilityLabel: 'Remove @sam' })).toHaveLength(0);
+  });
+
+  it('offers no switch for an invite-only roster nobody invited me to, and names who vouched', () => {
+    render({
+      roster: {
+        ...ROSTER,
+        mine: false,
+        carriesMe: false,
+        canEnrol: false,
+        open: false,
+        ownerLabel: '@sam’s repeaters',
+        vouchers: [{ id: '22'.repeat(32), label: '@sam', isMe: false }],
+      },
+    });
+    expect(renderer.root.findAllByType(Switch)).toHaveLength(0);
+    const text = JSON.stringify(renderer.toJSON());
+    expect(text).toContain('Vouched for by @sam');
+    expect(text).toContain('nobody has invited you yet');
   });
 });

@@ -76,7 +76,7 @@ mod system_dns;
 mod telemetry;
 mod telemetry_spool;
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -374,6 +374,11 @@ pub struct RepeaterRoster {
     pub carried: u32,
     /// Whose trails it carries (endpoint ids), the owner included when enrolled.
     pub members: Vec<String>,
+    /// Friends whose repeater cards list it and who are in it themselves (endpoint ids). Empty for
+    /// a roster this phone knows only by claiming or enrolling.
+    pub vouchers: Vec<String>,
+    /// Enrolling would be accepted, as far as this phone can tell: open, or an invite naming us.
+    pub can_enrol: bool,
 }
 
 /// A decrypted ratcheted envelope read from the durable replica.
@@ -1415,6 +1420,13 @@ impl LocationNode {
                                 from_author: Some(author.as_slice() == peer.as_slice()),
                                 entries: 1,
                             });
+                            contact::record_provenance(
+                                roles,
+                                contact::Lane::Gossip,
+                                author,
+                                &peer,
+                                &via,
+                            );
                         }
                         match opened {
                             GossipOpen::Delivered {
@@ -1610,6 +1622,7 @@ impl LocationNode {
             now_ms(),
         )
         .await?;
+        self.republish_repeater_card().await;
         Ok(())
     }
 
@@ -1656,9 +1669,14 @@ impl LocationNode {
             failed = tracing::field::Empty,
         );
         let endpoint = live.endpoint.clone();
+        let profile = live.profile.clone();
+        let key = self.roster_key();
         tokio::spawn(
             async move {
                 let refreshed = repeater::refresh(&endpoint, &book).await;
+                // After the refresh, so the card says what the repeaters say: a roster that has
+                // removed us drops off it.
+                publish_repeater_card(&profile, &key, &book).await;
                 let report = repeater::grant(&endpoint, &me, &book, &namespaces).await;
                 let current = tracing::Span::current();
                 current.record("refreshed", refreshed);
@@ -1667,6 +1685,26 @@ impl LocationNode {
             }
             .instrument(span),
         );
+    }
+
+    /// Republish our card after a roster change made on this phone. Best-effort, like every card
+    /// write: a friend who misses this one reads the next.
+    async fn republish_repeater_card(&self) {
+        let (Some(live), Ok(book)) = (self.live_opt().await, self.roster_book().await) else {
+            return;
+        };
+        publish_repeater_card(&live.profile, &self.roster_key(), &book).await;
+    }
+
+    /// Read every friend's card into the roster book and return who vouches for each roster. An
+    /// empty answer before the node is live: this only adds to what the settings show.
+    async fn read_repeater_cards(&self) -> BTreeMap<[u8; 32], BTreeSet<[u8; 32]>> {
+        let (Some(live), Ok(book)) = (self.live_opt().await, self.roster_book().await) else {
+            return BTreeMap::new();
+        };
+        let cards = live.profile.read_key_everywhere(repeater::CARD_KEY).await;
+        let me = self.roster_key().verifying_key().to_bytes();
+        repeater::ingest_cards(&book, &cards, &me)
     }
 
     /// Clone this node's live handles and RELEASE the node lock. See [`Live`].
@@ -2159,7 +2197,17 @@ impl LocationNode {
             }
             Err(_) => None,
         };
-        contact::PeerRoles::new(friends, stash)
+        // Every repeater in every roster this phone knows, with its roster's owner, so a fix a
+        // repeater handed over can say whose repeater it was.
+        let repeaters: Vec<([u8; 32], [u8; 32])> = match self.roster_book().await {
+            Ok(book) => book
+                .states()
+                .iter()
+                .flat_map(|state| state.repeaters.keys().map(|id| (*id, state.owner)))
+                .collect(),
+            Err(_) => Vec::new(),
+        };
+        contact::PeerRoles::new(friends, stash).with_repeaters(repeaters)
     }
 
     async fn gate_store(&self) -> Result<Arc<gate::GateStore>, LocationError> {
@@ -3750,19 +3798,33 @@ impl LocationNode {
     /// Every roster this phone knows, for the repeater settings.
     pub async fn repeater_rosters(&self) -> Result<Vec<RepeaterRoster>, LocationError> {
         let book = self.roster_book().await?;
+        // Friends' cards first, so a roster a friend joined since we last looked is listed.
+        let vouchers = self.read_repeater_cards().await;
         let me = self.roster_key().verifying_key().to_bytes();
         Ok(book
             .states()
             .into_iter()
-            .map(|state| RepeaterRoster {
-                roster_id: encode_hex(&state.id),
-                owner: encode_hex(&state.owner),
-                mine: state.owner == me,
-                open: state.policy == streetcryptid_repeater::roster::Policy::Open,
-                carries_me: state.carried.contains(&me),
-                repeaters: state.repeaters.keys().map(|id| encode_hex(id)).collect(),
-                carried: state.carried.len() as u32,
-                members: state.carried.iter().map(|id| encode_hex(id)).collect(),
+            .map(|state| {
+                let open = state.policy == streetcryptid_repeater::roster::Policy::Open;
+                let carries_me = state.carried.contains(&me);
+                let mine = state.owner == me;
+                let can_enrol = !carries_me
+                    && (mine || open || repeater::invite_for(&book, &state.id, &me).is_some());
+                RepeaterRoster {
+                    roster_id: encode_hex(&state.id),
+                    owner: encode_hex(&state.owner),
+                    mine,
+                    open,
+                    carries_me,
+                    repeaters: state.repeaters.keys().map(|id| encode_hex(id)).collect(),
+                    carried: state.carried.len() as u32,
+                    members: state.carried.iter().map(|id| encode_hex(id)).collect(),
+                    vouchers: vouchers
+                        .get(&state.id)
+                        .map(|ids| ids.iter().map(|id| encode_hex(id)).collect())
+                        .unwrap_or_default(),
+                    can_enrol,
+                }
             })
             .collect())
     }
@@ -3788,7 +3850,10 @@ impl LocationNode {
         )
         .await?;
         if carried {
+            // The grant pass republishes the card after its refresh.
             self.grant_repeaters("enrol").await;
+        } else {
+            self.republish_repeater_card().await;
         }
         Ok(carried)
     }
@@ -5022,6 +5087,14 @@ impl LocationNode {
                 isolation::Source::Pull,
                 &started.endpoint,
             );
+            // One `fix.provenance` per author slot delivered: who handed over whose fix.
+            for (peer, author) in &pass.delivered {
+                let path = match EndpointId::from_bytes(peer) {
+                    Ok(id) => delivery_label(&started.endpoint, id).await,
+                    Err(_) => "live".to_string(),
+                };
+                contact::record_provenance(&roles, contact::Lane::Docs, author, peer, &path);
+            }
             if !tallies.is_empty() {
                 for (peer, tally) in tallies {
                     let path = match EndpointId::from_bytes(&peer) {
@@ -5550,6 +5623,31 @@ fn decode_hex(s: &str) -> Option<Vec<u8>> {
         .step_by(2)
         .map(|i| u8::from_str_radix(&s[i..i + 2], 16).ok())
         .collect()
+}
+
+/// Sign our repeater card and put it in our profile namespace, unless it already says that (see
+/// [`repeater::build_card`]). Span `repeater.card`.
+async fn publish_repeater_card(
+    profile: &ProfileDocs,
+    key: &ed25519_dalek::SigningKey,
+    book: &repeater::RosterBook,
+) {
+    let span = tracing::info_span!(
+        "repeater.card",
+        rosters = tracing::field::Empty,
+        written = tracing::field::Empty,
+        error = tracing::field::Empty,
+    );
+    let me = key.verifying_key().to_bytes();
+    span.record("rosters", repeater::card_rosters(&book.states(), &me).len());
+    let outcome = match repeater::build_card(key, book) {
+        Ok(card) => profile.publish_key(repeater::CARD_KEY, card).await,
+        Err(e) => Err(e),
+    };
+    match outcome {
+        Ok(written) => span.record("written", written),
+        Err(e) => span.record("error", tracing::field::display(e)),
+    };
 }
 
 /// A 32-byte id (roster, endpoint) from the lowercase hex the repeater API speaks in.

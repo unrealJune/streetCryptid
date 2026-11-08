@@ -19,8 +19,9 @@ import { useRepeaters } from '../hooks/use-repeaters';
  * A scanned claim QR code lands here as `?claim=` (see `+native-intent.tsx`), filled into the
  * form but not claimed: the claim is where the roster's policy is chosen.
  *
- * "Available through friends" (rosters learned from friends' `RepeaterCard`s) arrives with the
- * cards; until then a roster reaches this phone only by claiming one of its machines.
+ * "Available through friends" is every roster a friend's repeater card vouches for (REPEATERS.md
+ * §4.2): friends publish the rosters they own or are carried by, and reading the settings reads
+ * their cards. Turning carrying on there is enrolling, the same switch as everywhere else.
  */
 export default function RepeatersScreen() {
   const scheme = useColorScheme();
@@ -95,6 +96,12 @@ export default function RepeatersScreen() {
 
       {sections.carryingMe.length > 0 ? (
         <SettingsSection label="CARRYING MY TRAIL">{sections.carryingMe.map(card)}</SettingsSection>
+      ) : null}
+
+      {sections.throughFriends.length > 0 ? (
+        <SettingsSection label="AVAILABLE THROUGH FRIENDS">
+          {sections.throughFriends.map(card)}
+        </SettingsSection>
       ) : null}
 
       {sections.others.length > 0 ? (

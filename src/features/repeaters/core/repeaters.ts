@@ -103,6 +103,10 @@ export interface RosterView {
   readonly carried: number;
   /** Who it carries, me first; empty on a binary that reports only the count. */
   readonly members: readonly RosterPerson[];
+  /** Friends whose repeater cards list it and who are in it themselves. */
+  readonly vouchers: readonly RosterPerson[];
+  /** Enrolling would be accepted: open, or an invite naming me. */
+  readonly canEnrol: boolean;
 }
 
 export interface RosterSections {
@@ -110,7 +114,9 @@ export interface RosterSections {
   readonly mine: RosterView | null;
   /** Other people's rosters that carry this phone's trail. */
   readonly carryingMe: readonly RosterView[];
-  /** Other rosters this phone knows and is not enrolled in. */
+  /** Rosters friends' cards vouch for that do not carry me (REPEATERS.md §4.4). */
+  readonly throughFriends: readonly RosterView[];
+  /** Everything else this phone knows and is not enrolled in. */
   readonly others: readonly RosterView[];
 }
 
@@ -150,13 +156,19 @@ export function rosterSections(
     members: (r.members ?? [])
       .map(person)
       .sort((a, b) => Number(b.isMe) - Number(a.isMe) || a.label.localeCompare(b.label)),
+    vouchers: (r.vouchers ?? []).map(person).sort((a, b) => a.label.localeCompare(b.label)),
+    // A binary without the field could always try; the repeater is what judges.
+    canEnrol: r.carriesMe ? false : (r.canEnrol ?? true),
   });
   const views = rosters.map(view);
   const byLabel = (a: RosterView, b: RosterView) => a.ownerLabel.localeCompare(b.ownerLabel);
   return {
     mine: views.find((v) => v.mine) ?? null,
     carryingMe: views.filter((v) => !v.mine && v.carriesMe).sort(byLabel),
-    others: views.filter((v) => !v.mine && !v.carriesMe).sort(byLabel),
+    throughFriends: views
+      .filter((v) => !v.mine && !v.carriesMe && v.vouchers.length > 0)
+      .sort(byLabel),
+    others: views.filter((v) => !v.mine && !v.carriesMe && v.vouchers.length === 0).sort(byLabel),
   };
 }
 
@@ -167,6 +179,8 @@ export function repeatersSummary(sections: RosterSections): string {
   const parts: string[] = [];
   if (machines > 0) parts.push(`${machines} ${machines === 1 ? 'machine' : 'machines'}`);
   if (carriers > 0) parts.push(`carried by ${carriers}`);
+  const offered = sections.throughFriends.filter((r) => r.canEnrol).length;
+  if (offered > 0) parts.push(`${offered} offered by friends`);
   return parts.length > 0 ? parts.join(' · ') : 'None';
 }
 

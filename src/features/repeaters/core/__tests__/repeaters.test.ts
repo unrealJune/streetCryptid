@@ -92,9 +92,27 @@ describe('rosterSections', () => {
     expect(rosterSections([roster({ carried: 2 })], []).others[0].members).toEqual([]);
   });
 
+  it('offers what friends vouch for, named by who vouched and whether I may enrol', () => {
+    const sections = rosterSections(
+      [
+        roster({ rosterId: 'open', owner: SAM, open: true, vouchers: [SAM], canEnrol: true }),
+        roster({ rosterId: 'closed', owner: STRANGER, vouchers: [SAM], canEnrol: false }),
+        roster({ rosterId: 'seen', owner: STRANGER }),
+      ],
+      [{ endpointId: SAM, handle: '@sam' }]
+    );
+    expect(sections.throughFriends.map((r) => [r.rosterId, r.canEnrol])).toEqual([
+      ['open', true],
+      ['closed', false],
+    ]);
+    expect(sections.throughFriends[0].vouchers.map((v) => v.label)).toEqual(['@sam']);
+    expect(sections.others.map((r) => r.rosterId)).toEqual(['seen']);
+    expect(repeatersSummary(sections)).toBe('1 offered by friends');
+  });
+
   it('has nothing to show for a phone in no roster', () => {
     const sections = rosterSections([], []);
-    expect(sections).toEqual({ mine: null, carryingMe: [], others: [] });
+    expect(sections).toEqual({ mine: null, carryingMe: [], throughFriends: [], others: [] });
     expect(repeatersSummary(sections)).toBe('None');
   });
 });

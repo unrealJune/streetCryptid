@@ -1325,6 +1325,8 @@ class IrohLocationModule : Module() {
             "repeaters" to r.repeaters,
             "carried" to r.carried.toLong(),
             "members" to r.members,
+            "vouchers" to r.vouchers,
+            "canEnrol" to r.canEnrol,
           )
         }
       }

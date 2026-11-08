@@ -12,7 +12,10 @@
 //!   names this phone, this roster and the machine that answered ([`claim`]);
 //! * **enrol or withdraw** — the one opt-in there is, which is having one's own trail carried;
 //! * ask every repeater that carries it to hold its own namespaces, naming each repeater to the
-//!   others as co-carriers so they converge between themselves ([`grant_plan`], [`grant`]).
+//!   others as co-carriers so they converge between themselves ([`grant_plan`], [`grant`]);
+//! * publish a **card** of the rosters it owns or is carried by, in its own profile namespace,
+//!   and read its friends' ([`build_card`], [`ingest_cards`]). That is how a roster reaches
+//!   people who never claimed one of its machines.
 //!
 //! Everything here is one request per connection on the node's own endpoint. The trail itself
 //! never moves over this protocol: it moves by plain iroh-docs sync, between phones and repeaters
@@ -29,7 +32,7 @@ use iroh::endpoint::RecvStream;
 use iroh::{Endpoint, EndpointAddr};
 use serde::{Deserialize, Serialize};
 use streetcryptid_repeater::roster::{
-    Action, EndpointId, Inserted, OpBody, Policy, Roster, RosterError, RosterId, RosterState,
+    Action, EndpointId, Inserted, OpBody, OpId, Policy, Roster, RosterError, RosterId, RosterState,
     SignedOp,
 };
 use streetcryptid_repeater::wire::{
@@ -58,6 +61,8 @@ pub enum RepeaterError {
     UnknownRoster,
     #[error("only the roster's owner can change it")]
     NotOwner,
+    #[error("a repeater card that does not verify")]
+    BadCard,
     #[error("roster: {0}")]
     Roster(#[from] RosterError),
     #[error("{0}")]
@@ -248,6 +253,158 @@ impl RosterBook {
     }
 }
 
+// ---- the card (pure) --------------------------------------------------------------------------
+
+/// The key a card lives under in its publisher's profile namespace. Its own key and signing
+/// context, never a field of `ProfileRecord`: that record is signed over a re-encode, so a new
+/// field would break every older reader (REPEATERS.md §4.2). Older readers look up `profile` only.
+pub const CARD_KEY: &[u8] = b"repeaters";
+const CARD_CTX: &[u8] = b"streetcryptid/repeater-card/1";
+const CARD_V: u32 = 1;
+/// Rosters on one card. A person is in few; this bounds what a friend can make us verify.
+pub const MAX_CARD_ROSTERS: usize = 16;
+/// The whole signed card. A roster op is at most 1 KiB and a real roster a few dozen ops.
+pub const MAX_CARD_BYTES: usize = 256 * 1024;
+
+#[derive(Debug, Serialize, Deserialize)]
+struct CardBody {
+    v: u32,
+    /// Each roster as its whole signed log, so a reader needs nothing else to check it, to label
+    /// it, or to sign an `Enroll` that cites it.
+    rosters: Vec<Vec<SignedOp>>,
+}
+
+/// A card as it is stored: the exact signed bytes, decoded only after the signature checks out
+/// (the roster's own rule; see `streetcryptid_repeater::roster`).
+#[derive(Debug, Serialize, Deserialize)]
+struct SignedCard {
+    signer: EndpointId,
+    body: Vec<u8>,
+    sig: Vec<u8>,
+}
+
+/// The rosters `me` vouches for: those it owns and those that carry it. A roster it merely saw on
+/// someone else's card is not repeated, so a card says "I am in this", never "I heard of this".
+pub fn card_rosters(states: &[RosterState], me: &EndpointId) -> Vec<RosterId> {
+    let mut ids: Vec<RosterId> = states
+        .iter()
+        .filter(|state| state.owner == *me || state.carried.contains(me))
+        .map(|state| state.id)
+        .collect();
+    ids.sort_unstable();
+    ids.truncate(MAX_CARD_ROSTERS);
+    ids
+}
+
+/// Sign this phone's card. Deterministic (ed25519 signatures are), so an unchanged card is the
+/// same bytes and republishing it writes nothing. An empty card is still a card: it is how
+/// friends learn we left the last roster.
+pub fn build_card(key: &SigningKey, book: &RosterBook) -> anyhow::Result<Vec<u8>> {
+    let me = key.verifying_key().to_bytes();
+    let rosters = card_rosters(&book.states(), &me)
+        .iter()
+        .filter_map(|id| book.export(id))
+        .collect();
+    let body = postcard::to_allocvec(&CardBody { v: CARD_V, rosters })?;
+    let sig = ed25519_dalek::Signer::sign(key, &card_signing_input(&body));
+    let card = postcard::to_allocvec(&SignedCard {
+        signer: me,
+        body,
+        sig: sig.to_bytes().to_vec(),
+    })?;
+    if card.len() > MAX_CARD_BYTES {
+        return Err(anyhow!("repeater card is {} bytes", card.len()));
+    }
+    Ok(card)
+}
+
+/// Check a card and return who signed it and the roster logs it carries. Each log is still only a
+/// claim until [`RosterBook::ingest`] has checked every op's own signature.
+pub fn open_card(bytes: &[u8]) -> Result<(EndpointId, Vec<Vec<SignedOp>>), RepeaterError> {
+    if bytes.len() > MAX_CARD_BYTES {
+        return Err(RepeaterError::BadCard);
+    }
+    let card: SignedCard = postcard::from_bytes(bytes).map_err(|_| RepeaterError::BadCard)?;
+    let key = ed25519_dalek::VerifyingKey::from_bytes(&card.signer)
+        .map_err(|_| RepeaterError::BadCard)?;
+    let sig =
+        ed25519_dalek::Signature::from_slice(&card.sig).map_err(|_| RepeaterError::BadCard)?;
+    key.verify_strict(&card_signing_input(&card.body), &sig)
+        .map_err(|_| RepeaterError::BadCard)?;
+    let body: CardBody = postcard::from_bytes(&card.body).map_err(|_| RepeaterError::BadCard)?;
+    if body.v != CARD_V || body.rosters.len() > MAX_CARD_ROSTERS {
+        return Err(RepeaterError::BadCard);
+    }
+    Ok((card.signer, body.rosters))
+}
+
+fn card_signing_input(body: &[u8]) -> Vec<u8> {
+    let mut msg = Vec::with_capacity(CARD_CTX.len() + body.len());
+    msg.extend_from_slice(CARD_CTX);
+    msg.extend_from_slice(body);
+    msg
+}
+
+/// Take in friends' cards: every roster log into the book (judged op by op, as anything else
+/// there), and for each roster, who vouched for it. Our own card is skipped; a card that does not
+/// verify is ignored, never an error, since it came from a namespace we only read.
+pub fn ingest_cards(
+    book: &RosterBook,
+    cards: &[Vec<u8>],
+    me: &EndpointId,
+) -> BTreeMap<RosterId, BTreeSet<EndpointId>> {
+    let mut vouchers: BTreeMap<RosterId, BTreeSet<EndpointId>> = BTreeMap::new();
+    for bytes in cards {
+        let Ok((signer, rosters)) = open_card(bytes) else {
+            continue;
+        };
+        if signer == *me {
+            continue;
+        }
+        for ops in rosters {
+            // Every roster the log names, known already or not: `ingest` reports only changes,
+            // and a card we have read before still vouches.
+            let ids: BTreeSet<RosterId> = ops
+                .iter()
+                .filter_map(|op| {
+                    let body = op.verify().ok()?;
+                    match body.action {
+                        Action::Genesis { .. } => Some(op.id()),
+                        _ => body.roster,
+                    }
+                })
+                .collect();
+            if book.ingest(ops).is_err() {
+                continue;
+            }
+            for id in ids {
+                // A voucher must actually be in what it vouches for, by the log itself.
+                if book
+                    .state(&id)
+                    .is_some_and(|s| s.owner == signer || s.carried.contains(&signer))
+                {
+                    vouchers.entry(id).or_default().insert(signer);
+                }
+            }
+        }
+    }
+    vouchers
+}
+
+/// The newest invite naming `member` in `roster`, if any: what an `Enroll` cites in an
+/// invite-only roster. Whether it still stands is the roster's call when the op is inserted.
+pub fn invite_for(book: &RosterBook, roster: &RosterId, member: &EndpointId) -> Option<OpId> {
+    book.export(roster)?
+        .iter()
+        .filter(|op| {
+            op.verify().is_ok_and(
+                |body| matches!(body.action, Action::Invite { member: m } if m == *member),
+            )
+        })
+        .map(SignedOp::id)
+        .last()
+}
+
 // ---- planning (pure) --------------------------------------------------------------------------
 
 /// Every repeater that carries `me`, across every roster that carries `me`.
@@ -414,7 +571,9 @@ pub async fn set_carried(
     let state = book.state(roster).ok_or(RepeaterError::UnknownRoster)?;
     if state.carried.contains(&me) != carry {
         let action = if carry {
-            Action::Enroll { invite: None }
+            Action::Enroll {
+                invite: invite_for(book, roster, &me),
+            }
         } else {
             Action::Withdraw
         };
@@ -765,6 +924,84 @@ mod tests {
             state.carried.contains(&id(2)),
             "a policy change is never retroactive"
         );
+    }
+
+    #[test]
+    fn a_card_carries_my_rosters_and_a_friend_learns_them_from_it() {
+        // Sam owns one roster and is carried by June's; a third roster only mentions Sam's friend.
+        let sams = RosterBook::open(&scratch("card-sam")).unwrap();
+        let owned = roster_with(&sams, 2, &[20], &[2]);
+        let junes = roster_with(&sams, 1, &[10], &[2]);
+        let other = roster_with(&sams, 3, &[30], &[3]);
+        let card = build_card(&key(2), &sams).unwrap();
+        assert_eq!(build_card(&key(2), &sams).unwrap(), card, "deterministic");
+
+        let mine = RosterBook::open(&scratch("card-me")).unwrap();
+        let vouchers = ingest_cards(&mine, std::slice::from_ref(&card), &id(4));
+        let mut expected = vec![owned, junes];
+        expected.sort();
+        assert_eq!(vouchers.keys().copied().collect::<Vec<_>>(), expected);
+        assert!(vouchers.values().all(|v| v == &BTreeSet::from([id(2)])));
+        assert!(mine.state(&other).is_none(), "only rosters Sam is in");
+        assert_eq!(mine.state(&owned), sams.state(&owned));
+
+        // Reading the same card again still vouches (nothing new to ingest, same answer).
+        assert_eq!(
+            ingest_cards(&mine, std::slice::from_ref(&card), &id(4)),
+            vouchers
+        );
+
+        // My own card vouches for nothing; a tampered one is ignored.
+        assert!(ingest_cards(&mine, std::slice::from_ref(&card), &id(2)).is_empty());
+        let mut tampered = card;
+        let last = tampered.len() - 1;
+        tampered[last] ^= 1;
+        assert!(open_card(&tampered).is_err());
+    }
+
+    #[test]
+    fn a_card_cannot_vouch_for_a_roster_its_signer_is_not_in() {
+        // Mallory republishes June's roster on her own card: the log is real, so it is learned,
+        // but she is no voucher for it.
+        let junes = RosterBook::open(&scratch("card-june")).unwrap();
+        let roster = roster_with(&junes, 1, &[10], &[1]);
+        let ops = junes.export(&roster).unwrap();
+        let body = postcard::to_allocvec(&CardBody {
+            v: CARD_V,
+            rosters: vec![ops],
+        })
+        .unwrap();
+        let sig = ed25519_dalek::Signer::sign(&key(6), &card_signing_input(&body));
+        let card = postcard::to_allocvec(&SignedCard {
+            signer: id(6),
+            body,
+            sig: sig.to_bytes().to_vec(),
+        })
+        .unwrap();
+        let mine = RosterBook::open(&scratch("card-mallory")).unwrap();
+        assert!(ingest_cards(&mine, &[card], &id(4)).is_empty());
+        assert!(mine.state(&roster).is_some());
+    }
+
+    #[test]
+    fn an_invite_is_what_an_enrolment_cites_in_an_invite_only_roster() {
+        let book = RosterBook::open(&scratch("invite")).unwrap();
+        let roster = book.create(&key(1), Policy::Invite, 1).unwrap();
+        assert_eq!(invite_for(&book, &roster, &id(2)), None);
+        let invite = book
+            .sign(&roster, &key(1), Action::Invite { member: id(2) }, 2)
+            .unwrap();
+        assert_eq!(invite_for(&book, &roster, &id(2)), Some(invite.id()));
+        book.sign(
+            &roster,
+            &key(2),
+            Action::Enroll {
+                invite: invite_for(&book, &roster, &id(2)),
+            },
+            3,
+        )
+        .unwrap();
+        assert!(book.state(&roster).unwrap().carried.contains(&id(2)));
     }
 
     #[test]

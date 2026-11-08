@@ -35,7 +35,7 @@ jest.mock('@/features/social/hooks/use-location-sharing', () => ({
 
 const repeaters: { status: string; sections: unknown } = {
   status: 'ready',
-  sections: { mine: null, carryingMe: [], others: [] },
+  sections: { mine: null, carryingMe: [], throughFriends: [], others: [] },
 };
 
 jest.mock('@/features/repeaters/hooks/use-repeaters', () => ({
@@ -121,10 +121,11 @@ describe('SettingsScreen', () => {
     repeaters.sections = {
       mine: { machines: ['aaaaaa', 'bbbbbb'], carriesMe: true },
       carryingMe: [{ machines: ['cccccc'], carriesMe: true }],
+      throughFriends: [{ canEnrol: true }, { canEnrol: false }],
       others: [],
     };
     expect(rows().find((row) => row.href === '/settings/repeaters')?.value).toBe(
-      '2 machines · carried by 2'
+      '2 machines · carried by 2 · 1 offered by friends'
     );
 
     act(() => renderer.unmount());
@@ -132,7 +133,7 @@ describe('SettingsScreen', () => {
     expect(rows().some((row) => row.href === '/settings/repeaters')).toBe(false);
 
     repeaters.status = 'ready';
-    repeaters.sections = { mine: null, carryingMe: [], others: [] };
+    repeaters.sections = { mine: null, carryingMe: [], throughFriends: [], others: [] };
   });
 
   it('names the route that is actually in use, not the one that was asked for', () => {

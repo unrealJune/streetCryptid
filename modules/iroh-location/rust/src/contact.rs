@@ -12,7 +12,7 @@
 //!
 //! - `contact.dir` — `send` | `recv`
 //! - `contact.lane` — `gossip` (the live path) | `docs` (trail reconciliation)
-//! - `contact.role` — `friend` | `stash` | `other`, from [`PeerRoles`]
+//! - `contact.role` — `friend` | `stash` | `repeater` | `other`, from [`PeerRoles`]
 //! - `contact.path` — `ble` | `lan` | `direct` | `relay` | `live` (see `delivery_label`)
 //! - `contact.from_author` — receive only: the peer handed over ITS OWN envelope, i.e. the
 //!   author's phone was on the other end, not a mirror of it
@@ -26,7 +26,7 @@
 //! The span's own duration is meaningless (opened and closed after the fact), the same convention
 //! as `trail.push.peer`.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 /// Which direction the data went.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -73,13 +73,37 @@ impl Lane {
 pub struct PeerRoles {
     friends: HashSet<[u8; 32]>,
     stash: Option<[u8; 32]>,
+    /// Every repeater in a roster this phone knows, to its roster's owner.
+    repeaters: HashMap<[u8; 32], [u8; 32]>,
 }
 
 impl PeerRoles {
     pub fn new(friends: impl IntoIterator<Item = [u8; 32]>, stash: Option<[u8; 32]>) -> Self {
         let friends: HashSet<[u8; 32]> = friends.into_iter().collect();
         let stash = stash.filter(|id| !friends.contains(id));
-        Self { friends, stash }
+        Self {
+            friends,
+            stash,
+            repeaters: HashMap::new(),
+        }
+    }
+
+    /// Add repeaters, each with its roster's owner. A friend or the stash keeps its role.
+    pub fn with_repeaters(
+        mut self,
+        repeaters: impl IntoIterator<Item = ([u8; 32], [u8; 32])>,
+    ) -> Self {
+        for (repeater, owner) in repeaters {
+            if !self.friends.contains(&repeater) && self.stash.as_ref() != Some(&repeater) {
+                self.repeaters.insert(repeater, owner);
+            }
+        }
+        self
+    }
+
+    /// Whose roster a repeater is in, when `peer` is one.
+    pub fn repeater_owner(&self, peer: &[u8; 32]) -> Option<&[u8; 32]> {
+        self.repeaters.get(peer)
     }
 
     /// The stash's endpoint id, when the stash is configured and opted into.
@@ -87,17 +111,58 @@ impl PeerRoles {
         self.stash.as_ref()
     }
 
-    /// `friend` | `stash` | `other`. `other` is honest rather than a guess: a pool member we hold no
-    /// recipient record for, or a peer from before the config was written.
+    /// `friend` | `stash` | `repeater` | `other`. `other` is honest rather than a guess: a pool
+    /// member we hold no recipient record for, or a peer from before the config was written.
     pub fn role(&self, peer: &[u8; 32]) -> &'static str {
         if self.friends.contains(peer) {
             "friend"
         } else if self.stash.as_ref() == Some(peer) {
             "stash"
+        } else if self.repeaters.contains_key(peer) {
+            "repeater"
         } else {
             "other"
         }
     }
+
+    /// Where a fix came from: `author` when the author's own phone handed it over, otherwise the
+    /// [`role`](Self::role) of whoever did (`friend` then means another friend relayed it).
+    pub fn source(&self, author: &[u8; 32], peer: &[u8; 32]) -> &'static str {
+        if author == peer {
+            "author"
+        } else {
+            self.role(peer)
+        }
+    }
+}
+
+/// Emit `fix.provenance`: one fix reached this phone, from whom and how. Dimensions
+/// (`collector-config.yaml`) are `fix.lane`, `fix.source` and `fix.path`, so "where do my fixes
+/// come from" is a spanmetrics query over weeks. `fix.repeater_owner` names whose repeater it was,
+/// and is a span attribute only (bounded by rosters, but not worth a series each).
+pub fn record_provenance(
+    roles: &PeerRoles,
+    lane: Lane,
+    author: &[u8; 32],
+    peer: &[u8; 32],
+    path: &str,
+) {
+    let span = tracing::info_span!(
+        "fix.provenance",
+        sc.author = %crate::telemetry::short_hex(author),
+        sc.via_peer = %crate::telemetry::short_hex(peer),
+        fix.lane = lane.as_str(),
+        fix.source = roles.source(author, peer),
+        fix.path = path,
+        fix.repeater_owner = tracing::field::Empty,
+    );
+    if let Some(owner) = roles.repeater_owner(peer) {
+        span.record(
+            "fix.repeater_owner",
+            tracing::field::display(crate::telemetry::short_hex(owner)),
+        );
+    }
+    span.in_scope(|| {});
 }
 
 /// One exchange with one peer. See the module docs for what each field means.
@@ -188,6 +253,26 @@ mod tests {
         // but its ticket missing), the recipient record has to win.
         let roles = PeerRoles::new([A], Some(A));
         assert_eq!(roles.role(&A), "friend");
+    }
+
+    #[test]
+    fn a_repeater_is_named_with_its_owner_and_never_outranks_a_friend() {
+        const R: [u8; 32] = [0x77; 32];
+        const OWNER: [u8; 32] = [0x11; 32];
+        let roles = PeerRoles::new([A], Some(STASH)).with_repeaters([(R, OWNER), (A, OWNER)]);
+        assert_eq!(roles.role(&R), "repeater");
+        assert_eq!(roles.repeater_owner(&R), Some(&OWNER));
+        assert_eq!(roles.role(&A), "friend");
+        assert_eq!(roles.repeater_owner(&A), None);
+    }
+
+    #[test]
+    fn a_fix_from_its_author_is_the_author_whoever_else_they_are() {
+        let roles = PeerRoles::new([A], Some(STASH));
+        assert_eq!(roles.source(&A, &A), "author");
+        assert_eq!(roles.source(&B, &A), "friend");
+        assert_eq!(roles.source(&A, &STASH), "stash");
+        assert_eq!(roles.source(&A, &B), "other");
     }
 
     #[test]
