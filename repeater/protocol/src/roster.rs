@@ -47,7 +47,12 @@
 //!   withdrawal ends; a revocation made *after* an invite stops later invites, not that one;
 //! * a `Remove` is sticky against re-enrolment, until an invitation made *after* it;
 //! * a `SetPolicy` applies to ops that have seen it, never retroactively; two concurrent ones
-//!   resolve to `Invite`, the stricter.
+//!   resolve to `Invite`, the stricter;
+//! * an **uninvited** enrolment concurrent with a `SetPolicy { Invite }` does not stand. Without
+//!   this, closing a roster closed nothing: anyone holding the genesis (which friends' cards
+//!   publish) could sign an `Enroll` on the open genesis alone, and its past would say "open".
+//!   An enrolment the owner had SEEN when closing is in that op's past, so it is not concurrent
+//!   and keeps standing — closing is still never retroactive.
 //!
 //! Pure: no iroh, no tokio. ed25519 is ed25519-dalek 2, the same as the app's core, so the phone
 //! signs ops with the code that verifies them here.
@@ -717,14 +722,27 @@ impl Roster {
                 }
                 _ => true,
             };
+            // Did it need the roster to be open? An answered invite that still stands did not.
+            let uninvited = match self.nodes[e].body.action {
+                Action::Enroll {
+                    invite: Some(invite),
+                } => !self
+                    .index
+                    .get(&invite)
+                    .is_some_and(|&i| self.invite_survives(i, scope)),
+                _ => true,
+            };
             let ended = self.indices(scope).any(|w| {
                 let node = &self.nodes[w];
-                let ends = match &node.body.action {
-                    Action::Remove { member: m } => m == member,
-                    Action::Withdraw => node.op.signer == *member,
+                match &node.body.action {
+                    Action::Remove { member: m } => m == member && self.unseen_by(w, e),
+                    Action::Withdraw => node.op.signer == *member && self.unseen_by(w, e),
+                    // Closing beats an uninvited enrolment it had not seen, like a removal does.
+                    Action::SetPolicy {
+                        policy: Policy::Invite,
+                    } => uninvited && self.concurrent(w, e),
                     _ => false,
-                };
-                ends && self.unseen_by(w, e)
+                }
             });
             invite_ok && !ended
         })
@@ -1272,7 +1290,9 @@ mod tests {
     }
 
     #[test]
-    fn an_enrolment_concurrent_with_closing_stands() {
+    fn an_enrolment_concurrent_with_closing_does_not_stand() {
+        // Concurrent and backdated look the same: neither was seen by the close. So a genuine
+        // race costs the enrollee an invite, which is the price of closing meaning anything.
         let mut f = Fixture::new(Policy::Open);
         let base = f.roster.heads();
         let close = f.op_on(
@@ -1286,9 +1306,49 @@ mod tests {
         f.roster.insert(close).unwrap();
         f.roster.insert(enroll).unwrap();
         assert!(
-            f.carried(ALICE),
-            "a policy applies to ops that have seen it"
+            !f.carried(ALICE),
+            "closing beats an uninvited enrolment it had not seen"
         );
+    }
+
+    #[test]
+    fn closing_a_roster_keeps_out_an_enrolment_backdated_onto_the_open_genesis() {
+        let mut f = Fixture::new(Policy::Open);
+        let genesis = f.roster.heads();
+        f.act(ALICE, Action::Enroll { invite: None }).unwrap();
+        f.act(
+            OWNER,
+            Action::SetPolicy {
+                policy: Policy::Invite,
+            },
+        )
+        .unwrap();
+        // Alice enrolled while it was open and the owner saw it: closing is not retroactive.
+        assert!(f.carried(ALICE));
+
+        // Bob signs an Enroll citing only the genesis, whose past says "open". It is accepted
+        // as an op (its past cannot change) but does not stand against the close.
+        let backdated = f.op_on(BOB, genesis, Action::Enroll { invite: None });
+        f.roster.insert(backdated).unwrap();
+        assert!(!f.carried(BOB));
+
+        // An invite after the close is how Bob gets in.
+        let invite = f
+            .act(
+                OWNER,
+                Action::Invite {
+                    member: member(BOB),
+                },
+            )
+            .unwrap();
+        f.act(
+            BOB,
+            Action::Enroll {
+                invite: Some(invite),
+            },
+        )
+        .unwrap();
+        assert!(f.carried(BOB));
     }
 
     #[test]
@@ -1437,7 +1497,7 @@ mod tests {
 
     /// The property everything else rests on: replicas that hold the same ops agree, whatever
     /// order the ops reached them in. Builds a log with concurrent branches (a revocation racing
-    /// an invite, a removal racing an enrolment, a policy change racing an open enrolment), then
+    /// an invite, a removal racing an enrolment, an enrolment backdated past a close), then
     /// feeds it to fresh rosters in many orders.
     #[test]
     fn order_does_not_matter() {
@@ -1453,9 +1513,10 @@ mod tests {
         );
         let alice_in = f.op_on(ALICE, root.clone(), Action::Enroll { invite: None });
         let carol_in = f.op_on(CAROL, root.clone(), Action::Enroll { invite: None });
+        // The owner had seen Alice's enrolment when closing, so it keeps standing.
         let close = f.op_on(
             OWNER,
-            vec![grant.id()],
+            vec![grant.id(), alice_in.id()],
             Action::SetPolicy {
                 policy: Policy::Invite,
             },
