@@ -1,6 +1,6 @@
 [package]
 name = "trail-stash"
-version = "0.3.0"
+version = "0.3.1"
 edition = "2021"
 publish = false
 license = "AGPL-3.0-or-later"
@@ -33,6 +33,7 @@ live = [
     "dep:reqwest",
     "dep:tracing",
     "dep:tracing-subscriber",
+    "dep:qrcode",
 ]
 # `otel` layers OTLP export (traces + logs) onto the `live` node — see src/telemetry.rs for the
 # layering and the redaction guarantees. Compiled into the shipped image (Dockerfile builds
@@ -57,6 +58,8 @@ streetcryptid-repeater = { path = "repeater" }
 # Repeater identity (live) and the persisted roster.
 ed25519-dalek = "2"
 postcard = { version = "1", default-features = false, features = ["alloc"] }
+# The repeater's claim QR code on the console (live binary only; no image backends).
+qrcode = { version = "0.14", default-features = false, optional = true }
 
 # --- live node only (see `live` feature). Versions match modules/iroh-location/rust so the
 # stash speaks the exact same docs/blobs/gossip protocols as the phones. ---

@@ -219,11 +219,39 @@ pub fn claim_link(endpoint_ticket: &str, secret: &[u8; 32]) -> String {
     format!("{CLAIM_SCHEME}{endpoint_ticket}#{hex}")
 }
 
-/// Split a claim link into its endpoint ticket and secret.
+/// The same link as a URL any phone camera can open:
+/// `https://streetcrypt.id/repeater#t=<endpoint ticket>&s=<64 hex secret>`. streetcrypt.id claims
+/// `/repeater` as a Universal Link / App Link, so scanning the QR code a repeater prints opens
+/// streetCryptid's repeater settings with the link filled in. Both halves ride in the fragment,
+/// which a browser never sends to streetcrypt.id when the app is not installed.
+pub const CLAIM_URL: &str = "https://streetcrypt.id/repeater";
+
+pub fn claim_url(endpoint_ticket: &str, secret: &[u8; 32]) -> String {
+    let hex: String = secret.iter().map(|b| format!("{b:02x}")).collect();
+    format!("{CLAIM_URL}#t={endpoint_ticket}&s={hex}")
+}
+
+/// Split a claim link, in either shape ([`claim_link`] or [`claim_url`]), into its endpoint
+/// ticket and secret.
 pub fn parse_claim_link(link: &str) -> Option<(&str, [u8; 32])> {
-    let rest = link.trim().strip_prefix(CLAIM_SCHEME)?;
-    let (ticket, hex) = rest.split_once('#')?;
-    if ticket.is_empty() || hex.len() != 64 {
+    let link = link.trim();
+    let (ticket, hex) = match link.strip_prefix(CLAIM_SCHEME) {
+        Some(rest) => rest.split_once('#')?,
+        None => {
+            let rest = link.strip_prefix(CLAIM_URL)?.strip_prefix(['#', '?'])?;
+            let mut ticket = None;
+            let mut secret = None;
+            for pair in rest.split('&') {
+                match pair.split_once('=') {
+                    Some(("t", v)) => ticket = Some(v),
+                    Some(("s", v)) => secret = Some(v),
+                    _ => {}
+                }
+            }
+            (ticket?, secret?)
+        }
+    };
+    if ticket.is_empty() || ticket.contains(['#', '&']) || hex.len() != 64 {
         return None;
     }
     let mut secret = [0u8; 32];
@@ -277,6 +305,30 @@ mod tests {
             None
         );
         assert_eq!(parse_claim_link("https://example.com"), None);
+
+        // The URL a QR code carries parses to the same thing, from the fragment or the query.
+        let url = claim_url("endpointabc", &secret);
+        assert_eq!(
+            url,
+            format!(
+                "https://streetcrypt.id/repeater#t=endpointabc&s={}",
+                "ab".repeat(32)
+            )
+        );
+        assert_eq!(parse_claim_link(&url), Some(("endpointabc", secret)));
+        let query = url.replacen('#', "?", 1);
+        assert_eq!(parse_claim_link(&query), Some(("endpointabc", secret)));
+        assert_eq!(
+            parse_claim_link("https://streetcrypt.id/repeater#t=endpointabc"),
+            None
+        );
+        assert_eq!(
+            parse_claim_link(&format!(
+                "https://streetcrypt.id/repeaters#t=x&s={}",
+                "00".repeat(32)
+            )),
+            None
+        );
         assert_eq!(
             parse_claim_link(&format!("{CLAIM_SCHEME}#{}", "00".repeat(32))),
             None
