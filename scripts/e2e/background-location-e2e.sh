@@ -15,8 +15,9 @@
 # current build installed (`bunx expo run:ios` / `bunx expo run:android`).
 #
 # Friend-side decryption through the stash is asserted only where the stash-only observer exists
-# (iOS today — see device_supports). On Android the run still asserts the full on-device pipeline
-# through `trail.push.app`, and says plainly that it skipped the friend-side check rather than
+# (iOS today — see device_supports). On Android the run asserts the on-device pipeline only as far
+# as the app's journal can see it — the push itself is native (`trail.push` in Rust) and ships over
+# OTLP, never into the journal — and says plainly that it skipped the friend-side check rather than
 # quietly reporting a weaker pass as if it were the same test.
 set -euo pipefail
 
@@ -57,7 +58,7 @@ if device_supports "$SPEC" stash-observer; then
   observer_state="$(ensure_stash_observer "$SPEC")"
 else
   log "NOTE: no stash-only observer on this platform — this run asserts the on-device pipeline"
-  log "      through trail.push.app, but NOT friend-side decryption."
+  log "      as far as the app's journal sees it (not the native push), and NOT friend-side decryption."
 fi
 
 start_ms="$(($(date +%s) * 1000))"
@@ -78,8 +79,7 @@ while [ "$(date +%s)" -lt "$deadline" ]; do
   # does exist, and its `wake.*` attributes carry the wake counts themselves.
   wake_count="$(device_event_log_count "$SPEC" "$start_ms" device.health)"
   publish_count="$(device_event_log_count "$SPEC" "$start_ms" publish.fix ok)"
-  push_count="$(device_event_log_count "$SPEC" "$start_ms" trail.push.app ok)"
-  if [ "$wake_count" -gt 0 ] && [ "$publish_count" -gt 0 ] && [ "$push_count" -gt 0 ]; then
+  if [ "$wake_count" -gt 0 ] && [ "$publish_count" -gt 0 ]; then
     if [ -n "$observer_state" ]; then
       observer_json="$(stash_observe_once "$observer_state" 30 || true)"
       if [ -n "$observer_json" ]; then
@@ -89,8 +89,8 @@ while [ "$(date +%s)" -lt "$deadline" ]; do
       fi
       # Pipeline is up but the friend hasn't decrypted a fix yet — keep waiting for it.
     else
-      log "PASS - background wake, native publish, and stash push completed (no friend-side check)"
-      log "wake=$wake_count publish.ok=$publish_count trail.push.ok=$push_count"
+      log "PASS - background wake and native publish completed (no push or friend-side check)"
+      log "wake=$wake_count publish.ok=$publish_count"
       exit 0
     fi
   fi

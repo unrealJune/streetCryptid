@@ -277,7 +277,7 @@
     {
       "type": "stat",
       "title": "Publishing but not pushing (1h)",
-      "description": "Devices sealing and publishing envelopes without pushing them to the stash, so the fixes exist only in the local replica. Friends online at that exact moment still see them live; everyone else never will — the precise gap the stash exists to close, and completely invisible from the sending side. Check trail.push.app for native.push.failed, and whether the device has any durable peer tickets at all.",
+      "description": "Devices sealing and publishing envelopes without pushing them to the stash or the pool, so the fixes exist only in the local replica. Friends whose replica happens to be syncing live with this phone at that moment still get them; everyone else never will — the precise gap the stash exists to close, and completely invisible from the sending side. Both spans come from the native drain (`publish.fix`, then `trail.push` from the same flush), so this is keyed on service_instance_id: native-core spans carry no device.id. Check the device's `trail.push` and `trail.push.peer` spans in Tempo (`peer.outcome`), and whether it has any durable peer tickets at all — with none, the flush has nowhere to push and emits no `trail.push`.",
       "datasource": {
         "type": "prometheus",
         "uid": "${prometheus}"
@@ -337,7 +337,7 @@
             "type": "prometheus",
             "uid": "${prometheus}"
           },
-          "expr": "count((sum by (device_id) (increase(traces_span_metrics_calls_total{service_name=\"streetcryptid-app\", span_name=\"publish.fix\"}[1h])) > 5) and (sum by (device_id) (increase(traces_span_metrics_calls_total{service_name=\"streetcryptid-app\", span_name=\"trail.push.app\"}[1h])) < 1)) or vector(0)",
+          "expr": "count((sum by (service_instance_id) (increase(traces_span_metrics_calls_total{service_name=\"streetcryptid-core\", span_name=\"publish.fix\"}[1h])) > 5) and (sum by (service_instance_id) (increase(traces_span_metrics_calls_total{service_name=\"streetcryptid-core\", span_name=\"trail.push\"}[1h])) < 1)) or vector(0)",
           "instant": true,
           "legendFormat": "__auto",
           "refId": "A"
@@ -461,7 +461,7 @@
     {
       "type": "timeseries",
       "title": "Publishes — publish.fix /min by device",
-      "description": "A device waking but not publishing has passed the OS gate and failed one of ours: read `Drops by reason` below, then the `engine.ingest` spans in Tempo.",
+      "description": "`publish.fix` is emitted by the native drain, which carries no device.id, so rows are named by short endpoint id (`service_instance_id`) and the device filter above does not apply. A device waking but not publishing has passed the OS gate and failed one of ours: read `Drops by reason` below, then the `engine.ingest` spans in Tempo.",
       "datasource": {
         "type": "prometheus",
         "uid": "${prometheus}"
@@ -488,16 +488,16 @@
             "type": "prometheus",
             "uid": "${prometheus}"
           },
-          "expr": "sum by (device_id) (rate(traces_span_metrics_calls_total{span_name=\"publish.fix\", device_id=~\"$device\"}[15m])) * 60",
-          "legendFormat": "{{device_id}}",
+          "expr": "sum by (service_instance_id) (rate(traces_span_metrics_calls_total{span_name=\"publish.fix\"}[15m])) * 60",
+          "legendFormat": "{{service_instance_id}}",
           "refId": "A"
         }
       ]
     },
     {
       "type": "timeseries",
-      "title": "Pushes — trail.push.app /min by device",
-      "description": "Publishing without pushing means envelopes are being written to the LOCAL replica and never leaving the phone — a friend who was not online at that exact moment never sees them, which is the whole reason the stash exists. Compare against the publish rate beside it.",
+      "title": "Pushes — trail.push /min by device",
+      "description": "One `trail.push` per native flush that had peers to push to: the docs reconciliation that carries this phone's envelopes to the stash and the pool. Publishing without pushing means envelopes are being written to the LOCAL replica and never leaving the phone — a friend who was not online at that exact moment never sees them, which is the whole reason the stash exists. Compare against the publish rate beside it. Native-core spans carry no device.id, so rows are named by short endpoint id and the device filter above does not apply.",
       "datasource": {
         "type": "prometheus",
         "uid": "${prometheus}"
@@ -524,8 +524,8 @@
             "type": "prometheus",
             "uid": "${prometheus}"
           },
-          "expr": "sum by (device_id) (rate(traces_span_metrics_calls_total{span_name=\"trail.push.app\", device_id=~\"$device\"}[15m])) * 60",
-          "legendFormat": "{{device_id}}",
+          "expr": "sum by (service_instance_id) (rate(traces_span_metrics_calls_total{span_name=\"trail.push\"}[15m])) * 60",
+          "legendFormat": "{{service_instance_id}}",
           "refId": "A"
         }
       ]
@@ -691,7 +691,7 @@
     {
       "type": "timeseries",
       "title": "Phone-to-phone contacts /h — by device pair",
-      "description": "One `peer.contact` per exchange between this device (`service_instance_id`) and a FRIEND's phone (`sc_peer`), either direction, either lane. A pair that only ever reaches each other through the stash shows nothing here, which is the point. Native-core spans carry no `device.id`, so the device filter above does not apply; pairs are named by short endpoint id.",
+      "description": "One `peer.contact` per exchange between this device (`service_instance_id`) and a FRIEND's phone (`sc_peer`), either direction. A pair that only ever reaches each other through the stash shows nothing here, which is the point. Native-core spans carry no `device.id`, so the device filter above does not apply; pairs are named by short endpoint id.",
       "datasource": {
         "type": "prometheus",
         "uid": "${prometheus}"
@@ -756,16 +756,16 @@
             "type": "prometheus",
             "uid": "${prometheus}"
           },
-          "expr": "sum by (contact_role, contact_from_author, contact_lane) (rate(traces_span_metrics_calls_total{span_name=\"peer.contact\", contact_dir=\"recv\"}[1h])) * 3600",
-          "legendFormat": "{{contact_lane}} via {{contact_role}} (from_author={{contact_from_author}})",
+          "expr": "sum by (contact_role, contact_from_author) (rate(traces_span_metrics_calls_total{span_name=\"peer.contact\", contact_dir=\"recv\"}[1h])) * 3600",
+          "legendFormat": "{{contact_role}} (from_author={{contact_from_author}})",
           "refId": "A"
         }
       ]
     },
     {
       "type": "timeseries",
-      "title": "Friend contacts by lane and path /h",
-      "description": "`gossip` is the live path (both phones subscribed at once); `docs` is trail reconciliation (a push a friend finished, or a pull a friend served). `path` is the closest open path to that peer: `ble` / `lan` / `direct` (hole-punched) / `relay`.",
+      "title": "Friend contacts by direction and path /h",
+      "description": "Every contact is trail reconciliation over iroh-docs: `send` is a push a friend finished, `recv` is friend entries a friend delivered into our replica (a live broadcast, a pull, or a sync they opened to us). `path` is the closest open path to that peer: `ble` / `lan` / `direct` (hole-punched) / `relay`.",
       "datasource": {
         "type": "prometheus",
         "uid": "${prometheus}"
@@ -793,8 +793,8 @@
             "type": "prometheus",
             "uid": "${prometheus}"
           },
-          "expr": "sum by (contact_dir, contact_lane, contact_path) (rate(traces_span_metrics_calls_total{span_name=\"peer.contact\", contact_role=\"friend\"}[1h])) * 3600",
-          "legendFormat": "{{contact_dir}} {{contact_lane}} over {{contact_path}}",
+          "expr": "sum by (contact_dir, contact_path) (rate(traces_span_metrics_calls_total{span_name=\"peer.contact\", contact_role=\"friend\"}[1h])) * 3600",
+          "legendFormat": "{{contact_dir}} over {{contact_path}}",
           "refId": "A"
         }
       ]

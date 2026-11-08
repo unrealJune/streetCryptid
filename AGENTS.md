@@ -252,6 +252,19 @@ Conventions when changing that code:
   phone receiving fixes. A redelivery may still confirm a pending dwell, and otherwise drives a
   no-claim heartbeat at most once a minute, since on a JS-free process nothing else ticks while
   `moving`.
+- **Location travels over iroh-docs alone; there is no app gossip lane.** A phone seals each fix
+  into the one slot of its own trail namespace (`docs.write`), and every namespace the node holds —
+  its own and each imported friend's — joins the iroh-docs live engine at start (`start_sync`). A
+  write therefore reaches whoever is syncing that namespace live, and a phone that was asleep
+  reconciles the newest slot from any peer holding it: the author, the stash or another friend.
+  The native drain pushes after it writes (`trail.push`: the stash and every friend ticket under one
+  `docs::PUSH_TIMEOUT_SECS` deadline); JS never pushes. The one inbound signal is
+  `ReplicaListener::on_friend_entries` — WHO changed, never a fix, because only the app's read may
+  advance the ratchet — after which the app reads the replica. Gossip still runs, but only inside
+  iroh-docs. Until 2026-11 a parallel app gossip topic carried each fix sealed a second time, with a
+  JS subscribe/topic/reachability model of its own; it was deleted, not kept as a fallback, so do
+  not add a second lane to speed delivery up — fix the docs path. Web (wasm) reads the replica and
+  does not publish (`web-no-publish`).
 - **There is ONE node per process, and only `NodeHost` builds it** (`rust/src/host.rs`). The
   mounted app (every JS context, through the module's `createNode`/`shutdown`) and the native
   background runtime (`acquireBackground`) take LEASES on it; the last one out shuts it down,
@@ -268,9 +281,9 @@ Conventions when changing that code:
   identity; a settings change is `restartNode`, never `shutdown` + `createNode` (that would only
   return your own lease and adopt the same node back); and platform code caches the node by
   `generation()` and must not `destroy()` a superseded handle (another call may be inside it).
-  The own topic is a SLOT on the node (`own_subscription`): a second `subscribe` adopts the live
-  one rather than opening a second receive loop, and listeners are swappable so a departing app's
-  are detached without stopping what the background runtime publishes through. Every drain on a
+  The replica listener is a SLOT on the node (`watchReplica` / `unwatchReplica`): swappable, so a
+  departing app's is detached without stopping what the background runtime replicates and
+  publishes, and per node, so the app attaches again to each new `generation()`. Every drain on a
   node is serialized (`drain_lock`), because two holders can now both drive one. The sink
   (`eventSink` / `appIsWired()`) is ROUTING, not ownership: a wired app gets the capture because it
   runs the sampling policy and draws the own marker, and both paths end in `ingestFix` on the same
@@ -484,8 +497,8 @@ Conventions when changing that code:
   only as binding-compatible shims.
 - **The ratchet acceptance window is sized by how long a READER can stay away.** A sender's
   chain resets only when the reader opens something (on iOS, only while the app is mounted), and
-  every tick spends two positions because the gossip and docs lanes each call `next_wraps`. At
-  512 (`DEFAULT_ACCEPT_WINDOW`) that ran out after ~21 h: on 2026-10-09 an iPhone whose owner had
+  every tick spent two positions while a gossip lane and the docs lane each called `next_wraps`
+  (one since 2026-11). At 512 (`DEFAULT_ACCEPT_WINDOW`) that ran out after ~21 h: on 2026-10-09 an iPhone whose owner had
   not opened the app for 25 h was 570 positions behind its friend's Pixel, read every new
   envelope as "no wrap in this envelope belongs to us", and showed the Pixel as a day stale until
   the leader restart healed it. It is `2^17` now. Do not shrink it to bound work: the walk is one
@@ -516,8 +529,8 @@ Conventions when changing that code:
   and finalize's ticket imports are bounded by `PAIR_DOCS_TIMEOUT` and degrade to empty, which
   every consumer already treats as "not published yet". An unbounded await here is an unbounded
   JS promise, which is a pairing screen stuck on "REACHING THEM" with no error and no end state.
-  On the JS side `decideDiscovery` adopts the friend, emits, and hands the subscribe / introduction
-  / trail-sync to `connectNewFriend` WITHOUT awaiting it — a friend is a local decision, and nothing
+  On the JS side `decideDiscovery` adopts the friend, emits, and hands the ticket imports /
+  introduction / trail-sync to `connectNewFriend` WITHOUT awaiting it — a friend is a local decision, and nothing
   the network does may stand between a human saying "keep this one" and the app having kept them.
   `awaitFriendWiring()` is what shutdown and the tests use instead.
 - **A BLE pipe outlives its last connection by `PIPE_IDLE_LINGER` (30 s), a peer keeps its BLE id
@@ -618,11 +631,11 @@ Conventions when changing that code:
 - **`peer.contact` is the only span that says two PHONES talked, and it must stay honest.** Every
   other delivery span says an envelope moved; a friend's dot updating via the stash hours later
   looks identical to two phones awake at once. `contact.rs` emits one per exchange with a named peer
-  at the four places one is visible (gossip send to a recipient neighbour, gossip receive, a FINISHED
-  push, a pull that DELIVERED entries), tagged `contact.role` (`friend`/`stash`/`other`) and, on
-  receive, `contact.from_author`. Do not emit it for a peer that was merely dialled, or for a
-  neighbour dropped from the seal — a contact we cannot observe is how the dashboard row starts
-  lying. Its dimensions are in `collector-config.yaml`; see `infra/otel/README.md`.
+  at the two places one is visible — a FINISHED `trail.push` peer (send), and the replica watch
+  when a peer's `InsertRemote` lands friend entries (receive; a live broadcast, a pull and a sync a
+  friend opened all end there, so each delivery counts once) — tagged `contact.role`
+  (`friend`/`stash`/`other`) and, on receive, `contact.from_author`. Do not emit it for a peer that
+  was merely dialled — a contact we cannot observe is how the dashboard row starts lying. Its dimensions are in `collector-config.yaml`; see `infra/otel/README.md`.
 - **One poll driver.** `pollPairingOnce` is driven by exactly one re-armed timer whose cadence comes
   from `pairingPollDelay()`; Bump's interval only watches for its own window closing. Two 300 ms
   drivers running the same drain produced 6-7 `pairing.poll` per second on 2026-09-17, each one six
@@ -677,7 +690,7 @@ Conventions when changing that code:
   relay their owner had when they were minted and live as long as the friendship, so every friend
   paired before 2026-10-11 still named a retired `iroh-*.junephilip.com` relay, which now lands on a
   wildcard record that fails TLS; every phone held a doomed connection to it. Every ticket-derived
-  dial (gossip bootstrap, push, pull, docs/profile ticket import) keeps only relays in this node's
+  dial (live-sync bootstrap, push, pull, docs/profile ticket import) keeps only relays in this node's
   own relay map and leaves the rest to the N0 address lookup. Retiring a relay is a config change
   and nothing more. The wasm build leaves addresses alone (a browser can only use relays).
 - **`process.memory` and `net.health` ride the five-minute runtime pulse, and are counters.**
