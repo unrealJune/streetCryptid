@@ -447,7 +447,8 @@ export function buildDeliveryScene(mode: DeliveryMode, t: number, size: StageSiz
 /** `mm:ss`, for the stash hold. Tabular by construction — both fields are always two digits. */
 export function formatCountdown(ms: number): string {
   const total = Math.max(0, Math.floor(ms / 1000));
-  const mm = String(Math.floor(total / 60)).padStart(2, '0');
+  const hours = Math.floor(total / 3600);
+  const mm = String(Math.floor((total % 3600) / 60)).padStart(2, '0');
   const ss = String(total % 60).padStart(2, '0');
-  return `${mm}:${ss}`;
+  return hours > 0 ? `${hours}:${mm}:${ss}` : `${mm}:${ss}`;
 }

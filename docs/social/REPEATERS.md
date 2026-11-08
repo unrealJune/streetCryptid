@@ -395,56 +395,43 @@ on.
 - **Retention.** Last-write-wins, as in `FORWARD-SECRECY.md` §4.4. The stash's retention code runs
   unchanged and keeps the latest fix per author.
 
-### 5.1 The hosted stash as the default repeater (proposed)
+### 5.1 The hosted stash: beside the repeaters, not one of them
 
-Today the hosted stash and repeaters are two things that do the same job: an always-on,
-ciphertext-blind replica that holds a trail while its phone sleeps. They differ only in history:
+The hosted stash and a repeater do the same job (an always-on, ciphertext-blind replica that
+holds a trail while its phone sleeps), so the app shows them together and opts in and out of both
+with the same kind of switch. They stay different things on purpose:
 
-|                 | hosted stash                                              | repeater                                                                    |
-| --------------- | --------------------------------------------------------- | --------------------------------------------------------------------------- |
-| opt-in          | "Offline delivery" switch, delivery mode                  | `Enroll` in a roster                                                        |
-| grant           | HTTP control API + a PSK baked into the build             | `Grant` over `streetcryptid/repeater/1`, with the namespace's own signature |
-| whose trails    | mine **and every friend's** (`grantStash` registers both) | only people who enrolled, each proving the namespace is theirs              |
-| leaving         | the switch; the stash keeps what it had until it restarts | `Withdraw`; every repeater releases the grants                              |
-| storage         | in memory, forgets every namespace on restart             | on disk                                                                     |
-| who can kick    | nobody                                                    | the roster's owner                                                          |
-| choosing others | not possible                                              | any roster, mine or a friend's                                              |
+|              | hosted stash                                              | repeater                                                                    |
+| ------------ | --------------------------------------------------------- | --------------------------------------------------------------------------- |
+| owner        | **nobody**                                                | the roster's owner, who can remove people                                   |
+| keeps        | each author's latest fix, in memory, at most 48 hours     | everything granted, on disk, until released                                 |
+| opt-in       | the delivery mode (`stash`), one switch                   | `Enroll` in a roster                                                        |
+| grant        | HTTP control API + a PSK baked into the build             | `Grant` over `streetcryptid/repeater/1`, with the namespace's own signature |
+| whose trails | mine **and every friend's** (`grantStash` registers both) | only people who enrolled, each proving the namespace is theirs              |
+| identified   | by the build's stash config (its ticket's endpoint id)    | by its cert in a roster                                                     |
 
-**Proposal: the hosted stash becomes a repeater in a default `open` roster, and the "Offline
-delivery" switch becomes that roster's carry switch.**
+**Decided (2026-11-08): the stash stays ownerless, with its rolling deletion.** An owner would be
+someone who can say whose trails it carries, and a server everyone shares should not have one.
+Forgetting on a clock is the stronger privacy promise, and it is one a repeater, whose point is
+keeping things, cannot make. So the stash gets no roster, no genesis and no operator key, and the
+app carries a deliberate **carve-out** for it:
 
-- The stash runs in repeater mode (`TRAIL_STASH_DATA_DIR` on a persistent volume), claimed into an
-  `open` roster owned by an **operator identity**: an ed25519 key held offline and used from a
-  small CLI to sign the genesis, `AddRepeater` and, when needed, `Remove`. Not a phone: the
-  default roster must outlive anyone's handset (§10, owner continuity).
-- A build knows the default roster the way it knows the stash today: the roster's genesis op and
-  the stash's endpoint id, in the build config. The phone fetches the rest from the stash, which
-  means `Fetch` must be allowed for an `open` roster to anyone (it is public through cards anyway).
-- **Opting in is enrolling**, and opting out is withdrawing, with the same switch everywhere: the
-  default roster sits at the top of Settings → Repeaters as "streetCryptid's stash", and the
-  delivery-mode picker reads and writes the same thing. Every grant then carries the namespace's
-  own signature, so the PSK and the HTTP grant path go away.
-- **Bring your own stash** (the App Store picker, see the privacy policy) stops being a separate
-  feature: running a repeater and claiming it is exactly that, and the default roster is just the
-  one a fresh install is offered.
-- **The stash gains what repeaters have:** persistence across restarts (the "stash forgot us"
-  path, `untracked` and the 10-minute floored regrant, becomes a backstop rather than the normal
-  case), releasing a member's data when they leave, and an operator who can remove an abusive
-  member.
-- **One behaviour changes, deliberately:** today a phone registers its friends' namespaces with
-  the stash too, so a friend who never opted in is stashed anyway. Under a roster only people who
-  enrolled are carried, which is the rule everywhere else ("carrying is the only opt-in"). Their
-  fixes still reach friends live and from each other's replicas.
-- **What stays stash-only:** the isolation rule (§5: only the default roster's silence counts),
-  and telemetry's `contact.role = stash`, which becomes "a repeater in the default roster".
+- **Identification** is by configuration, as now: the stash is the endpoint in
+  `EXPO_PUBLIC_TRAIL_STASH_TICKET`, first in the delivery list when opted into
+  (`DeliveryConfig`). It is never looked for in a roster and never appears on a card.
+- **Settings → Repeaters** shows it first, as "streetCryptid stash · hosted, owned by nobody ·
+  keeps only your latest sealed fix, for at most 48 hours, in memory", with a carry switch that
+  _is_ the delivery mode, so this page and Settings → Delivery are one setting (built,
+  `stash-card.tsx`). The 48 hours is `STASH_RETENTION_MS`, which must match the deployed
+  `retentionHours`; it said 30 minutes until this change.
+- **Telemetry** keeps `contact.role = stash` and `fix.source = stash`, checked before repeaters.
+- **Isolation** still counts only the stash's silence (§5).
 
-**Migration.** The daemon serves both for a release cycle: the HTTP grant for binaries that predate
-this, the repeater protocol for the rest. A phone that had "Offline delivery" on enrols in the
-default roster on its first start with the new build, so nobody is silently dropped. The HTTP
-control API is removed once `stash.grant` spans from old binaries stop arriving.
-
-**Decided before building:** who holds the operator key, and where (it signs every machine added
-to the default roster and every removal from it).
+**What could still be shared, later.** The stash could speak the repeater protocol's `Grant`, with
+the namespace proof, under an "ownerless" rule (anyone may grant their own namespace, retention
+applies), and drop the PSK and the HTTP grant. That would also end registering friends'
+namespaces, which today stashes a friend who never opted in. Neither is needed for the switch
+above, and the second is a behaviour change worth deciding on its own.
 
 ## 6. Several repeaters, one owner
 

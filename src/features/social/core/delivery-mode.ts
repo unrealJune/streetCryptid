@@ -43,14 +43,19 @@ export const DEFAULT_DELIVERY_MODE: DeliveryMode = 'mutual';
 export const NEW_USER_DELIVERY_MODE: DeliveryMode = 'stash';
 
 /**
- * How long the stash holds a sealed envelope before dropping it.
+ * The longest the stash holds a sealed envelope before dropping it.
  *
- * MUST match the deployed trail-stash's own retention setting — this is a promise made in the
- * UI about someone else's data, and the countdown on the delivery diagram renders from it. It
- * lives here so the copy and the animation cannot drift apart, not because the client enforces
- * it: the client cannot. Changing the server means changing this.
+ * MUST match the deployed trail-stash's own retention setting (buttercup
+ * `apps/trail-stash/helmrelease.yaml`, `retentionHours: 48`) — this is a promise made in the UI
+ * about someone else's data, and the delivery diagram's countdown and Settings → Repeaters both
+ * render from it. It lives here so they cannot drift apart, not because the client enforces it:
+ * the client cannot. Changing the server means changing this. It said 30 minutes until
+ * 2026-11-08 while the stash kept 48 hours.
+ *
+ * It is the backstop, not the usual case: the stash keeps only each author's latest fix, so a
+ * newer one replaces the last long before the window ends (trail-stash `retention.rs`).
  */
-export const STASH_RETENTION_MS = 30 * 60 * 1000;
+export const STASH_RETENTION_MS = 48 * 60 * 60 * 1000;
 
 /** What the runtime can actually offer right now. Availability is not a preference. */
 export interface DeliveryAvailability {

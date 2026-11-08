@@ -184,6 +184,14 @@ export function repeatersSummary(sections: RosterSections): string {
   return parts.length > 0 ? parts.join(' · ') : 'None';
 }
 
+/** A retention window in words: "48 hours", "30 minutes", "1 hour". */
+export function retentionWords(ms: number): string {
+  const hours = ms / 3_600_000;
+  if (hours >= 1 && Number.isInteger(hours)) return `${hours} ${hours === 1 ? 'hour' : 'hours'}`;
+  const minutes = Math.round(ms / 60_000);
+  return `${minutes} ${minutes === 1 ? 'minute' : 'minutes'}`;
+}
+
 /**
  * Words for a refused or failed repeater call. The core reports a refusal by its `Refusal` name
  * inside the error text (`the repeater refused: AlreadyClaimed`), and the native bridges pass that

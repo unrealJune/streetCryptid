@@ -4,11 +4,14 @@ import { useLocalSearchParams } from 'expo-router';
 import { ThemedText } from '@/components/themed-text';
 import { CryptidThemes } from '@/constants/theme';
 import { SettingsPage, SettingsSection } from '@/features/settings/components/settings-page';
+import { STASH_RETENTION_MS } from '@/features/social/core/delivery-mode';
+import { useLocationSharing } from '@/features/social/hooks/use-location-sharing';
 import { useColorScheme } from '@/hooks/use-color-scheme';
 
 import { ClaimRepeaterForm } from '../components/claim-repeater-form';
 import { RosterCard } from '../components/roster-card';
-import { checkClaimLink, type RosterView } from '../core/repeaters';
+import { StashCard } from '../components/stash-card';
+import { checkClaimLink, retentionWords, type RosterView } from '../core/repeaters';
 import { useRepeaters } from '../hooks/use-repeaters';
 
 /**
@@ -22,6 +25,9 @@ import { useRepeaters } from '../hooks/use-repeaters';
  * "Available through friends" is every roster a friend's repeater card vouches for (REPEATERS.md
  * §4.2): friends publish the rosters they own or are carried by, and reading the settings reads
  * their cards. Turning carrying on there is enrolling, the same switch as everywhere else.
+ *
+ * The hosted stash sits at the top, as the carve-out it is: ownerless, rosterless, forgetting on a
+ * clock. Its switch is the delivery mode, so this page and Settings → Delivery are one setting.
  */
 export default function RepeatersScreen() {
   const scheme = useColorScheme();
@@ -29,6 +35,8 @@ export default function RepeatersScreen() {
   const repeaters = useRepeaters();
   const { status, sections, error, busyRoster } = repeaters;
   const [actionError, setActionError] = useState<string | null>(null);
+  const { snapshot, setDeliveryMode } = useLocationSharing();
+  const [stashBusy, setStashBusy] = useState(false);
   const { claim } = useLocalSearchParams<{ claim?: string }>();
   const scanned = typeof claim === 'string' ? checkClaimLink(claim) : null;
   const initialLink = scanned?.ok ? scanned.link : undefined;
@@ -38,6 +46,26 @@ export default function RepeatersScreen() {
     const failure = await outcome;
     if (failure) setActionError(failure);
   }
+
+  const stash = snapshot?.delivery.stashConfigured ? (
+    <SettingsSection label="STASH">
+      <StashCard
+        carriesMe={snapshot.delivery.mode === 'stash'}
+        retention={retentionWords(STASH_RETENTION_MS)}
+        accent={chrome.green}
+        busy={stashBusy}
+        onCarryChange={(carry) => {
+          setStashBusy(true);
+          void run(
+            setDeliveryMode(carry ? 'stash' : 'mutual').then(
+              () => null,
+              () => 'Could not change the stash setting. Try again.'
+            )
+          ).finally(() => setStashBusy(false));
+        }}
+      />
+    </SettingsSection>
+  ) : null;
 
   const card = (roster: RosterView) => (
     <RosterCard
@@ -63,6 +91,7 @@ export default function RepeatersScreen() {
   if (status === 'unsupported') {
     return (
       <SettingsPage title="Repeaters">
+        {stash}
         <ThemedText type="small" themeColor="textSecondary">
           Repeaters need the installed app, on a build that has them.
         </ThemedText>
@@ -80,6 +109,8 @@ export default function RepeatersScreen() {
           {actionError ?? error}
         </ThemedText>
       ) : null}
+
+      {stash}
 
       <SettingsSection label="MY REPEATERS">
         {sections.mine ? card(sections.mine) : null}

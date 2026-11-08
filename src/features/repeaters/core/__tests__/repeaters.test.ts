@@ -5,6 +5,7 @@ import {
   isWebClaimLink,
   repeaterErrorCopy,
   repeatersSummary,
+  retentionWords,
   rosterSections,
 } from '../repeaters';
 
@@ -149,5 +150,13 @@ describe('repeaterErrorCopy', () => {
 
   it('falls back to something that is still true', () => {
     expect(repeaterErrorCopy('boom')).toBe('Could not reach the repeater. Try again.');
+  });
+});
+
+describe('retentionWords', () => {
+  it('says the stash window the way a person would', () => {
+    expect(retentionWords(48 * 3_600_000)).toBe('48 hours');
+    expect(retentionWords(3_600_000)).toBe('1 hour');
+    expect(retentionWords(30 * 60_000)).toBe('30 minutes');
   });
 });
