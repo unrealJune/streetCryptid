@@ -195,12 +195,12 @@ a phone signs ops with exactly the code that judges them on the repeater.
 
 The boundary is drawn so the crate holds only what both sides must agree on byte for byte:
 
-| in `streetcryptid-repeater` | trail-stash only | app core only |
-| --- | --- | --- |
-| roster ops, rules, state | console claim window | the roster book (`repeaters.bin`) |
-| `RepeaterCert` | namespace book, release | claim flow + cert check |
-| requests, responses, framing | protocol handler, sibling/carrier sync | grant plan, enrol/withdraw |
-| grant proof, claim link | persistent node | `RepeaterCard` (to come) |
+| in `streetcryptid-repeater`  | trail-stash only                       | app core only                     |
+| ---------------------------- | -------------------------------------- | --------------------------------- |
+| roster ops, rules, state     | console claim window                   | the roster book (`repeaters.bin`) |
+| `RepeaterCert`               | namespace book, release                | claim flow + cert check           |
+| requests, responses, framing | protocol handler, sibling/carrier sync | grant plan, enrol/withdraw        |
+| grant proof, claim link      | persistent node                        | `RepeaterCard` (to come)          |
 
 It has no iroh, tokio or I/O. Each side brings its own iroh (the daemon is on 1.0, the app on
 1.4), and identities cross the boundary as raw 32-byte ed25519 keys, which is what endpoint ids
@@ -290,7 +290,7 @@ namespace it wants carried (its trail and its profile). The repeater checks two 
   volunteer a friend's trail to be carried. The proof is bound to the repeater and the caller, so
   it cannot be replayed elsewhere.
 
-`carriers` names the member's *other* repeaters carrying the same namespace (§6.1). It is a sync
+`carriers` names the member's _other_ repeaters carrying the same namespace (§6.1). It is a sync
 hint, not a permission: it comes from the authenticated member, at most eight, and re-granting
 replaces it.
 
