@@ -30,7 +30,9 @@ import {
 import {
   getOtelConfig,
   getTelemetry,
+  isTelemetryExportEnabled,
   recordEventLog,
+  subscribeTelemetryExport,
   traceparentFor,
   type Attributes,
   type Span,
@@ -947,6 +949,8 @@ export class LocationSharingService {
   private postReady: PostReadySteps = INITIAL_POST_READY;
   private latestLocalFix: LocationFix | null = null;
   private shutdownPromise: Promise<void> | null = null;
+  /** Follows the user's telemetry send switch; see {@link configureDevTelemetry}. */
+  private telemetryConsentUnsub: (() => void) | null = null;
 
   /**
    * @param deps.mailbox Pairing mailbox transport for the short-code path (see
@@ -1144,10 +1148,28 @@ export class LocationSharingService {
     // the otel feature, and a build with no collector endpoint still wants the crash in its local
     // journal, which is what the Settings event-log viewer reads.
     void reportOsDiagnostics(this.mod);
+    if (!getOtelConfig()) return;
+    // The user's send switch (Settings → App & Data). Follow it for the life of the service, so
+    // flipping it reconfigures the native exporter at once rather than at the next launch.
+    this.telemetryConsentUnsub?.();
+    this.telemetryConsentUnsub = subscribeTelemetryExport((enabled) => {
+      this.configureNativeTelemetry(instanceId, enabled);
+    });
+    void isTelemetryExportEnabled().then((enabled) => {
+      if (!this.shutdownPromise) this.configureNativeTelemetry(instanceId, enabled);
+    });
+  }
+
+  /**
+   * Point the Rust exporter at the collector, or at `""` to switch it off. The native
+   * configurators persist whatever JS last said (`TelemetryConfigurator`), so `""` also keeps a
+   * JS-free background wake from re-applying an endpoint the user has since refused.
+   */
+  private configureNativeTelemetry(instanceId: string, enabled: boolean): void {
     const config = getOtelConfig();
     if (!config || !this.mod || typeof this.mod.configureTelemetry !== 'function') return;
     try {
-      void this.mod.configureTelemetry(config.endpoint, instanceId);
+      void this.mod.configureTelemetry(enabled ? config.endpoint : '', instanceId);
     } catch {
       // Older binding without the export, or a build with otel compiled out — JS telemetry alone.
     }
@@ -4024,6 +4046,8 @@ export class LocationSharingService {
   }
 
   private async performShutdown(): Promise<void> {
+    this.telemetryConsentUnsub?.();
+    this.telemetryConsentUnsub = null;
     // FIRST and synchronously: from here no poll starts, no post-ready step reports or applies,
     // and nobody is left waiting on either — including an init that lands after this.
     this.pairingPoll.stop();

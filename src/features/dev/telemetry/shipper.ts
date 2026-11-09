@@ -69,6 +69,8 @@ export interface ShipperPush {
   reachable: boolean;
   /** Rows still unshipped afterwards. */
   remaining: number;
+  /** The user has switched sending off; nothing was sent and the queue was discarded. */
+  disabled?: boolean;
 }
 
 export interface ShipperOptions {
@@ -86,6 +88,12 @@ export interface ShipperOptions {
   now?: () => number;
   batchSize?: number;
   maxBatches?: number;
+  /**
+   * The user's switch (`export-consent.ts`), asked before every drain. While it says no, queued
+   * rows are marked shipped WITHOUT being sent, so switching it back on never uploads what was
+   * recorded while it was off. Absent means always on.
+   */
+  exportEnabled?: () => Promise<boolean>;
 }
 
 export interface Shipper {
@@ -258,7 +266,39 @@ export function createShipper(options: ShipperOptions): Shipper {
     reachable: boolean;
   }
 
+  async function exportAllowed(): Promise<boolean> {
+    if (!options.exportEnabled) return true;
+    try {
+      return await options.exportEnabled();
+    } catch {
+      // An unreadable answer is not consent.
+      return false;
+    }
+  }
+
+  /**
+   * Clear the queue without sending it. Local only, so it ignores the backoff and the per-drain
+   * budget; bounded like a push all the same.
+   */
+  async function discardQueued(): Promise<void> {
+    for (let batch = 0; batch < PUSH_MAX_BATCHES; batch += 1) {
+      let entries: EventLogEntry[];
+      try {
+        entries = await takeUnshipped(batchSize);
+      } catch {
+        return;
+      }
+      if (entries.length === 0) return;
+      await markShipped(entries.map((entry) => entry.id));
+      if (entries.length < batchSize) return;
+    }
+  }
+
   async function runDrain(): Promise<void> {
+    if (!(await exportAllowed())) {
+      await discardQueued();
+      return;
+    }
     if (now() < nextAttemptAt) return;
     await drainBatches(maxBatches);
   }
@@ -315,6 +355,10 @@ export function createShipper(options: ShipperOptions): Shipper {
   }
 
   async function runPush(): Promise<ShipperPush> {
+    if (!(await exportAllowed())) {
+      await discardQueued();
+      return { sent: 0, reachable: true, remaining: 0, disabled: true };
+    }
     const result = await drainBatches(PUSH_MAX_BATCHES);
     let remaining = 0;
     try {

@@ -5,6 +5,7 @@ import { getBuildResource, resolveDeviceId } from './identity';
 import { newSpanId, newTraceId } from './ids';
 import { getOtelConfig } from './otel-config';
 import { getDeviceResource } from './resource';
+import { isTelemetryExportEnabled } from './export-consent';
 import type {
   Attributes,
   AttrValue,
@@ -55,6 +56,8 @@ export interface CreateTelemetryOptions {
   resource?: Attributes;
   transport?: OtlpTransport;
   now?: () => number;
+  /** The user's send switch; see `ShipperOptions.exportEnabled`. Absent means always on. */
+  exportEnabled?: () => Promise<boolean>;
 }
 
 function categoryFor(name: string): string {
@@ -133,6 +136,7 @@ export function createTelemetry(options: CreateTelemetryOptions): Telemetry {
         resource: () => resource,
         transport: options.transport,
         now,
+        exportEnabled: options.exportEnabled,
       })
     : undefined;
 
@@ -276,6 +280,7 @@ export function getTelemetry(): Telemetry {
     singleton = createTelemetry({
       endpoint: config?.endpoint,
       resource: { ...getDeviceResource(), ...getBuildResource() },
+      exportEnabled: isTelemetryExportEnabled,
     });
   }
   return singleton;
