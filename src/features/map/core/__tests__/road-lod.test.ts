@@ -38,6 +38,19 @@ describe('roadWidthScale', () => {
 });
 
 describe('roadWidthFor', () => {
+  it('uses subtly thinner strokes while preserving the class hierarchy and zoom taper', () => {
+    const previousWidths = [1.5, 2.0, 2.9, 3.8, 5.0];
+    for (let cls = 0; cls < previousWidths.length; cls++) {
+      for (const zoom of [CLASS_MIN_ZOOM[cls], 15, 18]) {
+        expect(roadWidthFor(cls, zoom)).toBeCloseTo(
+          previousWidths[cls] * 0.9 * roadWidthScale(zoom),
+          12
+        );
+      }
+      if (cls > 0) expect(ROAD_WIDTHS[cls]).toBeGreaterThan(ROAD_WIDTHS[cls - 1]);
+    }
+  });
+
   it('omits class 0 below its min zoom (15.0) and draws it above', () => {
     expect(roadWidthFor(0, 14.5)).toBeNull();
     expect(roadWidthFor(0, CLASS_MIN_ZOOM[0] - 0.01)).toBeNull();

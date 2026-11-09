@@ -14,7 +14,7 @@ import { TRANSIT_MODES, type TransitMode } from './types';
  * trains run is invisible unless it is drawn loud. At the old rail-1.6 /
  * subway-2.2 weights the layer was thinner than the motorways it parallels and
  * disappeared into the field at exactly the city zooms it exists for — compare
- * `ROAD_WIDTHS`, whose motorway is 5 mask px.
+ * `ROAD_WIDTHS`, whose motorway is 4.5 mask px.
  */
 
 /** Base stroke width per mode, region-logical px. Keyed by {@link TransitMode}. */
