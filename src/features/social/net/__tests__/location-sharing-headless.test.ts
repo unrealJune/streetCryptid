@@ -3,6 +3,8 @@ import type { Telemetry } from '@/features/dev/telemetry';
 
 import type { DeliveryMode } from '../../core/delivery-mode';
 import type { PoolState } from '../../core/pool';
+import { loadWatermarks, WATERMARKS_KEY } from '../background/watermarks';
+import type { PersistentKV } from '../background/persistent-kv';
 
 /**
  * Headless-init wiring. A background TaskManager/BGTask callback runs in a fresh JS context with no
@@ -382,6 +384,50 @@ describe('LocationSharingService — headless init', () => {
     await svc.pushTrail();
 
     expect(mockHolder.mod.calls.pushTrail).toEqual([]);
+  });
+
+  it('lets a newer binary schedule repeater carriers without claiming a confirmed push', async () => {
+    mockHolder.pool = { friends: {}, sharingWith: [] };
+    const budgeted = jest.fn().mockResolvedValue([]);
+    (mockHolder.mod as unknown as { pushTrailBudgeted: typeof budgeted }).pushTrailBudgeted =
+      budgeted;
+    const svc = makeService();
+    await svc.init('@me', 'mothman', '', '', { mode: 'headless' });
+    const kv = (svc as unknown as { kv: PersistentKV }).kv;
+    await kv.set(WATERMARKS_KEY, '{}');
+
+    await svc.pushTrail();
+
+    expect(budgeted).toHaveBeenCalledWith([], null);
+    expect((await loadWatermarks(kv)).push).toBeUndefined();
+  });
+
+  it.each([
+    ['failed', false],
+    ['silent', false],
+    ['skipped', false],
+    ['finished', true],
+  ])('records a budgeted %s peer as a confirmed push: %s', async (outcome, confirmed) => {
+    mockHolder.pool = { friends: { [friendA.endpointId]: friendA }, sharingWith: [] };
+    const budgeted = jest.fn().mockResolvedValue([
+      {
+        peer: friendA.endpointId,
+        outcome,
+        latencyMs: outcome === 'skipped' || outcome === 'silent' ? null : 10,
+        entriesSent: 0,
+        budgetMs: 100,
+      },
+    ]);
+    (mockHolder.mod as unknown as { pushTrailBudgeted: typeof budgeted }).pushTrailBudgeted =
+      budgeted;
+    const svc = makeService();
+    await svc.init('@me', 'mothman', '', '', { mode: 'headless' });
+    const kv = (svc as unknown as { kv: PersistentKV }).kv;
+    await kv.set(WATERMARKS_KEY, '{}');
+
+    await svc.pushTrail();
+
+    expect(typeof (await loadWatermarks(kv)).push === 'number').toBe(confirmed);
   });
 
   /**

@@ -163,7 +163,7 @@ pub trait PublishSink: Send + Sync {
 
 /// Whether a flush actually moved anything off the device.
 ///
-/// Two outcomes rather than a bare `Ok`, because they were the same value and it made the push
+/// Separate outcomes rather than a bare `Ok`, because they were the same value and it made the push
 /// watermark lie: a phone with nowhere to send returned `Ok`, the drain stamped `last_pushed_at`,
 /// and `device.health` reported a fresh push forever on a device that had never pushed at all.
 /// That is the same class of fault the native watermarks were introduced to end, reintroduced one
@@ -175,6 +175,8 @@ pub enum FlushOutcome {
     /// Nowhere to send: the stash is not opted into and the pool is empty. A real configuration,
     /// not a failure — and emphatically not a push.
     NoTargets,
+    /// A push was scheduled, but no receipt established that anything was received.
+    Scheduled,
 }
 
 /// What sealing one envelope actually achieved.
@@ -829,9 +831,8 @@ impl<S: PublishSink> DrainEngine<'_, S> {
                 let at = clock.at(self.clock);
                 self.stamp(|state| state.last_published_at = Some(at));
             }
-            // Only a flush that actually reached a peer counts. `NoTargets` is a successful call
-            // that pushed nothing, and stamping it would report a fresh push on a phone that has
-            // never had anywhere to send.
+            // Only a flush that actually reached a peer counts. A zero-budget repeater scheduled
+            // in the background is not a receipt, and must not advance the push watermark.
             if matches!(self.sink.flush().await, Ok(FlushOutcome::Pushed)) {
                 let at = clock.at(self.clock);
                 self.stamp(|state| state.last_pushed_at = Some(at));

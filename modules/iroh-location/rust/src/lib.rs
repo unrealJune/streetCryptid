@@ -1753,6 +1753,8 @@ pub struct LocationNode {
     /// Every repeater roster this phone knows (see [`repeater`]), opened from `state_dir` on first
     /// use. It claims nothing, so it has no part in `start` or `shutdown`.
     repeater_book: Mutex<Option<Arc<repeater::RosterBook>>>,
+    /// Rotate the capped pull plan so a large friend list cannot starve its later entries.
+    repeater_pull_cursor: AtomicU64,
     /// On-disk root for the persistent docs replica + blobs store (durable trail). Derived from
     /// the identity so it stays stable across restarts.
     ///
@@ -2521,6 +2523,7 @@ fn new_location_node_at(
         ordinal,
         stash_grant_at: AtomicU64::new(0),
         repeater_book: Mutex::new(None),
+        repeater_pull_cursor: AtomicU64::new(0),
     });
     tracing::info!(
         node.ordinal = ordinal,
@@ -3469,7 +3472,7 @@ impl LocationNode {
     ) -> Result<Vec<PeerPushReport>, LocationError> {
         use tracing::Instrument;
         let requested = peers.len();
-        let peers: Vec<(EndpointAddr, std::time::Duration)> = peers
+        let mut peers: Vec<(EndpointAddr, std::time::Duration)> = peers
             .iter()
             .filter_map(|dial| {
                 dial.ticket
@@ -3484,6 +3487,15 @@ impl LocationNode {
                 )
             })
             .collect();
+        let explicit_count = peers.len();
+        let explicit_ids: HashSet<_> = peers.iter().map(|(addr, _)| *addr.id.as_bytes()).collect();
+        let repeaters = match self.roster_book().await {
+            Ok(book) => repeater::append_push_targets(&mut peers, &book.states(), &self.author),
+            Err(error) => {
+                tracing::warn!(%error, "trail push: repeater roster unavailable");
+                0
+            }
+        };
         let budget_max_ms = peers
             .iter()
             .map(|(_, budget)| budget.as_millis() as u64)
@@ -3494,6 +3506,7 @@ impl LocationNode {
             sc.author = %telemetry::short_hex(&self.author),
             sync.peers_requested = requested,
             sync.peers_dialed = peers.len(),
+            sync.repeaters_scheduled = repeaters,
             // The deadline the model actually granted this push, so a run can be read against what
             // it was allowed rather than against a constant that no longer exists.
             push.budget_max_ms = budget_max_ms,
@@ -3506,9 +3519,9 @@ impl LocationNode {
         );
         telemetry::set_parent(&span, traceparent.as_deref());
         async move {
-            if peers.len() < requested {
+            if explicit_count < requested {
                 tracing::warn!(
-                    skipped = requested - peers.len(),
+                    skipped = requested - explicit_count,
                     "trail push: some peer tickets were unparseable and were skipped"
                 );
             }
@@ -3608,6 +3621,9 @@ impl LocationNode {
             Ok(report
                 .per_peer
                 .iter()
+                // JS learns about its explicit stash/friend plan; a repeater must not be inferred
+                // as the stash merely because it answered while another peer was being awaited.
+                .filter(|peer| explicit_ids.contains(&peer.peer))
                 .map(|peer| PeerPushReport {
                     // FULL hex, not the `short_hex` used on the span. JS keys its reachability
                     // store by `friend.endpointId`, so a truncated id here would silently fail to
@@ -5022,6 +5038,7 @@ impl LocationNode {
             sc.author = %telemetry::short_hex(&self.author),
             sync.peers_requested = requested,
             sync.peers_dialed = dialed,
+            sync.repeater_peers = tracing::field::Empty,
             // Peers that delivered at least one entry this pass — each is a `peer.contact`.
             sync.peers_delivered = tracing::field::Empty,
             // What the pass cost and why it ended — see `docs::SyncEnd`. `budget_ms` is absent
@@ -5050,11 +5067,84 @@ impl LocationNode {
             let started = self.live().await?;
             let trail = started.trail.clone();
 
+            let friends: BTreeSet<_> = match self.recipient_store().await {
+                Ok(store) => store
+                    .get()
+                    .iter()
+                    .chain(store.watchers().iter())
+                    .filter_map(|id| decode_endpoint(id).ok())
+                    .collect(),
+                Err(_) => BTreeSet::new(),
+            };
+            let friend_namespaces = repeater::friend_namespaces(&trail.friend_tickets(), &friends);
+            let mut repeater_peers = HashMap::new();
+            if !friend_namespaces.is_empty() {
+                // Use already-local cards for this pass without spending the pull's budget.
+                let remaining = deadline
+                    .map(|end| end.saturating_duration_since(n0_future::time::Instant::now()) / 4)
+                    .unwrap_or(std::time::Duration::from_millis(250))
+                    .min(std::time::Duration::from_millis(250));
+                if !remaining.is_zero() {
+                    let _ = tokio::time::timeout(remaining, self.read_repeater_cards()).await;
+                }
+                if let Ok(book) = self.roster_book().await {
+                    let offset = self.repeater_pull_cursor.fetch_add(1, Ordering::Relaxed) as usize;
+                    for (namespace, ids) in
+                        repeater::pull_plan(&book.states(), &friend_namespaces, offset)
+                    {
+                        let addrs: Vec<_> = ids
+                            .iter()
+                            .filter_map(|id| EndpointId::from_bytes(id).ok())
+                            .map(EndpointAddr::new)
+                            .collect();
+                        if !addrs.is_empty() {
+                            repeater_peers.insert(namespace, addrs);
+                        }
+                    }
+                }
+            }
+            let repeater_count: HashSet<_> = repeater_peers
+                .values()
+                .flatten()
+                .map(|addr| addr.id)
+                .collect();
+            tracing::Span::current().record("sync.repeater_peers", repeater_count.len());
+
             // No sink and no `recovered` count here any more: with one overwritten slot per author
             // there is no back-catalogue to stream, so a sync just reconciles and the app reads the
             // current fixes afterwards. The `recovered` span attribute is recorded app-side instead
             // (see `refreshTrailFromReplica`), which keeps the infra/otel `sc.*` join keys intact.
-            let pass = trail.sync_all_until(peers, deadline).await.map_err(|e| {
+            // Reopened profile replicas are not syncing. Wait for known friends' cards alongside
+            // the trail pass, then persist what arrived before a native-only node can shut down.
+            let profile_budget = if friend_namespaces.is_empty() {
+                std::time::Duration::ZERO
+            } else {
+                deadline
+                    .map(|end| end.saturating_duration_since(n0_future::time::Instant::now()) / 4)
+                    .unwrap_or(std::time::Duration::from_secs(2))
+                    .min(std::time::Duration::from_secs(2))
+            };
+            let profile_refresh = async {
+                if profile_budget.is_zero() {
+                    return;
+                }
+                let profile_deadline = n0_future::time::Instant::now() + profile_budget;
+                let _ = tokio::time::timeout(
+                    profile_budget * 3 / 4,
+                    started.profile.sync_known_friends(&friends),
+                )
+                .await;
+                let remaining =
+                    profile_deadline.saturating_duration_since(n0_future::time::Instant::now());
+                if !remaining.is_zero() {
+                    let _ = tokio::time::timeout(remaining, self.read_repeater_cards()).await;
+                }
+            };
+            let (pass, ()) = tokio::join!(
+                trail.sync_all_until(peers, repeater_peers, deadline),
+                profile_refresh
+            );
+            let pass = pass.map_err(|e| {
                 tracing::warn!(error = %e, "trail sync failed");
                 LocationError::Network(e.to_string())
             })?;
@@ -5875,16 +5965,27 @@ impl publish::PublishSink for SubscriptionSink<'_> {
             .delivery_config()
             .await
             .map_err(|e| publish::PublishError::Send(e.to_string()))?;
-        // Nothing to push to is a real state — stash opted out, no friends yet — and not worth a
-        // span or a native round trip. `push_trail` with an empty list still waits out the push
-        // deadline, which on a background wake is seconds of budget spent on no work. Reported as
-        // `NoTargets` rather than as success: nothing left the device, and saying otherwise is how
-        // the watermark started lying.
+        // The signed roster is separate from the persisted stash/friend configuration.
         if config.is_empty() {
-            return Ok(publish::FlushOutcome::NoTargets);
+            let book = node
+                .roster_book()
+                .await
+                .map_err(|e| publish::PublishError::Send(e.to_string()))?;
+            if repeater::carriers(&book.states(), &node.author).is_empty() {
+                return Ok(publish::FlushOutcome::NoTargets);
+            }
         }
-        // This is the push. Its success or failure is the whole of whether the entries left.
-        node.push_trail(config.peer_tickets.clone(), None)
+        let peers = config
+            .peer_tickets
+            .iter()
+            .cloned()
+            .map(|ticket| PeerDial {
+                ticket,
+                budget_ms: docs::PUSH_TIMEOUT_SECS * 1_000,
+            })
+            .collect();
+        let report = node
+            .push_trail_budgeted(peers, None)
             .await
             .map_err(|e| publish::PublishError::Send(e.to_string()))?;
         // The blob upload is a SEPARATE fact and must not be able to discard the push above.
@@ -5907,7 +6008,11 @@ impl publish::PublishSink for SubscriptionSink<'_> {
                 );
             }
         }
-        Ok(publish::FlushOutcome::Pushed)
+        if report.iter().any(|peer| peer.outcome == "finished") {
+            Ok(publish::FlushOutcome::Pushed)
+        } else {
+            Ok(publish::FlushOutcome::Scheduled)
+        }
     }
 }
 

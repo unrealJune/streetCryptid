@@ -416,6 +416,87 @@ pub fn carriers(states: &[RosterState], me: &EndpointId) -> BTreeSet<EndpointId>
         .collect()
 }
 
+/// Schedule our carriers without extending a push's wait or replacing an explicit peer's budget.
+pub(crate) fn append_push_targets(
+    peers: &mut Vec<(EndpointAddr, Duration)>,
+    states: &[RosterState],
+    me: &EndpointId,
+) -> usize {
+    let mut seen: BTreeSet<_> = peers.iter().map(|(addr, _)| *addr.id.as_bytes()).collect();
+    let mut added = 0;
+    for carrier in carriers(states, me) {
+        if carrier == *me || !seen.insert(carrier) {
+            continue;
+        }
+        if let Ok(id) = iroh::EndpointId::from_bytes(&carrier) {
+            peers.push((EndpointAddr::new(id), Duration::ZERO));
+            added += 1;
+        }
+    }
+    added
+}
+
+/// Match a remembered trail ticket to a known friend only when its address is unambiguous.
+pub(crate) fn friend_namespaces(
+    tickets: &[String],
+    friends: &BTreeSet<EndpointId>,
+) -> Vec<(EndpointId, [u8; 32])> {
+    tickets
+        .iter()
+        .filter_map(|raw| {
+            let ticket: iroh_docs::DocTicket = raw.parse().ok()?;
+            let owners: BTreeSet<_> = ticket
+                .nodes
+                .iter()
+                .map(|addr| *addr.id.as_bytes())
+                .filter(|id| friends.contains(id))
+                .collect();
+            if owners.len() != 1 {
+                return None;
+            }
+            Some((*owners.first()?, ticket.capability.id().to_bytes()))
+        })
+        .collect()
+}
+
+/// At most three carriers per friend and six distinct carriers per receive pass.
+pub fn pull_plan(
+    states: &[RosterState],
+    friends: &[(EndpointId, [u8; 32])],
+    offset: usize,
+) -> BTreeMap<[u8; 32], Vec<EndpointId>> {
+    const PER_FRIEND: usize = 3;
+    const PER_PASS: usize = 6;
+
+    if friends.is_empty() {
+        return BTreeMap::new();
+    }
+    let candidates: Vec<_> = friends
+        .iter()
+        .map(|(friend, namespace)| (*namespace, carriers(states, friend)))
+        .collect();
+    let mut selected = BTreeSet::new();
+    let mut plan: BTreeMap<[u8; 32], Vec<EndpointId>> = BTreeMap::new();
+    for rank in 0..PER_FRIEND {
+        for i in 0..candidates.len() {
+            let (namespace, repeaters) =
+                &candidates[(i + offset % candidates.len()) % candidates.len()];
+            if rank >= repeaters.len() {
+                continue;
+            }
+            let repeater = *repeaters
+                .iter()
+                .nth((rank + offset % repeaters.len()) % repeaters.len())
+                .expect("rank is in the set");
+            if selected.contains(&repeater) || selected.len() < PER_PASS {
+                selected.insert(repeater);
+                plan.entry(*namespace).or_default().push(repeater);
+            }
+        }
+    }
+    plan
+}
+
 /// The grants to ask for: each repeater carrying `me`, with the others as its co-carriers, so a
 /// trail carried in two people's rosters converges between their repeaters while we sleep.
 pub fn grant_plan(states: &[RosterState], me: &EndpointId) -> Vec<(EndpointId, Vec<EndpointId>)> {
@@ -857,6 +938,256 @@ mod tests {
         assert_eq!(grant_plan(&book.states(), &id(1)).len(), 1);
         book.sign(&roster, &key(1), Action::Withdraw, 9).unwrap();
         assert!(grant_plan(&book.states(), &id(1)).is_empty());
+    }
+
+    #[test]
+    fn push_adds_only_my_carriers_without_waiting_or_duplicating_explicit_peers() {
+        let book = RosterBook::open(&scratch("push-plan")).unwrap();
+        roster_with(&book, 1, &[10, 11], &[2]);
+        roster_with(&book, 3, &[20], &[4]);
+        let explicit = iroh::EndpointId::from_bytes(&id(10)).unwrap();
+        let mut peers = vec![(EndpointAddr::new(explicit), Duration::from_secs(5))];
+
+        assert_eq!(append_push_targets(&mut peers, &book.states(), &id(2)), 1);
+        assert_eq!(peers.len(), 2);
+        assert_eq!(peers[0].1, Duration::from_secs(5));
+        assert_eq!(*peers[1].0.id.as_bytes(), id(11));
+        assert_eq!(peers[1].1, Duration::ZERO);
+        assert_eq!(append_push_targets(&mut peers, &book.states(), &id(2)), 0);
+    }
+
+    #[tokio::test]
+    async fn native_push_reaches_a_roster_carrier_without_explicit_peers() -> anyhow::Result<()> {
+        use iroh::{protocol::Router, RelayMode, SecretKey};
+        use iroh_blobs::{store::mem::MemStore, BlobsProtocol};
+        use iroh_docs::{protocol::Docs, store::Query};
+        use iroh_gossip::net::Gossip;
+
+        let dir = scratch("native-carrier-push");
+        let phone = crate::LocationNode::new_at_dirs(
+            Some(vec![21; 32]),
+            None,
+            dir.join("data").to_string_lossy().into_owned(),
+            dir.join("state").to_string_lossy().into_owned(),
+        )?;
+        phone
+            .start(vec![], String::new(), false, true, false)
+            .await?;
+
+        let endpoint = Endpoint::builder(iroh::endpoint::presets::N0)
+            .secret_key(SecretKey::from_bytes(&[22; 32]))
+            .relay_mode(RelayMode::Disabled)
+            .bind()
+            .await?;
+        let gossip = Gossip::builder().spawn(endpoint.clone());
+        let blobs = MemStore::new();
+        let docs = Docs::memory()
+            .spawn(endpoint.clone(), (*blobs).clone(), gossip.clone())
+            .await?;
+        let router = Router::builder(endpoint.clone())
+            .accept(iroh_gossip::ALPN, gossip)
+            .accept(iroh_docs::ALPN, docs.clone())
+            .accept(iroh_blobs::ALPN, BlobsProtocol::new(&blobs, None))
+            .spawn();
+
+        let live = phone.live().await?;
+        live.memory.add_endpoint_info(endpoint.addr());
+        let book = phone.roster_book().await?;
+        roster_with(&book, 21, &[22], &[21]);
+        let namespace = live.trail.own_namespace();
+        let ticket: iroh_docs::DocTicket = live.trail.read_ticket(namespace).await?.parse()?;
+        let carrier_doc = docs.import_namespace(ticket.capability).await?;
+        carrier_doc.start_sync(Vec::new()).await?;
+        live.trail
+            .write(namespace, &phone.author, b"sealed fix".to_vec())
+            .await?;
+
+        let reports = tokio::time::timeout(
+            Duration::from_secs(3),
+            phone.push_trail_budgeted(Vec::new(), None),
+        )
+        .await??;
+        assert!(reports.is_empty(), "a scheduled carrier is not a receipt");
+
+        let key = crate::docs::encode_key(&phone.author);
+        tokio::time::timeout(Duration::from_secs(15), async {
+            loop {
+                if let Some(entry) = carrier_doc
+                    .get_one(Query::single_latest_per_key().key_exact(&key).build())
+                    .await?
+                {
+                    if blobs
+                        .blobs()
+                        .get_bytes(entry.content_hash())
+                        .await
+                        .is_ok_and(|bytes| bytes.as_ref() == b"sealed fix")
+                    {
+                        return Ok::<(), anyhow::Error>(());
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await??;
+
+        phone.shutdown().await?;
+        router.shutdown().await?;
+        endpoint.close().await;
+        std::fs::remove_dir_all(dir)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn native_pull_persists_a_new_friend_card_after_reopening() -> anyhow::Result<()> {
+        use crate::ns_book::{NamespaceBook, PROFILE_BOOK_FILE, TRAIL_BOOK_FILE};
+
+        let dir = scratch("native-card-reopen");
+        let writer = crate::LocationNode::new_at_dirs(
+            Some(vec![31; 32]),
+            None,
+            dir.join("writer-data").to_string_lossy().into_owned(),
+            dir.join("writer-state").to_string_lossy().into_owned(),
+        )?;
+        writer
+            .start(vec![], String::new(), false, true, false)
+            .await?;
+        let live = writer.live().await?;
+        let writer_book = writer.roster_book().await?;
+        let roster = roster_with(&writer_book, 31, &[33], &[31]);
+        live.profile
+            .publish_key(CARD_KEY, build_card(&key(31), &writer_book)?)
+            .await?;
+        let profile_ticket = live.profile.ticket().await?;
+        let trail_ticket = live.trail.read_ticket(live.trail.own_namespace()).await?;
+        let reader = crate::LocationNode::new_at_dirs(
+            Some(vec![32; 32]),
+            None,
+            dir.join("reader-data").to_string_lossy().into_owned(),
+            dir.join("reader-state").to_string_lossy().into_owned(),
+        )?;
+        let reader_state = reader.state_dir.clone();
+        for (file, ticket) in [
+            (PROFILE_BOOK_FILE, &profile_ticket),
+            (TRAIL_BOOK_FILE, &trail_ticket),
+        ] {
+            let book = NamespaceBook::open(&reader_state, file)?;
+            book.add_friend(crate::ns_book::ticket_namespace(ticket)?, ticket)?;
+        }
+
+        reader
+            .start(vec![], String::new(), false, true, false)
+            .await?;
+        reader
+            .recipient_store()
+            .await?
+            .set(&[crate::encode_hex(live.endpoint.id().as_bytes())])?;
+        let reader_live = reader.live().await?;
+        reader_live.memory.add_endpoint_info(live.endpoint.addr());
+        let writer_id = *live.endpoint.id().as_bytes();
+        let matched = friend_namespaces(
+            &reader_live.trail.friend_tickets(),
+            &BTreeSet::from([writer_id]),
+        );
+        assert_eq!(
+            matched.len(),
+            1,
+            "the remembered trail must select its friend"
+        );
+        assert!(reader.roster_book().await?.state(&roster).is_none());
+        tokio::time::timeout(
+            Duration::from_secs(12),
+            reader.pull_latest(Vec::new(), Some(10_000), None),
+        )
+        .await??;
+        assert!(reader.roster_book().await?.state(&roster).is_some());
+
+        drop(reader_live);
+        reader.shutdown().await?;
+        drop(live);
+        writer.shutdown().await?;
+        assert!(RosterBook::open(&reader_state)?.state(&roster).is_some());
+        std::fs::remove_dir_all(dir)?;
+        Ok(())
+    }
+
+    #[test]
+    fn trail_tickets_are_matched_only_to_an_unambiguous_known_friend() {
+        let capability =
+            iroh_docs::Capability::Write(iroh_docs::NamespaceSecret::from_bytes(&[71; 32]));
+        let namespace = capability.id().to_bytes();
+        let addr = |seed| EndpointAddr::new(iroh::EndpointId::from_bytes(&id(seed)).unwrap());
+        let ticket = iroh_docs::DocTicket {
+            capability: capability.clone(),
+            nodes: vec![addr(2)],
+        };
+        let ambiguous = iroh_docs::DocTicket {
+            capability,
+            nodes: vec![addr(2), addr(3)],
+        };
+        assert_eq!(
+            friend_namespaces(
+                &[ticket.to_string(), ambiguous.to_string(), "invalid".into()],
+                &BTreeSet::from([id(2), id(3)]),
+            ),
+            vec![(id(2), namespace)]
+        );
+        assert!(friend_namespaces(&[ticket.to_string()], &BTreeSet::from([id(4)])).is_empty());
+    }
+
+    #[test]
+    fn pull_targets_only_friends_carriers_and_respects_both_caps() {
+        let book = RosterBook::open(&scratch("pull-plan")).unwrap();
+        roster_with(&book, 1, &[10, 11, 12, 13], &[2]);
+        roster_with(&book, 3, &[12, 20, 21, 22], &[4]);
+        roster_with(&book, 5, &[30], &[6]);
+
+        let plan = pull_plan(
+            &book.states(),
+            &[(id(2), [2; 32]), (id(4), [4; 32]), (id(6), [6; 32])],
+            0,
+        );
+        assert!(!plan[&[2; 32]].is_empty());
+        assert!(!plan[&[4; 32]].is_empty());
+        assert_eq!(plan[&[6; 32]], vec![id(30)]);
+        assert!(!plan[&[2; 32]].contains(&id(20)));
+        assert!(!plan[&[4; 32]].contains(&id(10)));
+        let all: BTreeSet<_> = plan.values().flatten().copied().collect();
+        assert!(all.len() <= 6);
+        assert!(!plan.values().any(|targets| targets.len() > 3));
+    }
+
+    #[test]
+    fn pull_rotates_which_friends_fit_the_per_pass_cap() {
+        let book = RosterBook::open(&scratch("pull-fairness")).unwrap();
+        let friends: Vec<_> = (0..7)
+            .map(|i| {
+                roster_with(&book, 40 + i, &[60 + i], &[50 + i]);
+                (id(50 + i), [i; 32])
+            })
+            .collect();
+        let first = pull_plan(&book.states(), &friends, 0);
+        let next = pull_plan(&book.states(), &friends, 1);
+        assert_eq!(first.len(), 6);
+        assert!(!first.contains_key(&[6; 32]));
+        assert!(next.contains_key(&[6; 32]));
+    }
+
+    #[test]
+    fn pull_rotates_carriers_when_a_friend_has_more_than_three() {
+        let book = RosterBook::open(&scratch("pull-carrier-fairness")).unwrap();
+        roster_with(&book, 1, &[10, 11, 12, 13, 14], &[2]);
+        let friends = [(id(2), [2; 32])];
+        let first = pull_plan(&book.states(), &friends, 0);
+        let next = pull_plan(&book.states(), &friends, 1);
+        let all: BTreeSet<_> = (0..5)
+            .flat_map(|offset| pull_plan(&book.states(), &friends, offset)[&[2; 32]].clone())
+            .collect();
+        assert_eq!(first[&[2; 32]].len(), 3);
+        assert_ne!(first, next);
+        assert_eq!(
+            all,
+            BTreeSet::from([id(10), id(11), id(12), id(13), id(14)])
+        );
     }
 
     #[test]

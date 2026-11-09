@@ -403,7 +403,7 @@ impl PeerOutcome {
 /// on `#[cfg(test)]` coverage of the pure helpers).
 ///
 /// The two things it must not do, both of which lose the signal the model needs: file a peer that
-/// was never dialled as `Silent` (that is a fact about our prediction, not about the peer), and
+/// was not waited for as `Silent` (that is a fact about our prediction, not about the peer), and
 /// drop the record entirely when nobody answered (a push where every peer stayed quiet is the most
 /// informative row there is).
 fn finish_outcomes(
@@ -412,7 +412,12 @@ fn finish_outcomes(
     skipped: &[[u8; 32]],
     budgets: &HashMap<[u8; 32], u64>,
 ) -> Vec<PeerPushOutcome> {
+    let mut already_reported: std::collections::HashSet<_> =
+        reported.iter().map(|outcome| outcome.peer).collect();
     for peer in outstanding {
+        if !already_reported.insert(*peer) {
+            continue;
+        }
         reported.push(PeerPushOutcome {
             peer: *peer,
             outcome: PeerOutcome::Silent,
@@ -422,6 +427,9 @@ fn finish_outcomes(
         });
     }
     for peer in skipped {
+        if !already_reported.insert(*peer) {
+            continue;
+        }
         reported.push(PeerPushOutcome {
             peer: *peer,
             outcome: PeerOutcome::Skipped,
@@ -1141,22 +1149,19 @@ impl TrailDocs {
             budgets.insert(peer, budget.as_millis() as u64);
             if budget.is_zero() {
                 skipped.push(peer);
-                continue;
+            } else {
+                pending.insert(peer, started_at + budget);
             }
-            pending.insert(peer, started_at + budget);
             addrs.push(addr);
         }
 
         let mut report = PushReport::default();
-        // Nobody was worth waiting for. Still hand the data to the live engine — `start_sync` marks
-        // the namespace syncing, so these peers reconcile on their own whenever they next wake —
-        // but do not hold a background wake open watching for events that will not come.
-        if addrs.is_empty() {
-            doc.start_sync(Vec::new()).await?;
+        // Even a zero-budget target must reach the live engine; only the wait is skipped.
+        doc.start_sync(addrs).await?;
+        if pending.is_empty() {
             report.per_peer = finish_outcomes(Vec::new(), &[], &skipped, &budgets);
             return Ok(Some(report));
         }
-        doc.start_sync(addrs).await?;
 
         while !pending.is_empty() {
             // The loop's own deadline is the LAST peer deadline still outstanding — anything
@@ -1172,9 +1177,7 @@ impl TrailDocs {
                     let peer = *ev.peer.as_bytes();
                     let latency_ms = started_at.elapsed().as_millis() as u64;
                     let budget_ms = budgets.get(&peer).copied().unwrap_or_default();
-                    // A peer we granted no budget can still report — `start_sync` was never told
-                    // about it, but a live-engine event for it may already be in flight. Record it
-                    // rather than dropping it: it is free evidence for the model.
+                    // A zero-budget peer can still answer while another peer is being awaited.
                     pending.remove(&peer);
                     match &ev.result {
                         Ok(details) => {
@@ -1379,7 +1382,10 @@ impl TrailDocs {
     ///
     /// Returns every `(serving peer, author)` delivered across all namespaces, for `peer.contact`.
     pub async fn sync_all(&self, peers: Vec<EndpointAddr>) -> Result<Vec<([u8; 32], [u8; 32])>> {
-        Ok(self.sync_all_until(peers, None).await?.delivered)
+        Ok(self
+            .sync_all_until(peers, HashMap::new(), None)
+            .await?
+            .delivered)
     }
 
     /// [`Self::sync_all`], stopped at `deadline` when one is given, reporting how each namespace's
@@ -1391,6 +1397,7 @@ impl TrailDocs {
     pub async fn sync_all_until(
         &self,
         peers: Vec<EndpointAddr>,
+        extra_peers: HashMap<[u8; 32], Vec<EndpointAddr>>,
         deadline: Option<Instant>,
     ) -> Result<SyncPass> {
         let namespaces = self.namespaces().await;
@@ -1401,7 +1408,7 @@ impl TrailDocs {
         // pocket. The namespaces are independent replicas reconciled against the same peer set —
         // there is no ordering between them — so the pass now costs ONE timeout, not N.
         let results = join_all(namespaces.iter().map(|ns| {
-            let peers = peers.clone();
+            let peers = namespace_peers(&peers, extra_peers.get(&ns.to_bytes()));
             async move { (*ns, self.sync_ns(*ns, peers, deadline).await) }
         }))
         .await;
@@ -1434,6 +1441,18 @@ impl TrailDocs {
         }
         Ok(pass)
     }
+}
+
+/// Add only this namespace's extra targets, retaining explicit addresses when an id overlaps.
+fn namespace_peers(peers: &[EndpointAddr], extra: Option<&Vec<EndpointAddr>>) -> Vec<EndpointAddr> {
+    let mut result = peers.to_vec();
+    let mut ids: std::collections::HashSet<_> = peers.iter().map(|peer| peer.id).collect();
+    for peer in extra.into_iter().flatten() {
+        if ids.insert(peer.id) {
+            result.push(peer.clone());
+        }
+    }
+    result
 }
 
 /// How one namespace's reconciliation wait ended.
@@ -1640,6 +1659,19 @@ pub(crate) mod tests {
         assert_eq!(declined_row.outcome, PeerOutcome::Skipped);
         assert_eq!(declined_row.budget_ms, 0);
         assert!(declined_row.latency_ms.is_none());
+    }
+
+    #[test]
+    fn an_unwaited_peer_that_answers_is_not_also_reported_skipped() {
+        let peer = [0x03u8; 32];
+        let out = finish_outcomes(
+            vec![finished(peer, 100, 1)],
+            &[],
+            &[peer],
+            &budget_map(&[(peer, 0)]),
+        );
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].outcome, PeerOutcome::Finished);
     }
 
     #[test]
@@ -1928,6 +1960,251 @@ pub(crate) mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    async fn replication_peer() -> Result<(Endpoint, Docs, BlobsStore, iroh::protocol::Router)> {
+        use iroh::protocol::Router;
+        use iroh_blobs::store::mem::MemStore;
+        use iroh_blobs::BlobsProtocol;
+
+        let endpoint = Endpoint::builder(iroh::endpoint::presets::N0)
+            .relay_mode(RelayMode::Disabled)
+            .bind()
+            .await?;
+        let gossip = Gossip::builder().spawn(endpoint.clone());
+        let blobs = MemStore::new();
+        let docs = Docs::memory()
+            .spawn(endpoint.clone(), (*blobs).clone(), gossip.clone())
+            .await?;
+        let router = Router::builder(endpoint.clone())
+            .accept(iroh_gossip::ALPN, gossip)
+            .accept(iroh_docs::ALPN, docs.clone())
+            .accept(iroh_blobs::ALPN, BlobsProtocol::new(&blobs, None))
+            .spawn();
+        Ok((endpoint, docs, (*blobs).clone(), router))
+    }
+
+    #[tokio::test]
+    async fn reopened_friend_profile_schedules_card_sync_only_for_known_friends() -> Result<()> {
+        use crate::ns_book::{NamespaceBook, PROFILE_BOOK_FILE};
+        use crate::profile::ProfileDocs;
+        use std::collections::BTreeSet;
+        use std::sync::Arc;
+
+        let state = scratch_dir("profile-card-reader-state");
+        let writer_state = scratch_dir("profile-card-writer-state");
+        let (writer_endpoint, writer_docs, writer_blobs, writer_router) =
+            replication_peer().await?;
+        let (_reader_endpoint, reader_docs, reader_blobs, reader_router) =
+            replication_peer().await?;
+        let writer =
+            ProfileDocs::init(writer_docs, writer_blobs, writer_state.clone(), None).await?;
+        let ticket = writer.ticket().await?;
+        let namespace = crate::ns_book::ticket_namespace(&ticket)?;
+        let book = Arc::new(NamespaceBook::open(&state, PROFILE_BOOK_FILE)?);
+        book.add_friend(namespace, &ticket)?;
+        writer
+            .publish_key(crate::repeater::CARD_KEY, b"new card".to_vec())
+            .await?;
+
+        let reader =
+            ProfileDocs::init(reader_docs, reader_blobs, state.clone(), Some(book)).await?;
+        reader.sync_known_friends(&BTreeSet::new()).await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(reader
+            .read_key_everywhere(crate::repeater::CARD_KEY)
+            .await
+            .is_empty());
+
+        tokio::time::timeout(
+            Duration::from_secs(15),
+            reader.sync_known_friends(&BTreeSet::from([*writer_endpoint.id().as_bytes()])),
+        )
+        .await?;
+        assert!(reader
+            .read_key_everywhere(crate::repeater::CARD_KEY)
+            .await
+            .iter()
+            .any(|bytes| bytes == b"new card"));
+        reader_router.shutdown().await?;
+        writer_router.shutdown().await?;
+        let _ = std::fs::remove_dir_all(state);
+        let _ = std::fs::remove_dir_all(writer_state);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn zero_budget_still_schedules_a_real_replica_without_waiting() -> Result<()> {
+        let dir = scratch_dir("zero-budget-replica");
+        let (writer_endpoint, writer_docs, writer_blobs, writer_router) =
+            replication_peer().await?;
+        let (reader_endpoint, reader_docs, reader_blobs, reader_router) =
+            replication_peer().await?;
+        let writer = TrailDocs::init(writer_docs, writer_blobs, dir.clone(), None).await?;
+        let ns = writer.own_namespace();
+        let writer_doc = writer.doc_for(ns).await?;
+        let key = encode_key(writer_endpoint.id().as_bytes());
+        writer_doc
+            .set_bytes(writer.author, key.clone(), b"sealed fix".to_vec())
+            .await?;
+        let ticket: iroh_docs::DocTicket = writer.read_ticket(ns).await?.parse()?;
+        let reader_doc = reader_docs.import_namespace(ticket.capability).await?;
+        reader_doc.start_sync(Vec::new()).await?;
+
+        let report = tokio::time::timeout(
+            Duration::from_secs(3),
+            writer.push(ns, vec![(reader_endpoint.addr(), Duration::ZERO)]),
+        )
+        .await??
+        .expect("a scheduled push has a report");
+        assert_eq!(report.per_peer.len(), 1);
+        assert_eq!(report.per_peer[0].outcome, PeerOutcome::Skipped);
+
+        tokio::time::timeout(Duration::from_secs(15), async {
+            loop {
+                let entries = reader_doc
+                    .get_many(Query::single_latest_per_key().build())
+                    .await?;
+                tokio::pin!(entries);
+                if let Some(entry) = entries.next().await {
+                    let entry = entry?;
+                    if entry.key() == key
+                        && reader_blobs
+                            .blobs()
+                            .get_bytes(entry.content_hash())
+                            .await
+                            .is_ok_and(|bytes| bytes.as_ref() == b"sealed fix")
+                    {
+                        return Ok::<(), anyhow::Error>(());
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await??;
+        writer_router.shutdown().await?;
+        reader_router.shutdown().await?;
+        let _ = std::fs::remove_dir_all(dir);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_friend_pulls_its_namespace_from_a_carrier_after_the_writer_goes_offline(
+    ) -> Result<()> {
+        let writer_dir = scratch_dir("carrier-writer");
+        let reader_dir = scratch_dir("carrier-reader");
+        let state_dir = scratch_dir("carrier-state");
+        let (writer_endpoint, writer_docs, writer_blobs, writer_router) =
+            replication_peer().await?;
+        let (carrier_endpoint, carrier_docs, carrier_blobs, carrier_router) =
+            replication_peer().await?;
+        let (reader_endpoint, reader_docs, reader_blobs, reader_router) =
+            replication_peer().await?;
+
+        let writer = TrailDocs::init(writer_docs, writer_blobs, writer_dir.clone(), None).await?;
+        let ns = writer.own_namespace();
+        let key = encode_key(writer_endpoint.id().as_bytes());
+        writer
+            .doc_for(ns)
+            .await?
+            .set_bytes(writer.author, key.clone(), b"sealed friend fix".to_vec())
+            .await?;
+        let ticket = writer.read_ticket(ns).await?;
+        let parsed: iroh_docs::DocTicket = ticket.parse()?;
+        assert_eq!(
+            parsed.nodes.iter().map(|addr| addr.id).collect::<Vec<_>>(),
+            vec![writer_endpoint.id()],
+            "a newly shared trail ticket names its writer"
+        );
+        let carrier_doc = carrier_docs.import_namespace(parsed.capability).await?;
+        carrier_doc.start_sync(Vec::new()).await?;
+        writer
+            .push(ns, vec![(carrier_endpoint.addr(), Duration::ZERO)])
+            .await?;
+        tokio::time::timeout(Duration::from_secs(15), async {
+            loop {
+                if let Some(entry) = carrier_doc
+                    .get_one(Query::single_latest_per_key().key_exact(&key).build())
+                    .await?
+                {
+                    if carrier_blobs
+                        .blobs()
+                        .get_bytes(entry.content_hash())
+                        .await
+                        .is_ok()
+                    {
+                        return Ok::<(), anyhow::Error>(());
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await??;
+        writer_router.shutdown().await?;
+        writer_endpoint.close().await;
+
+        let reader = TrailDocs::init(
+            reader_docs,
+            reader_blobs.clone(),
+            reader_dir.clone(),
+            Some(book(&state_dir)),
+        )
+        .await?;
+        reader.import_ticket(&ticket).await?;
+        assert_eq!(reader.friend_tickets(), vec![ticket]);
+        let extras = HashMap::from([(ns.to_bytes(), vec![carrier_endpoint.addr()])]);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        reader
+            .sync_all_until(Vec::new(), extras, Some(deadline))
+            .await?;
+
+        let entry = reader
+            .doc_for(ns)
+            .await?
+            .get_one(Query::single_latest_per_key().key_exact(&key).build())
+            .await?
+            .expect("the carrier served the friend's fix");
+        assert_eq!(
+            reader_blobs
+                .blobs()
+                .get_bytes(entry.content_hash())
+                .await?
+                .as_ref(),
+            b"sealed friend fix"
+        );
+        assert!(
+            reader
+                .doc_for(reader.own_namespace())
+                .await?
+                .get_one(Query::single_latest_per_key().key_exact(&key).build())
+                .await?
+                .is_none(),
+            "a friend's carrier is not a target for our own namespace"
+        );
+        carrier_router.shutdown().await?;
+        reader_router.shutdown().await?;
+        carrier_endpoint.close().await;
+        reader_endpoint.close().await;
+        for dir in [writer_dir, reader_dir, state_dir] {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn extra_carriers_are_scoped_and_do_not_replace_explicit_addresses() {
+        let first = SecretKey::from_bytes(&[1; 32]).public();
+        let second = SecretKey::from_bytes(&[2; 32]).public();
+        let explicit = EndpointAddr::new(first);
+        let extra = vec![EndpointAddr::new(first), EndpointAddr::new(second)];
+        assert_eq!(
+            namespace_peers(&[explicit.clone()], None),
+            vec![explicit.clone()]
+        );
+        assert_eq!(
+            namespace_peers(&[explicit.clone()], Some(&extra)),
+            vec![explicit, EndpointAddr::new(second)]
+        );
     }
 
     // ── LWW: a second publish leaves exactly one readable entry per author ───────────────────

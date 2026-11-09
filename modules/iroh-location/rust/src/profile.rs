@@ -19,7 +19,7 @@
 //! [`is_newer_epoch`] / the namespace-metadata file helpers is pure and unit-tested here.
 //! [`ProfileDocs`] wraps the live iroh-docs replica.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -522,6 +522,63 @@ impl ProfileDocs {
         }
         self.handles.lock().await.insert(ns.to_bytes(), doc);
         Ok(ns)
+    }
+
+    /// Re-arm saved profiles after a native-only node restart and wait for their content.
+    /// The caller bounds this wait and runs it alongside the trail pull.
+    pub async fn sync_known_friends(&self, friends: &BTreeSet<[u8; 32]>) {
+        let Some(book) = &self.book else {
+            return;
+        };
+        let saved = book.friends();
+        let tickets: Vec<_> = saved.iter().map(|entry| entry.ticket.clone()).collect();
+        let owners: HashMap<_, _> = crate::repeater::friend_namespaces(&tickets, friends)
+            .into_iter()
+            .map(|(owner, namespace)| (namespace, owner))
+            .collect();
+        n0_future::join_all(saved.into_iter().filter_map(|entry| {
+            let owner = *owners.get(&entry.namespace)?;
+            let ticket: iroh_docs::DocTicket = entry.ticket.parse().ok()?;
+            if ticket.capability.id().to_bytes() != entry.namespace {
+                return None;
+            }
+            let peers: Vec<_> = ticket
+                .nodes
+                .into_iter()
+                .filter(|addr| addr.id.as_bytes() == &owner)
+                .map(crate::relay::scrub_addr)
+                .collect();
+            if peers.is_empty() {
+                return None;
+            }
+            Some(async move {
+                let Ok(doc) = self.doc_for(NamespaceId::from(entry.namespace)).await else {
+                    return;
+                };
+                let Ok(mut events) = doc.subscribe().await else {
+                    return;
+                };
+                if let Err(error) = doc.start_sync(peers).await {
+                    tracing::warn!(%error, "profile: could not schedule friend sync");
+                    return;
+                }
+                let mut synced = false;
+                while let Some(Ok(event)) = events.next().await {
+                    match event {
+                        LiveEvent::SyncFinished(result) if result.peer.as_bytes() == &owner => {
+                            match result.result {
+                                Ok(_) => synced = true,
+                                Err(error) if !error.contains("AlreadySyncing") => return,
+                                Err(_) => {}
+                            }
+                        }
+                        LiveEvent::PendingContentReady if synced => return,
+                        _ => {}
+                    }
+                }
+            })
+        }))
+        .await;
     }
 
     /// Stop replicating a removed friend's profile namespace and drop it from the book. Returns

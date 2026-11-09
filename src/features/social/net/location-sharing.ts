@@ -3361,10 +3361,10 @@ export class LocationSharingService {
       },
     });
     try {
-      // Nothing to push to — no stash, no friends — so there is no durable mirror to make. Not
-      // merely an optimisation: `start_sync([])` still waits out the native push timeout, and on a
-      // headless wake that is a hard multi-second block on iOS's background budget for no work.
-      if (peerTickets.length === 0) {
+      // The native roster may name carriers even when the explicit stash/friend list is empty.
+      // Older binaries without the budgeted export have no such path and keep the no-target skip.
+      const budgeted = this.mod.pushTrailBudgeted;
+      if (peerTickets.length === 0 && typeof budgeted !== 'function') {
         span.setStatus('ok');
         return;
       }
@@ -3375,13 +3375,14 @@ export class LocationSharingService {
       if (typeof this.mod.pushTrail !== 'function') {
         throw new Error('native module must be rebuilt: pushTrail is missing (just bindgen-ios)');
       }
-      const budgeted = this.mod.pushTrailBudgeted;
+      let confirmed = false;
       if (typeof budgeted === 'function') {
         const outcomes = await budgeted.call(
           this.mod,
           plan.map((dial) => ({ ticket: dial.ticket, budgetMs: dial.budgetMs })),
           getTelemetry().enabled ? traceparentFor(span.context) : null
         );
+        confirmed = outcomes.some((outcome) => outcome.outcome === 'finished');
         await this.learnFromPush(plan, outcomes, span.context);
       } else {
         // A phone can be running an older binary than the JS bundle, so the flat-budget push stays
@@ -3392,6 +3393,7 @@ export class LocationSharingService {
           peerTickets,
           getTelemetry().enabled ? traceparentFor(span.context) : null
         );
+        confirmed = peerTickets.length > 0;
       }
       // Content upload is stash-only, and gated on the OPT-IN rather than on the stash merely
       // being configured. `stashConfig` is build-time env; `stashEnabled()` is the user's answer.
@@ -3406,7 +3408,10 @@ export class LocationSharingService {
         const uploaded = await uploadTrailContent(this.stashConfig.baseUrl, this.stashConfig.psk);
         span.setAttribute('content_uploaded', uploaded);
       }
-      await stampWatermark(this.kv, 'push').catch(() => undefined);
+      // An unwaited repeater was only scheduled; that is not proof anything left the phone.
+      if (confirmed) {
+        await stampWatermark(this.kv, 'push').catch(() => undefined);
+      }
       span.setStatus('ok');
     } catch (err) {
       // A failure means these fixes only reach friends who are online now — exactly the gap the
