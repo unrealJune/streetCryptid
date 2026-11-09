@@ -101,6 +101,12 @@ bg.refresh         (the OS-scheduled periodic wake; bg.refresh.expired if iOS cu
         └ docs.write       (sc.entry_hash, sc.envelope, dropped, sc.drop_reason?, dropped_peers?)  ─ LOCAL replica; live engine broadcasts it
       └ session.recover    (desynced, primed, restarted, requested, withdrawn, await_prekey, no_key, control_written)  ─ §4.6, once per drain
       └ trail.push         (entries_sent, finished)  ─ reconciliation ─►  stash.entry.received (sc.entry_hash)
+        ├ trail.push.live       (waiting on the node lock)
+        ├ trail.push.open       (doc handle + event subscription)
+        ├ trail.push.start_sync (peers)
+        ├ trail.push.wait       (budget_ms, ended, events, pending)  ─ the only phase the 30 s deadline bounds
+        ├ trail.push.roles      (recipient/delivery store reads for peer.role)
+        ├ trail.push.report     (peers; per-peer path labels)
         ├ trail.push.peer  (sc.peer, peer.outcome)
         ├ peer.contact     (send, per peer that finished)
         └ trail.content.upload (stash blob PUT; stash opted in only)
@@ -338,6 +344,16 @@ network, or the wake ended too early):
 ```traceql
 { name = "trail.push" && span.finished = false }
 { name = "trail.push" && span.entries_sent > 0 }
+```
+
+A push longer than its 30 s budget spent the difference outside `trail.push.wait`; the sibling
+phase spans say where. `trail.push.wait{ended}` is `all-reported` (every dialled peer answered),
+`deadline` (someone stayed silent — the usual case while a friend is asleep), `stream-ended` or
+`stream-error`:
+
+```traceql
+{ name = "trail.push" && duration > 35s } >> { name =~ "trail.push.(live|open|start_sync|wait|roles|report)" }
+{ name = "trail.push.wait" } | select(span.ended, span.pending)
 ```
 
 **`stash.grant`** (`streetcryptid-core`, Rust) — the node registering our trail namespace and every

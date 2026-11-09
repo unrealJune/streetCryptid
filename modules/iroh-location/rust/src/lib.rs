@@ -1367,7 +1367,12 @@ impl LocationNode {
                     "trail push: some peer tickets were unparseable and were skipped"
                 );
             }
-            let started = self.live().await?;
+            // `live()` takes the node-wide `inner` lock, so a push queued behind another caller
+            // holding it is visible here rather than as unexplained `trail.push` duration.
+            let started = self
+                .live()
+                .instrument(tracing::info_span!("trail.push.live"))
+                .await?;
             let trail = started.trail.clone();
             let ns = trail.own_namespace();
 
@@ -1406,35 +1411,46 @@ impl LocationNode {
             //
             // `peer.role` says whether the peer was the stash or a friend's phone, and a FINISHED
             // push is also a `peer.contact`: the two devices reconciled with each other.
-            let roles = self.peer_roles().await;
-            for peer in &report.per_peer {
-                let latency = peer.latency_ms;
-                let role = roles.role(&peer.peer);
-                tracing::info_span!(
-                    "trail.push.peer",
-                    sc.peer = %telemetry::short_hex(&peer.peer),
-                    peer.outcome = peer.outcome.as_str(),
-                    peer.role = role,
-                    peer.latency_ms = latency.unwrap_or_default(),
-                    peer.answered = latency.is_some(),
-                    entries_sent = peer.entries_sent,
-                )
-                .in_scope(|| {});
-                if peer.outcome == docs::PeerOutcome::Finished {
-                    let path = match EndpointId::from_bytes(&peer.peer) {
-                        Ok(id) => delivery_label(&started.endpoint, id).await,
-                        Err(_) => "unknown".to_string(),
-                    };
-                    contact::record(contact::Contact {
-                        dir: contact::Dir::Send,
-                        peer: &peer.peer,
-                        role,
-                        path: &path,
-                        from_author: None,
-                        entries: peer.entries_sent,
-                    });
+            let roles = self
+                .peer_roles()
+                .instrument(tracing::info_span!("trail.push.roles"))
+                .await;
+            // Per-peer reporting awaits `remote_info` for every finished peer's path label, so it
+            // is timed as a phase of its own (`trail.push.report`).
+            let report_span =
+                tracing::info_span!("trail.push.report", peers = report.per_peer.len() as u64);
+            async {
+                for peer in &report.per_peer {
+                    let latency = peer.latency_ms;
+                    let role = roles.role(&peer.peer);
+                    tracing::info_span!(
+                        "trail.push.peer",
+                        sc.peer = %telemetry::short_hex(&peer.peer),
+                        peer.outcome = peer.outcome.as_str(),
+                        peer.role = role,
+                        peer.latency_ms = latency.unwrap_or_default(),
+                        peer.answered = latency.is_some(),
+                        entries_sent = peer.entries_sent,
+                    )
+                    .in_scope(|| {});
+                    if peer.outcome == docs::PeerOutcome::Finished {
+                        let path = match EndpointId::from_bytes(&peer.peer) {
+                            Ok(id) => delivery_label(&started.endpoint, id).await,
+                            Err(_) => "unknown".to_string(),
+                        };
+                        contact::record(contact::Contact {
+                            dir: contact::Dir::Send,
+                            peer: &peer.peer,
+                            role,
+                            path: &path,
+                            from_author: None,
+                            entries: peer.entries_sent,
+                        });
+                    }
                 }
             }
+            .instrument(report_span)
+            .await;
 
             let stash_dialed = roles
                 .stash()

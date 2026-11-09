@@ -1225,72 +1225,120 @@ impl TrailDocs {
         peers: Vec<EndpointAddr>,
         budget: Duration,
     ) -> Result<Option<PushReport>> {
-        let doc = self.doc_for(ns).await?;
-        let mut events = doc.subscribe().await?;
+        use tracing::Instrument;
+        // The phases of a push are spans of their own (`trail.push.open`, `.start_sync`, `.wait`)
+        // because the deadline below bounds only the wait: on 2026-11-08 `trail.push` spans ran
+        // 35-82 s (one 447 s) against a 30 s budget with every peer's `latency_ms` under 30 s, and
+        // nothing could say where the rest went.
+        let (doc, mut events) = async {
+            let doc = self.doc_for(ns).await?;
+            let events = doc.subscribe().await?;
+            anyhow::Ok((doc, events))
+        }
+        .instrument(tracing::info_span!("trail.push.open"))
+        .await?;
 
-        let started_at = Instant::now();
-        let deadline = started_at + budget;
         let mut pending: std::collections::HashSet<[u8; 32]> =
             peers.iter().map(|addr| *addr.id.as_bytes()).collect();
 
         let mut report = PushReport::default();
-        if peers.is_empty() {
-            doc.start_sync(Vec::new()).await?;
+        let dialled = peers.len();
+        doc.start_sync(peers)
+            .instrument(tracing::info_span!(
+                "trail.push.start_sync",
+                peers = dialled
+            ))
+            .await?;
+        if dialled == 0 {
             return Ok(Some(report));
         }
-        doc.start_sync(peers).await?;
 
-        while !pending.is_empty() {
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
-                break;
-            }
-            match timeout(remaining, events.next()).await {
-                Ok(Some(Ok(LiveEvent::SyncFinished(ev)))) => {
-                    let peer = *ev.peer.as_bytes();
-                    let latency_ms = started_at.elapsed().as_millis() as u64;
-                    // A peer this push did not dial can still report — the live engine may be
-                    // reconciling with it from an earlier `start_sync`. Record it all the same.
-                    pending.remove(&peer);
-                    match &ev.result {
-                        Ok(details) => {
-                            let sent = details.entries_sent as u64;
-                            report.entries_sent += sent;
-                            report.peers_finished += 1;
-                            report.per_peer.push(PeerPushOutcome {
-                                peer,
-                                outcome: PeerOutcome::Finished,
-                                latency_ms: Some(latency_ms),
-                                entries_sent: sent,
-                            });
-                        }
-                        Err(err) => {
-                            // One unreachable peer isn't the end of the exchange — keep waiting
-                            // for the others rather than reporting the whole push as done.
-                            tracing::warn!(
-                                peer = %ev.peer.fmt_short(),
-                                error = %err,
-                                latency_ms,
-                                "trail.push: reconciliation with peer failed"
-                            );
-                            report.peers_failed += 1;
-                            report.per_peer.push(PeerPushOutcome {
-                                peer,
-                                outcome: PeerOutcome::Failed,
-                                latency_ms: Some(latency_ms),
-                                entries_sent: 0,
-                            });
+        // The budget starts once the exchange is under way, as it always has; `latency_ms` is
+        // measured from here too.
+        let started_at = Instant::now();
+        let deadline = started_at + budget;
+        let wait = tracing::info_span!(
+            "trail.push.wait",
+            budget_ms = budget.as_millis() as u64,
+            ended = tracing::field::Empty,
+            events = tracing::field::Empty,
+            pending = tracing::field::Empty,
+        );
+        let mut events_seen: u64 = 0;
+        let mut ended = "all-reported";
+        let waited = async {
+            while !pending.is_empty() {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    ended = "deadline";
+                    break;
+                }
+                let next = timeout(remaining, events.next()).await;
+                events_seen += 1;
+                match next {
+                    Ok(Some(Ok(LiveEvent::SyncFinished(ev)))) => {
+                        let peer = *ev.peer.as_bytes();
+                        let latency_ms = started_at.elapsed().as_millis() as u64;
+                        // A peer this push did not dial can still report — the live engine may be
+                        // reconciling with it from an earlier `start_sync`. Record it all the same.
+                        pending.remove(&peer);
+                        match &ev.result {
+                            Ok(details) => {
+                                let sent = details.entries_sent as u64;
+                                report.entries_sent += sent;
+                                report.peers_finished += 1;
+                                report.per_peer.push(PeerPushOutcome {
+                                    peer,
+                                    outcome: PeerOutcome::Finished,
+                                    latency_ms: Some(latency_ms),
+                                    entries_sent: sent,
+                                });
+                            }
+                            Err(err) => {
+                                // One unreachable peer isn't the end of the exchange — keep waiting
+                                // for the others rather than reporting the whole push as done.
+                                tracing::warn!(
+                                    peer = %ev.peer.fmt_short(),
+                                    error = %err,
+                                    latency_ms,
+                                    "trail.push: reconciliation with peer failed"
+                                );
+                                report.peers_failed += 1;
+                                report.per_peer.push(PeerPushOutcome {
+                                    peer,
+                                    outcome: PeerOutcome::Failed,
+                                    latency_ms: Some(latency_ms),
+                                    entries_sent: 0,
+                                });
+                            }
                         }
                     }
+                    Ok(Some(Ok(_))) => continue,
+                    Ok(Some(Err(err))) => {
+                        ended = "stream-error";
+                        return Err(err);
+                    }
+                    // Stream ended, or the deadline passed. Either way the peers still
+                    // in `pending` never spoke. The namespace stays marked syncing, so later writes in
+                    // this process broadcast — we just cannot confirm them here.
+                    Ok(None) => {
+                        ended = "stream-ended";
+                        break;
+                    }
+                    Err(_) => {
+                        ended = "deadline";
+                        break;
+                    }
                 }
-                Ok(Some(Ok(_))) => continue,
-                Ok(Some(Err(err))) => return Err(err),
-                // Stream ended, or the deadline passed. Either way the peers still
-                // in `pending` never spoke. The namespace stays marked syncing, so later writes in
-                // this process broadcast — we just cannot confirm them here.
-                Ok(None) | Err(_) => break,
             }
+            anyhow::Ok(())
         }
+        .instrument(wait.clone())
+        .await;
+        wait.record("ended", ended);
+        wait.record("events", events_seen);
+        wait.record("pending", pending.len() as u64);
+        waited?;
 
         let outstanding: Vec<[u8; 32]> = pending.into_iter().collect();
         report.per_peer = finish_outcomes(report.per_peer, &outstanding);
