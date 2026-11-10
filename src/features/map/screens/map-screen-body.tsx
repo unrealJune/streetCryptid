@@ -155,10 +155,10 @@ export default function MapScreenBody() {
     location: MapFriendLocation['location'];
   } | null>(null);
   // The camera-centred readouts change mid-gesture, so they live in a store the map writes and the
-  // chrome subscribes to field by field (`live-readout.ts`): this screen re-renders when the place
-  // name or the measurable band changes, and the live percentage re-renders only `MeIsland`.
+  // chrome subscribes to field by field (`live-readout.ts`): this screen re-renders mid-gesture only
+  // when the measurable band changes, and the live name and percentage re-render only `MeIsland`.
   const [readouts] = useState(createLiveReadoutStore);
-  const placeName = useLiveReadout(readouts, selectPlaceName);
+  const placeName = useLiveReadout(readouts, selectSettledPlaceName);
   const sectorsVisible = useLiveReadout(readouts, selectSectorsVisible);
   const settledPct = useLiveReadout(readouts, selectSettledPct);
   const [friendPlace, setFriendPlace] = useState<FriendPlace | null>(null);
@@ -171,14 +171,7 @@ export default function MapScreenBody() {
   }, []);
 
   const onFriendPlace = useCallback((next: FriendPlace | null) => {
-    setFriendPlace((current) =>
-      current?.id === next?.id &&
-      current?.name === next?.name &&
-      current?.location.lat === next?.location.lat &&
-      current?.location.lon === next?.location.lon
-        ? current
-        : next
-    );
+    setFriendPlace((current) => (sameFriendPlace(current, next) ? current : next));
   }, []);
 
   const mapFriends = useMemo(
@@ -440,8 +433,8 @@ export default function MapScreenBody() {
         ? 'Your current location is shown.'
         : 'Finding your location.'
       : 'Your location is not available.';
-  // The SETTLED percentage: this label is a prop on the map, and a live one would re-render the
-  // whole map at every step of a pan.
+  // The SETTLED name and percentage: this label is a prop on the map, and a live one would
+  // re-render the whole map at every neighbourhood or step a pan crosses.
   const mapAccessibilityLabel = placeName
     ? `Map near ${placeName}. ${settledPct} percent of visible sectors explored. ${
         explorationEnabled ? 'Exploration overlay on.' : 'Exploration overlay off.'
@@ -460,8 +453,10 @@ export default function MapScreenBody() {
     : null;
   // The last position on disk counts: it is where the user almost always still is,
   // and it is known within a few hundred ms of launch, long before a live read.
-  const initialCenter =
-    sessionFocus?.location ?? (selfFix ? { lat: selfFix.lat, lon: selfFix.lon } : null);
+  // Identity-stable while the coordinates are, so a screen render does not hand the map new props.
+  const focusCenter = useLatLon(sessionFocus?.location.lat, sessionFocus?.location.lon);
+  const selfCenter = useLatLon(selfFix?.lat, selfFix?.lon);
+  const initialCenter = focusCenter ?? selfCenter;
   // Once the map has been anchored on the user it stays so.
   // A fix going stale later must not recenter the session out from under the user.
   const [selfCenterSeen, setSelfCenterSeen] = useState(false);
@@ -636,7 +631,7 @@ export default function MapScreenBody() {
             selfHistory={selfHistory}
             selfSelected={selectedEndpoint === SELF_AUTHOR}
             selfColor={selfInk}
-            selfLocation={hasLiveSelfFix && selfFix ? { lat: selfFix.lat, lon: selfFix.lon } : null}
+            selfLocation={hasLiveSelfFix ? selfCenter : null}
             selfFix={hasLiveSelfFix ? selfFix : null}
           />
         )}
@@ -794,6 +789,7 @@ function MapSession({
 }
 
 const selectPlaceName = (readout: LiveReadout) => readout.placeName;
+const selectSettledPlaceName = (readout: LiveReadout) => readout.settledPlaceName;
 const selectSectorsVisible = (readout: LiveReadout) => readout.sectorsVisible;
 const selectSettledPct = (readout: LiveReadout) => Math.round(readout.settledCoverage * 100);
 const selectCoverage = (readout: LiveReadout) => readout.coverage;
@@ -819,6 +815,30 @@ function MeIsland({
       signal={signal}
       theme={theme}
     />
+  );
+}
+
+/** `{ lat, lon }` that keeps its identity for as long as the coordinates do. */
+function useLatLon(
+  lat: number | undefined,
+  lon: number | undefined
+): MapFriendLocation['location'] | null {
+  return useMemo(() => (lat === undefined || lon === undefined ? null : { lat, lon }), [lat, lon]);
+}
+
+/**
+ * Out here, not inline in `onFriendPlace`: optional chains inside a `&&` test are a shape the React
+ * Compiler cannot lower, and it bails on the WHOLE component when it meets one — `MapScreenBody`
+ * ran uncompiled (every render re-rendering the map) from 43d78fa until this moved.
+ * `react-compiler.test.ts` holds the screen to compiling.
+ */
+function sameFriendPlace(a: FriendPlace | null, b: FriendPlace | null): boolean {
+  if (a === null || b === null) return a === b;
+  return (
+    a.id === b.id &&
+    a.name === b.name &&
+    a.location.lat === b.location.lat &&
+    a.location.lon === b.location.lon
   );
 }
 

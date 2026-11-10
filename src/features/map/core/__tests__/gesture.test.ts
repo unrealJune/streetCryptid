@@ -5,19 +5,23 @@ import {
   visibleWorldRect,
   worldToScreen,
   type CameraConstraints,
+  viewTransformFor,
   type ViewTransform,
 } from '../camera';
 import {
   applyPan,
   applyPinch,
+  cameraAnimationProgress,
   clampPinchFactor,
   clampTranslation,
+  interpolateViewTransform,
   makeViewLimits,
   READOUT_ZOOM_STRIDE,
   shouldTrackScaleMotion,
   transformDistanceSq,
   translationRange,
 } from '../gesture';
+import { latLonToWorld } from '../mercator';
 import type { CameraState, Viewport, WorldPoint } from '../types';
 
 const viewport: Viewport = { width: 400, height: 800 };
@@ -193,5 +197,66 @@ describe('shouldTrackScaleMotion', () => {
     expect(shouldTrackScaleMotion(at(READOUT_ZOOM_STRIDE * 0.9), at(0))).toBe(false);
     expect(shouldTrackScaleMotion(at(READOUT_ZOOM_STRIDE), at(0))).toBe(true);
     expect(shouldTrackScaleMotion(at(-READOUT_ZOOM_STRIDE), at(0))).toBe(true);
+  });
+});
+
+describe('interpolateViewTransform', () => {
+  // The case that jumped: a session anchored in Seattle, looking at Kyoto at z16, so the
+  // anchor-space x under the finger is ~760 000 px and tx is ~-12 million.
+  const seattle: CameraState = { center: latLonToWorld({ lat: 47.61, lon: -122.33 }), zoom: 12 };
+  const kyoto = latLonToWorld({ lat: 35.01, lon: 135.77 });
+  const world = makeViewLimits(seattle, viewport, {
+    bounds: { minX: 0, minY: 0, maxX: 1, maxY: 1 },
+    minZoom: 2,
+    maxZoom: 19,
+  });
+  const from = viewTransformFor(seattle, viewport, { center: kyoto, zoom: 16 });
+  const focal = [viewport.width * 0.3, viewport.height * 0.62] as const;
+  const to = applyPinch(from, 2, focal[0], focal[1], world);
+  const under = [(focal[0] - from.tx) / from.k, (focal[1] - from.ty) / from.k] as const;
+  const screenOf = (t: ViewTransform) => [under[0] * t.k + t.tx, under[1] * t.k + t.ty];
+
+  it('is far from the anchor, which is what amplifies any skew', () => {
+    expect(Math.abs(under[0])).toBeGreaterThan(500_000);
+  });
+
+  it('keeps a double-tap focal point fixed at every progress, half a world from the anchor', () => {
+    for (let i = 0; i <= 100; i++) {
+      const [x, y] = screenOf(interpolateViewTransform(from, to, i / 100));
+      expect(Math.abs(x - focal[0])).toBeLessThan(1e-4);
+      expect(Math.abs(y - focal[1])).toBeLessThan(1e-4);
+    }
+  });
+
+  it('is exactly its endpoints outside (0, 1)', () => {
+    expect(interpolateViewTransform(from, to, 0)).toBe(from);
+    expect(interpolateViewTransform(from, to, -0.1)).toBe(from);
+    expect(interpolateViewTransform(from, to, 1)).toBe(to);
+    expect(interpolateViewTransform(from, to, 1.2)).toBe(to);
+  });
+
+  it('shows why separate clocks jumped: a 1e-4 progress skew moves the focal point >100 px', () => {
+    // Three withTimings started microseconds apart: k is a little ahead of tx.
+    const p = 0.3;
+    const k = interpolateViewTransform(from, to, p + 1e-4).k;
+    const { tx, ty } = interpolateViewTransform(from, to, p);
+    const [x] = screenOf({ k, tx, ty });
+    expect(Math.abs(x - focal[0])).toBeGreaterThan(100);
+  });
+});
+
+describe('cameraAnimationProgress', () => {
+  const easeOutCubic = (t: number) => 1 - (1 - t) ** 3;
+
+  it('eases between 0 and 1 and clamps either side', () => {
+    expect(cameraAnimationProgress(-5, 300, easeOutCubic)).toBe(0);
+    expect(cameraAnimationProgress(0, 300, easeOutCubic)).toBe(0);
+    expect(cameraAnimationProgress(150, 300, easeOutCubic)).toBeCloseTo(0.875, 12);
+    expect(cameraAnimationProgress(300, 300, easeOutCubic)).toBe(1);
+    expect(cameraAnimationProgress(900, 300, easeOutCubic)).toBe(1);
+  });
+
+  it('finishes at once for a zero-length (reduced-motion) animation', () => {
+    expect(cameraAnimationProgress(0, 0, easeOutCubic)).toBe(1);
   });
 });

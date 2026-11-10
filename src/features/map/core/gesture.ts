@@ -180,3 +180,41 @@ export function transformDistanceSq(a: ViewTransform, b: ViewTransform): number 
   const dy = a.ty - b.ty;
   return dx * dx + dy * dy + dk * dk;
 }
+
+/**
+ * Where a camera animation is at eased progress `p`: k, tx and ty all read the SAME `p`.
+ *
+ * That is the whole point. A pinch-shaped move (`applyPinch` about f) keeps f exactly fixed only
+ * while every component is at one progress: k(p)·x + t(p) = f + p·(c − 1)·(k·x + t − f) = f. Any skew
+ * between them is multiplied by Δk·x, and x is anchor-space px measured from wherever the session
+ * opened — about 760 000 px for Kyoto seen from a Seattle anchor. Three `withTiming`s started from a
+ * gesture callback or a JS hop each read their own start timestamp (Reanimated sets the shared
+ * frame timestamp only inside its frame loop), so they disagree by microseconds, and at z16 in
+ * Japan that is a jump of thousands of px mid-zoom. Interpolate here, from one clock, instead.
+ */
+export function interpolateViewTransform(
+  from: ViewTransform,
+  to: ViewTransform,
+  p: number
+): ViewTransform {
+  'worklet';
+  if (p >= 1) return to;
+  if (p <= 0) return from;
+  return {
+    k: from.k + (to.k - from.k) * p,
+    tx: from.tx + (to.tx - from.tx) * p,
+    ty: from.ty + (to.ty - from.ty) * p,
+  };
+}
+
+/** Eased progress of an animation `elapsedMs` into `durationMs`, clamped to [0, 1]. */
+export function cameraAnimationProgress(
+  elapsedMs: number,
+  durationMs: number,
+  easing: (t: number) => number
+): number {
+  'worklet';
+  if (durationMs <= 0 || elapsedMs >= durationMs) return 1;
+  if (elapsedMs <= 0) return 0;
+  return easing(elapsedMs / durationMs);
+}

@@ -782,6 +782,22 @@ on web is noise. Use it for ratios and for finding work that should not happen a
   them makes a slope that jumps at every DEM pixel (square hillshade tiles), and the height's low
   byte wraps every 256 m, which drew ghost lines along that elevation on the iOS GPU. CanvasKit's
   software filter does not show the second, so a CPU pixel test cannot catch it coming back.
+- **Camera animations move `(k, tx, ty)` on ONE clock** (`useCameraAnimation`), never as three
+  `withTiming`s. Each `withTiming` reads its own start time when assigned, and outside Reanimated's
+  frame loop (a gesture callback, a JS hop) those reads differ slightly. The focal-point error is
+  about `Δk · x_anchor · Δp`: near the anchor it is nothing, but in Kyoto, seen from a
+  Seattle-anchored session, it is thousands of px. That error is the "big jump" on a
+  double-tap or locate. Anything else that writes the transform calls `stop` (or `stopMotion`)
+  first, because assigning a shared value does not cancel that loop.
+- **Nothing live reaches the map's props, and the map screen must stay compiled.** The island's
+  readouts change mid-gesture, so they live in `LiveReadoutStore`. A prop on the map, such as its
+  accessibility label, reads the `settled*` copies, and only `MeIsland` subscribes to the live
+  ones. The React Compiler's caching is what keeps a screen render from reaching `MapView`, and
+  it bails out on a whole component without a word. 43d78fa put optional chains in a `&&` test in
+  `MapScreenBody`, the compiler skipped it, and with the live place name every pan re-rendered the
+  whole map. `screens/__tests__/react-compiler.test.ts` fails if that happens again. Live
+  `track` measurements run a macrotask after the gesture's JS hop, coalesced, so they do not
+  hold up the labels that hop moves.
 
 ## Store screenshots
 
