@@ -24,6 +24,7 @@ import type {
   SasChallenge,
   TrailReplicaAuthor,
   TransportDiagnostics,
+  DeliveryStatistics,
   TransportConfig,
 } from './IrohLocation.types';
 
@@ -412,6 +413,7 @@ export declare class IrohLocationNativeModule
   /** Optional for compatibility with installed binaries built before deliverer attribution. */
   endpointIdFromTicket?(ticket: string): Promise<string>;
   transportDiagnostics(peerEndpointIdsHex: string[]): Promise<TransportDiagnostics>;
+  deliveryStatistics?(): Promise<DeliveryStatistics>;
   /** Optional for compatibility with installed iOS binaries built before the replica query. */
   trailReplicaStatus?(): Promise<TrailReplicaAuthor[]>;
 

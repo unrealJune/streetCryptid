@@ -18,17 +18,17 @@ const TRANSPORTS: {
 }[] = [
   {
     id: 'relay',
-    label: 'Relay',
+    label: 'Internet relay',
     detail: 'Authenticated internet relay paths.',
   },
   {
     id: 'ip',
-    label: 'Direct IP / LAN',
-    detail: 'Hole-punched IP, ticket-seeded LAN, and mDNS paths.',
+    label: 'Direct IP',
+    detail: 'Direct internet and local-network connections. mDNS helps discover nearby devices.',
   },
   {
     id: 'ble',
-    label: 'Bluetooth LE',
+    label: 'Bluetooth',
     detail: 'Nearby BLE discovery, pairing, and data paths.',
   },
 ];

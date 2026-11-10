@@ -60,9 +60,9 @@ export default function SettingsScreen() {
   // no path at all, so nothing can leave this phone — has to be legible without counting.
   const enabledTransports = (
     [
-      ['relay', 'Relay'],
-      ['ip', 'Direct'],
-      ['ble', 'BLE'],
+      ['relay', 'Internet relay'],
+      ['ip', 'Direct IP'],
+      ['ble', 'Bluetooth'],
     ] as const
   )
     .filter(([key]) => transports[key])

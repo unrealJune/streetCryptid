@@ -56,6 +56,7 @@ async fn start(node: &LocationNode, config: TransportConfig) {
     )
     .await
     .expect("start node");
+    node.delivery_statistics().await.expect("receipt store opened without a leaked prior claim");
 }
 
 /// The keystore copy of the identity, as the platform hands it to a JS-free wake.

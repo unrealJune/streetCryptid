@@ -43,6 +43,7 @@ describe('describeDelivery', () => {
     const result = describe_({ viaPeer: STASH });
     expect(result.kind).toBe('stash');
     expect(result.headline).toBe('Served by the trail stash');
+    expect(result.detail).toContain('It could not read it');
   });
 
   /**

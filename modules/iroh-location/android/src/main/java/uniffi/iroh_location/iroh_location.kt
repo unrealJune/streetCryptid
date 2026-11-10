@@ -769,6 +769,8 @@ external fun uniffi_iroh_location_checksum_method_locationnode_current_seq(
 ): Int
 external fun uniffi_iroh_location_checksum_method_locationnode_delivery_config(
 ): Int
+external fun uniffi_iroh_location_checksum_method_locationnode_delivery_statistics(
+): Int
 external fun uniffi_iroh_location_checksum_method_locationnode_doc_ticket(
 ): Int
 external fun uniffi_iroh_location_checksum_method_locationnode_endpoint_id(
@@ -992,6 +994,8 @@ external fun uniffi_iroh_location_fn_method_locationnode_create_invite(`ptr`: Lo
 external fun uniffi_iroh_location_fn_method_locationnode_current_seq(`ptr`: Long,
 ): Long
 external fun uniffi_iroh_location_fn_method_locationnode_delivery_config(`ptr`: Long,
+): Long
+external fun uniffi_iroh_location_fn_method_locationnode_delivery_statistics(`ptr`: Long,
 ): Long
 external fun uniffi_iroh_location_fn_method_locationnode_doc_ticket(`ptr`: Long,
 ): Long
@@ -1444,6 +1448,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_iroh_location_checksum_method_locationnode_delivery_config() != 3587) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_iroh_location_checksum_method_locationnode_delivery_statistics() != 20115) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_iroh_location_checksum_method_locationnode_doc_ticket() != 34643) {
@@ -2722,6 +2729,11 @@ public interface LocationNodeInterface {
     suspend fun `deliveryConfig`(): DeliveryConfig
     
     /**
+     * De-identified local receipt counts for the last 30 completed local calendar days.
+     */
+    suspend fun `deliveryStatistics`(): DeliveryStatistics
+    
+    /**
      * A shareable docs **read-ticket** granting replication of our trail namespace (the
      * swarm-join half of a grant). Goes in the contact card.
      */
@@ -3621,6 +3633,30 @@ open class LocationNode: Disposable, AutoCloseable, LocationNodeInterface
         { future -> UniffiLib.ffi_iroh_location_rust_future_free_rust_buffer(future) },
         // lift function
         { FfiConverterTypeDeliveryConfig.lift(it) },
+        // Error FFI converter
+        LocationException.ErrorHandler,
+    )
+    }
+
+    
+    /**
+     * De-identified local receipt counts for the last 30 completed local calendar days.
+     */
+    @Throws(LocationException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `deliveryStatistics`() : DeliveryStatistics {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_iroh_location_fn_method_locationnode_delivery_statistics(
+                uniffiHandle,
+                
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_iroh_location_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_iroh_location_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterTypeDeliveryStatistics.lift(it) },
         // Error FFI converter
         LocationException.ErrorHandler,
     )
@@ -6778,6 +6814,102 @@ public object FfiConverterTypeDeliveryConfig: FfiConverterRustBuffer<DeliveryCon
             FfiConverterSequenceString.write(value.`peerTickets`, buf)
             FfiConverterOptionalString.write(value.`stashBaseUrl`, buf)
             FfiConverterOptionalString.write(value.`stashPsk`, buf)
+    }
+}
+
+
+
+data class DeliveryCount (
+    var `hour`: kotlin.UByte
+    , 
+    var `source`: kotlin.String
+    , 
+    var `path`: kotlin.String
+    , 
+    var `relaySetup`: kotlin.String
+    , 
+    var `count`: kotlin.ULong
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeDeliveryCount: FfiConverterRustBuffer<DeliveryCount> {
+    override fun read(buf: ByteBuffer): DeliveryCount {
+        return DeliveryCount(
+            FfiConverterUByte.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterULong.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: DeliveryCount) = (
+            FfiConverterUByte.allocationSize(value.`hour`) +
+            FfiConverterString.allocationSize(value.`source`) +
+            FfiConverterString.allocationSize(value.`path`) +
+            FfiConverterString.allocationSize(value.`relaySetup`) +
+            FfiConverterULong.allocationSize(value.`count`)
+    )
+
+    override fun write(value: DeliveryCount, buf: ByteBuffer) {
+            FfiConverterUByte.write(value.`hour`, buf)
+            FfiConverterString.write(value.`source`, buf)
+            FfiConverterString.write(value.`path`, buf)
+            FfiConverterString.write(value.`relaySetup`, buf)
+            FfiConverterULong.write(value.`count`, buf)
+    }
+}
+
+
+
+data class DeliveryStatistics (
+    var `recordedDays`: kotlin.UInt
+    , 
+    var `counts`: List<DeliveryCount>
+    , 
+    var `incomplete`: kotlin.Boolean
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeDeliveryStatistics: FfiConverterRustBuffer<DeliveryStatistics> {
+    override fun read(buf: ByteBuffer): DeliveryStatistics {
+        return DeliveryStatistics(
+            FfiConverterUInt.read(buf),
+            FfiConverterSequenceTypeDeliveryCount.read(buf),
+            FfiConverterBoolean.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: DeliveryStatistics) = (
+            FfiConverterUInt.allocationSize(value.`recordedDays`) +
+            FfiConverterSequenceTypeDeliveryCount.allocationSize(value.`counts`) +
+            FfiConverterBoolean.allocationSize(value.`incomplete`)
+    )
+
+    override fun write(value: DeliveryStatistics, buf: ByteBuffer) {
+            FfiConverterUInt.write(value.`recordedDays`, buf)
+            FfiConverterSequenceTypeDeliveryCount.write(value.`counts`, buf)
+            FfiConverterBoolean.write(value.`incomplete`, buf)
     }
 }
 
@@ -10605,6 +10737,34 @@ public object FfiConverterSequenceTypeBlePeer: FfiConverterRustBuffer<List<BlePe
         buf.putInt(value.size)
         value.iterator().forEach {
             FfiConverterTypeBlePeer.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceTypeDeliveryCount: FfiConverterRustBuffer<List<DeliveryCount>> {
+    override fun read(buf: ByteBuffer): List<DeliveryCount> {
+        val len = buf.getInt()
+        return List<DeliveryCount>(len) {
+            FfiConverterTypeDeliveryCount.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<DeliveryCount>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeDeliveryCount.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<DeliveryCount>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeDeliveryCount.write(it, buf)
         }
     }
 }

@@ -22,6 +22,7 @@ mod ble;
 mod contact;
 pub mod crypto;
 pub mod delivery;
+pub mod delivery_stats;
 mod docs;
 mod durable;
 /// `friend.pull` spans: a native runtime's receive-side pull, with what it cost against the OS's
@@ -51,6 +52,7 @@ pub mod process_memory;
 mod profile;
 pub mod publish;
 pub mod ratchet;
+mod receipt_collector;
 pub mod recipients;
 pub mod restart;
 pub mod seq_store;
@@ -1293,6 +1295,7 @@ pub struct LocationNode {
     /// [`crate::delivery`]. Opened with the others because the drain reads it on every wake, and a
     /// wake with no JS context has nowhere else to get it.
     delivery: Mutex<Option<Arc<delivery::DeliveryStore>>>,
+    receipts: Mutex<Option<Arc<receipt_collector::Collector>>>,
     /// Ephemerals minted by `begin_session` and awaiting the peer's half. Keyed by peer endpoint
     /// id. Held in memory only: an unfinished bootstrap that does not survive a restart is a
     /// bootstrap the user simply repeats, whereas one persisted to disk is a private key sitting
@@ -2082,6 +2085,7 @@ fn new_location_node_at(
         own_log: Mutex::new(None),
         transport: Mutex::new(None),
         delivery: Mutex::new(None),
+        receipts: Mutex::new(None),
         pending_bootstrap: Mutex::new(HashMap::new()),
         last_control: Mutex::new(None),
         clock_offset_ms: std::sync::atomic::AtomicI64::new(0),
@@ -2179,6 +2183,21 @@ impl LocationNode {
                 state: PathBuf::from(state_root),
             },
         )
+    }
+
+    /// De-identified local receipt counts for the last 30 completed local calendar days.
+    pub async fn delivery_statistics(
+        &self,
+    ) -> Result<delivery_stats::DeliveryStatistics, LocationError> {
+        let collector = self
+            .receipts
+            .lock()
+            .await
+            .clone()
+            .ok_or(LocationError::NotStarted)?;
+        collector
+            .statistics()
+            .map_err(|error| LocationError::Network(error.to_string()))
     }
 
     /// Bind the iroh endpoint + spawn the docs/blobs router. Idempotent.
@@ -2296,6 +2315,21 @@ impl LocationNode {
                 ));
             }
         }
+        let current_receipts = { self.receipts.lock().await.clone() };
+        let receipts = match current_receipts {
+            Some(receipts) => receipts,
+            None => {
+                let receipts = receipt_collector::Collector::new(
+                    &self.state_dir,
+                    &self.identity_seed,
+                    self.session_manager().await?,
+                    self.recipient_store().await?,
+                    self.delivery_store().await?,
+                );
+                *self.receipts.lock().await = Some(receipts.clone());
+                receipts
+            }
+        };
         // The namespaces to reopen live in `state_dir`, not beside the replica: the replica is in
         // the cache directory on Android, and losing it must cost a re-sync, never a new identity.
         // Read here, with the other local state and before the endpoint binds, so a book that will
@@ -2328,7 +2362,11 @@ impl LocationNode {
         #[allow(unused_mut)]
         let mut builder = Endpoint::builder(iroh::endpoint::presets::N0)
             .secret_key(secret)
-            .relay_mode(relay_mode);
+            .relay_mode(relay_mode)
+            .hooks(receipt_collector::Hook {
+                collector: Arc::downgrade(&receipts),
+                relay_enabled,
+            });
         // iroh's default resolver sends its own queries to a nameserver list: Google's on Apple,
         // where it cannot read the system config, and on Android whatever list it read at build or
         // at the last network change, which can be the wrong network's. Some phones can never
@@ -2548,6 +2586,8 @@ impl LocationNode {
         // runtime is: live endpoint + docs handles that are about to become invalid anyway.
         tracing::info!("shutdown: detaching pair runtime");
         self.pair.detach_runtime().await;
+        tracing::info!("shutdown: releasing receipt collector");
+        *self.receipts.lock().await = None;
         tracing::info!("shutdown: taking sessions lock");
         *self.sessions.lock().await = None;
         // Same rule for the publish counter: hold the slot past shutdown and the directory claim

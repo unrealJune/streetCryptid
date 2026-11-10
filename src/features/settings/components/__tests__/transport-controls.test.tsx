@@ -26,9 +26,9 @@ describe('TransportControls', () => {
 
     const switches = renderer.root.findAllByType(Switch);
     expect(switches.map((item) => item.props.accessibilityLabel)).toEqual([
-      'Relay transport',
-      'Direct IP / LAN transport',
-      'Bluetooth LE transport',
+      'Internet relay transport',
+      'Direct IP transport',
+      'Bluetooth transport',
     ]);
 
     act(() => switches[2].props.onValueChange(true));

@@ -61,6 +61,17 @@ same problems itself; its NOTICE lists what is still ours.
 Applied with `[patch.crates-io]` for a single fix: `read_to_end` on a stream already read to its
 end failed, which made most iroh-docs syncs report failure. Remove it once noq fixes it.
 
+## iroh-blobs (vendored, modified)
+
+- **Location:** `modules/iroh-location/rust/third_party/iroh-blobs/`
+- **Upstream:** <https://github.com/n0-computer/iroh-blobs> (crates.io `iroh-blobs` 0.103.0)
+- **Copyright:** n0, inc. and contributors
+- **License:** MIT OR Apache-2.0
+- **List of modifications:** `modules/iroh-location/rust/third_party/iroh-blobs/NOTICE`
+
+An optional local download-completion hook correlates an encrypted update with its actual
+supplier and receive-path evidence. No wire or download-policy changes.
+
 ## Distribution obligation
 
 Distributing a build — including to TestFlight and Play testers — obliges you to offer

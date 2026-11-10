@@ -1056,6 +1056,21 @@ public final class IrohLocationModule: Module {
       return (try await node.pairResult(sessionId: hexToData(sessionIdHex))).map { pairResultDict($0) }
     }
 
+    AsyncFunction("deliveryStatistics") { () async throws -> [String: Any] in
+      guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
+      let statistics = try await node.deliveryStatistics()
+      return [
+        "recordedDays": statistics.recordedDays,
+        "incomplete": statistics.incomplete,
+        "counts": statistics.counts.map { row -> [String: Any] in
+          [
+            "hour": row.hour, "source": row.source, "path": row.path,
+            "relaySetup": row.relaySetup, "count": row.count,
+          ]
+        },
+      ]
+    }
+
     AsyncFunction("transportDiagnostics") { (peerEndpointIdsHex: [String]) async throws -> [String: Any] in
       guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
       let peerEndpointIds = peerEndpointIdsHex.map { hexToData($0) }

@@ -979,6 +979,11 @@ public protocol LocationNodeProtocol: AnyObject, Sendable {
     func deliveryConfig() async throws  -> DeliveryConfig
     
     /**
+     * De-identified local receipt counts for the last 30 completed local calendar days.
+     */
+    func deliveryStatistics() async throws  -> DeliveryStatistics
+    
+    /**
      * A shareable docs **read-ticket** granting replication of our trail namespace (the
      * swarm-join half of a grant). Goes in the contact card.
      */
@@ -1843,6 +1848,26 @@ open func deliveryConfig()async throws  -> DeliveryConfig  {
             completeFunc: ffi_iroh_location_rust_future_complete_rust_buffer,
             freeFunc: ffi_iroh_location_rust_future_free_rust_buffer,
             liftFunc: FfiConverterTypeDeliveryConfig_lift,
+            errorHandler: FfiConverterTypeLocationError_lift
+        )
+}
+    
+    /**
+     * De-identified local receipt counts for the last 30 completed local calendar days.
+     */
+open func deliveryStatistics()async throws  -> DeliveryStatistics  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_iroh_location_fn_method_locationnode_delivery_statistics(
+                    self.uniffiCloneHandle()
+                    
+                )
+            },
+            pollFunc: ffi_iroh_location_rust_future_poll_rust_buffer,
+            completeFunc: ffi_iroh_location_rust_future_complete_rust_buffer,
+            freeFunc: ffi_iroh_location_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeDeliveryStatistics_lift,
             errorHandler: FfiConverterTypeLocationError_lift
         )
 }
@@ -4388,6 +4413,130 @@ public func FfiConverterTypeDeliveryConfig_lift(_ buf: RustBuffer) throws -> Del
 #endif
 public func FfiConverterTypeDeliveryConfig_lower(_ value: DeliveryConfig) -> RustBuffer {
     return FfiConverterTypeDeliveryConfig.lower(value)
+}
+
+
+public struct DeliveryCount: Equatable, Hashable {
+    public var hour: UInt8
+    public var source: String
+    public var path: String
+    public var relaySetup: String
+    public var count: UInt64
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(hour: UInt8, source: String, path: String, relaySetup: String, count: UInt64) {
+        self.hour = hour
+        self.source = source
+        self.path = path
+        self.relaySetup = relaySetup
+        self.count = count
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension DeliveryCount: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeDeliveryCount: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> DeliveryCount {
+        return
+            try DeliveryCount(
+                hour: FfiConverterUInt8.read(from: &buf), 
+                source: FfiConverterString.read(from: &buf), 
+                path: FfiConverterString.read(from: &buf), 
+                relaySetup: FfiConverterString.read(from: &buf), 
+                count: FfiConverterUInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: DeliveryCount, into buf: inout [UInt8]) {
+        FfiConverterUInt8.write(value.hour, into: &buf)
+        FfiConverterString.write(value.source, into: &buf)
+        FfiConverterString.write(value.path, into: &buf)
+        FfiConverterString.write(value.relaySetup, into: &buf)
+        FfiConverterUInt64.write(value.count, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeDeliveryCount_lift(_ buf: RustBuffer) throws -> DeliveryCount {
+    return try FfiConverterTypeDeliveryCount.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeDeliveryCount_lower(_ value: DeliveryCount) -> RustBuffer {
+    return FfiConverterTypeDeliveryCount.lower(value)
+}
+
+
+public struct DeliveryStatistics: Equatable, Hashable {
+    public var recordedDays: UInt32
+    public var counts: [DeliveryCount]
+    public var incomplete: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(recordedDays: UInt32, counts: [DeliveryCount], incomplete: Bool) {
+        self.recordedDays = recordedDays
+        self.counts = counts
+        self.incomplete = incomplete
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension DeliveryStatistics: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeDeliveryStatistics: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> DeliveryStatistics {
+        return
+            try DeliveryStatistics(
+                recordedDays: FfiConverterUInt32.read(from: &buf), 
+                counts: FfiConverterSequenceTypeDeliveryCount.read(from: &buf), 
+                incomplete: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: DeliveryStatistics, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.recordedDays, into: &buf)
+        FfiConverterSequenceTypeDeliveryCount.write(value.counts, into: &buf)
+        FfiConverterBool.write(value.incomplete, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeDeliveryStatistics_lift(_ buf: RustBuffer) throws -> DeliveryStatistics {
+    return try FfiConverterTypeDeliveryStatistics.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeDeliveryStatistics_lower(_ value: DeliveryStatistics) -> RustBuffer {
+    return FfiConverterTypeDeliveryStatistics.lower(value)
 }
 
 
@@ -9236,6 +9385,31 @@ fileprivate struct FfiConverterSequenceTypeBlePeer: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypeDeliveryCount: FfiConverterRustBuffer {
+    typealias SwiftType = [DeliveryCount]
+
+    public static func write(_ value: [DeliveryCount], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeDeliveryCount.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [DeliveryCount] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [DeliveryCount]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeDeliveryCount.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeIncomingFix: FfiConverterRustBuffer {
     typealias SwiftType = [IncomingFix]
 
@@ -10025,6 +10199,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_method_locationnode_delivery_config() != 3587) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_iroh_location_checksum_method_locationnode_delivery_statistics() != 20115) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_method_locationnode_doc_ticket() != 34643) {
