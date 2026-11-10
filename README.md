@@ -276,6 +276,7 @@ Path alias: `@/*` → `src/*`, `@/assets/*` → `assets/*`.
 | [docs/map-performance.md](docs/map-performance.md)               | Map engine performance budget and measurements                        |
 | [docs/privacy-policy.md](docs/privacy-policy.md)                 | The published privacy policy                                          |
 | [docs/mesh/DESIGN.md](docs/mesh/DESIGN.md)                       | Festival mesh hardware design of record                               |
+| [docs/mesh/V2-PROPOSAL.md](docs/mesh/V2-PROPOSAL.md)             | Proposal: personal pucks, HaLow carriers, offline messaging           |
 | [docs/release-engineering.md](docs/release-engineering.md)       | How a commit becomes a release, and how PR builds are made            |
 | [infra/otel/README.md](infra/otel/README.md)                     | Telemetry span map, join keys, and the TraceQL cookbook               |
 | [AGENTS.md](./AGENTS.md)                                         | The conventions and hard-won constraints to read before changing code |
