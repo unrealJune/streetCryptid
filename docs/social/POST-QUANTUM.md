@@ -1,8 +1,15 @@
 # streetCryptid — Post-quantum migration and export compliance
 
-Status: **plan, rev 1.** Nothing here is implemented. Companion to
+Status: **plan, rev 2 (2026-11-10).** Nothing here is implemented. Companion to
 `FORWARD-SECRECY.md` (which this extends at §4.2, §4.6 and §4.7) and
 `docs/mesh/DESIGN.md` §3.2.
+
+**Rev 2, after a review against the tree at v3.0.0.** Three changes, each marked
+**[rev 2]**. The restart root was missing from rev 1 and would have undone P1 at the
+first restart; it is now row 4b and phase P1b. §3 explains why P1 and P1b together close
+harvest-now-decrypt-later for the life of a friendship, which demotes P3 to optional and
+means no KEM material ever needs to ride the mesh. And §0 is still unfixed. The repair
+list for both documents is `FORWARD-SECRECY.md` §10.
 
 Two requirements, deliberately kept in one document because one of them constrains
 the other: we must be **export compliant**, and we want **every asymmetric primitive
@@ -12,6 +19,9 @@ crypto work — it is wrong today. The PQ half is a multi-phase wire migration.
 ---
 
 ## 0. The export declaration is wrong today [VERIFIED — fix before the next submission]
+
+**[rev 2] Still wrong at v3.0.0** (checked 2026-11-10): the line below is unchanged, and
+releases have shipped since rev 1 was written. This is repair item R1.
 
 `app.json:21` declares:
 
@@ -80,18 +90,19 @@ Three of these are already done, three are cheap, one is genuinely hard, and one
 impossible without forking iroh. Taking them in order stops us spending the hard
 budget first.
 
-| #   | Layer                     | Today                            | Quantum-relevant?                                       | Phase  |
-| --- | ------------------------- | -------------------------------- | ------------------------------------------------------- | ------ |
-| 1   | Payload AEAD              | ChaCha20-Poly1305, 256-bit       | **No** — Grover halves to ~128-bit, which is the target | —      |
-| 2   | KDF chain                 | BLAKE3 `derive_key`              | **No** — 256-bit output, Grover-adequate                | —      |
-| 3   | v3 per-recipient wrap     | AEAD under a ratchet message key | **No** — symmetric already                              | —      |
-| 4   | Pairing bump → `RK₀`      | X25519 ephemeral↔ephemeral       | **Yes, and it is the whole tree**                       | **P1** |
-| 5   | v2 HPKE wrap (still live) | DHKEM(X25519, HKDF-SHA256)       | **Yes**                                                 | **P2** |
-| 6   | Mesh capsule              | raw X25519 DH                    | **Yes**                                                 | **P2** |
-| 7   | DH ratchet step           | X25519 per step                  | Yes — but see §3                                        | **P3** |
-| 8   | Envelope signatures       | ed25519                          | Yes, but **not harvestable**                            | **P4** |
-| 9   | QUIC handshake            | rustls + `ring`, X25519          | Yes, but transport-only                                 | **P5** |
-| 10  | iroh node identity        | ed25519, structural              | Yes — **blocked**, see §2                               | —      |
+| #   | Layer                     | Today                            | Quantum-relevant?                                       | Phase        |
+| --- | ------------------------- | -------------------------------- | ------------------------------------------------------- | ------------ |
+| 1   | Payload AEAD              | ChaCha20-Poly1305, 256-bit       | **No** — Grover halves to ~128-bit, which is the target | —            |
+| 2   | KDF chain                 | BLAKE3 `derive_key`              | **No** — 256-bit output, Grover-adequate                | —            |
+| 3   | v3 per-recipient wrap     | AEAD under a ratchet message key | **No** — symmetric already                              | —            |
+| 4   | Pairing bump → `RK₀`      | X25519 ephemeral↔ephemeral       | **Yes, and it is the whole tree**                       | **P1**       |
+| 4b  | Restart root **[rev 2]**  | X25519 ephemeral↔prekey          | **Yes — it replaces row 4's root at every restart**     | **P1b**      |
+| 5   | v2 HPKE wrap (still live) | DHKEM(X25519, HKDF-SHA256)       | **Yes**                                                 | **P2**       |
+| 6   | Mesh capsule              | raw X25519 DH                    | **Yes**                                                 | **P2**       |
+| 7   | DH ratchet step           | X25519 per step                  | Only for healing — see §3                               | P3, optional |
+| 8   | Envelope signatures       | ed25519                          | Yes, but **not harvestable**                            | **P4**       |
+| 9   | QUIC handshake            | rustls + `ring`, X25519          | Yes, but transport-only                                 | **P5**       |
+| 10  | iroh node identity        | ed25519, structural              | Yes — **blocked**, see §2                               | —            |
 
 Rows 1–3 are not a gap. Symmetric primitives at 256-bit are the recommended
 post-quantum posture; there is nothing to migrate and no version of this work that
@@ -105,6 +116,13 @@ both humans present. Make that one exchange hybrid and every envelope sealed und
 that session for the life of the friendship becomes harvest-now-decrypt-later
 resistant — without adding a single byte to any envelope. This is precisely the
 PQXDH trade, and it is the reason Signal shipped PQXDH years before a PQ ratchet.
+
+**[rev 2] That claim holds only if the root is never replaced classically, and rev 1
+missed that it is.** A `FORWARD-SECRECY.md` §4.6 restart derives a new `RK₀` from one
+X25519 DH against a published prekey and discards the old session. Restarts are routine,
+not rare: a friend who does not open the app for a day lapses and is restarted
+(`FORWARD-SECRECY.md` §4.2). Without row 4b, P1 protects a friendship until its first
+restart and no longer. P1 and P1b ship together or P1's headline is false.
 
 ---
 
@@ -155,19 +173,36 @@ This is the problem Signal spent years on and solved with erasure-coded chunking
 (SPQR), spreading one KEM transmission across many messages. We should not invent
 our own answer to it, and we should not pay it before rows 4–6 are done.
 
-**Recommended resolution for row 7: PQ re-key at epoch boundaries, not per message.**
+**[rev 2] Row 7 is not needed for harvest-now-decrypt-later at all.** Every DH step
+computes `RK ← KDF_rk(RK, DH(...))`: the new root depends on the old root as well as on
+the DH output. An adversary who recorded every envelope and later breaks every X25519
+exchange learns each DH output and still cannot compute a root, because it never had the
+one before it. A post-quantum secret mixed in once, at pairing (P1) and at each restart
+(P1b), therefore protects every key derived afterwards, across any number of classical
+DH steps, with no KEM bytes in any envelope.
+
+What a post-quantum ratchet step adds is healing against a different adversary: one who
+holds a _copy of the session state_ and later has a quantum computer. With the state it
+knows a root; with the quantum computer it follows every classical DH step forward from
+there, so the session never heals against it. `FORWARD-SECRECY.md` rev 5 puts the copied
+device in scope, so this is a real gap, but a much narrower one than rev 1 implied, and
+rev 1's reason for discounting it (that PCS is out of scope) no longer stands. The
+resolution below is kept as the way to close it if it is ever worth the bytes.
+
+**Resolution for row 7, if taken: PQ re-key at epoch boundaries, not per message.**
 The ratchet header already carries an `epoch i` (§4.7). Carry hybrid KEM material
 only on an epoch change, keep the per-message step X25519, and choose the epoch
 cadence from telemetry rather than by guess. That bounds the cost to one ~1.2 KB
 transmission per epoch instead of per message, keeps the mesh capsule inside its
 framing between epochs, and degrades gracefully: the property lost relative to a
 full PQ ratchet is post-compromise security against a quantum adversary _within_
-an epoch — and `FORWARD-SECRECY.md` §1 already puts PCS explicitly out of scope,
-on the grounds that a seized device never ratchets again.
+an epoch.
 
-Deferred decision, to be made with P3 and not before: whether the mesh path takes
-the PQ epoch re-key at all, or stays classical with that stated as a §1.1 residual
-risk. The mesh is the tightest budget and the least archived path.
+**[rev 2] The mesh decision is no longer deferred: the mesh carries no KEM material.**
+Mesh keys derive from the paired session by a clock-indexed chain
+(`FORWARD-SECRECY.md` §8.1, repair item R7), so they inherit the session's post-quantum
+root and cost no capsule bytes. Any re-key, classical or hybrid, happens over iroh when a
+phone is online.
 
 ---
 
@@ -181,6 +216,11 @@ do not need and costs us the cross-target story plus a cmake dependency in a bui
 we just spent real effort profiling.
 
 - **`ml-kem` 0.3.2** (RustCrypto) — FIPS 203. Pure Rust, `no_std`, portable.
+- **[rev 2] `libcrux-ml-kem`** (Cryspen, Apache-2.0) — FIPS 203, formally verified with
+  hax and F\*, and the implementation Signal's SPQR is built on. Prefer it over `ml-kem`
+  for P1 if it builds for all three targets. **[MUST VERIFY]** that its portable backend
+  builds for `wasm32-unknown-unknown`, the Android NDK targets and the iOS XCFramework
+  without a C toolchain, and which release implements final FIPS 203.
 - **`x-wing` 0.1.0** — the X25519 + ML-KEM-768 hybrid, if we want it packaged
   rather than composed by hand.
 - **`hpke` 0.14.1** — adds X-Wing and pure-ML-KEM KEMs; row 5 becomes a type
@@ -228,8 +268,33 @@ Make `RK₀` depend on a hybrid secret.
   `f1f4da0` and re-run `pair-bench` after.
 - **Zero bytes added to any envelope.** Every session paired after P1 is
   harvest-now-decrypt-later resistant for its entire life.
-- Existing pairings keep their classical `RK₀`. Re-pair is the only upgrade path;
-  decide whether to surface that in the UI or leave it silent.
+- Existing pairings keep their classical `RK₀` until P1b restarts them. **[rev 2]**
+  Re-pair is not the only upgrade path: see P1b.
+
+### P1b — Hybrid restart prekeys **[rev 2]** — ships with P1
+
+Make `restart_root` depend on a hybrid secret, so a restart never replaces a
+post-quantum root with a classical one. This is repair item R6.
+
+- `restart.rs`, control record: publish an ML-KEM-768 encapsulation key (1,184 B)
+  beside each X25519 restart prekey, under the same signature, rotated and deleted on
+  the same schedule. The control record lives in a docs slot and is not size-constrained.
+- Leader: encapsulate to the follower's newest KEM prekey and compute
+  `restart_root(DH(base, prekey_F) ‖ ss_mlkem, transcript)`. Concatenate into the
+  existing derivation; do not replace the X25519 input.
+- `BootHeader`: carries the ML-KEM ciphertext (1,088 B) with `{base_pub, prekey_id, ts}`.
+  It rides every wrap for that follower until answered, so an unanswered restart costs
+  about 1.1 KB per wrap on the docs path. It never rides the mesh.
+- **Wire break.** A new envelope version, for the reason v4 was one. Share the bump
+  with header encryption (`FORWARD-SECRECY.md` §10, R5).
+- **Upgrade without re-pair.** A leader on a P1b build restarts each classical session
+  once against a hybrid prekey. Traffic already recorded under the classical root stays
+  exposed to a future quantum adversary; nothing can change that. Everything after the
+  restart is protected. The restart is authenticated by classical signatures, which is
+  sound until an adversary can forge ed25519 in real time (row 8).
+- Forward secrecy against a quantum adversary matches the classical case: the KEM
+  prekey's private half is deleted on the X25519 prekey's schedule, so the
+  `FORWARD-SECRECY.md` §4.6 residual window is unchanged.
 
 ### P2 — Hybrid HPKE wrap and mesh capsule
 
@@ -238,13 +303,16 @@ Make `RK₀` depend on a hybrid secret.
   `658`, `1459`, `2400` — so this is live code, not legacy cleanup. Alternative
   worth pricing first: retire the v2 path entirely and always establish a ratchet
   session, which deletes row 5 instead of migrating it.
-- `mesh.rs` row 6: hybrid DH for the capsule key. Costs ~1.1 KB per capsule at the
-  _epoch_ level, which is how `mesh_epoch` already works — not per fix.
+- `mesh.rs` row 6: **[rev 2]** no hybrid DH on the radio. Rev 1 priced this at ~1.1 KB
+  per capsule per epoch. Derive the capsule key from the paired session instead
+  (`FORWARD-SECRECY.md` §8.1, R7): it inherits the P1/P1b root and adds no bytes.
 - Envelope version → v4, or a new wrap variant under the existing version byte.
 
 ### P3 — Epoch-level PQ ratchet re-key
 
-Per §3. Gate on telemetry for the epoch cadence. Decide the mesh question here.
+Per §3. **[rev 2] Optional.** It closes only the copied-state-plus-quantum-computer case
+§3 describes. Gate on telemetry for the epoch cadence if it is ever taken. The mesh
+question is decided in §3 and is no longer part of this phase.
 
 ### P4 — Additive ML-DSA signatures
 
@@ -287,8 +355,12 @@ Non-negotiable, because two crates must produce byte-identical envelopes:
 1. **[LEGAL]** ERN filed? Annual report owner? (§0)
 2. Is pure-PQ identity a requirement or a preference? It decides whether §2 is an
    accepted limitation or a reason to leave iroh.
-3. Does the mesh path take the PQ epoch re-key, or stay classical as a stated §1.1
-   residual? (§3)
+3. ~~Does the mesh path take the PQ epoch re-key, or stay classical as a stated §1.1
+   residual? (§3)~~ **[rev 2]** Neither: mesh keys derive from the session (§3, R7).
 4. Retire the v2 HPKE path rather than migrate it? (P2)
-5. Is silent re-pair acceptable as the P1 upgrade path, or does an existing
-   friendship need to surface "this pairing predates PQ"?
+5. ~~Is silent re-pair acceptable as the P1 upgrade path, or does an existing
+   friendship need to surface "this pairing predates PQ"?~~ **[rev 2]** P1b upgrades
+   in place. Whether to show that a friendship's earlier traffic predates PQ is still
+   open.
+6. **[rev 2]** Is P3 worth taking at all, given §3? It needs an adversary with a copy of
+   the state and, later, a quantum computer.
