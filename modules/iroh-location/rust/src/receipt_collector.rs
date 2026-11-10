@@ -5,7 +5,7 @@
 //! includes concurrent streams and cannot prove that THIS update used every observed path.
 
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::HashMap,
     future::Future,
     path::Path,
     pin::Pin,
@@ -23,9 +23,7 @@ use iroh_tickets::endpoint::EndpointTicket;
 use crate::{
     contact::PeerRoles,
     delivery::DeliveryStore,
-    delivery_stats::{
-        self, DeliveryStatistics, Mechanism, PathKind, Receipt, RelaySetup, Source, Store,
-    },
+    delivery_stats::{self, DeliveryStatistics, PathKind, Receipt, RelaySetup, Source, Store},
     recipients::RecipientStore,
     sessions::{SessionError, SessionManager},
 };
@@ -118,31 +116,6 @@ fn handshake_relay(connection: &Connection, relay_enabled: bool) -> RelaySetup {
     }
 }
 
-type MessageKey = ([u8; 32], [u8; 32]);
-
-#[derive(Clone, Copy)]
-pub struct Evidence {
-    path: PathKind,
-    setup: RelaySetup,
-    time: (i32, u8),
-}
-
-impl Default for Evidence {
-    fn default() -> Self {
-        Self {
-            path: PathKind::Unknown,
-            setup: RelaySetup::Unknown,
-            time: delivery_stats::local_hour(),
-        }
-    }
-}
-
-#[derive(Default)]
-struct PendingMessages {
-    receipts: HashMap<MessageKey, Evidence>,
-    order: VecDeque<MessageKey>,
-}
-
 pub struct Collector {
     weak: Weak<Self>,
     store: Result<Store, String>,
@@ -150,7 +123,6 @@ pub struct Collector {
     recipients: Arc<RecipientStore>,
     delivery: Arc<DeliveryStore>,
     connections: Mutex<HashMap<usize, RelaySetup>>,
-    pending: Mutex<PendingMessages>,
 }
 
 impl std::fmt::Debug for Collector {
@@ -179,7 +151,6 @@ impl Collector {
             recipients,
             delivery,
             connections: Mutex::new(HashMap::new()),
-            pending: Mutex::new(PendingMessages::default()),
         })
     }
 
@@ -221,7 +192,6 @@ impl Collector {
         peer: Option<&[u8; 32]>,
         path: PathKind,
         setup: RelaySetup,
-        mechanism: Mechanism,
         time: (i32, u8),
     ) {
         let roles = self.roles();
@@ -250,70 +220,11 @@ impl Collector {
                     source,
                     path,
                     relay_setup: setup,
-                    mechanism,
                 },
             ) {
                 tracing::warn!(%error, "delivery statistics receipt not persisted");
             }
         }
-    }
-
-    pub fn take_gossip(&self, peer: &[u8; 32], content: &[u8]) -> Evidence {
-        let key = (*peer, *blake3::hash(content).as_bytes());
-        let mut pending = self.pending.lock().expect("receipt messages poisoned");
-        pending.order.retain(|entry| *entry != key);
-        pending.receipts.remove(&key).unwrap_or_default()
-    }
-
-    pub fn gossip(&self, author: &[u8], seq: u64, peer: &[u8; 32], evidence: Evidence) {
-        self.record(
-            author,
-            seq,
-            Some(peer),
-            evidence.path,
-            evidence.setup,
-            Mechanism::Gossip,
-            evidence.time,
-        );
-    }
-}
-
-impl iroh_gossip::receipt::ReceiveObserver for Collector {
-    fn received(&self, connection: &Connection, content: &[u8]) {
-        // QUIC may buffer a complete message before the read starts. A lifetime single-family
-        // receive history is proof even then; a migrated/multipath history is not.
-        let evidence = Evidence {
-            path: classify(
-                &RxSnapshot {
-                    coherent: true,
-                    ..RxSnapshot::default()
-                },
-                &snapshot(connection),
-            ),
-            setup: self
-                .connections
-                .lock()
-                .expect("receipt connections poisoned")
-                .get(&connection.stable_id())
-                .copied()
-                .unwrap_or(RelaySetup::Unknown),
-            time: delivery_stats::local_hour(),
-        };
-        let key = (
-            *connection.remote_id().as_bytes(),
-            *blake3::hash(content).as_bytes(),
-        );
-        let mut pending = self.pending.lock().expect("receipt messages poisoned");
-        if pending.receipts.contains_key(&key) {
-            return;
-        }
-        while pending.order.len() >= 4096 {
-            if let Some(old) = pending.order.pop_front() {
-                pending.receipts.remove(&old);
-            }
-        }
-        pending.order.push_back(key);
-        pending.receipts.insert(key, evidence);
     }
 }
 
@@ -326,7 +237,7 @@ pub struct Hook {
 impl EndpointHooks for Hook {
     async fn after_handshake(&self, connection: &Connection) -> AfterHandshakeOutcome {
         if let Some(collector) = self.collector.upgrade() {
-            if connection.alpn() != iroh_blobs::ALPN && connection.alpn() != iroh_gossip::ALPN {
+            if connection.alpn() != iroh_blobs::ALPN {
                 return AfterHandshakeOutcome::accept();
             }
             let mut connections = collector
@@ -340,30 +251,14 @@ impl EndpointHooks for Hook {
                 );
             }
             drop(connections);
-            let blob = if connection.alpn() == iroh_blobs::ALPN {
-                let observer: Arc<dyn DownloadObserver> = collector.clone();
-                Some(iroh_blobs::api::receipt::register(
-                    connection,
-                    Arc::downgrade(&observer),
-                ))
-            } else {
-                None
-            };
-            let gossip = if connection.alpn() == iroh_gossip::ALPN {
-                let observer: Arc<dyn iroh_gossip::receipt::ReceiveObserver> = collector.clone();
-                Some(iroh_gossip::receipt::register(
-                    connection,
-                    Arc::downgrade(&observer),
-                ))
-            } else {
-                None
-            };
+            let observer: Arc<dyn DownloadObserver> = collector.clone();
+            let blob = iroh_blobs::api::receipt::register(connection, Arc::downgrade(&observer));
             let weak = collector.weak.clone();
             let id = connection.stable_id();
             let closed = connection.weak_handle().closed();
             tokio::spawn(async move {
                 closed.await;
-                drop((blob, gossip));
+                drop(blob);
                 if let Some(collector) = weak.upgrade() {
                     collector
                         .connections
@@ -471,7 +366,6 @@ impl PendingReceipt for Download {
                         } else {
                             RelaySetup::Unknown
                         },
-                        Mechanism::Sync,
                         time,
                     );
                 }
@@ -504,7 +398,6 @@ mod tests {
         RelayMode,
     };
     use iroh_blobs::{store::mem::MemStore, BlobsProtocol};
-    use n0_future::StreamExt;
 
     #[tokio::test]
     async fn native_receipts_correlate_the_actual_supplier_without_consuming_the_fix() {
@@ -573,14 +466,8 @@ mod tests {
                 .unwrap();
             let source_store = MemStore::new();
             let destination_store = MemStore::new();
-            let source_gossip = iroh_gossip::net::Gossip::builder().spawn(source.clone());
-            let destination_gossip = iroh_gossip::net::Gossip::builder().spawn(destination.clone());
             let source_router = Router::builder(source.clone())
                 .accept(iroh_blobs::ALPN, BlobsProtocol::new(&source_store, None))
-                .accept(iroh_gossip::ALPN, source_gossip.clone())
-                .spawn();
-            let destination_router = Router::builder(destination.clone())
-                .accept(iroh_gossip::ALPN, destination_gossip.clone())
                 .spawn();
             let downloader = destination_store.downloader(&destination);
             let fix = crate::LocationFix {
@@ -638,7 +525,6 @@ mod tests {
                 "collection must not consume the ratchet"
             );
             downloader.download(tag.hash, [source.id()]).await.unwrap();
-            collector.gossip(&author, 1, source.id().as_bytes(), Evidence::default());
             assert_eq!(snapshot().counts.iter().map(|r| r.count).sum::<u64>(), 1);
 
             let null = source_store.add_slice(seal(2, None)).await.unwrap();
@@ -669,42 +555,12 @@ mod tests {
             recipients
                 .set(&[author_hex, source.id().to_string()])
                 .unwrap();
-            let topic = iroh_gossip::proto::TopicId::from([44; 32]);
-            let mut source_topic = source_gossip.subscribe(topic, vec![]).await.unwrap();
-            let mut destination_topic = destination_gossip
-                .subscribe_and_join(topic, vec![source.id()])
-                .await
-                .unwrap();
-            source_topic.joined().await.unwrap();
-            let live = seal(4, Some(&fix));
-            source_topic.broadcast(live.into()).await.unwrap();
-            loop {
-                if let iroh_gossip::api::Event::Received(message) =
-                    destination_topic.next().await.unwrap().unwrap()
-                {
-                    let evidence =
-                        collector.take_gossip(message.delivered_from.as_bytes(), &message.content);
-                    assert_ne!(
-                        evidence.path,
-                        PathKind::Unknown,
-                        "per-message connection hook"
-                    );
-                    assert_eq!(evidence.setup, RelaySetup::No);
-                    collector.gossip(&author, 4, message.delivered_from.as_bytes(), evidence);
-                    break;
-                }
-            }
-            assert!(snapshot()
-                .counts
-                .iter()
-                .any(|r| r.source == "friend" && r.mechanism == "gossip"));
             collector.record(
                 &author,
                 5,
                 Some(&author),
                 PathKind::Bluetooth,
                 RelaySetup::Unknown,
-                Mechanism::Gossip,
                 delivery_stats::local_hour(),
             );
             assert!(snapshot().counts.iter().any(|r| r.source == "author"));
@@ -729,7 +585,6 @@ mod tests {
                 && r.path == "unknown"
                 && r.relay_setup == "unknown"));
             source_router.shutdown().await.unwrap();
-            destination_router.shutdown().await.unwrap();
             drop((collector, sessions, recipients, delivery, sender_sessions));
             std::fs::remove_dir_all(root).unwrap();
         })

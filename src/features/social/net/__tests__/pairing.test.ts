@@ -217,19 +217,21 @@ describe('LocationSharingService — pairing / profile wiring', () => {
     });
   });
 
+  // A headless context publishes through the native pipeline and nothing else: no profile write,
+  // no pairing poll, and no replica watch, because there is no mounted UI to tell.
   it('restores a minimal publisher without interactive polling in headless mode', async () => {
     const svc = newService();
     await svc.init('@me', 'mothman', '', '', { mode: 'headless' });
 
     expect(mockHolder.mod.calls.publishProfile).toHaveLength(0);
     expect(mockHolder.mod.calls.pollPairEvents).toBe(0);
+    expect(mockHolder.mod.calls.watchReplica).toBe(0);
     await expect(
-      svc.publishFix({ lat: 47.62, lon: -122.32, accuracyM: 5, headingDeg: 0, ts: 1 })
-    ).resolves.toBeGreaterThan(0);
-    expect(mockHolder.mod.calls.subscribe.some((s) => s.topic === 'topic-aa11')).toBe(true);
+      svc.ingestNativeFix({ lat: 47.62, lon: -122.32, accuracyM: 5, headingDeg: 0, ts: 1 })
+    ).resolves.toBe(1);
+    expect(mockHolder.mod.calls.ingestFix).toBe(1);
 
     await svc.shutdownAsync();
-    expect(mockHolder.mod.calls.unsubscribe).toContain('sub-topic-aa11');
     expect(mockHolder.mod.calls.shutdown).toBe(1);
   });
 
@@ -1113,14 +1115,14 @@ describe('LocationSharingService — pairing / profile wiring', () => {
     expect(snap.current?.friends).toEqual([]);
     expect(snap.current?.sharingWith).toEqual([]);
     expect(snap.current?.pairing.discoveredFriend?.endpointId).toBe('peer-ready');
-    expect(mockHolder.mod.calls.subscribe.some((s) => s.topic === 'topic-peer-ready')).toBe(false);
+    expect(mockHolder.mod.calls.importDocTicket).not.toContain('peer-trail');
 
     await svc.armBump();
     expect(snap.current?.pairing.discoveredFriend?.endpointId).toBe('peer-ready');
     expect(snap.current?.pairing.bump.stage).toBe('idle');
 
     await svc.acknowledgeDiscoveredFriend();
-    // The friend exists the moment ACKNOWLEDGE returns — the subscribe/introduction wiring is
+    // The friend exists the moment ACKNOWLEDGE returns — the namespace/introduction wiring is
     // deliberately NOT awaited by it (see `decideDiscovery`), so the assertions below that reach
     // the network wait for it explicitly.
     const friend = snap.current?.friends.find((f) => f.endpointId === 'peer-ready');
@@ -1129,14 +1131,9 @@ describe('LocationSharingService — pairing / profile wiring', () => {
     expect(friend?.profileEpoch).toBe(300);
     expect(snap.current?.sharingWith).toEqual(['peer-ready']);
     expect(friend?.pairingSessionId).toBe('sess-ready');
-    // Subscribed + profile-imported via the normal friend path.
+    // Their trail and profile namespaces are opened via the normal friend path.
     await svc.awaitFriendWiring();
-    expect(mockHolder.mod.calls.subscribe.some((s) => s.topic === 'topic-peer-ready')).toBe(true);
-    expect(
-      mockHolder.mod.calls.subscribe.some(
-        (s) => s.topic === 'topic-aa11' && s.bootstrap.includes('peer-ticket')
-      )
-    ).toBe(true);
+    expect(mockHolder.mod.calls.importDocTicket).toContain('peer-trail');
     expect(mockHolder.mod.calls.importProfileTicket).toContain('peer-profile');
 
     expect(snap.current?.pairing.discoveredFriend).toBeNull();
@@ -1259,9 +1256,7 @@ describe('LocationSharingService — pairing / profile wiring', () => {
     expect(snap.current?.sharingWith).toEqual([]);
     expect(mockHolder.mod.calls.cancelPair).toContain('sess-rejected');
     expect(mockHolder.mod.calls.forgetSession).not.toContain('peer-rejected');
-    expect(mockHolder.mod.calls.subscribe.some((s) => s.topic === 'topic-peer-rejected')).toBe(
-      false
-    );
+    expect(mockHolder.mod.calls.importDocTicket).not.toContain('peer-trail');
   });
 
   it('does not resurrect a rejected discovery from a stale completion or late profile', async () => {
@@ -1464,7 +1459,7 @@ describe('LocationSharingService — pairing / profile wiring', () => {
       expect(snap.current?.friends).toEqual([]);
       expect(snap.current?.sharingWith).toEqual([]);
       expect(snap.current?.pairing.discoveredFriend?.endpointId).toBe('peer-save');
-      expect(mockHolder.mod.calls.subscribe.some((s) => s.topic === 'topic-peer-save')).toBe(false);
+      expect(mockHolder.mod.calls.importDocTicket).not.toContain('peer-trail');
       await svc.acknowledgeDiscoveredFriend();
       expect(snap.current?.friends[0]?.endpointId).toBe('peer-save');
     } finally {
@@ -1504,9 +1499,7 @@ describe('LocationSharingService — pairing / profile wiring', () => {
       expect(snap.current?.friends).toEqual([]);
       expect(snap.current?.sharingWith).toEqual([]);
       expect((await persistence.loadPool(save.mock.calls[0][0]))?.friends).toEqual({});
-      expect(mockHolder.mod.calls.subscribe.some((s) => s.topic === 'topic-peer-write-race')).toBe(
-        false
-      );
+      expect(mockHolder.mod.calls.importDocTicket).not.toContain('peer-trail');
     } finally {
       release();
       save.mockRestore();
@@ -1761,7 +1754,7 @@ describe('LocationSharingService — pairing / profile wiring', () => {
     it('sends nothing while the reveal is still on screen', async () => {
       const { snap } = await pairAndWatch();
       expect(snap.current?.pairing?.discoveredFriend?.endpointId).toBe('cc330099');
-      expect(mockHolder.mod.calls.publishIntroduction).toHaveLength(0);
+      expect(mockHolder.mod.calls.publishIntroduction).toBe(0);
     });
 
     it('seals the last known position once the friend is acknowledged', async () => {
@@ -1769,11 +1762,12 @@ describe('LocationSharingService — pairing / profile wiring', () => {
       await svc.acknowledgeDiscoveredFriend();
       await svc.awaitFriendWiring();
 
-      expect(mockHolder.mod.calls.publishIntroduction).toHaveLength(1);
+      expect(mockHolder.mod.calls.publishIntroduction).toBe(1);
     });
 
-    // THE regression from 2026-09-17 00:50 UTC. `subscribeToFriend` was awaited by ACKNOWLEDGE,
-    // and it held the node-wide native lock across a dial to an internet-unreachable peer — so the
+    // THE regression from 2026-09-17 00:50 UTC. The friend's network wiring was awaited by
+    // ACKNOWLEDGE, and it held the node-wide native lock across a dial to an internet-unreachable
+    // peer — so the
     // acknowledge promise never settled, `pool.friend_added` was never recorded, the pairing poll
     // stopped within the second, and the phone needed a force-quit. The peer gave up and
     // unfriended a minute later.
@@ -1782,9 +1776,9 @@ describe('LocationSharingService — pairing / profile wiring', () => {
     // "keep this one" and the app having kept them.
     it('adopts the friend even when the network wiring never comes back', async () => {
       const { svc, snap } = await pairAndWatch();
-      // A subscribe that never settles — not one that rejects. A rejection would have been
+      // An import that never settles — not one that rejects. A rejection would have been
       // reported and moved on; it is the pending-forever case that wedged the app.
-      mockHolder.mod.subscribe = () => new Promise<string>(() => {});
+      mockHolder.mod.importDocTicket = () => new Promise<void>(() => {});
 
       await svc.acknowledgeDiscoveredFriend();
 
@@ -1802,7 +1796,7 @@ describe('LocationSharingService — pairing / profile wiring', () => {
       const { svc } = await pairAndWatch();
       await svc.rejectDiscoveredFriend();
 
-      expect(mockHolder.mod.calls.publishIntroduction).toHaveLength(0);
+      expect(mockHolder.mod.calls.publishIntroduction).toBe(0);
     });
 
     // A friend vanishing seconds after a successful pair is indistinguishable, in the data, from
@@ -1831,13 +1825,6 @@ describe('LocationSharingService — pairing / profile wiring', () => {
       expect(poolSpans('pool.friend_removed')[0]?.details).toMatchObject({
         attributes: expect.objectContaining({ reason: 'peer-reject', friends: 0 }),
       });
-    });
-
-    // A phone can be running an older binary than the JS bundle — the export simply is not there.
-    it('is silent on a binary that predates the native half', async () => {
-      const { svc } = await pairAndWatch();
-      delete (mockHolder.mod as { publishIntroduction?: unknown }).publishIntroduction;
-      expect(() => svc.acknowledgeDiscoveredFriend()).not.toThrow();
     });
   });
 
@@ -1945,17 +1932,22 @@ describe('LocationSharingService — pairing / profile wiring', () => {
     expect(await mockHolder.mod.bleAvailable()).toBe(true);
   });
 
-  it('resubscribes after a host restart, because every subscription died with the old node', async () => {
+  it('re-watches the replica and reopens friends after a host restart', async () => {
     const svc = newService();
     mockHolder.mod.caps = { ...mockHolder.mod.caps, available: false };
     mockHolder.mod.bleAvailableAfterRestart = true;
     mockHolder.mod.hostRestart = true;
     await svc.init('@me', 'mothman');
-    const subscribesBefore = mockHolder.mod.calls.subscribe.length;
+    await discover(svc, mockHolder.mod, 'peer-restart');
+    await svc.acknowledgeDiscoveredFriend();
+    await svc.awaitFriendWiring();
+    const watchesBefore = mockHolder.mod.calls.watchReplica;
+    const importsBefore = mockHolder.mod.calls.importDocTicket.length;
 
     await svc.ensureBleReady();
 
-    expect(mockHolder.mod.calls.subscribe.length).toBeGreaterThan(subscribesBefore);
+    expect(mockHolder.mod.calls.watchReplica).toBeGreaterThan(watchesBefore);
+    expect(mockHolder.mod.calls.importDocTicket.length).toBeGreaterThan(importsBefore);
   });
 
   it('does not rebuild BLE while another pairing session is active', async () => {

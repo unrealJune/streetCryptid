@@ -191,3 +191,13 @@ No other upstream source files were modified (src/transport/mod.rs gained the `s
     disconnects, link reservation and linger are re-applied.
   * src/transport/pipe.rs, src/transport/l2cap.rs — per-path traffic tallies
     for the `ble.pipe` span (2026-11-02, before the rebase).
+
+2026-11-03 — Make the symmetric-connect integration test's ordering explicit:
+
+  * tests/mesh_integration.rs — hold both mock connects until both initial
+    sends are queued, so the simultaneous-dial case cannot accidentally send
+    generation 0 after an inbound pipe has already advanced it. Read the
+    current snapshot generation as BleSender does, and add a deterministic
+    case where a peer receives before its first send. The old hardcoded
+    generation timed out depending on actor scheduling; the registry's
+    stale-generation rejection remains unchanged.

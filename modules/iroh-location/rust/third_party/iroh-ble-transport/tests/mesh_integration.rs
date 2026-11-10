@@ -19,7 +19,7 @@ use iroh_ble_transport::transport::{
     peer::{KEY_PREFIX_LEN, KeyPrefix, PeerCommand},
     registry::{Registry, SnapshotMaps},
     store::InMemoryPeerStore,
-    test_util::MockFabric,
+    test_util::{MockBleInterface, MockFabric},
     transport::L2capPolicy,
 };
 use tokio::sync::mpsc;
@@ -49,6 +49,7 @@ fn waker_from_channel(tx: mpsc::Sender<()>) -> std::task::Waker {
 
 struct TestNode {
     device_id: DeviceId,
+    iface: Arc<MockBleInterface>,
     inbox_tx: mpsc::Sender<PeerCommand>,
     incoming_rx: mpsc::Receiver<IncomingPacket>,
     snapshots: Arc<ArcSwap<SnapshotMaps>>,
@@ -63,7 +64,7 @@ fn spawn_node(fabric: &MockFabric, device_id: DeviceId, policy: L2capPolicy) -> 
 
     let routing_local = Arc::new(iroh_ble_transport::transport::routing::Routing::new());
     let driver = Driver::new(
-        iface,
+        iface.clone(),
         inbox_tx.clone(),
         incoming_tx,
         retransmits,
@@ -83,10 +84,31 @@ fn spawn_node(fabric: &MockFabric, device_id: DeviceId, policy: L2capPolicy) -> 
 
     TestNode {
         device_id,
+        iface,
         inbox_tx,
         incoming_rx,
         snapshots,
     }
+}
+
+async fn send_datagram(from: &TestNode, to: &TestNode, data: &'static [u8]) {
+    // Match BleSender::poll_send: an inbound pipe may already have advanced the generation.
+    let tx_gen = from
+        .snapshots
+        .load()
+        .peer_states
+        .get(&to.device_id)
+        .map_or(0, |peer| peer.tx_gen);
+    from.inbox_tx
+        .send(PeerCommand::SendDatagram {
+            device_id: to.device_id.clone(),
+            target_endpoint: None,
+            tx_gen,
+            datagram: Bytes::from_static(data),
+            waker: Waker::noop().clone(),
+        })
+        .await
+        .unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -159,15 +181,25 @@ async fn triangle_send_fans_out_to_both_peers() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn symmetric_connect_converges_to_one_channel() {
+    assert_bidirectional_exchange(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn first_send_after_inbound_uses_current_generation() {
+    assert_bidirectional_exchange(true).await;
+}
+
+async fn assert_bidirectional_exchange(reply_after_inbound: bool) {
     use iroh_ble_transport::transport::registry::PhaseKind;
 
     let fabric = MockFabric::new();
-    let a = spawn_node(&fabric, DeviceId::from("a"), L2capPolicy::Disabled);
-    let b = spawn_node(&fabric, DeviceId::from("b"), L2capPolicy::Disabled);
+    let mut a = spawn_node(&fabric, DeviceId::from("a"), L2capPolicy::Disabled);
+    let mut b = spawn_node(&fabric, DeviceId::from("b"), L2capPolicy::Disabled);
 
-    let (waker_tx, _waker_rx) = mpsc::channel::<()>(4);
-    let waker = waker_from_channel(waker_tx);
-
+    // A cold simultaneous dial must queue both sends before either connect can finish.
+    // Otherwise an inbound pipe can make a queued generation-0 send stale, just as on the wire.
+    a.iface.set_connect_held(!reply_after_inbound);
+    b.iface.set_connect_held(!reply_after_inbound);
     tokio::join!(
         async {
             a.inbox_tx
@@ -175,16 +207,6 @@ async fn symmetric_connect_converges_to_one_channel() {
                     prefix: prefix_for(0xB1),
                     device_id: b.device_id.clone(),
                     rssi: None,
-                })
-                .await
-                .unwrap();
-            a.inbox_tx
-                .send(PeerCommand::SendDatagram {
-                    device_id: b.device_id.clone(),
-                    target_endpoint: None,
-                    tx_gen: 0,
-                    datagram: Bytes::from_static(b"a-to-b"),
-                    waker: waker.clone(),
                 })
                 .await
                 .unwrap();
@@ -198,25 +220,27 @@ async fn symmetric_connect_converges_to_one_channel() {
                 })
                 .await
                 .unwrap();
-            b.inbox_tx
-                .send(PeerCommand::SendDatagram {
-                    device_id: a.device_id.clone(),
-                    target_endpoint: None,
-                    tx_gen: 0,
-                    datagram: Bytes::from_static(b"b-to-a"),
-                    waker: waker.clone(),
-                })
-                .await
-                .unwrap();
         }
     );
 
-    let mut a = a;
-    let mut b = b;
+    send_datagram(&a, &b, b"a-to-b").await;
+    if !reply_after_inbound {
+        send_datagram(&b, &a, b"b-to-a").await;
+        a.iface.set_connect_held(false);
+        b.iface.set_connect_held(false);
+    }
+
     let got_on_b = tokio::time::timeout(std::time::Duration::from_secs(10), b.incoming_rx.recv())
         .await
         .expect("B never received A's datagram")
         .expect("B incoming closed");
+    if reply_after_inbound {
+        assert!(
+            b.snapshots.load().peer_states[&a.device_id].tx_gen > 0,
+            "B must already have an inbound pipe before its first send"
+        );
+        send_datagram(&b, &a, b"b-to-a").await;
+    }
     let got_on_a = tokio::time::timeout(std::time::Duration::from_secs(10), a.incoming_rx.recv())
         .await
         .expect("A never received B's datagram")

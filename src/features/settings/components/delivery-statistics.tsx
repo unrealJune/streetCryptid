@@ -219,8 +219,7 @@ export function DeliveryStatisticsChart({ chrome }: { chrome: CryptidChrome }) {
       </ThemedText>
       <ThemedText type="small" themeColor="textSecondary">
         Unknown includes ambiguous or resumed transfers. Relay-assisted setup means relay handshake
-        traffic was observed; a direct connection alone cannot prove a relay was not involved. These
-        measurements are separate from the nearest-open-path badges.
+        traffic was observed; a direct connection alone cannot prove a relay was not involved.
       </ThemedText>
       <ThemedText type="small" themeColor="textSecondary">
         Only anonymous hourly totals and expiring duplicate-check tokens stay on this phone. No

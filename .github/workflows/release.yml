@@ -438,6 +438,26 @@ jobs:
           bash scripts/test-eas-ci-log-isolation.sh
           bash scripts/test-build-profile-isolation.sh
 
+      # Every store build since the SDK 58 merge died with "The runner has received a shutdown
+      # signal" 10-32 minutes in, while the arm64-only pull-request builds of the same commits
+      # passed. Three ABIs means three sets of CMake builds side by side under Gradle's parallel
+      # workers, on a 16 GB runner already giving Gradle 5 GB; the runner's own resource lines in the
+      # build step (scripts/build-profile.sh) say whether memory is what ran out. Swap on the
+      # ephemeral disk turns a short compile peak into slowness instead of a dead runner.
+      - name: Add swap for the three-ABI native build
+        run: |
+          set -euo pipefail
+          if ! mountpoint -q /mnt; then
+            echo "::notice::No ephemeral /mnt on this runner; building without extra swap."
+            exit 0
+          fi
+          sudo fallocate -l 12G /mnt/sc-build.swap
+          sudo chmod 600 /mnt/sc-build.swap
+          sudo mkswap /mnt/sc-build.swap > /dev/null
+          sudo swapon /mnt/sc-build.swap
+          swapon --show
+          free -m
+
       - name: Build the store bundle locally
         id: build
         env:

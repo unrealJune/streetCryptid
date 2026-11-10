@@ -2,6 +2,7 @@ import { StyleSheet, Text, View } from 'react-native';
 import { act, create, type ReactTestRenderer } from 'react-test-renderer';
 
 import { CryptidThemes } from '@/constants/cryptid-theme';
+import { CryptidAvatar } from '@/features/account/components/cryptid-avatar';
 import type { DistanceUnit } from '@/features/settings/core/distance-units';
 
 import { FriendsIsland, compactDistance, type MapRosterFriend } from '../friends-island';
@@ -45,6 +46,16 @@ const jackalope: MapRosterFriend = {
   locatable: false,
 };
 
+const noSignal: MapRosterFriend = {
+  ...mothman,
+  id: 'endpoint-no-signal',
+  handle: '@no-signal',
+  distanceM: 10,
+  status: 'NO SIGNAL FOR 2 DAYS',
+  online: false,
+  nearby: false,
+};
+
 describe('FriendsIsland', () => {
   let renderer: ReactTestRenderer;
 
@@ -85,6 +96,98 @@ describe('FriendsIsland', () => {
     // A friend who has gone dark stays in the roster rather than vanishing.
     expect(findText(renderer, '@nightowl')).toHaveLength(1);
     expect(findText(renderer, '1 NEARBY')).toHaveLength(1);
+  });
+
+  it('puts offline friends last, preserving the existing order within each group', () => {
+    const parked = {
+      ...mothman,
+      id: 'endpoint-parked',
+      handle: '@parked',
+      distanceM: 8_000_000,
+      status: 'PARKED HERE 8 HR',
+      nearby: false,
+    };
+    const friends = Object.freeze([noSignal, mothman, jackalope, parked]);
+    render(friends);
+
+    expect(rosterHandles(renderer)).toEqual(['@wanderer', '@parked', '@no-signal', '@nightowl']);
+    expect(friends).toEqual([noSignal, mothman, jackalope, parked]);
+    expect(findText(renderer, '1 NEARBY')).toHaveLength(1);
+  });
+
+  it('updates order and dimming when a friend loses and regains signal', () => {
+    render([noSignal, mothman]);
+
+    for (const online of [true, false]) {
+      const friend = { ...noSignal, online, status: online ? 'HERE NOW' : noSignal.status };
+      act(() => {
+        renderer.update(
+          <FriendsIsland
+            friends={[friend, mothman]}
+            minimized={false}
+            onOpenPairing={jest.fn()}
+            onOpenProfile={jest.fn()}
+            onSelect={jest.fn()}
+            theme={CryptidThemes.daybreak}
+          />
+        );
+      });
+
+      expect(rosterHandles(renderer)).toEqual(
+        online ? ['@no-signal', '@wanderer'] : ['@wanderer', '@no-signal']
+      );
+      const row = renderer.root.findByProps({
+        accessibilityLabel: `@no-signal. ${online ? '10 m. here now.' : 'offline. no signal for 2 days.'}`,
+      });
+      expect(StyleSheet.flatten(row.props.style({ pressed: false })).opacity).toBe(
+        online ? 1 : 0.58
+      );
+    }
+  });
+
+  it.each([noSignal, jackalope])(
+    'dims offline row content once, including the handle and status: $handle',
+    (friend) => {
+      render([friend]);
+
+      const row = renderer.root.findByProps({
+        accessibilityLabel: `${friend.handle}. offline. ${friend.status.toLowerCase()}.`,
+      });
+      expect(StyleSheet.flatten(row.props.style({ pressed: false })).opacity).toBe(0.58);
+      expect(renderer.root.findByType(CryptidAvatar).props.muted).not.toBe(true);
+      expect(StyleSheet.flatten(findText(renderer, friend.handle)[0].props.style).color).toBe(
+        friend.color
+      );
+    }
+  );
+
+  it.each(['HERE NOW', 'PARKED HERE 8 HR', 'MOVING, NO SIGNAL FIX'])(
+    'keeps reachable friends at full opacity: %s',
+    (status) => {
+      render([{ ...mothman, status }]);
+
+      const row = renderer.root.findByProps({
+        accessibilityLabel: `@wanderer. 320 m. ${status.toLowerCase()}.`,
+      });
+      expect(StyleSheet.flatten(row.props.style({ pressed: false })).opacity).toBe(1);
+      expect(StyleSheet.flatten(row.props.style({ pressed: true })).opacity).toBe(0.58);
+    }
+  );
+
+  it('keeps a no-signal friend selectable and manageable', () => {
+    const { onSelect, onOpenProfile } = render([noSignal]);
+    const row = renderer.root.findByProps({
+      accessibilityLabel: '@no-signal. offline. no signal for 2 days.',
+    });
+    expect(row.props.disabled).toBe(false);
+    act(() => row.props.onPress());
+    expect(onSelect).toHaveBeenCalledWith(noSignal.id);
+
+    const manage = renderer.root.findByProps({ accessibilityLabel: 'Manage @no-signal' });
+    expect(manage.props.disabled).toBeUndefined();
+    expect(StyleSheet.flatten(manage.props.style({ pressed: false })).opacity).toBe(1);
+    act(() => manage.props.onPress());
+    expect(onOpenProfile).toHaveBeenCalledWith(noSignal.id);
   });
 
   it('has no collapse control of its own — the drawer owns minimizing', () => {
@@ -322,4 +425,11 @@ function findText(renderer: ReactTestRenderer, value: string) {
       : [node.props.children];
     return children.join('') === value;
   });
+}
+
+function rosterHandles(renderer: ReactTestRenderer): string[] {
+  return renderer.root
+    .findAllByType(Text)
+    .map((node) => node.props.children)
+    .filter((text): text is string => typeof text === 'string' && text.startsWith('@'));
 }

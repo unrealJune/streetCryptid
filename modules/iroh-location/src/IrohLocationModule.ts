@@ -10,7 +10,6 @@ import type {
   BlePeer,
   BluetoothRadioState,
   BumpResolution,
-  NativeControlMsg,
   NativeRatchetEvent,
   NativeLocationFix,
   IsolationStatus,
@@ -22,14 +21,11 @@ import type {
   PairResult,
   PairStateRecord,
   ProfileView,
-  RatchetDropped,
   SasChallenge,
   TrailReplicaAuthor,
   TransportDiagnostics,
   DeliveryStatistics,
   TransportConfig,
-  NativePeerDial,
-  NativePeerPushReport,
 } from './IrohLocation.types';
 
 /**
@@ -47,37 +43,12 @@ export declare class IrohLocationNativeModule
   start(config?: TransportConfig): Promise<void>;
   shutdown(): Promise<void>;
   ticket(): Promise<string>;
-  deriveTopic(authorEndpointIdHex: string): Promise<string>;
-  subscribe(topicHex: string, bootstrapTickets: string[]): Promise<string>;
-  publish(
-    subscriptionId: string,
-    seq: number,
-    fix: NativeLocationFix,
-    recipientEndpointsHex: string[],
-    traceparent?: string | null
-  ): Promise<RatchetDropped[]>;
-  unsubscribe(subscriptionId: string): Promise<void>;
-  docsWrite(
-    subscriptionId: string,
-    seq: number,
-    fix: NativeLocationFix,
-    recipientEndpointsHex: string[],
-    traceparent?: string | null
-  ): Promise<RatchetDropped[]>;
   /**
-   * Advance and return this device's next publish sequence number.
-   *
-   * The counter is persisted natively **before** this resolves, because the value goes straight
-   * onto the wire as half of an `author/seq` docs key and two envelopes under one key is a payload
-   * lost to last-write-wins. It lives in native rather than JS because expo-task-manager hands
-   * every headless callback a fresh JS context: each got its own copy of the module, its own
-   * cached counter, and its own belief that it was the only writer. No JS-side guard can close
-   * that — the guard would be duplicated along with the thing it guards.
-   *
-   * OPTIONAL: absent on binaries built before this API, so callers must guard with
-   * `typeof mod.nextSeq === 'function'` and fall back to the old `state-store.ts` path.
+   * Emit `onReplicaChanged` whenever a friend's fix or null slot becomes readable in the replica.
+   * The module re-attaches it to every node generation. OPTIONAL: guard with `typeof`.
    */
-  nextSeq?(): Promise<number>;
+  watchReplica?(): void;
+  unwatchReplica?(): void;
   /**
    * Remember the transport settings natively, so a background wake can `start` without JS.
    *
@@ -87,13 +58,11 @@ export declare class IrohLocationNativeModule
    */
   setTransportConfig?(config?: TransportConfig): Promise<void>;
   /**
-   * Run one captured fix through the native gate → outbox → seal → send pipeline.
+   * Run one captured fix through the native gate → outbox → seal → own docs namespace → push.
    *
-   * The same call the background runtime makes, exposed so the mounted app can exercise the exact
-   * path a wake takes rather than a parallel implementation of it. OPTIONAL.
+   * The ONLY way a position leaves this device, and the same call the background runtimes make.
    */
-  ingestFix?(
-    subscriptionId: string,
+  ingestFix(
     fix: NativeLocationFix,
     battery: { level: number; charging: boolean; lowPower: boolean },
     intervalMs: number
@@ -123,10 +92,8 @@ export declare class IrohLocationNativeModule
    * `parked` is what the caller can prove about motion, and decides the envelope's `fix_state`:
    * `true` a confirmed stop, `false` a stop just left, `null` no evidence either way — which is
    * what the mounted timer has, and why it must not claim `parked` (see `publish::Motion`).
-   * OPTIONAL.
    */
-  heartbeatFix?(
-    subscriptionId: string,
+  heartbeatFix(
     battery: { level: number; charging: boolean; lowPower: boolean },
     intervalMs: number,
     parked: boolean | null
@@ -138,9 +105,9 @@ export declare class IrohLocationNativeModule
    * just paired cannot open anything published before they existed — their first sight of you is
    * otherwise the next scheduled publish, which on a parked iPhone is p90 92 minutes. Fills no
    * slot and does not move the cadence; see `DrainEngine::publish_introduction`. Resolves with
-   * `enqueued: 0` on a device that has never captured a position. OPTIONAL.
+   * `enqueued: 0` on a device that has never captured a position.
    */
-  publishIntroduction?(subscriptionId: string): Promise<NativeIngestOutcome>;
+  publishIntroduction(): Promise<NativeIngestOutcome>;
   /**
    * Re-program the native background runtime from the sampling policy's decision.
    *
@@ -304,9 +271,9 @@ export declare class IrohLocationNativeModule
    *
    * The companion to {@link setSharingRecipients}: that call says who to seal for, this one says
    * who to hand the sealed bytes to. A device that knows the first but not the second publishes
-   * into its own local replica and reports success — `docsWrite` is local-only, and iroh-docs
-   * broadcasts a local insert solely for namespaces the live engine has marked as syncing, which a
-   * publish-only context never does. Two phones spent 2026-08-31 in exactly that state.
+   * into its own local replica and reports success: a replica write reaches only the peers the
+   * docs live engine already holds a connection to for that namespace, and a process woken in the
+   * background for one fix usually holds none. Two phones spent 2026-08-31 in exactly that state.
    *
    * Persisted natively because the caller that most needs it is an OS location callback with no JS
    * context alive to supply it. Push on every pool change and every stash opt-in change, alongside
@@ -344,70 +311,35 @@ export declare class IrohLocationNativeModule
     lastPublishedAt: number | null;
     lastPushedAt: number | null;
   }>;
-  /** The last sequence number handed out, without advancing. OPTIONAL, as {@link nextSeq}. */
+  /**
+   * The last publish sequence number the native drain handed out, without advancing.
+   *
+   * The counter lives natively and only the drain advances it, durably, before the envelope it
+   * numbers is sealed (`seq_store.rs`): expo-task-manager hands every headless callback a fresh JS
+   * context, so a JS-side counter was duplicated along with every guard on it, and two envelopes
+   * under one `author/seq` key is a payload lost to last-write-wins. OPTIONAL: absent on binaries
+   * built before the native counter.
+   */
   currentSeq?(): Promise<number>;
   /**
    * Raise the native counter to at least `floor`; resolves to whether it moved.
    *
    * Monotone, so it is safe to call repeatedly: this is both the one-time migration of the old
    * SecureStore value and the recovery path for an unreadable counter file. Raising can only skip
-   * values, never re-issue them. OPTIONAL, as {@link nextSeq}.
+   * values, never re-issue them. OPTIONAL, as {@link currentSeq}.
    */
   seedSeq?(floor: number): Promise<boolean>;
   /**
-   * Broadcast a **null fix**: an envelope with an empty padded payload, wrapped for the friends we
-   * do NOT share position with (FORWARD-SECRECY.md §4.1). Same signing, AAD, and ciphertext length
-   * as {@link publish} — only the tick timestamp, no coordinates.
-   *
-   * Optional for compatibility with installed iOS binaries built before the null-fix API (Swift
-   * bindings regenerate only on macOS, `just bindgen-ios`). Guard with `typeof … === 'function'`.
-   */
-  publishNull?(
-    subscriptionId: string,
-    seq: number,
-    ts: number,
-    watcherEndpointsHex: string[],
-    traceparent?: string | null
-  ): Promise<RatchetDropped[]>;
-  /**
-   * Durable mirror of {@link publishNull}. Writes to a **separate** last-write-wins slot from the
-   * fix lane, because a tick's two envelopes are wrapped for disjoint recipient sets and would
-   * otherwise supersede each other. Optional for the same reason as {@link publishNull}.
-   */
-  docsWriteNull?(
-    subscriptionId: string,
-    seq: number,
-    ts: number,
-    watcherEndpointsHex: string[],
-    traceparent?: string | null
-  ): Promise<RatchetDropped[]>;
-  /**
-   * §4.6 recovery. Optional for the same reason as the other recent additions: iOS Swift bindings
-   * regenerate only on macOS, so an installed binary may predate these exports.
+   * §4.6 session health. The restart itself runs inside the native drain; these only report it.
    */
   isDesynced?(peerEndpointHex: string): Promise<boolean>;
   resyncCount?(peerEndpointHex: string): Promise<number>;
-  publishResync?(recipientRecvPubsHex: string[]): Promise<string>;
-  pollResync?(peerEndpointHex: string, peerRecvPubHex: string): Promise<boolean>;
-  clearResync?(): Promise<void>;
   forgetSession?(peerEndpointHex: string): Promise<void>;
   /** Optional; absent on binaries built before the pairing-session forget existed. */
   forgetPairSessions?(peerEndpointHex: string): Promise<number>;
   syncLatest(peerTickets: string[], traceparent?: string | null): Promise<void>;
-  /** Optional for compatibility with installed iOS binaries built before the push API. */
   /** Optional; absence means this binary clobbers the node on a second createNode. */
   nativeRuntimeAdoptsNode?(): Promise<boolean>;
-  pushTrail?(peerTickets: string[], traceparent?: string | null): Promise<void>;
-  /** Optional for compatibility with installed binaries built before the budgeted push API. */
-  pushTrailBudgeted?(
-    peers: NativePeerDial[],
-    traceparent?: string | null
-  ): Promise<NativePeerPushReport[]>;
-  uploadTrailContent?(baseUrl: string, psk: string | null): Promise<number>;
-  /** Optional for compatibility with installed iOS binaries built before the control API. */
-  docsWriteControl?(msg: NativeControlMsg, recipientsHex: string[]): Promise<void>;
-  /** Optional for compatibility with installed iOS binaries built before the control API. */
-  readControl?(author: string): Promise<NativeControlMsg[]>;
   readLatest(): Promise<NativeRatchetEvent[]>;
   pruneTrail(olderThanTs: number): Promise<void>;
   docTicket(): Promise<string>;

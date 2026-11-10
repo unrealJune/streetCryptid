@@ -891,339 +891,8 @@ public func FfiConverterTypeDeviceSecrets_lower(_ value: DeviceSecrets) -> UInt6
 
 
 /**
- * Foreign (Swift/Kotlin/JS) callback for inbound events on a subscription.
- */
-public protocol FixListener: AnyObject, Sendable {
-    
-    /**
-     * A fix we could decrypt (someone shared with us). `backfill` is `true` when the fix arrived
-     * via durable range-reconciliation (iroh-docs catch-up) rather than the live gossip path.
-     *
-     * `via` names the LAST HOP into this device — see [`transport_label`]. Gossip is epidemic and
-     * the stash is a mirror, so it never claims a direct link to the fix's author.
-     *
-     * On the live path it is the CLOSEST open path to the delivering neighbour rather than the
-     * carrier of this particular datagram, which iroh does not expose — see [`delivery_label`].
-     *
-     * `via_peer` is WHO performed that last hop: the hex EndpointId of the neighbour that handed
-     * us the datagram. It is reported verbatim, including when it equals `author` (a fix straight
-     * from its own author) — deciding what to call that device is the app's job, not this seam's.
-     */
-    func onFix(author: Data, seq: UInt64, fix: LocationFix, backfill: Bool, via: String, viaPeer: String?) 
-    
-    /**
-     * A fix we received but could NOT decrypt (not addressed to us / revoked). Useful
-     * for presence metrics without leaking content.
-     */
-    func onOpaque(author: Data, seq: UInt64) 
-    
-    /**
-     * Membership / connectivity status strings for the harness UI.
-     */
-    func onStatus(status: String) 
-    
-}
-/**
- * Foreign (Swift/Kotlin/JS) callback for inbound events on a subscription.
- */
-open class FixListenerImpl: FixListener, @unchecked Sendable {
-    fileprivate let handle: UInt64
-
-    /// Used to instantiate a [FFIObject] without an actual handle, for fakes in tests, mostly.
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-    public struct NoHandle {
-        public init() {}
-    }
-
-    // TODO: We'd like this to be `private` but for Swifty reasons,
-    // we can't implement `FfiConverter` without making this `required` and we can't
-    // make it `required` without making it `public`.
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-    required public init(unsafeFromHandle handle: UInt64) {
-        self.handle = handle
-    }
-
-    // This constructor can be used to instantiate a fake object.
-    // - Parameter noHandle: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
-    //
-    // - Warning:
-    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing handle the FFI lower functions will crash.
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-    public init(noHandle: NoHandle) {
-        self.handle = 0
-    }
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-    public func uniffiCloneHandle() -> UInt64 {
-        return try! rustCall { uniffi_iroh_location_fn_clone_fixlistener(self.handle, $0) }
-    }
-    // No primary constructor declared for this class.
-
-    deinit {
-        if handle == 0 {
-            // Mock objects have handle=0 don't try to free them
-            return
-        }
-
-        try! rustCall { uniffi_iroh_location_fn_free_fixlistener(handle, $0) }
-    }
-
-    
-
-    
-    /**
-     * A fix we could decrypt (someone shared with us). `backfill` is `true` when the fix arrived
-     * via durable range-reconciliation (iroh-docs catch-up) rather than the live gossip path.
-     *
-     * `via` names the LAST HOP into this device — see [`transport_label`]. Gossip is epidemic and
-     * the stash is a mirror, so it never claims a direct link to the fix's author.
-     *
-     * On the live path it is the CLOSEST open path to the delivering neighbour rather than the
-     * carrier of this particular datagram, which iroh does not expose — see [`delivery_label`].
-     *
-     * `via_peer` is WHO performed that last hop: the hex EndpointId of the neighbour that handed
-     * us the datagram. It is reported verbatim, including when it equals `author` (a fix straight
-     * from its own author) — deciding what to call that device is the app's job, not this seam's.
-     */
-open func onFix(author: Data, seq: UInt64, fix: LocationFix, backfill: Bool, via: String, viaPeer: String?)  {try! rustCall() {
-    uniffi_iroh_location_fn_method_fixlistener_on_fix(
-            self.uniffiCloneHandle(),
-        FfiConverterData.lower(author),
-        FfiConverterUInt64.lower(seq),
-        FfiConverterTypeLocationFix_lower(fix),
-        FfiConverterBool.lower(backfill),
-        FfiConverterString.lower(via),
-        FfiConverterOptionString.lower(viaPeer),$0
-    )
-}
-}
-    
-    /**
-     * A fix we received but could NOT decrypt (not addressed to us / revoked). Useful
-     * for presence metrics without leaking content.
-     */
-open func onOpaque(author: Data, seq: UInt64)  {try! rustCall() {
-    uniffi_iroh_location_fn_method_fixlistener_on_opaque(
-            self.uniffiCloneHandle(),
-        FfiConverterData.lower(author),
-        FfiConverterUInt64.lower(seq),$0
-    )
-}
-}
-    
-    /**
-     * Membership / connectivity status strings for the harness UI.
-     */
-open func onStatus(status: String)  {try! rustCall() {
-    uniffi_iroh_location_fn_method_fixlistener_on_status(
-            self.uniffiCloneHandle(),
-        FfiConverterString.lower(status),$0
-    )
-}
-}
-    
-
-    
-}
-
-
-
-// Put the implementation in a struct so we don't pollute the top-level namespace
-fileprivate struct UniffiCallbackInterfaceFixListener {
-
-    // Create the VTable using a series of closures.
-    // Swift automatically converts these into C callback functions.
-    //
-    // Store the vtable directly.
-    static let vtable: UniffiVTableCallbackInterfaceFixListener = UniffiVTableCallbackInterfaceFixListener(
-        uniffiFree: { (uniffiHandle: UInt64) -> () in
-            do {
-                try FfiConverterTypeFixListener.handleMap.remove(handle: uniffiHandle)
-            } catch {
-                print("Uniffi callback interface FixListener: handle missing in uniffiFree")
-            }
-        },
-        uniffiClone: { (uniffiHandle: UInt64) -> UInt64 in
-            do {
-                return try FfiConverterTypeFixListener.handleMap.clone(handle: uniffiHandle)
-            } catch {
-                fatalError("Uniffi callback interface FixListener: handle missing in uniffiClone")
-            }
-        },
-        onFix: { (
-            uniffiHandle: UInt64,
-            author: RustBuffer,
-            seq: UInt64,
-            fix: RustBuffer,
-            backfill: Int8,
-            via: RustBuffer,
-            viaPeer: RustBuffer,
-            uniffiOutReturn: UnsafeMutableRawPointer,
-            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
-        ) in
-            let makeCall = {
-                () throws -> () in
-                guard let uniffiObj = try? FfiConverterTypeFixListener.handleMap.get(handle: uniffiHandle) else {
-                    throw UniffiInternalError.unexpectedStaleHandle
-                }
-                return uniffiObj.onFix(
-                     author: try FfiConverterData.lift(author),
-                     seq: try FfiConverterUInt64.lift(seq),
-                     fix: try FfiConverterTypeLocationFix_lift(fix),
-                     backfill: try FfiConverterBool.lift(backfill),
-                     via: try FfiConverterString.lift(via),
-                     viaPeer: try FfiConverterOptionString.lift(viaPeer)
-                )
-            }
-
-            
-            let writeReturn = { () }
-            uniffiTraitInterfaceCall(
-                callStatus: uniffiCallStatus,
-                makeCall: makeCall,
-                writeReturn: writeReturn
-            )
-        },
-        onOpaque: { (
-            uniffiHandle: UInt64,
-            author: RustBuffer,
-            seq: UInt64,
-            uniffiOutReturn: UnsafeMutableRawPointer,
-            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
-        ) in
-            let makeCall = {
-                () throws -> () in
-                guard let uniffiObj = try? FfiConverterTypeFixListener.handleMap.get(handle: uniffiHandle) else {
-                    throw UniffiInternalError.unexpectedStaleHandle
-                }
-                return uniffiObj.onOpaque(
-                     author: try FfiConverterData.lift(author),
-                     seq: try FfiConverterUInt64.lift(seq)
-                )
-            }
-
-            
-            let writeReturn = { () }
-            uniffiTraitInterfaceCall(
-                callStatus: uniffiCallStatus,
-                makeCall: makeCall,
-                writeReturn: writeReturn
-            )
-        },
-        onStatus: { (
-            uniffiHandle: UInt64,
-            status: RustBuffer,
-            uniffiOutReturn: UnsafeMutableRawPointer,
-            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
-        ) in
-            let makeCall = {
-                () throws -> () in
-                guard let uniffiObj = try? FfiConverterTypeFixListener.handleMap.get(handle: uniffiHandle) else {
-                    throw UniffiInternalError.unexpectedStaleHandle
-                }
-                return uniffiObj.onStatus(
-                     status: try FfiConverterString.lift(status)
-                )
-            }
-
-            
-            let writeReturn = { () }
-            uniffiTraitInterfaceCall(
-                callStatus: uniffiCallStatus,
-                makeCall: makeCall,
-                writeReturn: writeReturn
-            )
-        }
-    )
-
-    // Rust stores this pointer for future callback invocations, so it must live
-    // for the process lifetime (not just for the init function call).
-    //
-    // `nonisolated(unsafe)` is needed under Swift 6 strict concurrency.
-    // This is safe because the pointee is initialized once during static init
-    // and never mutated by either side of the FFI.  Its fields are C function pointers.
-    nonisolated(unsafe) static let vtablePtr: UnsafePointer<UniffiVTableCallbackInterfaceFixListener> = {
-        let ptr = UnsafeMutablePointer<UniffiVTableCallbackInterfaceFixListener>.allocate(capacity: 1)
-        ptr.initialize(to: vtable)
-        return UnsafePointer(ptr)
-    }()
-}
-
-private func uniffiCallbackInitFixListener() {
-    uniffi_iroh_location_fn_init_callback_vtable_fixlistener(UniffiCallbackInterfaceFixListener.vtablePtr)
-}
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public struct FfiConverterTypeFixListener: FfiConverter {
-    fileprivate static let handleMap = UniffiHandleMap<FixListener>()
-
-    typealias FfiType = UInt64
-    typealias SwiftType = FixListener
-
-    public static func lift(_ handle: UInt64) throws -> FixListener {
-        if ((handle & 1) == 0) {
-            // Rust-generated handle, construct a new class that uses the handle to implement the
-            // interface
-            return FixListenerImpl(unsafeFromHandle: handle)
-        } else {
-            // Swift-generated handle, get the object from the handle map
-            return try handleMap.remove(handle: handle)
-        }
-    }
-
-    public static func lower(_ value: FixListener) -> UInt64 {
-         if let rustImpl = value as? FixListenerImpl {
-             // Rust-implemented object.  Clone the handle and return it
-            return rustImpl.uniffiCloneHandle()
-         } else {
-            // Swift object, generate a new vtable handle and return that.
-            return handleMap.insert(obj: value)
-         }
-    }
-
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FixListener {
-        let handle: UInt64 = try readInt(&buf)
-        return try lift(handle)
-    }
-
-    public static func write(_ value: FixListener, into buf: inout [UInt8]) {
-        writeInt(&buf, lower(value))
-    }
-}
-
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFixListener_lift(_ handle: UInt64) throws -> FixListener {
-    return try FfiConverterTypeFixListener.lift(handle)
-}
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFixListener_lower(_ value: FixListener) -> UInt64 {
-    return FfiConverterTypeFixListener.lower(value)
-}
-
-
-
-
-
-
-/**
  * The device node: holds identity + receiving keys and, once started, the iroh
- * endpoint + gossip router.
+ * endpoint and its docs/blobs router.
  */
 public protocol LocationNodeProtocol: AnyObject, Sendable {
     
@@ -1275,12 +944,6 @@ public protocol LocationNodeProtocol: AnyObject, Sendable {
     func clearOutbox() async throws 
     
     /**
-     * Retained for binding compatibility. Nothing about a restart is held in memory any more,
-     * so there is nothing to clear.
-     */
-    func clearResync() async 
-    
-    /**
      * Complete the bootstrap with the peer's ephemeral public half, installing the session.
      *
      * `RK₀` is derived from the ephemeral-ephemeral DH and a transcript over both endpoint ids
@@ -1325,88 +988,6 @@ public protocol LocationNodeProtocol: AnyObject, Sendable {
      * swarm-join half of a grant). Goes in the contact card.
      */
     func docTicket() async throws  -> String
-    
-    /**
-     * Seal `fix` for `recipients` and write it to OUR docs namespace under key `author/seq`,
-     * mirroring the gossip broadcast. Produces the identical sealed bytes as
-     * [`Subscription::publish`], so per-recipient revocation carries over. `_subscription_id`
-     * ties the write to our own topic/namespace; a node owns a single trail namespace, so it is
-     * accepted for API parity with the TS contract but not otherwise needed.
-     */
-    func docsWrite(subscriptionId: String, seq: UInt64, fix: LocationFix, recipients: [Data]) async throws 
-    
-    /**
-     * Seal `msg` for `recipients` and write it to our own namespace's control slot
-     * (ARCHITECTURE §9c). Overwrites any previous control message from us — one slot per author,
-     * latest-wins — so a cancel genuinely supersedes the request it withdraws.
-     *
-     * `recipients` is normally a single friend's receiving key: a live request addressed to one
-     * person should be readable by exactly that person. Passing an empty list writes an envelope
-     * nobody can open, which is a no-op in practice but not an error here.
-     *
-     * The envelope's `seq` is fixed at 0 — control entries have no history for it to order, and
-     * replay identity lives in the payload's `nonce`/`ts` instead.
-     */
-    func docsWriteControl(msg: ControlMsg, recipients: [Data]) async throws 
-    
-    func docsWriteInner(subscriptionId: String, seq: UInt64, fix: LocationFix?, ts: UInt64, recipients: [Data], traceparent: String?) async throws 
-    
-    /**
-     * Seal a **null fix** for `recipients` and write it to our namespace's null slot
-     * (FORWARD-SECRECY §4.1) — the watcher half of the symmetric lanes.
-     *
-     * A null fix is an ordinary envelope carrying an empty padded payload: same signature, same
-     * AAD binding, same `seq` monotonicity, same ciphertext length as a real fix. It exists so a
-     * friend we do not share position with still receives our envelopes on cadence, which is
-     * what carries our ratchet contribution once envelope v3 lands (§4.2). `ts` is the tick's
-     * timestamp — it rides in the signed header exactly as a real fix's does.
-     *
-     * Written to a separate LWW key from the fix lane so the two envelopes a tick produces,
-     * wrapped for disjoint recipient sets, do not supersede each other (see `docs::encode_nul_key`).
-     */
-    func docsWriteNull(subscriptionId: String, seq: UInt64, ts: UInt64, recipients: [Data]) async throws 
-    
-    /**
-     * Seal a **ratcheted null fix** for `watcher_endpoints` and write it to the null slot.
-     *
-     * The v3 counterpart of [`Self::docs_write_null`], and the half of §4.1 that makes the
-     * symmetric-lane argument true rather than aspirational. A watcher who only ever *reads* our
-     * position still publishes on cadence, and once that envelope is ratcheted it carries their
-     * ratchet contribution — which is what advances our `peer_advanced_ms` for them and stops
-     * `next_wraps` dropping them as `Lapsed` after 24 h. On the v2 null lane the contribution did
-     * not exist, so every one-directional watch edge expired after a day.
-     */
-    func docsWriteNullRatcheted(subscriptionId: String, seq: UInt64, ts: UInt64, watcherEndpoints: [String]) async throws  -> [String]
-    
-    func docsWriteNullRatchetedTraced(subscriptionId: String, seq: UInt64, ts: UInt64, watcherEndpoints: [String], traceparent: String) async throws  -> [String]
-    
-    func docsWriteNullTraced(subscriptionId: String, seq: UInt64, ts: UInt64, recipients: [Data], traceparent: String) async throws 
-    
-    /**
-     * Seal `fix` under **envelope v3** for each recipient's ratchet session and write it to our
-     * durable namespace (FORWARD-SECRECY §4.7).
-     *
-     * Recipients are **endpoint ids**, not receiving keys: a v3 wrap is addressed by session,
-     * and sessions are keyed by who the peer is rather than by a long-term key of theirs. That
-     * difference is the point — the long-term receiving key is exactly what a seized device
-     * still holds.
-     *
-     * Returns the recipients that were left out, as `endpoint_hex:reason` — lapsed (§4.5),
-     * un-bootstrapped, or unpersistable. A short wrap list is never silent.
-     */
-    func docsWriteRatcheted(subscriptionId: String, seq: UInt64, fix: LocationFix, recipientEndpoints: [String]) async throws  -> [String]
-    
-    /**
-     * Both ratcheted durable lanes. `fix.is_none()` is the null lane, which differs only in
-     * carrying an empty padded payload and landing in a separate LWW slot — the two envelopes a
-     * tick produces are wrapped for disjoint recipient sets, so sharing a slot would have them
-     * supersede each other.
-     */
-    func docsWriteRatchetedInner(subscriptionId: String, seq: UInt64, fix: LocationFix?, nullTs: UInt64, recipientEndpoints: [String], traceparent: String?) async throws  -> [String]
-    
-    func docsWriteRatchetedTraced(subscriptionId: String, seq: UInt64, fix: LocationFix, recipientEndpoints: [String], traceparent: String) async throws  -> [String]
-    
-    func docsWriteTraced(subscriptionId: String, seq: UInt64, fix: LocationFix, recipients: [Data], traceparent: String) async throws 
     
     /**
      * This device's EndpointId (== envelope `author`).
@@ -1455,6 +1036,19 @@ public protocol LocationNodeProtocol: AnyObject, Sendable {
     func hasSession(peerEndpointHex: String) async throws  -> Bool
     
     /**
+     * Publish the slots that have come due without a new fix, reusing the last known position.
+     *
+     * `ingest_fix` only runs when the OS delivers a location, and on a stationary phone that can
+     * be never; the cadence still has to be uniform, because it is the one property of a sealed
+     * envelope the stash can read.
+     *
+     * `parked` is what the caller can prove about motion: `Some(true)` a confirmed stop,
+     * `Some(false)` a stop just left, `None` a clock with no evidence either way (the JS timer).
+     * Only the first stamps `parked` — see [`publish::Motion`] for the day it was unconditional.
+     */
+    func heartbeatFix(battery: BatteryState, intervalMs: UInt64, nowMs: UInt64, parked: Bool?) async throws  -> IngestOutcome
+    
+    /**
      * The ed25519 identity secret — persist in the OS secure store.
      */
     func identitySecret()  -> Data
@@ -1474,6 +1068,17 @@ public protocol LocationNodeProtocol: AnyObject, Sendable {
      * accepted updates surface via [`poll_profile_events`](Self::poll_profile_events).
      */
     func importProfileTicket(ticket: String) async throws 
+    
+    /**
+     * Take one captured location all the way to the wire, with no JS involved.
+     *
+     * This is the whole point of the native drain path. `expo-task-manager` spools location events
+     * when it cannot start a headless JS context, and on 2026-08-29 a Pixel spooled eleven and a
+     * half hours of them — 446 real fixes, captured by a perfectly healthy foreground service,
+     * with nothing on the JS side alive to publish them. Everything below runs in the OS callback
+     * that delivered the fix.
+     */
+    func ingestFix(fix: LocationFix, battery: BatteryState, intervalMs: UInt64, nowMs: UInt64) async throws  -> IngestOutcome
     
     /**
      * Begin an invite-based pair from a decoded [`PairInvite`]. Returns the session id.
@@ -1539,34 +1144,9 @@ public protocol LocationNodeProtocol: AnyObject, Sendable {
     func networkChanged() async 
     
     /**
-     * Advance and return this device's next publish sequence number.
-     *
-     * Durable before it returns: the caller puts the value straight onto the wire as half of an
-     * `author/seq` docs key, and two envelopes under one key is a payload silently lost to
-     * last-write-wins. See `seq_store.rs` for why the counter had to leave JS to be safe — in
-     * short, every headless callback gets a fresh JS context and so got its own copy of it.
-     */
-    func nextSeq() async throws  -> UInt64
-    
-    /**
      * How many captured fixes are waiting to be sealed.
      */
     func outboxPending() async throws  -> UInt32
-    
-    /**
-     * The single subscription to this node's own topic: create it, or adopt the live one.
-     *
-     * Adopting joins `bootstrap`'s peers on the existing subscription and, when `listener` is
-     * given, makes it the one events go to. `None` keeps whoever is listening — the background
-     * runtime's call, which must never silence a mounted app — and creates the subscription
-     * silent if there is none yet. A subscription whose receive loop has ended is replaced rather
-     * than handed out.
-     *
-     * Removing a friend therefore does not drop them from this topic's swarm until the node next
-     * restarts. That costs nothing: everything published here is sealed per recipient, and they
-     * are no longer one.
-     */
-    func ownSubscription(bootstrap: [String], listener: FixListener?) async throws  -> Subscription
     
     /**
      * The completed-pair result for a session, enriched with the peer's verified latest profile
@@ -1602,12 +1182,6 @@ public protocol LocationNodeProtocol: AnyObject, Sendable {
     func pollProfileEvents() async  -> [ProfileView]
     
     /**
-     * Run one recovery pass for this peer alone. Returns whether a session was installed —
-     * restarted (leader) or adopted (follower).
-     */
-    func pollResync(peerEndpointHex: String, peerRecvPubHex: String) async throws  -> Bool
-    
-    /**
      * A shareable **read**-ticket for our profile namespace. Also exchanged automatically inside
      * a pairing Accept, so friends usually don't need to import it by hand.
      */
@@ -1619,20 +1193,23 @@ public protocol LocationNodeProtocol: AnyObject, Sendable {
     func pruneTrail(olderThanTs: UInt64) async throws 
     
     /**
+     * Seal the last known position once, for a recipient set that has just grown.
+     *
+     * Called when a pairing is accepted. A sealed envelope is readable only by the recipients it
+     * was sealed for, so a new friend cannot open anything published before they existed and
+     * their first sight of you is otherwise your next scheduled publish — p90 92 minutes on a
+     * parked iPhone. See [`publish::DrainEngine::publish_introduction`] for what it deliberately
+     * does NOT touch (the slot cursor, the parked/live stamp, the battery suspension).
+     */
+    func publishIntroduction(nowMs: UInt64) async throws  -> IngestOutcome
+    
+    /**
      * Sign + publish our profile to the dedicated profile namespace, returning the new epoch.
      * The epoch is monotonic and wall-clock-anchored so it keeps strictly increasing across node
      * restarts (the in-memory epoch counter resets, but `now_ms()` does not), which the readers'
      * rollback guard requires.
      */
     func publishProfile(handle: String, cryptidName: String, sigil: String, color: String) async throws  -> UInt64
-    
-    /**
-     * Publish our control record (§4.6) now, sealed to `recipient_recv_pubs`, whether or not it
-     * changed. Returns our newest prekey's public half as hex.
-     *
-     * The native drain publishes it on its own; this is for a caller that wants it out now.
-     */
-    func publishResync(recipientRecvPubs: [String]) async throws  -> String
     
     /**
      * When this device last accepted a fix, published, and pushed — as the native drain saw it.
@@ -1656,74 +1233,12 @@ public protocol LocationNodeProtocol: AnyObject, Sendable {
     func pullLatest(peerTickets: [String], budgetMs: UInt64?, traceparent: String?) async throws  -> PullReport
     
     /**
-     * Push our own trail namespace to `peer_tickets` — the trail stash when it is configured and
-     * opted into, and **every pool member** — and wait for the exchange to finish. **This is what
-     * actually gets a published fix off the phone.**
-     *
-     * [`Self::docs_write`] only writes the local replica; iroh-docs broadcasts a local insert
-     * solely for namespaces the live engine has marked as syncing, which happens on `start_sync`
-     * and nowhere else. A short-lived headless publish context never called anything that did
-     * that, so its envelopes never reached the stash and an offline friend had nothing to
-     * reconcile from. Call this after draining a batch.
-     *
-     * The peer list is the send-side counterpart of [`Self::sync_latest`], and it is what makes
-     * ARCHITECTURE.md §1.3/§6's pool relay the normal flow rather than luck. An earlier revision
-     * took a single `Option<String>` that only ever carried the stash, so an author's published
-     * fix was broadcast over docs to the stash and to nobody else: a pool member gained the
-     * author's entries only if it happened to dial the author itself during a reconciliation
-     * window, and with the stash off there was no durable copy anywhere. Pushing to the pool
-     * means a friend with the app open holds the author's entries **as they are published**, and
-     * can hand them on the moment the author goes dark.
-     *
-     * Repeating it is cheap: `start_sync` is a no-op once a namespace is syncing, so the
-     * steady-state cost is one connection per member for the process's lifetime.
-     *
-     * Unparseable tickets are skipped rather than failing the push — one malformed friend card
-     * must not stop delivery to everyone else — but they are counted on the span.
-     *
-     * Best-effort by design: a failure means offline delivery is degraded for those fixes, not
-     * that the live gossip path or a later [`Self::sync_latest`] is broken.
-     */
-    func pushTrail(peerTickets: [String], traceparent: String?) async throws 
-    
-    /**
-     * Push our trail to each peer with **its own deadline**, and report what each one did.
-     *
-     * The send-side counterpart of the reachability model in
-     * `src/features/social/core/peer-reachability.ts`. JS decides the budgets — it is where
-     * presence lives and where the decision is testable — and this returns the per-peer outcomes
-     * it learns from.
-     *
-     * A budget of zero means "do not wait for this peer". The data is still handed to the live
-     * engine, so the peer reconciles on its own whenever it next wakes; we simply stop holding a
-     * background wake open for a phone we expect to be asleep. That single change is where the
-     * saving is: measured over 7 days, 74% of pushes burned the full 30s budget waiting on peers
-     * that never reported at all, at a cost of 41.7 hours a week.
-     */
-    func pushTrailBudgeted(peers: [PeerDial], traceparent: String?) async throws  -> [PeerPushReport]
-    
-    /**
-     * Read `author`'s current control message, if we can open it. Returns an empty vec when
-     * there is none, when it is addressed to someone else, or when the content has not
-     * replicated locally yet — all indistinguishable and all "nothing to act on".
-     *
-     * Callers MUST still check freshness and dedupe by `nonce`; see [`ControlMsg`].
-     */
-    func readControl(author: Data) async throws  -> [ControlMsg]
-    
-    /**
-     * Read the latest decryptable fix per author (friends who share with us) from the local
-     * replica. One entry per author — the durable path holds no history (FORWARD-SECRECY §4.4).
-     */
-    func readLatest() async throws  -> [IncomingFix]
-    
-    /**
      * Read the latest **ratcheted** fix per author from the local replica.
      *
      * Signature first, then session state — `verify_v3` returns a type that the session manager
      * is the only consumer of, so no unauthenticated byte can reach the ratchet (§4.2).
-     * Envelopes we cannot open are skipped exactly as v2's are: addressed to someone else,
-     * replayed from the archive, or beyond the acceptance window are all "nothing to surface".
+     * Envelopes we cannot open are skipped: addressed to someone else, replayed from the archive,
+     * or beyond the acceptance window are all "nothing to surface".
      */
     func readLatestRatcheted() async throws  -> [IncomingFix]
     
@@ -1877,7 +1392,7 @@ public protocol LocationNodeProtocol: AnyObject, Sendable {
     func shutdown() async throws 
     
     /**
-     * Bind the iroh endpoint + spawn the gossip router. Idempotent.
+     * Bind the iroh endpoint + spawn the docs/blobs router. Idempotent.
      */
     func start(relayUrls: [String], relayAuthToken: String, relayEnabled: Bool, ipEnabled: Bool, bleEnabled: Bool) async throws 
     
@@ -1898,22 +1413,9 @@ public protocol LocationNodeProtocol: AnyObject, Sendable {
     func submitPairChoice(sessionId: Data, chosenIndex: UInt32) async throws 
     
     /**
-     * Subscribe to a topic and start forwarding decrypted fixes to `listener`.
-     *
-     * `bootstrap` are peer EndpointTickets (e.g. from friends' contact cards) that are
-     * already in the topic. Returns a handle used to publish our own fixes.
-     *
-     * The node's OWN topic is the exception: it is routed to [`Self::own_subscription`], so a
-     * second caller adopts the live subscription (joining its bootstrap peers and taking over its
-     * events) instead of opening a second receive loop. Every other topic gets a fresh
-     * subscription per call, as it always has.
-     */
-    func subscribe(topic: Data, bootstrap: [String], listener: FixListener) async throws  -> Subscription
-    
-    /**
      * Reconcile our own + every imported friend namespace so each author's **current** fix is
      * exchanged (FORWARD-SECRECY §4.4 — the durable path is last-write-wins; there is no missed
-     * history to recover). Read the results with [`Self::read_latest`].
+     * history to recover). Read the results with [`Self::read_latest_ratcheted_events`].
      *
      * `peer_tickets` is every endpoint worth dialing for this pass: the trail stash when it is
      * configured and opted into, and **every pool member**. That list is the whole mechanism
@@ -1950,10 +1452,9 @@ public protocol LocationNodeProtocol: AnyObject, Sendable {
      * What this device's durable replica can **serve**, one record per author present in it.
      *
      * The diagnostic that distinguishes "the relay had nothing to give" from "the transfer
-     * failed" — a distinction `friend_latest` structurally cannot make, because the live gossip
-     * lane writes it too and a fix that arrived over gossip never enters the author's namespace
-     * (a pool member holds a READ ticket). Reconciliation serves out of the replica, so this is
-     * the only honest answer to "can this device relay author X".
+     * failed" — a distinction `friend_latest` cannot make, because it records what the app
+     * surfaced and keeps it after the replica moves on. Reconciliation serves out of the replica,
+     * so this is the only honest answer to "can this device relay author X".
      *
      * No decryption and no location data in the result — presence, not payload — so it is
      * ungated, like [`Self::transport_diagnostics`]. `NamespaceId` is not an FFI type, so the
@@ -1968,19 +1469,21 @@ public protocol LocationNodeProtocol: AnyObject, Sendable {
     func transportDiagnostics(peerEndpointIds: [Data]) async throws  -> TransportDiagnostics
     
     /**
-     * Explicitly hand the current opaque trail slots to the stash and wait for HTTP receipts.
-     *
-     * Returns the number of slots the stash **accepted**. The other outcomes are on the
-     * `trail.content.upload` span rather than in the return value, deliberately: the UniFFI
-     * signature stays `u64` so a phone running an older binary than the JS bundle keeps working,
-     * and `untracked` is a number you want to watch over time rather than branch on.
+     * Stop announcing friend-replica changes. Replication carries on regardless.
      */
-    func uploadTrailContent(baseUrl: String, psk: String?) async throws  -> UInt64
+    func unwatchReplica() 
+    
+    /**
+     * Announce friend-replica changes to `listener` from now on, replacing any listener before
+     * it. Per node: after the [`host`] rebuilds one (`restart`, `heal`, a replacement), attach to
+     * the new generation again. See [`ReplicaListener`].
+     */
+    func watchReplica(listener: ReplicaListener) 
     
 }
 /**
  * The device node: holds identity + receiving keys and, once started, the iroh
- * endpoint + gossip router.
+ * endpoint and its docs/blobs router.
  */
 open class LocationNode: LocationNodeProtocol, @unchecked Sendable {
     fileprivate let handle: UInt64
@@ -2240,28 +1743,6 @@ open func clearOutbox()async throws   {
 }
     
     /**
-     * Retained for binding compatibility. Nothing about a restart is held in memory any more,
-     * so there is nothing to clear.
-     */
-open func clearResync()async   {
-    return
-        try!  await uniffiRustCallAsync(
-            rustFutureFunc: {
-                uniffi_iroh_location_fn_method_locationnode_clear_resync(
-                    self.uniffiCloneHandle()
-                    
-                )
-            },
-            pollFunc: ffi_iroh_location_rust_future_poll_void,
-            completeFunc: ffi_iroh_location_rust_future_complete_void,
-            freeFunc: ffi_iroh_location_rust_future_free_void,
-            liftFunc: { $0 },
-            errorHandler: nil
-            
-        )
-}
-    
-    /**
      * Complete the bootstrap with the peer's ephemeral public half, installing the session.
      *
      * `RK₀` is derived from the ephemeral-ephemeral DH and a transcript over both endpoint ids
@@ -2413,253 +1894,6 @@ open func docTicket()async throws  -> String  {
 }
     
     /**
-     * Seal `fix` for `recipients` and write it to OUR docs namespace under key `author/seq`,
-     * mirroring the gossip broadcast. Produces the identical sealed bytes as
-     * [`Subscription::publish`], so per-recipient revocation carries over. `_subscription_id`
-     * ties the write to our own topic/namespace; a node owns a single trail namespace, so it is
-     * accepted for API parity with the TS contract but not otherwise needed.
-     */
-open func docsWrite(subscriptionId: String, seq: UInt64, fix: LocationFix, recipients: [Data])async throws   {
-    return
-        try  await uniffiRustCallAsync(
-            rustFutureFunc: {
-                uniffi_iroh_location_fn_method_locationnode_docs_write(
-                    self.uniffiCloneHandle(),
-                    FfiConverterString.lower(subscriptionId),FfiConverterUInt64.lower(seq),FfiConverterTypeLocationFix_lower(fix),FfiConverterSequenceData.lower(recipients)
-                )
-            },
-            pollFunc: ffi_iroh_location_rust_future_poll_void,
-            completeFunc: ffi_iroh_location_rust_future_complete_void,
-            freeFunc: ffi_iroh_location_rust_future_free_void,
-            liftFunc: { $0 },
-            errorHandler: FfiConverterTypeLocationError_lift
-        )
-}
-    
-    /**
-     * Seal `msg` for `recipients` and write it to our own namespace's control slot
-     * (ARCHITECTURE §9c). Overwrites any previous control message from us — one slot per author,
-     * latest-wins — so a cancel genuinely supersedes the request it withdraws.
-     *
-     * `recipients` is normally a single friend's receiving key: a live request addressed to one
-     * person should be readable by exactly that person. Passing an empty list writes an envelope
-     * nobody can open, which is a no-op in practice but not an error here.
-     *
-     * The envelope's `seq` is fixed at 0 — control entries have no history for it to order, and
-     * replay identity lives in the payload's `nonce`/`ts` instead.
-     */
-open func docsWriteControl(msg: ControlMsg, recipients: [Data])async throws   {
-    return
-        try  await uniffiRustCallAsync(
-            rustFutureFunc: {
-                uniffi_iroh_location_fn_method_locationnode_docs_write_control(
-                    self.uniffiCloneHandle(),
-                    FfiConverterTypeControlMsg_lower(msg),FfiConverterSequenceData.lower(recipients)
-                )
-            },
-            pollFunc: ffi_iroh_location_rust_future_poll_void,
-            completeFunc: ffi_iroh_location_rust_future_complete_void,
-            freeFunc: ffi_iroh_location_rust_future_free_void,
-            liftFunc: { $0 },
-            errorHandler: FfiConverterTypeLocationError_lift
-        )
-}
-    
-open func docsWriteInner(subscriptionId: String, seq: UInt64, fix: LocationFix?, ts: UInt64, recipients: [Data], traceparent: String?)async throws   {
-    return
-        try  await uniffiRustCallAsync(
-            rustFutureFunc: {
-                uniffi_iroh_location_fn_method_locationnode_docs_write_inner(
-                    self.uniffiCloneHandle(),
-                    FfiConverterString.lower(subscriptionId),FfiConverterUInt64.lower(seq),FfiConverterOptionTypeLocationFix.lower(fix),FfiConverterUInt64.lower(ts),FfiConverterSequenceData.lower(recipients),FfiConverterOptionString.lower(traceparent)
-                )
-            },
-            pollFunc: ffi_iroh_location_rust_future_poll_void,
-            completeFunc: ffi_iroh_location_rust_future_complete_void,
-            freeFunc: ffi_iroh_location_rust_future_free_void,
-            liftFunc: { $0 },
-            errorHandler: FfiConverterTypeLocationError_lift
-        )
-}
-    
-    /**
-     * Seal a **null fix** for `recipients` and write it to our namespace's null slot
-     * (FORWARD-SECRECY §4.1) — the watcher half of the symmetric lanes.
-     *
-     * A null fix is an ordinary envelope carrying an empty padded payload: same signature, same
-     * AAD binding, same `seq` monotonicity, same ciphertext length as a real fix. It exists so a
-     * friend we do not share position with still receives our envelopes on cadence, which is
-     * what carries our ratchet contribution once envelope v3 lands (§4.2). `ts` is the tick's
-     * timestamp — it rides in the signed header exactly as a real fix's does.
-     *
-     * Written to a separate LWW key from the fix lane so the two envelopes a tick produces,
-     * wrapped for disjoint recipient sets, do not supersede each other (see `docs::encode_nul_key`).
-     */
-open func docsWriteNull(subscriptionId: String, seq: UInt64, ts: UInt64, recipients: [Data])async throws   {
-    return
-        try  await uniffiRustCallAsync(
-            rustFutureFunc: {
-                uniffi_iroh_location_fn_method_locationnode_docs_write_null(
-                    self.uniffiCloneHandle(),
-                    FfiConverterString.lower(subscriptionId),FfiConverterUInt64.lower(seq),FfiConverterUInt64.lower(ts),FfiConverterSequenceData.lower(recipients)
-                )
-            },
-            pollFunc: ffi_iroh_location_rust_future_poll_void,
-            completeFunc: ffi_iroh_location_rust_future_complete_void,
-            freeFunc: ffi_iroh_location_rust_future_free_void,
-            liftFunc: { $0 },
-            errorHandler: FfiConverterTypeLocationError_lift
-        )
-}
-    
-    /**
-     * Seal a **ratcheted null fix** for `watcher_endpoints` and write it to the null slot.
-     *
-     * The v3 counterpart of [`Self::docs_write_null`], and the half of §4.1 that makes the
-     * symmetric-lane argument true rather than aspirational. A watcher who only ever *reads* our
-     * position still publishes on cadence, and once that envelope is ratcheted it carries their
-     * ratchet contribution — which is what advances our `peer_advanced_ms` for them and stops
-     * `next_wraps` dropping them as `Lapsed` after 24 h. On the v2 null lane the contribution did
-     * not exist, so every one-directional watch edge expired after a day.
-     */
-open func docsWriteNullRatcheted(subscriptionId: String, seq: UInt64, ts: UInt64, watcherEndpoints: [String])async throws  -> [String]  {
-    return
-        try  await uniffiRustCallAsync(
-            rustFutureFunc: {
-                uniffi_iroh_location_fn_method_locationnode_docs_write_null_ratcheted(
-                    self.uniffiCloneHandle(),
-                    FfiConverterString.lower(subscriptionId),FfiConverterUInt64.lower(seq),FfiConverterUInt64.lower(ts),FfiConverterSequenceString.lower(watcherEndpoints)
-                )
-            },
-            pollFunc: ffi_iroh_location_rust_future_poll_rust_buffer,
-            completeFunc: ffi_iroh_location_rust_future_complete_rust_buffer,
-            freeFunc: ffi_iroh_location_rust_future_free_rust_buffer,
-            liftFunc: FfiConverterSequenceString.lift,
-            errorHandler: FfiConverterTypeLocationError_lift
-        )
-}
-    
-open func docsWriteNullRatchetedTraced(subscriptionId: String, seq: UInt64, ts: UInt64, watcherEndpoints: [String], traceparent: String)async throws  -> [String]  {
-    return
-        try  await uniffiRustCallAsync(
-            rustFutureFunc: {
-                uniffi_iroh_location_fn_method_locationnode_docs_write_null_ratcheted_traced(
-                    self.uniffiCloneHandle(),
-                    FfiConverterString.lower(subscriptionId),FfiConverterUInt64.lower(seq),FfiConverterUInt64.lower(ts),FfiConverterSequenceString.lower(watcherEndpoints),FfiConverterString.lower(traceparent)
-                )
-            },
-            pollFunc: ffi_iroh_location_rust_future_poll_rust_buffer,
-            completeFunc: ffi_iroh_location_rust_future_complete_rust_buffer,
-            freeFunc: ffi_iroh_location_rust_future_free_rust_buffer,
-            liftFunc: FfiConverterSequenceString.lift,
-            errorHandler: FfiConverterTypeLocationError_lift
-        )
-}
-    
-open func docsWriteNullTraced(subscriptionId: String, seq: UInt64, ts: UInt64, recipients: [Data], traceparent: String)async throws   {
-    return
-        try  await uniffiRustCallAsync(
-            rustFutureFunc: {
-                uniffi_iroh_location_fn_method_locationnode_docs_write_null_traced(
-                    self.uniffiCloneHandle(),
-                    FfiConverterString.lower(subscriptionId),FfiConverterUInt64.lower(seq),FfiConverterUInt64.lower(ts),FfiConverterSequenceData.lower(recipients),FfiConverterString.lower(traceparent)
-                )
-            },
-            pollFunc: ffi_iroh_location_rust_future_poll_void,
-            completeFunc: ffi_iroh_location_rust_future_complete_void,
-            freeFunc: ffi_iroh_location_rust_future_free_void,
-            liftFunc: { $0 },
-            errorHandler: FfiConverterTypeLocationError_lift
-        )
-}
-    
-    /**
-     * Seal `fix` under **envelope v3** for each recipient's ratchet session and write it to our
-     * durable namespace (FORWARD-SECRECY §4.7).
-     *
-     * Recipients are **endpoint ids**, not receiving keys: a v3 wrap is addressed by session,
-     * and sessions are keyed by who the peer is rather than by a long-term key of theirs. That
-     * difference is the point — the long-term receiving key is exactly what a seized device
-     * still holds.
-     *
-     * Returns the recipients that were left out, as `endpoint_hex:reason` — lapsed (§4.5),
-     * un-bootstrapped, or unpersistable. A short wrap list is never silent.
-     */
-open func docsWriteRatcheted(subscriptionId: String, seq: UInt64, fix: LocationFix, recipientEndpoints: [String])async throws  -> [String]  {
-    return
-        try  await uniffiRustCallAsync(
-            rustFutureFunc: {
-                uniffi_iroh_location_fn_method_locationnode_docs_write_ratcheted(
-                    self.uniffiCloneHandle(),
-                    FfiConverterString.lower(subscriptionId),FfiConverterUInt64.lower(seq),FfiConverterTypeLocationFix_lower(fix),FfiConverterSequenceString.lower(recipientEndpoints)
-                )
-            },
-            pollFunc: ffi_iroh_location_rust_future_poll_rust_buffer,
-            completeFunc: ffi_iroh_location_rust_future_complete_rust_buffer,
-            freeFunc: ffi_iroh_location_rust_future_free_rust_buffer,
-            liftFunc: FfiConverterSequenceString.lift,
-            errorHandler: FfiConverterTypeLocationError_lift
-        )
-}
-    
-    /**
-     * Both ratcheted durable lanes. `fix.is_none()` is the null lane, which differs only in
-     * carrying an empty padded payload and landing in a separate LWW slot — the two envelopes a
-     * tick produces are wrapped for disjoint recipient sets, so sharing a slot would have them
-     * supersede each other.
-     */
-open func docsWriteRatchetedInner(subscriptionId: String, seq: UInt64, fix: LocationFix?, nullTs: UInt64, recipientEndpoints: [String], traceparent: String?)async throws  -> [String]  {
-    return
-        try  await uniffiRustCallAsync(
-            rustFutureFunc: {
-                uniffi_iroh_location_fn_method_locationnode_docs_write_ratcheted_inner(
-                    self.uniffiCloneHandle(),
-                    FfiConverterString.lower(subscriptionId),FfiConverterUInt64.lower(seq),FfiConverterOptionTypeLocationFix.lower(fix),FfiConverterUInt64.lower(nullTs),FfiConverterSequenceString.lower(recipientEndpoints),FfiConverterOptionString.lower(traceparent)
-                )
-            },
-            pollFunc: ffi_iroh_location_rust_future_poll_rust_buffer,
-            completeFunc: ffi_iroh_location_rust_future_complete_rust_buffer,
-            freeFunc: ffi_iroh_location_rust_future_free_rust_buffer,
-            liftFunc: FfiConverterSequenceString.lift,
-            errorHandler: FfiConverterTypeLocationError_lift
-        )
-}
-    
-open func docsWriteRatchetedTraced(subscriptionId: String, seq: UInt64, fix: LocationFix, recipientEndpoints: [String], traceparent: String)async throws  -> [String]  {
-    return
-        try  await uniffiRustCallAsync(
-            rustFutureFunc: {
-                uniffi_iroh_location_fn_method_locationnode_docs_write_ratcheted_traced(
-                    self.uniffiCloneHandle(),
-                    FfiConverterString.lower(subscriptionId),FfiConverterUInt64.lower(seq),FfiConverterTypeLocationFix_lower(fix),FfiConverterSequenceString.lower(recipientEndpoints),FfiConverterString.lower(traceparent)
-                )
-            },
-            pollFunc: ffi_iroh_location_rust_future_poll_rust_buffer,
-            completeFunc: ffi_iroh_location_rust_future_complete_rust_buffer,
-            freeFunc: ffi_iroh_location_rust_future_free_rust_buffer,
-            liftFunc: FfiConverterSequenceString.lift,
-            errorHandler: FfiConverterTypeLocationError_lift
-        )
-}
-    
-open func docsWriteTraced(subscriptionId: String, seq: UInt64, fix: LocationFix, recipients: [Data], traceparent: String)async throws   {
-    return
-        try  await uniffiRustCallAsync(
-            rustFutureFunc: {
-                uniffi_iroh_location_fn_method_locationnode_docs_write_traced(
-                    self.uniffiCloneHandle(),
-                    FfiConverterString.lower(subscriptionId),FfiConverterUInt64.lower(seq),FfiConverterTypeLocationFix_lower(fix),FfiConverterSequenceData.lower(recipients),FfiConverterString.lower(traceparent)
-                )
-            },
-            pollFunc: ffi_iroh_location_rust_future_poll_void,
-            completeFunc: ffi_iroh_location_rust_future_complete_void,
-            freeFunc: ffi_iroh_location_rust_future_free_void,
-            liftFunc: { $0 },
-            errorHandler: FfiConverterTypeLocationError_lift
-        )
-}
-    
-    /**
      * This device's EndpointId (== envelope `author`).
      */
 open func endpointId() -> Data  {
@@ -2803,6 +2037,34 @@ open func hasSession(peerEndpointHex: String)async throws  -> Bool  {
 }
     
     /**
+     * Publish the slots that have come due without a new fix, reusing the last known position.
+     *
+     * `ingest_fix` only runs when the OS delivers a location, and on a stationary phone that can
+     * be never; the cadence still has to be uniform, because it is the one property of a sealed
+     * envelope the stash can read.
+     *
+     * `parked` is what the caller can prove about motion: `Some(true)` a confirmed stop,
+     * `Some(false)` a stop just left, `None` a clock with no evidence either way (the JS timer).
+     * Only the first stamps `parked` — see [`publish::Motion`] for the day it was unconditional.
+     */
+open func heartbeatFix(battery: BatteryState, intervalMs: UInt64, nowMs: UInt64, parked: Bool?)async throws  -> IngestOutcome  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_iroh_location_fn_method_locationnode_heartbeat_fix(
+                    self.uniffiCloneHandle(),
+                    FfiConverterTypeBatteryState_lower(battery),FfiConverterUInt64.lower(intervalMs),FfiConverterUInt64.lower(nowMs),FfiConverterOptionBool.lower(parked)
+                )
+            },
+            pollFunc: ffi_iroh_location_rust_future_poll_rust_buffer,
+            completeFunc: ffi_iroh_location_rust_future_complete_rust_buffer,
+            freeFunc: ffi_iroh_location_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeIngestOutcome_lift,
+            errorHandler: FfiConverterTypeLocationError_lift
+        )
+}
+    
+    /**
      * The ed25519 identity secret — persist in the OS secure store.
      */
 open func identitySecret() -> Data  {
@@ -2855,6 +2117,32 @@ open func importProfileTicket(ticket: String)async throws   {
             completeFunc: ffi_iroh_location_rust_future_complete_void,
             freeFunc: ffi_iroh_location_rust_future_free_void,
             liftFunc: { $0 },
+            errorHandler: FfiConverterTypeLocationError_lift
+        )
+}
+    
+    /**
+     * Take one captured location all the way to the wire, with no JS involved.
+     *
+     * This is the whole point of the native drain path. `expo-task-manager` spools location events
+     * when it cannot start a headless JS context, and on 2026-08-29 a Pixel spooled eleven and a
+     * half hours of them — 446 real fixes, captured by a perfectly healthy foreground service,
+     * with nothing on the JS side alive to publish them. Everything below runs in the OS callback
+     * that delivered the fix.
+     */
+open func ingestFix(fix: LocationFix, battery: BatteryState, intervalMs: UInt64, nowMs: UInt64)async throws  -> IngestOutcome  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_iroh_location_fn_method_locationnode_ingest_fix(
+                    self.uniffiCloneHandle(),
+                    FfiConverterTypeLocationFix_lower(fix),FfiConverterTypeBatteryState_lower(battery),FfiConverterUInt64.lower(intervalMs),FfiConverterUInt64.lower(nowMs)
+                )
+            },
+            pollFunc: ffi_iroh_location_rust_future_poll_rust_buffer,
+            completeFunc: ffi_iroh_location_rust_future_complete_rust_buffer,
+            freeFunc: ffi_iroh_location_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeIngestOutcome_lift,
             errorHandler: FfiConverterTypeLocationError_lift
         )
 }
@@ -3062,31 +2350,6 @@ open func networkChanged()async   {
 }
     
     /**
-     * Advance and return this device's next publish sequence number.
-     *
-     * Durable before it returns: the caller puts the value straight onto the wire as half of an
-     * `author/seq` docs key, and two envelopes under one key is a payload silently lost to
-     * last-write-wins. See `seq_store.rs` for why the counter had to leave JS to be safe — in
-     * short, every headless callback gets a fresh JS context and so got its own copy of it.
-     */
-open func nextSeq()async throws  -> UInt64  {
-    return
-        try  await uniffiRustCallAsync(
-            rustFutureFunc: {
-                uniffi_iroh_location_fn_method_locationnode_next_seq(
-                    self.uniffiCloneHandle()
-                    
-                )
-            },
-            pollFunc: ffi_iroh_location_rust_future_poll_u64,
-            completeFunc: ffi_iroh_location_rust_future_complete_u64,
-            freeFunc: ffi_iroh_location_rust_future_free_u64,
-            liftFunc: FfiConverterUInt64.lift,
-            errorHandler: FfiConverterTypeLocationError_lift
-        )
-}
-    
-    /**
      * How many captured fixes are waiting to be sealed.
      */
 open func outboxPending()async throws  -> UInt32  {
@@ -3102,36 +2365,6 @@ open func outboxPending()async throws  -> UInt32  {
             completeFunc: ffi_iroh_location_rust_future_complete_u32,
             freeFunc: ffi_iroh_location_rust_future_free_u32,
             liftFunc: FfiConverterUInt32.lift,
-            errorHandler: FfiConverterTypeLocationError_lift
-        )
-}
-    
-    /**
-     * The single subscription to this node's own topic: create it, or adopt the live one.
-     *
-     * Adopting joins `bootstrap`'s peers on the existing subscription and, when `listener` is
-     * given, makes it the one events go to. `None` keeps whoever is listening — the background
-     * runtime's call, which must never silence a mounted app — and creates the subscription
-     * silent if there is none yet. A subscription whose receive loop has ended is replaced rather
-     * than handed out.
-     *
-     * Removing a friend therefore does not drop them from this topic's swarm until the node next
-     * restarts. That costs nothing: everything published here is sealed per recipient, and they
-     * are no longer one.
-     */
-open func ownSubscription(bootstrap: [String], listener: FixListener?)async throws  -> Subscription  {
-    return
-        try  await uniffiRustCallAsync(
-            rustFutureFunc: {
-                uniffi_iroh_location_fn_method_locationnode_own_subscription(
-                    self.uniffiCloneHandle(),
-                    FfiConverterSequenceString.lower(bootstrap),FfiConverterOptionTypeFixListener.lower(listener)
-                )
-            },
-            pollFunc: ffi_iroh_location_rust_future_poll_u64,
-            completeFunc: ffi_iroh_location_rust_future_complete_u64,
-            freeFunc: ffi_iroh_location_rust_future_free_u64,
-            liftFunc: FfiConverterTypeSubscription_lift,
             errorHandler: FfiConverterTypeLocationError_lift
         )
 }
@@ -3253,27 +2486,6 @@ open func pollProfileEvents()async  -> [ProfileView]  {
 }
     
     /**
-     * Run one recovery pass for this peer alone. Returns whether a session was installed —
-     * restarted (leader) or adopted (follower).
-     */
-open func pollResync(peerEndpointHex: String, peerRecvPubHex: String)async throws  -> Bool  {
-    return
-        try  await uniffiRustCallAsync(
-            rustFutureFunc: {
-                uniffi_iroh_location_fn_method_locationnode_poll_resync(
-                    self.uniffiCloneHandle(),
-                    FfiConverterString.lower(peerEndpointHex),FfiConverterString.lower(peerRecvPubHex)
-                )
-            },
-            pollFunc: ffi_iroh_location_rust_future_poll_i8,
-            completeFunc: ffi_iroh_location_rust_future_complete_i8,
-            freeFunc: ffi_iroh_location_rust_future_free_i8,
-            liftFunc: FfiConverterBool.lift,
-            errorHandler: FfiConverterTypeLocationError_lift
-        )
-}
-    
-    /**
      * A shareable **read**-ticket for our profile namespace. Also exchanged automatically inside
      * a pairing Accept, so friends usually don't need to import it by hand.
      */
@@ -3315,6 +2527,32 @@ open func pruneTrail(olderThanTs: UInt64)async throws   {
 }
     
     /**
+     * Seal the last known position once, for a recipient set that has just grown.
+     *
+     * Called when a pairing is accepted. A sealed envelope is readable only by the recipients it
+     * was sealed for, so a new friend cannot open anything published before they existed and
+     * their first sight of you is otherwise your next scheduled publish — p90 92 minutes on a
+     * parked iPhone. See [`publish::DrainEngine::publish_introduction`] for what it deliberately
+     * does NOT touch (the slot cursor, the parked/live stamp, the battery suspension).
+     */
+open func publishIntroduction(nowMs: UInt64)async throws  -> IngestOutcome  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_iroh_location_fn_method_locationnode_publish_introduction(
+                    self.uniffiCloneHandle(),
+                    FfiConverterUInt64.lower(nowMs)
+                )
+            },
+            pollFunc: ffi_iroh_location_rust_future_poll_rust_buffer,
+            completeFunc: ffi_iroh_location_rust_future_complete_rust_buffer,
+            freeFunc: ffi_iroh_location_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeIngestOutcome_lift,
+            errorHandler: FfiConverterTypeLocationError_lift
+        )
+}
+    
+    /**
      * Sign + publish our profile to the dedicated profile namespace, returning the new epoch.
      * The epoch is monotonic and wall-clock-anchored so it keeps strictly increasing across node
      * restarts (the in-memory epoch counter resets, but `now_ms()` does not), which the readers'
@@ -3333,29 +2571,6 @@ open func publishProfile(handle: String, cryptidName: String, sigil: String, col
             completeFunc: ffi_iroh_location_rust_future_complete_u64,
             freeFunc: ffi_iroh_location_rust_future_free_u64,
             liftFunc: FfiConverterUInt64.lift,
-            errorHandler: FfiConverterTypeLocationError_lift
-        )
-}
-    
-    /**
-     * Publish our control record (§4.6) now, sealed to `recipient_recv_pubs`, whether or not it
-     * changed. Returns our newest prekey's public half as hex.
-     *
-     * The native drain publishes it on its own; this is for a caller that wants it out now.
-     */
-open func publishResync(recipientRecvPubs: [String])async throws  -> String  {
-    return
-        try  await uniffiRustCallAsync(
-            rustFutureFunc: {
-                uniffi_iroh_location_fn_method_locationnode_publish_resync(
-                    self.uniffiCloneHandle(),
-                    FfiConverterSequenceString.lower(recipientRecvPubs)
-                )
-            },
-            pollFunc: ffi_iroh_location_rust_future_poll_rust_buffer,
-            completeFunc: ffi_iroh_location_rust_future_complete_rust_buffer,
-            freeFunc: ffi_iroh_location_rust_future_free_rust_buffer,
-            liftFunc: FfiConverterString.lift,
             errorHandler: FfiConverterTypeLocationError_lift
         )
 }
@@ -3412,134 +2627,12 @@ open func pullLatest(peerTickets: [String], budgetMs: UInt64?, traceparent: Stri
 }
     
     /**
-     * Push our own trail namespace to `peer_tickets` — the trail stash when it is configured and
-     * opted into, and **every pool member** — and wait for the exchange to finish. **This is what
-     * actually gets a published fix off the phone.**
-     *
-     * [`Self::docs_write`] only writes the local replica; iroh-docs broadcasts a local insert
-     * solely for namespaces the live engine has marked as syncing, which happens on `start_sync`
-     * and nowhere else. A short-lived headless publish context never called anything that did
-     * that, so its envelopes never reached the stash and an offline friend had nothing to
-     * reconcile from. Call this after draining a batch.
-     *
-     * The peer list is the send-side counterpart of [`Self::sync_latest`], and it is what makes
-     * ARCHITECTURE.md §1.3/§6's pool relay the normal flow rather than luck. An earlier revision
-     * took a single `Option<String>` that only ever carried the stash, so an author's published
-     * fix was broadcast over docs to the stash and to nobody else: a pool member gained the
-     * author's entries only if it happened to dial the author itself during a reconciliation
-     * window, and with the stash off there was no durable copy anywhere. Pushing to the pool
-     * means a friend with the app open holds the author's entries **as they are published**, and
-     * can hand them on the moment the author goes dark.
-     *
-     * Repeating it is cheap: `start_sync` is a no-op once a namespace is syncing, so the
-     * steady-state cost is one connection per member for the process's lifetime.
-     *
-     * Unparseable tickets are skipped rather than failing the push — one malformed friend card
-     * must not stop delivery to everyone else — but they are counted on the span.
-     *
-     * Best-effort by design: a failure means offline delivery is degraded for those fixes, not
-     * that the live gossip path or a later [`Self::sync_latest`] is broken.
-     */
-open func pushTrail(peerTickets: [String], traceparent: String?)async throws   {
-    return
-        try  await uniffiRustCallAsync(
-            rustFutureFunc: {
-                uniffi_iroh_location_fn_method_locationnode_push_trail(
-                    self.uniffiCloneHandle(),
-                    FfiConverterSequenceString.lower(peerTickets),FfiConverterOptionString.lower(traceparent)
-                )
-            },
-            pollFunc: ffi_iroh_location_rust_future_poll_void,
-            completeFunc: ffi_iroh_location_rust_future_complete_void,
-            freeFunc: ffi_iroh_location_rust_future_free_void,
-            liftFunc: { $0 },
-            errorHandler: FfiConverterTypeLocationError_lift
-        )
-}
-    
-    /**
-     * Push our trail to each peer with **its own deadline**, and report what each one did.
-     *
-     * The send-side counterpart of the reachability model in
-     * `src/features/social/core/peer-reachability.ts`. JS decides the budgets — it is where
-     * presence lives and where the decision is testable — and this returns the per-peer outcomes
-     * it learns from.
-     *
-     * A budget of zero means "do not wait for this peer". The data is still handed to the live
-     * engine, so the peer reconciles on its own whenever it next wakes; we simply stop holding a
-     * background wake open for a phone we expect to be asleep. That single change is where the
-     * saving is: measured over 7 days, 74% of pushes burned the full 30s budget waiting on peers
-     * that never reported at all, at a cost of 41.7 hours a week.
-     */
-open func pushTrailBudgeted(peers: [PeerDial], traceparent: String?)async throws  -> [PeerPushReport]  {
-    return
-        try  await uniffiRustCallAsync(
-            rustFutureFunc: {
-                uniffi_iroh_location_fn_method_locationnode_push_trail_budgeted(
-                    self.uniffiCloneHandle(),
-                    FfiConverterSequenceTypePeerDial.lower(peers),FfiConverterOptionString.lower(traceparent)
-                )
-            },
-            pollFunc: ffi_iroh_location_rust_future_poll_rust_buffer,
-            completeFunc: ffi_iroh_location_rust_future_complete_rust_buffer,
-            freeFunc: ffi_iroh_location_rust_future_free_rust_buffer,
-            liftFunc: FfiConverterSequenceTypePeerPushReport.lift,
-            errorHandler: FfiConverterTypeLocationError_lift
-        )
-}
-    
-    /**
-     * Read `author`'s current control message, if we can open it. Returns an empty vec when
-     * there is none, when it is addressed to someone else, or when the content has not
-     * replicated locally yet — all indistinguishable and all "nothing to act on".
-     *
-     * Callers MUST still check freshness and dedupe by `nonce`; see [`ControlMsg`].
-     */
-open func readControl(author: Data)async throws  -> [ControlMsg]  {
-    return
-        try  await uniffiRustCallAsync(
-            rustFutureFunc: {
-                uniffi_iroh_location_fn_method_locationnode_read_control(
-                    self.uniffiCloneHandle(),
-                    FfiConverterData.lower(author)
-                )
-            },
-            pollFunc: ffi_iroh_location_rust_future_poll_rust_buffer,
-            completeFunc: ffi_iroh_location_rust_future_complete_rust_buffer,
-            freeFunc: ffi_iroh_location_rust_future_free_rust_buffer,
-            liftFunc: FfiConverterSequenceTypeControlMsg.lift,
-            errorHandler: FfiConverterTypeLocationError_lift
-        )
-}
-    
-    /**
-     * Read the latest decryptable fix per author (friends who share with us) from the local
-     * replica. One entry per author — the durable path holds no history (FORWARD-SECRECY §4.4).
-     */
-open func readLatest()async throws  -> [IncomingFix]  {
-    return
-        try  await uniffiRustCallAsync(
-            rustFutureFunc: {
-                uniffi_iroh_location_fn_method_locationnode_read_latest(
-                    self.uniffiCloneHandle()
-                    
-                )
-            },
-            pollFunc: ffi_iroh_location_rust_future_poll_rust_buffer,
-            completeFunc: ffi_iroh_location_rust_future_complete_rust_buffer,
-            freeFunc: ffi_iroh_location_rust_future_free_rust_buffer,
-            liftFunc: FfiConverterSequenceTypeIncomingFix.lift,
-            errorHandler: FfiConverterTypeLocationError_lift
-        )
-}
-    
-    /**
      * Read the latest **ratcheted** fix per author from the local replica.
      *
      * Signature first, then session state — `verify_v3` returns a type that the session manager
      * is the only consumer of, so no unauthenticated byte can reach the ratchet (§4.2).
-     * Envelopes we cannot open are skipped exactly as v2's are: addressed to someone else,
-     * replayed from the archive, or beyond the acceptance window are all "nothing to surface".
+     * Envelopes we cannot open are skipped: addressed to someone else, replayed from the archive,
+     * or beyond the acceptance window are all "nothing to surface".
      */
 open func readLatestRatcheted()async throws  -> [IncomingFix]  {
     return
@@ -3938,7 +3031,7 @@ open func shutdown()async throws   {
 }
     
     /**
-     * Bind the iroh endpoint + spawn the gossip router. Idempotent.
+     * Bind the iroh endpoint + spawn the docs/blobs router. Idempotent.
      */
 open func start(relayUrls: [String], relayAuthToken: String, relayEnabled: Bool, ipEnabled: Bool, bleEnabled: Bool)async throws   {
     return
@@ -4004,37 +3097,9 @@ open func submitPairChoice(sessionId: Data, chosenIndex: UInt32)async throws   {
 }
     
     /**
-     * Subscribe to a topic and start forwarding decrypted fixes to `listener`.
-     *
-     * `bootstrap` are peer EndpointTickets (e.g. from friends' contact cards) that are
-     * already in the topic. Returns a handle used to publish our own fixes.
-     *
-     * The node's OWN topic is the exception: it is routed to [`Self::own_subscription`], so a
-     * second caller adopts the live subscription (joining its bootstrap peers and taking over its
-     * events) instead of opening a second receive loop. Every other topic gets a fresh
-     * subscription per call, as it always has.
-     */
-open func subscribe(topic: Data, bootstrap: [String], listener: FixListener)async throws  -> Subscription  {
-    return
-        try  await uniffiRustCallAsync(
-            rustFutureFunc: {
-                uniffi_iroh_location_fn_method_locationnode_subscribe(
-                    self.uniffiCloneHandle(),
-                    FfiConverterData.lower(topic),FfiConverterSequenceString.lower(bootstrap),FfiConverterTypeFixListener_lower(listener)
-                )
-            },
-            pollFunc: ffi_iroh_location_rust_future_poll_u64,
-            completeFunc: ffi_iroh_location_rust_future_complete_u64,
-            freeFunc: ffi_iroh_location_rust_future_free_u64,
-            liftFunc: FfiConverterTypeSubscription_lift,
-            errorHandler: FfiConverterTypeLocationError_lift
-        )
-}
-    
-    /**
      * Reconcile our own + every imported friend namespace so each author's **current** fix is
      * exchanged (FORWARD-SECRECY §4.4 — the durable path is last-write-wins; there is no missed
-     * history to recover). Read the results with [`Self::read_latest`].
+     * history to recover). Read the results with [`Self::read_latest_ratcheted_events`].
      *
      * `peer_tickets` is every endpoint worth dialing for this pass: the trail stash when it is
      * configured and opted into, and **every pool member**. That list is the whole mechanism
@@ -4116,10 +3181,9 @@ open func ticket()async throws  -> String  {
      * What this device's durable replica can **serve**, one record per author present in it.
      *
      * The diagnostic that distinguishes "the relay had nothing to give" from "the transfer
-     * failed" — a distinction `friend_latest` structurally cannot make, because the live gossip
-     * lane writes it too and a fix that arrived over gossip never enters the author's namespace
-     * (a pool member holds a READ ticket). Reconciliation serves out of the replica, so this is
-     * the only honest answer to "can this device relay author X".
+     * failed" — a distinction `friend_latest` cannot make, because it records what the app
+     * surfaced and keeps it after the replica moves on. Reconciliation serves out of the replica,
+     * so this is the only honest answer to "can this device relay author X".
      *
      * No decryption and no location data in the result — presence, not payload — so it is
      * ungated, like [`Self::transport_diagnostics`]. `NamespaceId` is not an FFI type, so the
@@ -4164,28 +3228,26 @@ open func transportDiagnostics(peerEndpointIds: [Data])async throws  -> Transpor
 }
     
     /**
-     * Explicitly hand the current opaque trail slots to the stash and wait for HTTP receipts.
-     *
-     * Returns the number of slots the stash **accepted**. The other outcomes are on the
-     * `trail.content.upload` span rather than in the return value, deliberately: the UniFFI
-     * signature stays `u64` so a phone running an older binary than the JS bundle keeps working,
-     * and `untracked` is a number you want to watch over time rather than branch on.
+     * Stop announcing friend-replica changes. Replication carries on regardless.
      */
-open func uploadTrailContent(baseUrl: String, psk: String?)async throws  -> UInt64  {
-    return
-        try  await uniffiRustCallAsync(
-            rustFutureFunc: {
-                uniffi_iroh_location_fn_method_locationnode_upload_trail_content(
-                    self.uniffiCloneHandle(),
-                    FfiConverterString.lower(baseUrl),FfiConverterOptionString.lower(psk)
-                )
-            },
-            pollFunc: ffi_iroh_location_rust_future_poll_u64,
-            completeFunc: ffi_iroh_location_rust_future_complete_u64,
-            freeFunc: ffi_iroh_location_rust_future_free_u64,
-            liftFunc: FfiConverterUInt64.lift,
-            errorHandler: FfiConverterTypeLocationError_lift
-        )
+open func unwatchReplica()  {try! rustCall() {
+    uniffi_iroh_location_fn_method_locationnode_unwatch_replica(
+            self.uniffiCloneHandle(),$0
+    )
+}
+}
+    
+    /**
+     * Announce friend-replica changes to `listener` from now on, replacing any listener before
+     * it. Per node: after the [`host`] rebuilds one (`restart`, `heal`, a replacement), attach to
+     * the new generation again. See [`ReplicaListener`].
+     */
+open func watchReplica(listener: ReplicaListener)  {try! rustCall() {
+    uniffi_iroh_location_fn_method_locationnode_watch_replica(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeReplicaListener_lower(listener),$0
+    )
+}
 }
     
 
@@ -4718,77 +3780,34 @@ public func FfiConverterTypeNodeHost_lower(_ value: NodeHost) -> UInt64 {
 
 
 /**
- * A live topic subscription; publish fixes through it.
+ * Foreign (Swift/Kotlin) callback: friends' slots changed in the local replica.
+ *
+ * The replica is the only inbound path. Every friend namespace this node replicates is in the
+ * iroh-docs live engine, which takes entries from whichever peer has them — the author's own phone
+ * broadcasting a write, the stash, or a friend relaying a copy — and this is how the app hears
+ * that one landed. It carries no fix: opening an envelope advances the ratchet, which only the
+ * app's read (`read_latest_ratcheted_events`) may do, so the callback says WHO changed and the app
+ * reads. Called once per burst of deliveries, after their content is local.
  */
-public protocol SubscriptionProtocol: AnyObject, Sendable {
+public protocol ReplicaListener: AnyObject, Sendable {
     
     /**
-     * Publish the slots that have come due without a new fix, reusing the last known position.
-     *
-     * Driven on a timer by whoever is running the pipeline — the mounted app today, since neither
-     * platform gives a background process a reliable one. `ingest_fix` only runs when the OS
-     * delivers a location, and on a stationary phone that can be never; the cadence still has to
-     * be uniform, because it is the one property of a sealed envelope the stash can read.
-     *
-     * `parked` is what the caller can prove about motion: `Some(true)` a confirmed stop,
-     * `Some(false)` a stop just left, `None` a clock with no evidence either way (the JS timer).
-     * Only the first stamps `parked` — see [`publish::Motion`] for the day it was unconditional.
+     * Envelope authors (32-byte endpoint ids) whose fix or null slot is newly readable.
      */
-    func heartbeatFix(subscriptionId: String, battery: BatteryState, intervalMs: UInt64, nowMs: UInt64, parked: Bool?) async throws  -> IngestOutcome
-    
-    /**
-     * Take one captured location all the way to the wire, with no JS involved.
-     *
-     * This is the whole point of the native drain path. `expo-task-manager` spools location events
-     * when it cannot start a headless JS context, and on 2026-08-29 a Pixel spooled eleven and a
-     * half hours of them — 446 real fixes, captured by a perfectly healthy foreground service,
-     * with nothing on the JS side alive to publish them. Everything below runs in the OS callback
-     * that delivered the fix.
-     *
-     * Thin by design: the decisions live in [`publish::DrainEngine`], which depends on ports
-     * rather than on a node, so they can be tested against fakes that fail on demand. All this
-     * does is bind those ports to the real stores and hand the engine somewhere to send.
-     */
-    func ingestFix(subscriptionId: String, fix: LocationFix, battery: BatteryState, intervalMs: UInt64, nowMs: UInt64) async throws  -> IngestOutcome
-    
-    /**
-     * Seal `fix` for `recipients` (each = a friend's 32-byte receiving public key) and
-     * broadcast it on the topic. Recipients NOT in this list cannot decrypt it —
-     * that's how revocation works.
-     */
-    func publish(seq: UInt64, fix: LocationFix, recipientEndpoints: [String]) async throws  -> [String]
-    
-    func publishInner(seq: UInt64, fix: LocationFix?, ts: UInt64, recipientEndpoints: [String], traceparent: String?) async throws  -> [String]
-    
-    /**
-     * Seal the last known position once, for a recipient set that has just grown.
-     *
-     * Called when a pairing is accepted. A sealed envelope is readable only by the recipients it
-     * was sealed for, so a new friend cannot open anything published before they existed and
-     * their first sight of you is otherwise your next scheduled publish — p90 92 minutes on a
-     * parked iPhone. See [`publish::DrainEngine::publish_introduction`] for what it deliberately
-     * does NOT touch (the slot cursor, the parked/live stamp, the battery suspension).
-     */
-    func publishIntroduction(subscriptionId: String, nowMs: UInt64) async throws  -> IngestOutcome
-    
-    /**
-     * Broadcast a **null fix** — an envelope with an empty padded payload (FORWARD-SECRECY §4.1).
-     *
-     * The live half of the watcher lane: identical in shape, length, and signing discipline to
-     * [`Self::publish`], carrying no position. Recipients decode it as a healthy envelope with
-     * nothing to deliver.
-     */
-    func publishNull(seq: UInt64, ts: UInt64, recipientEndpoints: [String]) async throws  -> [String]
-    
-    func publishNullTraced(seq: UInt64, ts: UInt64, recipientEndpoints: [String], traceparent: String) async throws  -> [String]
-    
-    func publishTraced(seq: UInt64, fix: LocationFix, recipientEndpoints: [String], traceparent: String) async throws  -> [String]
+    func onFriendEntries(authors: [Data]) 
     
 }
 /**
- * A live topic subscription; publish fixes through it.
+ * Foreign (Swift/Kotlin) callback: friends' slots changed in the local replica.
+ *
+ * The replica is the only inbound path. Every friend namespace this node replicates is in the
+ * iroh-docs live engine, which takes entries from whichever peer has them — the author's own phone
+ * broadcasting a write, the stash, or a friend relaying a copy — and this is how the app hears
+ * that one landed. It carries no fix: opening an envelope advances the ratchet, which only the
+ * app's read (`read_latest_ratcheted_events`) may do, so the callback says WHO changed and the app
+ * reads. Called once per burst of deliveries, after their content is local.
  */
-open class Subscription: SubscriptionProtocol, @unchecked Sendable {
+open class ReplicaListenerImpl: ReplicaListener, @unchecked Sendable {
     fileprivate let handle: UInt64
 
     /// Used to instantiate a [FFIObject] without an actual handle, for fakes in tests, mostly.
@@ -4825,7 +3844,7 @@ open class Subscription: SubscriptionProtocol, @unchecked Sendable {
     @_documentation(visibility: private)
 #endif
     public func uniffiCloneHandle() -> UInt64 {
-        return try! rustCall { uniffi_iroh_location_fn_clone_subscription(self.handle, $0) }
+        return try! rustCall { uniffi_iroh_location_fn_clone_replicalistener(self.handle, $0) }
     }
     // No primary constructor declared for this class.
 
@@ -4835,220 +3854,130 @@ open class Subscription: SubscriptionProtocol, @unchecked Sendable {
             return
         }
 
-        try! rustCall { uniffi_iroh_location_fn_free_subscription(handle, $0) }
+        try! rustCall { uniffi_iroh_location_fn_free_replicalistener(handle, $0) }
     }
 
     
 
     
     /**
-     * Publish the slots that have come due without a new fix, reusing the last known position.
-     *
-     * Driven on a timer by whoever is running the pipeline — the mounted app today, since neither
-     * platform gives a background process a reliable one. `ingest_fix` only runs when the OS
-     * delivers a location, and on a stationary phone that can be never; the cadence still has to
-     * be uniform, because it is the one property of a sealed envelope the stash can read.
-     *
-     * `parked` is what the caller can prove about motion: `Some(true)` a confirmed stop,
-     * `Some(false)` a stop just left, `None` a clock with no evidence either way (the JS timer).
-     * Only the first stamps `parked` — see [`publish::Motion`] for the day it was unconditional.
+     * Envelope authors (32-byte endpoint ids) whose fix or null slot is newly readable.
      */
-open func heartbeatFix(subscriptionId: String, battery: BatteryState, intervalMs: UInt64, nowMs: UInt64, parked: Bool?)async throws  -> IngestOutcome  {
-    return
-        try  await uniffiRustCallAsync(
-            rustFutureFunc: {
-                uniffi_iroh_location_fn_method_subscription_heartbeat_fix(
-                    self.uniffiCloneHandle(),
-                    FfiConverterString.lower(subscriptionId),FfiConverterTypeBatteryState_lower(battery),FfiConverterUInt64.lower(intervalMs),FfiConverterUInt64.lower(nowMs),FfiConverterOptionBool.lower(parked)
-                )
-            },
-            pollFunc: ffi_iroh_location_rust_future_poll_rust_buffer,
-            completeFunc: ffi_iroh_location_rust_future_complete_rust_buffer,
-            freeFunc: ffi_iroh_location_rust_future_free_rust_buffer,
-            liftFunc: FfiConverterTypeIngestOutcome_lift,
-            errorHandler: FfiConverterTypeLocationError_lift
-        )
+open func onFriendEntries(authors: [Data])  {try! rustCall() {
+    uniffi_iroh_location_fn_method_replicalistener_on_friend_entries(
+            self.uniffiCloneHandle(),
+        FfiConverterSequenceData.lower(authors),$0
+    )
 }
-    
-    /**
-     * Take one captured location all the way to the wire, with no JS involved.
-     *
-     * This is the whole point of the native drain path. `expo-task-manager` spools location events
-     * when it cannot start a headless JS context, and on 2026-08-29 a Pixel spooled eleven and a
-     * half hours of them — 446 real fixes, captured by a perfectly healthy foreground service,
-     * with nothing on the JS side alive to publish them. Everything below runs in the OS callback
-     * that delivered the fix.
-     *
-     * Thin by design: the decisions live in [`publish::DrainEngine`], which depends on ports
-     * rather than on a node, so they can be tested against fakes that fail on demand. All this
-     * does is bind those ports to the real stores and hand the engine somewhere to send.
-     */
-open func ingestFix(subscriptionId: String, fix: LocationFix, battery: BatteryState, intervalMs: UInt64, nowMs: UInt64)async throws  -> IngestOutcome  {
-    return
-        try  await uniffiRustCallAsync(
-            rustFutureFunc: {
-                uniffi_iroh_location_fn_method_subscription_ingest_fix(
-                    self.uniffiCloneHandle(),
-                    FfiConverterString.lower(subscriptionId),FfiConverterTypeLocationFix_lower(fix),FfiConverterTypeBatteryState_lower(battery),FfiConverterUInt64.lower(intervalMs),FfiConverterUInt64.lower(nowMs)
-                )
-            },
-            pollFunc: ffi_iroh_location_rust_future_poll_rust_buffer,
-            completeFunc: ffi_iroh_location_rust_future_complete_rust_buffer,
-            freeFunc: ffi_iroh_location_rust_future_free_rust_buffer,
-            liftFunc: FfiConverterTypeIngestOutcome_lift,
-            errorHandler: FfiConverterTypeLocationError_lift
-        )
-}
-    
-    /**
-     * Seal `fix` for `recipients` (each = a friend's 32-byte receiving public key) and
-     * broadcast it on the topic. Recipients NOT in this list cannot decrypt it —
-     * that's how revocation works.
-     */
-open func publish(seq: UInt64, fix: LocationFix, recipientEndpoints: [String])async throws  -> [String]  {
-    return
-        try  await uniffiRustCallAsync(
-            rustFutureFunc: {
-                uniffi_iroh_location_fn_method_subscription_publish(
-                    self.uniffiCloneHandle(),
-                    FfiConverterUInt64.lower(seq),FfiConverterTypeLocationFix_lower(fix),FfiConverterSequenceString.lower(recipientEndpoints)
-                )
-            },
-            pollFunc: ffi_iroh_location_rust_future_poll_rust_buffer,
-            completeFunc: ffi_iroh_location_rust_future_complete_rust_buffer,
-            freeFunc: ffi_iroh_location_rust_future_free_rust_buffer,
-            liftFunc: FfiConverterSequenceString.lift,
-            errorHandler: FfiConverterTypeLocationError_lift
-        )
-}
-    
-open func publishInner(seq: UInt64, fix: LocationFix?, ts: UInt64, recipientEndpoints: [String], traceparent: String?)async throws  -> [String]  {
-    return
-        try  await uniffiRustCallAsync(
-            rustFutureFunc: {
-                uniffi_iroh_location_fn_method_subscription_publish_inner(
-                    self.uniffiCloneHandle(),
-                    FfiConverterUInt64.lower(seq),FfiConverterOptionTypeLocationFix.lower(fix),FfiConverterUInt64.lower(ts),FfiConverterSequenceString.lower(recipientEndpoints),FfiConverterOptionString.lower(traceparent)
-                )
-            },
-            pollFunc: ffi_iroh_location_rust_future_poll_rust_buffer,
-            completeFunc: ffi_iroh_location_rust_future_complete_rust_buffer,
-            freeFunc: ffi_iroh_location_rust_future_free_rust_buffer,
-            liftFunc: FfiConverterSequenceString.lift,
-            errorHandler: FfiConverterTypeLocationError_lift
-        )
-}
-    
-    /**
-     * Seal the last known position once, for a recipient set that has just grown.
-     *
-     * Called when a pairing is accepted. A sealed envelope is readable only by the recipients it
-     * was sealed for, so a new friend cannot open anything published before they existed and
-     * their first sight of you is otherwise your next scheduled publish — p90 92 minutes on a
-     * parked iPhone. See [`publish::DrainEngine::publish_introduction`] for what it deliberately
-     * does NOT touch (the slot cursor, the parked/live stamp, the battery suspension).
-     */
-open func publishIntroduction(subscriptionId: String, nowMs: UInt64)async throws  -> IngestOutcome  {
-    return
-        try  await uniffiRustCallAsync(
-            rustFutureFunc: {
-                uniffi_iroh_location_fn_method_subscription_publish_introduction(
-                    self.uniffiCloneHandle(),
-                    FfiConverterString.lower(subscriptionId),FfiConverterUInt64.lower(nowMs)
-                )
-            },
-            pollFunc: ffi_iroh_location_rust_future_poll_rust_buffer,
-            completeFunc: ffi_iroh_location_rust_future_complete_rust_buffer,
-            freeFunc: ffi_iroh_location_rust_future_free_rust_buffer,
-            liftFunc: FfiConverterTypeIngestOutcome_lift,
-            errorHandler: FfiConverterTypeLocationError_lift
-        )
-}
-    
-    /**
-     * Broadcast a **null fix** — an envelope with an empty padded payload (FORWARD-SECRECY §4.1).
-     *
-     * The live half of the watcher lane: identical in shape, length, and signing discipline to
-     * [`Self::publish`], carrying no position. Recipients decode it as a healthy envelope with
-     * nothing to deliver.
-     */
-open func publishNull(seq: UInt64, ts: UInt64, recipientEndpoints: [String])async throws  -> [String]  {
-    return
-        try  await uniffiRustCallAsync(
-            rustFutureFunc: {
-                uniffi_iroh_location_fn_method_subscription_publish_null(
-                    self.uniffiCloneHandle(),
-                    FfiConverterUInt64.lower(seq),FfiConverterUInt64.lower(ts),FfiConverterSequenceString.lower(recipientEndpoints)
-                )
-            },
-            pollFunc: ffi_iroh_location_rust_future_poll_rust_buffer,
-            completeFunc: ffi_iroh_location_rust_future_complete_rust_buffer,
-            freeFunc: ffi_iroh_location_rust_future_free_rust_buffer,
-            liftFunc: FfiConverterSequenceString.lift,
-            errorHandler: FfiConverterTypeLocationError_lift
-        )
-}
-    
-open func publishNullTraced(seq: UInt64, ts: UInt64, recipientEndpoints: [String], traceparent: String)async throws  -> [String]  {
-    return
-        try  await uniffiRustCallAsync(
-            rustFutureFunc: {
-                uniffi_iroh_location_fn_method_subscription_publish_null_traced(
-                    self.uniffiCloneHandle(),
-                    FfiConverterUInt64.lower(seq),FfiConverterUInt64.lower(ts),FfiConverterSequenceString.lower(recipientEndpoints),FfiConverterString.lower(traceparent)
-                )
-            },
-            pollFunc: ffi_iroh_location_rust_future_poll_rust_buffer,
-            completeFunc: ffi_iroh_location_rust_future_complete_rust_buffer,
-            freeFunc: ffi_iroh_location_rust_future_free_rust_buffer,
-            liftFunc: FfiConverterSequenceString.lift,
-            errorHandler: FfiConverterTypeLocationError_lift
-        )
-}
-    
-open func publishTraced(seq: UInt64, fix: LocationFix, recipientEndpoints: [String], traceparent: String)async throws  -> [String]  {
-    return
-        try  await uniffiRustCallAsync(
-            rustFutureFunc: {
-                uniffi_iroh_location_fn_method_subscription_publish_traced(
-                    self.uniffiCloneHandle(),
-                    FfiConverterUInt64.lower(seq),FfiConverterTypeLocationFix_lower(fix),FfiConverterSequenceString.lower(recipientEndpoints),FfiConverterString.lower(traceparent)
-                )
-            },
-            pollFunc: ffi_iroh_location_rust_future_poll_rust_buffer,
-            completeFunc: ffi_iroh_location_rust_future_complete_rust_buffer,
-            freeFunc: ffi_iroh_location_rust_future_free_rust_buffer,
-            liftFunc: FfiConverterSequenceString.lift,
-            errorHandler: FfiConverterTypeLocationError_lift
-        )
 }
     
 
     
 }
 
+
+
+// Put the implementation in a struct so we don't pollute the top-level namespace
+fileprivate struct UniffiCallbackInterfaceReplicaListener {
+
+    // Create the VTable using a series of closures.
+    // Swift automatically converts these into C callback functions.
+    //
+    // Store the vtable directly.
+    static let vtable: UniffiVTableCallbackInterfaceReplicaListener = UniffiVTableCallbackInterfaceReplicaListener(
+        uniffiFree: { (uniffiHandle: UInt64) -> () in
+            do {
+                try FfiConverterTypeReplicaListener.handleMap.remove(handle: uniffiHandle)
+            } catch {
+                print("Uniffi callback interface ReplicaListener: handle missing in uniffiFree")
+            }
+        },
+        uniffiClone: { (uniffiHandle: UInt64) -> UInt64 in
+            do {
+                return try FfiConverterTypeReplicaListener.handleMap.clone(handle: uniffiHandle)
+            } catch {
+                fatalError("Uniffi callback interface ReplicaListener: handle missing in uniffiClone")
+            }
+        },
+        onFriendEntries: { (
+            uniffiHandle: UInt64,
+            authors: RustBuffer,
+            uniffiOutReturn: UnsafeMutableRawPointer,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> () in
+                guard let uniffiObj = try? FfiConverterTypeReplicaListener.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return uniffiObj.onFriendEntries(
+                     authors: try FfiConverterSequenceData.lift(authors)
+                )
+            }
+
+            
+            let writeReturn = { () }
+            uniffiTraitInterfaceCall(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn
+            )
+        }
+    )
+
+    // Rust stores this pointer for future callback invocations, so it must live
+    // for the process lifetime (not just for the init function call).
+    //
+    // `nonisolated(unsafe)` is needed under Swift 6 strict concurrency.
+    // This is safe because the pointee is initialized once during static init
+    // and never mutated by either side of the FFI.  Its fields are C function pointers.
+    nonisolated(unsafe) static let vtablePtr: UnsafePointer<UniffiVTableCallbackInterfaceReplicaListener> = {
+        let ptr = UnsafeMutablePointer<UniffiVTableCallbackInterfaceReplicaListener>.allocate(capacity: 1)
+        ptr.initialize(to: vtable)
+        return UnsafePointer(ptr)
+    }()
+}
+
+private func uniffiCallbackInitReplicaListener() {
+    uniffi_iroh_location_fn_init_callback_vtable_replicalistener(UniffiCallbackInterfaceReplicaListener.vtablePtr)
+}
 
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
-public struct FfiConverterTypeSubscription: FfiConverter {
+public struct FfiConverterTypeReplicaListener: FfiConverter {
+    fileprivate static let handleMap = UniffiHandleMap<ReplicaListener>()
+
     typealias FfiType = UInt64
-    typealias SwiftType = Subscription
+    typealias SwiftType = ReplicaListener
 
-    public static func lift(_ handle: UInt64) throws -> Subscription {
-        return Subscription(unsafeFromHandle: handle)
+    public static func lift(_ handle: UInt64) throws -> ReplicaListener {
+        if ((handle & 1) == 0) {
+            // Rust-generated handle, construct a new class that uses the handle to implement the
+            // interface
+            return ReplicaListenerImpl(unsafeFromHandle: handle)
+        } else {
+            // Swift-generated handle, get the object from the handle map
+            return try handleMap.remove(handle: handle)
+        }
     }
 
-    public static func lower(_ value: Subscription) -> UInt64 {
-        return value.uniffiCloneHandle()
+    public static func lower(_ value: ReplicaListener) -> UInt64 {
+         if let rustImpl = value as? ReplicaListenerImpl {
+             // Rust-implemented object.  Clone the handle and return it
+            return rustImpl.uniffiCloneHandle()
+         } else {
+            // Swift object, generate a new vtable handle and return that.
+            return handleMap.insert(obj: value)
+         }
     }
 
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> Subscription {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ReplicaListener {
         let handle: UInt64 = try readInt(&buf)
         return try lift(handle)
     }
 
-    public static func write(_ value: Subscription, into buf: inout [UInt8]) {
+    public static func write(_ value: ReplicaListener, into buf: inout [UInt8]) {
         writeInt(&buf, lower(value))
     }
 }
@@ -5057,15 +3986,15 @@ public struct FfiConverterTypeSubscription: FfiConverter {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
-public func FfiConverterTypeSubscription_lift(_ handle: UInt64) throws -> Subscription {
-    return try FfiConverterTypeSubscription.lift(handle)
+public func FfiConverterTypeReplicaListener_lift(_ handle: UInt64) throws -> ReplicaListener {
+    return try FfiConverterTypeReplicaListener.lift(handle)
 }
 
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
-public func FfiConverterTypeSubscription_lower(_ value: Subscription) -> UInt64 {
-    return FfiConverterTypeSubscription.lower(value)
+public func FfiConverterTypeReplicaListener_lower(_ value: ReplicaListener) -> UInt64 {
+    return FfiConverterTypeReplicaListener.lower(value)
 }
 
 
@@ -5401,113 +4330,6 @@ public func FfiConverterTypeBumpResolution_lower(_ value: BumpResolution) -> Rus
 
 
 /**
- * A **control** message — the live-mode request channel (ARCHITECTURE §9c).
- *
- * Sealed with the exact same envelope machinery as a [`LocationFix`] and written to the sender's
- * own trail namespace under a `ctl/` key, so it is opaque to the stash and to every pool member
- * it is not wrapped for. Deliberately carries no location.
- *
- * `ts` + `nonce` are the replay defence, and they matter: the control key is overwritten in
- * place, so a malicious replica could withhold an update and keep serving a stale request. The
- * receiver MUST reject messages outside a freshness window and MUST dedupe by `nonce`.
- */
-public struct ControlMsg: Equatable, Hashable {
-    /**
-     * Wire version of this payload (currently 1).
-     */
-    public var v: UInt8
-    /**
-     * One of `CTL_KIND_*`.
-     */
-    public var kind: UInt8
-    /**
-     * When the sender created it (ms since epoch) — the freshness anchor.
-     */
-    public var ts: UInt64
-    /**
-     * Requested live window in ms; the receiver clamps it and is always free to refuse.
-     */
-    public var ttlMs: UInt32
-    /**
-     * 16 random bytes giving this message a stable identity for dedup.
-     */
-    public var nonce: Data
-
-    // Default memberwise initializers are never public by default, so we
-    // declare one manually.
-    public init(
-        /**
-         * Wire version of this payload (currently 1).
-         */v: UInt8, 
-        /**
-         * One of `CTL_KIND_*`.
-         */kind: UInt8, 
-        /**
-         * When the sender created it (ms since epoch) — the freshness anchor.
-         */ts: UInt64, 
-        /**
-         * Requested live window in ms; the receiver clamps it and is always free to refuse.
-         */ttlMs: UInt32, 
-        /**
-         * 16 random bytes giving this message a stable identity for dedup.
-         */nonce: Data) {
-        self.v = v
-        self.kind = kind
-        self.ts = ts
-        self.ttlMs = ttlMs
-        self.nonce = nonce
-    }
-
-    
-
-    
-}
-
-#if compiler(>=6)
-extension ControlMsg: Sendable {}
-#endif
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public struct FfiConverterTypeControlMsg: FfiConverterRustBuffer {
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ControlMsg {
-        return
-            try ControlMsg(
-                v: FfiConverterUInt8.read(from: &buf), 
-                kind: FfiConverterUInt8.read(from: &buf), 
-                ts: FfiConverterUInt64.read(from: &buf), 
-                ttlMs: FfiConverterUInt32.read(from: &buf), 
-                nonce: FfiConverterData.read(from: &buf)
-        )
-    }
-
-    public static func write(_ value: ControlMsg, into buf: inout [UInt8]) {
-        FfiConverterUInt8.write(value.v, into: &buf)
-        FfiConverterUInt8.write(value.kind, into: &buf)
-        FfiConverterUInt64.write(value.ts, into: &buf)
-        FfiConverterUInt32.write(value.ttlMs, into: &buf)
-        FfiConverterData.write(value.nonce, into: &buf)
-    }
-}
-
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public func FfiConverterTypeControlMsg_lift(_ buf: RustBuffer) throws -> ControlMsg {
-    return try FfiConverterTypeControlMsg.lift(buf)
-}
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public func FfiConverterTypeControlMsg_lower(_ value: ControlMsg) -> RustBuffer {
-    return FfiConverterTypeControlMsg.lower(value)
-}
-
-
-/**
  * Everything the drain needs to get a published envelope off the device.
  */
 public struct DeliveryConfig: Equatable, Hashable {
@@ -5599,17 +4421,15 @@ public struct DeliveryCount: Equatable, Hashable {
     public var source: String
     public var path: String
     public var relaySetup: String
-    public var mechanism: String
     public var count: UInt64
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(hour: UInt8, source: String, path: String, relaySetup: String, mechanism: String, count: UInt64) {
+    public init(hour: UInt8, source: String, path: String, relaySetup: String, count: UInt64) {
         self.hour = hour
         self.source = source
         self.path = path
         self.relaySetup = relaySetup
-        self.mechanism = mechanism
         self.count = count
     }
 
@@ -5633,7 +4453,6 @@ public struct FfiConverterTypeDeliveryCount: FfiConverterRustBuffer {
                 source: FfiConverterString.read(from: &buf), 
                 path: FfiConverterString.read(from: &buf), 
                 relaySetup: FfiConverterString.read(from: &buf), 
-                mechanism: FfiConverterString.read(from: &buf), 
                 count: FfiConverterUInt64.read(from: &buf)
         )
     }
@@ -5643,7 +4462,6 @@ public struct FfiConverterTypeDeliveryCount: FfiConverterRustBuffer {
         FfiConverterString.write(value.source, into: &buf)
         FfiConverterString.write(value.path, into: &buf)
         FfiConverterString.write(value.relaySetup, into: &buf)
-        FfiConverterString.write(value.mechanism, into: &buf)
         FfiConverterUInt64.write(value.count, into: &buf)
     }
 }
@@ -6501,8 +5319,8 @@ public struct LocationFix: Equatable, Hashable {
     /**
      * Why the position is what it is, as one of `FIX_STATE_*`.
      *
-     * A plain `u8` for the same reason `CTL_KIND_*` is: an unknown future value from a newer peer
-     * must degrade to "I do not recognise this" rather than fail the whole payload.
+     * A plain `u8` rather than an enum: an unknown future value from a newer peer must degrade to
+     * "I do not recognise this" rather than fail the whole payload.
      */
     public var state: UInt8?
     /**
@@ -6522,8 +5340,8 @@ public struct LocationFix: Equatable, Hashable {
         /**
          * Why the position is what it is, as one of `FIX_STATE_*`.
          *
-         * A plain `u8` for the same reason `CTL_KIND_*` is: an unknown future value from a newer peer
-         * must degrade to "I do not recognise this" rather than fail the whole payload.
+         * A plain `u8` rather than an enum: an unknown future value from a newer peer must degrade to
+         * "I do not recognise this" rather than fail the whole payload.
          */state: UInt8?, 
         /**
          * Seconds between [`ts`](Self::ts) and the moment this envelope was sealed.
@@ -7748,186 +6566,6 @@ public func FfiConverterTypePairStateRecord_lower(_ value: PairStateRecord) -> R
 
 
 /**
- * One peer to push to, and how long it is worth waiting for.
- *
- * Produced by `dialBudgetMs` in `src/features/social/core/peer-reachability.ts`. The budget lives
- * on the JS side because that is where presence does, and because a pure function over
- * `(presence, history)` can be tested without a node.
- */
-public struct PeerDial: Equatable, Hashable {
-    /**
-     * The peer's endpoint ticket, as [`LocationNode::push_trail`] takes them.
-     */
-    public var ticket: String
-    /**
-     * Deadline for this peer. **Zero means do not wait**: the data is still handed to the live
-     * engine so the peer reconciles when it next wakes, but no background wake is held open for
-     * it. See [`LocationNode::push_trail_budgeted`].
-     */
-    public var budgetMs: UInt64
-
-    // Default memberwise initializers are never public by default, so we
-    // declare one manually.
-    public init(
-        /**
-         * The peer's endpoint ticket, as [`LocationNode::push_trail`] takes them.
-         */ticket: String, 
-        /**
-         * Deadline for this peer. **Zero means do not wait**: the data is still handed to the live
-         * engine so the peer reconciles when it next wakes, but no background wake is held open for
-         * it. See [`LocationNode::push_trail_budgeted`].
-         */budgetMs: UInt64) {
-        self.ticket = ticket
-        self.budgetMs = budgetMs
-    }
-
-    
-
-    
-}
-
-#if compiler(>=6)
-extension PeerDial: Sendable {}
-#endif
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public struct FfiConverterTypePeerDial: FfiConverterRustBuffer {
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PeerDial {
-        return
-            try PeerDial(
-                ticket: FfiConverterString.read(from: &buf), 
-                budgetMs: FfiConverterUInt64.read(from: &buf)
-        )
-    }
-
-    public static func write(_ value: PeerDial, into buf: inout [UInt8]) {
-        FfiConverterString.write(value.ticket, into: &buf)
-        FfiConverterUInt64.write(value.budgetMs, into: &buf)
-    }
-}
-
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public func FfiConverterTypePeerDial_lift(_ buf: RustBuffer) throws -> PeerDial {
-    return try FfiConverterTypePeerDial.lift(buf)
-}
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public func FfiConverterTypePeerDial_lower(_ value: PeerDial) -> RustBuffer {
-    return FfiConverterTypePeerDial.lower(value)
-}
-
-
-/**
- * What one peer did during a push, handed back so JS can fold it into its estimate.
- *
- * Mirrors `PeerObservation` in `src/features/social/core/peer-reachability.ts`.
- */
-public struct PeerPushReport: Equatable, Hashable {
-    /**
-     * Full lowercase hex endpoint id, directly comparable to `friend.endpointId`.
-     */
-    public var peer: String
-    /**
-     * `finished` | `failed` | `silent` | `skipped`. See `docs::PeerOutcome` for why the last two
-     * are not the same thing.
-     */
-    public var outcome: String
-    /**
-     * Time from `start_sync` to this peer reporting. Absent when it never did.
-     */
-    public var latencyMs: UInt64?
-    /**
-     * Entries handed to THIS peer. Zero unless `outcome` is `finished`.
-     */
-    public var entriesSent: UInt64
-    /**
-     * The deadline this peer was granted, so a truncated dial is distinguishable from a real one.
-     */
-    public var budgetMs: UInt64
-
-    // Default memberwise initializers are never public by default, so we
-    // declare one manually.
-    public init(
-        /**
-         * Full lowercase hex endpoint id, directly comparable to `friend.endpointId`.
-         */peer: String, 
-        /**
-         * `finished` | `failed` | `silent` | `skipped`. See `docs::PeerOutcome` for why the last two
-         * are not the same thing.
-         */outcome: String, 
-        /**
-         * Time from `start_sync` to this peer reporting. Absent when it never did.
-         */latencyMs: UInt64?, 
-        /**
-         * Entries handed to THIS peer. Zero unless `outcome` is `finished`.
-         */entriesSent: UInt64, 
-        /**
-         * The deadline this peer was granted, so a truncated dial is distinguishable from a real one.
-         */budgetMs: UInt64) {
-        self.peer = peer
-        self.outcome = outcome
-        self.latencyMs = latencyMs
-        self.entriesSent = entriesSent
-        self.budgetMs = budgetMs
-    }
-
-    
-
-    
-}
-
-#if compiler(>=6)
-extension PeerPushReport: Sendable {}
-#endif
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public struct FfiConverterTypePeerPushReport: FfiConverterRustBuffer {
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PeerPushReport {
-        return
-            try PeerPushReport(
-                peer: FfiConverterString.read(from: &buf), 
-                outcome: FfiConverterString.read(from: &buf), 
-                latencyMs: FfiConverterOptionUInt64.read(from: &buf), 
-                entriesSent: FfiConverterUInt64.read(from: &buf), 
-                budgetMs: FfiConverterUInt64.read(from: &buf)
-        )
-    }
-
-    public static func write(_ value: PeerPushReport, into buf: inout [UInt8]) {
-        FfiConverterString.write(value.peer, into: &buf)
-        FfiConverterString.write(value.outcome, into: &buf)
-        FfiConverterOptionUInt64.write(value.latencyMs, into: &buf)
-        FfiConverterUInt64.write(value.entriesSent, into: &buf)
-        FfiConverterUInt64.write(value.budgetMs, into: &buf)
-    }
-}
-
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public func FfiConverterTypePeerPushReport_lift(_ buf: RustBuffer) throws -> PeerPushReport {
-    return try FfiConverterTypePeerPushReport.lift(buf)
-}
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public func FfiConverterTypePeerPushReport_lower(_ value: PeerPushReport) -> RustBuffer {
-    return FfiConverterTypePeerPushReport.lower(value)
-}
-
-
-/**
  * Iroh's current address knowledge for one requested peer.
  */
 public struct PeerTransportDiagnostic: Equatable, Hashable {
@@ -8939,7 +7577,7 @@ public func FfiConverterTypeTelemetryPush_lower(_ value: TelemetryPush) -> RustB
  *
  * Companion to [`TransportDiagnostics`]: a diagnostics read, carrying no location data, so it
  * needs no decrypt and no gate. See [`docs::ReplicaSlot`] for why this is not the same question
- * as "have we seen this author's fix" — app storage is written by the live gossip lane too, and
+ * as "have we seen this author's fix" — app storage keeps what the app surfaced, while
  * reconciliation serves out of the replica.
  */
 public struct TrailReplicaAuthor: Equatable, Hashable {
@@ -10382,30 +9020,6 @@ fileprivate struct FfiConverterOptionData: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
-fileprivate struct FfiConverterOptionTypeFixListener: FfiConverterRustBuffer {
-    typealias SwiftType = FixListener?
-
-    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
-        guard let value = value else {
-            writeInt(&buf, Int8(0))
-            return
-        }
-        writeInt(&buf, Int8(1))
-        FfiConverterTypeFixListener.write(value, into: &buf)
-    }
-
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
-        switch try readInt(&buf) as Int8 {
-        case 0: return nil
-        case 1: return try FfiConverterTypeFixListener.read(from: &buf)
-        default: throw UniffiInternalError.unexpectedOptionalTag
-        }
-    }
-}
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
 fileprivate struct FfiConverterOptionTypeLocationNode: FfiConverterRustBuffer {
     typealias SwiftType = LocationNode?
 
@@ -10771,31 +9385,6 @@ fileprivate struct FfiConverterSequenceTypeBlePeer: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
-fileprivate struct FfiConverterSequenceTypeControlMsg: FfiConverterRustBuffer {
-    typealias SwiftType = [ControlMsg]
-
-    public static func write(_ value: [ControlMsg], into buf: inout [UInt8]) {
-        let len = Int32(value.count)
-        writeInt(&buf, len)
-        for item in value {
-            FfiConverterTypeControlMsg.write(item, into: &buf)
-        }
-    }
-
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [ControlMsg] {
-        let len: Int32 = try readInt(&buf)
-        var seq = [ControlMsg]()
-        seq.reserveCapacity(Int(len))
-        for _ in 0 ..< len {
-            seq.append(try FfiConverterTypeControlMsg.read(from: &buf))
-        }
-        return seq
-    }
-}
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
 fileprivate struct FfiConverterSequenceTypeDeliveryCount: FfiConverterRustBuffer {
     typealias SwiftType = [DeliveryCount]
 
@@ -10963,56 +9552,6 @@ fileprivate struct FfiConverterSequenceTypePairStateRecord: FfiConverterRustBuff
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
             seq.append(try FfiConverterTypePairStateRecord.read(from: &buf))
-        }
-        return seq
-    }
-}
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-fileprivate struct FfiConverterSequenceTypePeerDial: FfiConverterRustBuffer {
-    typealias SwiftType = [PeerDial]
-
-    public static func write(_ value: [PeerDial], into buf: inout [UInt8]) {
-        let len = Int32(value.count)
-        writeInt(&buf, len)
-        for item in value {
-            FfiConverterTypePeerDial.write(item, into: &buf)
-        }
-    }
-
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [PeerDial] {
-        let len: Int32 = try readInt(&buf)
-        var seq = [PeerDial]()
-        seq.reserveCapacity(Int(len))
-        for _ in 0 ..< len {
-            seq.append(try FfiConverterTypePeerDial.read(from: &buf))
-        }
-        return seq
-    }
-}
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-fileprivate struct FfiConverterSequenceTypePeerPushReport: FfiConverterRustBuffer {
-    typealias SwiftType = [PeerPushReport]
-
-    public static func write(_ value: [PeerPushReport], into buf: inout [UInt8]) {
-        let len = Int32(value.count)
-        writeInt(&buf, len)
-        for item in value {
-            FfiConverterTypePeerPushReport.write(item, into: &buf)
-        }
-    }
-
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [PeerPushReport] {
-        let len: Int32 = try readInt(&buf)
-        var seq = [PeerPushReport]()
-        seq.reserveCapacity(Int(len))
-        for _ in 0 ..< len {
-            seq.append(try FfiConverterTypePeerPushReport.read(from: &buf))
         }
         return seq
     }
@@ -11251,16 +9790,6 @@ public func decodePairInvite(token: String)throws  -> PairInvite  {
 })
 }
 /**
- * Derive the gossip topic for a given author's location stream.
- */
-public func deriveTopic(authorEndpointId: Data) -> Data  {
-    return try!  FfiConverterData.lift(try! rustCall() {
-    uniffi_iroh_location_fn_func_derive_topic(
-        FfiConverterData.lower(authorEndpointId),$0
-    )
-})
-}
-/**
  * Encode a [`PairInvite`] into an opaque, dependency-free `scpair2:<base64url>` token for QR / links.
  */
 public func encodePairInvite(invite: PairInvite)throws  -> String  {
@@ -11275,7 +9804,7 @@ public func encodePairInvite(invite: PairInvite)throws  -> String  {
  *
  * Pure decode, deliberately node-free: the app uses it to recognise the configured stash as the
  * device that handed over a fix, and that question comes up before (and independently of) any
- * node being started. Same parse as the bootstrap loop in [`LocationNode::subscribe`].
+ * node being started.
  */
 public func endpointIdFromTicket(ticket: String)throws  -> String  {
     return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeLocationError_lift) {
@@ -11567,13 +10096,10 @@ private let initializationResult: InitializationResult = {
     if (uniffi_iroh_location_checksum_func_decode_pair_invite() != 65503) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_iroh_location_checksum_func_derive_topic() != 20218) {
-        return InitializationResult.apiChecksumMismatch
-    }
     if (uniffi_iroh_location_checksum_func_encode_pair_invite() != 1284) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_iroh_location_checksum_func_endpoint_id_from_ticket() != 28437) {
+    if (uniffi_iroh_location_checksum_func_endpoint_id_from_ticket() != 42046) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_func_generate_recv_keypair() != 62550) {
@@ -11642,15 +10168,6 @@ private let initializationResult: InitializationResult = {
     if (uniffi_iroh_location_checksum_method_devicesecrets_recv_secret() != 59366) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_iroh_location_checksum_method_fixlistener_on_fix() != 31892) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_iroh_location_checksum_method_fixlistener_on_opaque() != 14800) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_iroh_location_checksum_method_fixlistener_on_status() != 49613) {
-        return InitializationResult.apiChecksumMismatch
-    }
     if (uniffi_iroh_location_checksum_method_locationnode_begin_session() != 25232) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -11667,9 +10184,6 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_method_locationnode_clear_outbox() != 61861) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_iroh_location_checksum_method_locationnode_clear_resync() != 23779) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_method_locationnode_complete_session() != 30383) {
@@ -11693,39 +10207,6 @@ private let initializationResult: InitializationResult = {
     if (uniffi_iroh_location_checksum_method_locationnode_doc_ticket() != 34643) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_iroh_location_checksum_method_locationnode_docs_write() != 25294) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_iroh_location_checksum_method_locationnode_docs_write_control() != 23232) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_iroh_location_checksum_method_locationnode_docs_write_inner() != 15200) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_iroh_location_checksum_method_locationnode_docs_write_null() != 46772) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_iroh_location_checksum_method_locationnode_docs_write_null_ratcheted() != 18657) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_iroh_location_checksum_method_locationnode_docs_write_null_ratcheted_traced() != 10230) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_iroh_location_checksum_method_locationnode_docs_write_null_traced() != 22862) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_iroh_location_checksum_method_locationnode_docs_write_ratcheted() != 14176) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_iroh_location_checksum_method_locationnode_docs_write_ratcheted_inner() != 59600) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_iroh_location_checksum_method_locationnode_docs_write_ratcheted_traced() != 56484) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_iroh_location_checksum_method_locationnode_docs_write_traced() != 47616) {
-        return InitializationResult.apiChecksumMismatch
-    }
     if (uniffi_iroh_location_checksum_method_locationnode_endpoint_id() != 34847) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -11747,6 +10228,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_iroh_location_checksum_method_locationnode_has_session() != 16365) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_iroh_location_checksum_method_locationnode_heartbeat_fix() != 49997) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_iroh_location_checksum_method_locationnode_identity_secret() != 6853) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -11754,6 +10238,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_method_locationnode_import_profile_ticket() != 16047) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_iroh_location_checksum_method_locationnode_ingest_fix() != 21806) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_method_locationnode_initiate_pair() != 61841) {
@@ -11783,13 +10270,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_iroh_location_checksum_method_locationnode_network_changed() != 50592) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_iroh_location_checksum_method_locationnode_next_seq() != 48703) {
-        return InitializationResult.apiChecksumMismatch
-    }
     if (uniffi_iroh_location_checksum_method_locationnode_outbox_pending() != 57932) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_iroh_location_checksum_method_locationnode_own_subscription() != 45730) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_method_locationnode_pair_result() != 26021) {
@@ -11810,19 +10291,16 @@ private let initializationResult: InitializationResult = {
     if (uniffi_iroh_location_checksum_method_locationnode_poll_profile_events() != 11150) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_iroh_location_checksum_method_locationnode_poll_resync() != 23719) {
-        return InitializationResult.apiChecksumMismatch
-    }
     if (uniffi_iroh_location_checksum_method_locationnode_profile_ticket() != 35099) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_method_locationnode_prune_trail() != 22166) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_iroh_location_checksum_method_locationnode_publish_profile() != 57330) {
+    if (uniffi_iroh_location_checksum_method_locationnode_publish_introduction() != 32077) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_iroh_location_checksum_method_locationnode_publish_resync() != 6657) {
+    if (uniffi_iroh_location_checksum_method_locationnode_publish_profile() != 57330) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_method_locationnode_publish_watermarks() != 59312) {
@@ -11831,19 +10309,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_iroh_location_checksum_method_locationnode_pull_latest() != 61053) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_iroh_location_checksum_method_locationnode_push_trail() != 39469) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_iroh_location_checksum_method_locationnode_push_trail_budgeted() != 15776) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_iroh_location_checksum_method_locationnode_read_control() != 32699) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_iroh_location_checksum_method_locationnode_read_latest() != 16725) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_iroh_location_checksum_method_locationnode_read_latest_ratcheted() != 45503) {
+    if (uniffi_iroh_location_checksum_method_locationnode_read_latest_ratcheted() != 31284) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_method_locationnode_read_latest_ratcheted_events() != 33560) {
@@ -11897,7 +10363,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_iroh_location_checksum_method_locationnode_shutdown() != 36520) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_iroh_location_checksum_method_locationnode_start() != 8886) {
+    if (uniffi_iroh_location_checksum_method_locationnode_start() != 56944) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_method_locationnode_start_stored() != 48587) {
@@ -11906,10 +10372,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_iroh_location_checksum_method_locationnode_submit_pair_choice() != 8652) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_iroh_location_checksum_method_locationnode_subscribe() != 45610) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_iroh_location_checksum_method_locationnode_sync_latest() != 8256) {
+    if (uniffi_iroh_location_checksum_method_locationnode_sync_latest() != 43791) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_method_locationnode_take_own_published() != 62996) {
@@ -11918,13 +10381,16 @@ private let initializationResult: InitializationResult = {
     if (uniffi_iroh_location_checksum_method_locationnode_ticket() != 17929) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_iroh_location_checksum_method_locationnode_trail_replica_status() != 25080) {
+    if (uniffi_iroh_location_checksum_method_locationnode_trail_replica_status() != 14570) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_method_locationnode_transport_diagnostics() != 23251) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_iroh_location_checksum_method_locationnode_upload_trail_content() != 56184) {
+    if (uniffi_iroh_location_checksum_method_locationnode_unwatch_replica() != 40665) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_iroh_location_checksum_method_locationnode_watch_replica() != 20728) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_method_meshcapsulestore_deliver() != 47836) {
@@ -11945,28 +10411,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_iroh_location_checksum_method_meshcapsulestore_stats() != 21966) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_iroh_location_checksum_method_subscription_heartbeat_fix() != 26170) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_iroh_location_checksum_method_subscription_ingest_fix() != 22084) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_iroh_location_checksum_method_subscription_publish() != 18306) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_iroh_location_checksum_method_subscription_publish_inner() != 62762) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_iroh_location_checksum_method_subscription_publish_introduction() != 61008) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_iroh_location_checksum_method_subscription_publish_null() != 2917) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_iroh_location_checksum_method_subscription_publish_null_traced() != 48794) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_iroh_location_checksum_method_subscription_publish_traced() != 2036) {
+    if (uniffi_iroh_location_checksum_method_replicalistener_on_friend_entries() != 36185) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_method_nodehost_acquire_app() != 18446) {
@@ -12004,7 +10449,7 @@ private let initializationResult: InitializationResult = {
     }
 
     uniffiCallbackInitDeviceSecrets()
-    uniffiCallbackInitFixListener()
+    uniffiCallbackInitReplicaListener()
     return InitializationResult.ok
 }()
 

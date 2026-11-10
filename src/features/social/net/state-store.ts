@@ -9,10 +9,10 @@ import { SECURE_STORE_OPTIONS } from './secure-keys';
  * kept in the secure store for durability + to sit next to the identity keys (see secure-keys.ts).
  *
  * Unlike the static identity keys, `seq` is SEQUENTIAL state, so persistence is fail-stop
- * (FORWARD-SECRECY.md §4.2): a silent persist no-op would let a later launch reuse an
- * already-published counter value. `saveSeq` therefore propagates failure — the caller
- * (`nextSeq` in location-sharing.ts) persists before the value goes on the wire, so a persist
- * failure aborts the publish instead of risking reuse.
+ * (FORWARD-SECRECY.md §4.2): a silent persist no-op would record a reservation the keychain does
+ * not hold, and a later reinstall would seed native below values already on the wire. `saveSeq`
+ * therefore propagates failure, and the caller (`reserveSeqAhead` in location-sharing.ts) only
+ * advances its idea of the reservation once the write has landed.
  *
  * # What this value MEANS, since `seq_store.rs` took over issuing
  *
@@ -49,8 +49,8 @@ export const SEQ_RESERVATION_BLOCK = 10_000;
 /**
  * How close the live counter may get to the reservation before a new block is claimed.
  *
- * Only the foreground path can notice and top up, so this exists to keep the cheap local check in
- * `nextSeq` from turning into a native round-trip on every single publish.
+ * Only the foreground path can notice and top up, so this exists to keep `topUpSeqReservation`
+ * from writing the keychain after every single publish.
  */
 export const SEQ_RESERVATION_LOW_WATER = 1_000;
 

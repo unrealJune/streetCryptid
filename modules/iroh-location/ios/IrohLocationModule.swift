@@ -54,10 +54,9 @@ private final class BluetoothRadioProbe: NSObject, CBCentralManagerDelegate {
 
 // The UniFFI-generated Swift bindings for the `iroh-location` Rust crate are compiled
 // into this target (see IrohLocation.podspec -> vendored xcframework + generated/*.swift).
-// They expose: `LocationNode`, `Subscription`, the `FixListener` protocol, the profile /
-// pairing / BLE records + enums, and the free functions `deriveTopic(authorEndpointId:)`,
-// `generateRecvKeypair()`, `encodePairInvite(invite:)`, `decodePairInvite(token:)`, and
-// `endpointIdFromTicket(ticket:)`.
+// They expose: `LocationNode`, the `ReplicaListener` protocol, the profile / pairing / BLE
+// records + enums, and the free functions `generateRecvKeypair()`, `encodePairInvite(invite:)`,
+// `decodePairInvite(token:)`, and `endpointIdFromTicket(ticket:)`.
 //
 // Regenerate with `just bindgen-ios` on macOS (source bindings can also be produced from a
 // host library via `uniffi-bindgen ... --language swift`; only the XCFramework needs macOS).
@@ -169,16 +168,6 @@ private func fixToDict(_ fix: LocationFix) -> [String: Any] {
   if let state = fix.state { out["state"] = Int(state) }
   if let delta = fix.publishedDeltaS { out["publishedDeltaS"] = Int(delta) }
   return out
-}
-
-/// Build the UniFFI `ControlMsg` from the JS bridge dict (see `NativeControlMsg`; `nonce` is hex).
-private func controlMsg(from msg: [String: Any]) -> ControlMsg {
-  ControlMsg(
-    v: UInt8(truncatingIfNeeded: (msg["v"] as? NSNumber)?.intValue ?? 1),
-    kind: UInt8(truncatingIfNeeded: (msg["kind"] as? NSNumber)?.intValue ?? 0),
-    ts: UInt64((msg["ts"] as? NSNumber)?.doubleValue ?? 0),
-    ttlMs: UInt32((msg["ttlMs"] as? NSNumber)?.doubleValue ?? 0),
-    nonce: hexToData(msg["nonce"] as? String ?? ""))
 }
 
 // ── JS-facing conversions: byte arrays → lowercase hex, U64 → JS number ──────────────────────
@@ -356,52 +345,23 @@ private func bumpResolutionDict(_ resolution: BumpResolution) -> [String: Any] {
   ]
 }
 
-/// Bridges inbound Rust gossip events to the JS EventEmitter.
-private final class EventBridge: FixListener {
+/// Tells JS which friends' replica slots just became readable (`ReplicaListener` in `lib.rs`).
+///
+/// Carries authors only. The entries themselves stay in the replica and are read back with
+/// `readLatest`, so a notification that is dropped (no app mounted, a JS context going away) loses
+/// nothing but latency.
+private final class ReplicaBridge: ReplicaListener, @unchecked Sendable {
   weak var module: IrohLocationModule?
-  let subscriptionId: String
-  init(module: IrohLocationModule, subscriptionId: String) {
-    self.module = module
-    self.subscriptionId = subscriptionId
+  init(module: IrohLocationModule) { self.module = module }
+  func onFriendEntries(authors: [Data]) {
+    module?.sendEvent("onReplicaChanged", ["authors": authors.map(dataToHex)])
   }
-  // `backfill` is `true` when the fix arrived via durable range-reconciliation (iroh-docs
-  // catch-up) rather than the live gossip path. `via` names the last hop into this device
-  // (`relay` | `direct` | `lan` | `ble` | `live` | `docs` | `stash`); `viaPeer` names the device
-  // that performed it, which is not necessarily the fix's author.
-  func onFix(
-    author: Data, seq: UInt64, fix: LocationFix, backfill: Bool, via: String, viaPeer: String?
-  ) {
-    module?.sendEvent(
-      "onFix",
-      [
-        "author": dataToHex(author),
-        "seq": seq,
-        "fix": fixToDict(fix),
-        "backfill": backfill,
-        "via": via,
-        "viaPeer": viaPeer as Any,
-      ])
-  }
-  func onOpaque(author: Data, seq: UInt64) {
-    module?.sendEvent("onOpaque", [
-      "author": dataToHex(author),
-      "seq": seq,
-      "kind": author.isEmpty ? "opaque" : "null",
-    ])
-  }
-  func onStatus(status: String) {
-    module?.sendEvent("onStatus", ["subscriptionId": subscriptionId, "status": status])
-  }
-  // No `onSync`: the Rust `FixListener` trait has no `on_sync`, so nothing ever calls it. It went
-  // when the durable path collapsed to last-write-wins (FORWARD-SECRECY.md §4.4) — with one
-  // overwritten slot per author there is no backfill stream to report progress on. Swift tolerated
-  // the leftover method because a protocol conformance ignores extras; Kotlin's `override` did not,
-  // which is what actually broke the Android build.
 }
 
 public final class IrohLocationModule: Module {
-  private var subscriptions: [String: Subscription] = [:]
-  private var bridges: [String: EventBridge] = [:]
+  /// Set while JS wants replica notifications. Re-attached to every node generation, because a
+  /// restart or replacement builds a new `LocationNode` that knows no listener.
+  private var replicaBridge: ReplicaBridge?
 
   /// App leases THIS module instance holds on the process's node: one per `createNode` not yet
   /// matched by a `shutdown`.
@@ -430,19 +390,18 @@ public final class IrohLocationModule: Module {
     if generation != cachedGeneration {
       cachedNode = host.current()
       cachedGeneration = generation
+      if let bridge = replicaBridge { cachedNode?.watchReplica(listener: bridge) }
     }
     return cachedNode
   }
 
   /// Undo what this module set up AROUND the node — never the node itself, which is the host's.
   ///
-  /// Dropping the subscriptions lets a friend's topic leave the swarm; the own-topic subscription
-  /// stays alive in the node's slot for the background runtime, silenced by the host once no app
-  /// holds the node.
+  /// The host detaches the replica listener itself once no app holds the node; this only forgets
+  /// that JS asked for one.
   private func clearModuleRuntime() {
-    subscriptions.removeAll()
-    bridges.removeAll()
     nodeLock.lock()
+    replicaBridge = nil
     cachedNode = nil
     cachedGeneration = .max
     nodeLock.unlock()
@@ -458,7 +417,7 @@ public final class IrohLocationModule: Module {
     Name("IrohLocation")
     // `onNativeFix` is the mounted-app handoff: while the app is wired the background runtime hands
     // its captures here rather than running them itself. See `BackgroundLocationRuntime.eventSink`.
-    Events("onFix", "onOpaque", "onStatus", "onSync", "onNativeFix", "onFriendsPulled")
+    Events("onReplicaChanged", "onNativeFix", "onFriendsPulled")
 
     /// Whether this binary refcounts the node instead of clobbering it on a second `createNode`.
     ///
@@ -478,7 +437,6 @@ public final class IrohLocationModule: Module {
       excludeFromBackup(roots.state)
       excludeFromBackup(roots.data)
       let host = nodeHost()
-      let generationBefore = host.generation()
       // Adopts the live node when the identity matches — including one the background runtime
       // built and started on a JS-free launch — and builds otherwise. Never refused.
       let node = try await host.acquireApp(
@@ -487,14 +445,10 @@ public final class IrohLocationModule: Module {
         dataRoot: roots.data.path,
         stateRoot: roots.state.path)
       self.nodeLock.lock()
-      let heldBefore = self.leases
       self.leases += 1
       self.nodeLock.unlock()
-      // A replacement (a different identity) invalidates every subscription made on the old node.
-      if heldBefore > 0 && host.generation() != generationBefore {
-        self.subscriptions.removeAll()
-        self.bridges.removeAll()
-      }
+      // A replacement (a different identity) is a new node: the getter re-attaches the watch.
+      _ = self.node
       return [
         "endpointId": dataToHex(node.endpointId()),
         "identitySecret": dataToHex(node.identitySecret()),
@@ -544,14 +498,32 @@ public final class IrohLocationModule: Module {
       guard held > 0 else {
         throw Exception(name: "NoNode", description: "call createNode first")
       }
-      // Every subscription belongs to the node being replaced; JS resubscribes afterwards.
-      self.subscriptions.removeAll()
-      self.bridges.removeAll()
       _ = try await nodeHost().restart(
         config: TransportConfig(
           relayUrls: relayUrls, relayAuthToken: relayAuthToken, relayEnabled: relayEnabled,
           ipEnabled: ipEnabled, bleEnabled: bleEnabled),
         timeoutMs: Self.restartBudgetMs)
+      // The new node has no listener; touching the getter attaches the watch before JS asks.
+      _ = self.node
+    }
+
+    /// Announce, as `onReplicaChanged`, each friend whose fix or null slot becomes readable.
+    ///
+    /// Replication runs whether or not anyone listens; this only stops JS having to poll the
+    /// replica to notice. Kept across node restarts and replacements by this module.
+    Function("watchReplica") {
+      let bridge = ReplicaBridge(module: self)
+      self.nodeLock.lock()
+      self.replicaBridge = bridge
+      self.nodeLock.unlock()
+      self.node?.watchReplica(listener: bridge)
+    }
+
+    Function("unwatchReplica") {
+      self.nodeLock.lock()
+      self.replicaBridge = nil
+      self.nodeLock.unlock()
+      self.node?.unwatchReplica()
     }
 
     /// The host's view of who holds the node, for `device.health`.
@@ -640,18 +612,15 @@ public final class IrohLocationModule: Module {
           ipEnabled: ipEnabled, bleEnabled: bleEnabled))
     }
 
-    /// Hand one captured fix to the native pipeline on the CURRENT subscription. The background
-    /// runtime does not come through here — it owns its own node — but the mounted app uses it to
-    /// exercise the same path the background one takes.
+    /// Hand one captured fix to the native pipeline: gate → outbox → seal → own docs namespace.
+    /// The mounted app's captures come through here; the background runtime calls the same node
+    /// method directly.
     AsyncFunction("ingestFix") {
-      (subscriptionId: String, fix: [String: Double], battery: [String: Any], intervalMs: Double)
+      (fix: [String: Double], battery: [String: Any], intervalMs: Double)
         async throws -> [String: Any?] in
-      guard let sub = self.subscriptions[subscriptionId] else {
-        throw Exception(name: "NoSubscription", description: "no such subscription")
-      }
+      guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
       return ingestOutcomeToDict(
-        try await sub.ingestFix(
-          subscriptionId: subscriptionId,
+        try await node.ingestFix(
           fix: locationFix(from: fix),
           battery: batteryState(from: battery),
           intervalMs: UInt64(max(1, intervalMs)),
@@ -663,14 +632,11 @@ public final class IrohLocationModule: Module {
     /// reliable one, and the cadence has to stay uniform whether or not the phone is moving.
     /// `parked` is the caller's motion claim (`nil` for none) — see `publish::Motion`.
     AsyncFunction("heartbeatFix") {
-      (subscriptionId: String, battery: [String: Any], intervalMs: Double, parked: Bool?)
+      (battery: [String: Any], intervalMs: Double, parked: Bool?)
         async throws -> [String: Any?] in
-      guard let sub = self.subscriptions[subscriptionId] else {
-        throw Exception(name: "NoSubscription", description: "no such subscription")
-      }
+      guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
       return ingestOutcomeToDict(
-        try await sub.heartbeatFix(
-          subscriptionId: subscriptionId,
+        try await node.heartbeatFix(
           battery: batteryState(from: battery),
           intervalMs: UInt64(max(1, intervalMs)),
           nowMs: UInt64(Date().timeIntervalSince1970 * 1000),
@@ -680,13 +646,10 @@ public final class IrohLocationModule: Module {
     /// Seal the last known position once for a recipient set that has just grown — a new friend's
     /// first dot. Declared in the TS contract and called by `connectNewFriend` since it existed,
     /// and exported by neither platform until the export-parity test found it.
-    AsyncFunction("publishIntroduction") { (subscriptionId: String) async throws -> [String: Any?] in
-      guard let sub = self.subscriptions[subscriptionId] else {
-        throw Exception(name: "NoSubscription", description: "no such subscription")
-      }
+    AsyncFunction("publishIntroduction") { () async throws -> [String: Any?] in
+      guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
       return ingestOutcomeToDict(
-        try await sub.publishIntroduction(
-          subscriptionId: subscriptionId,
+        try await node.publishIntroduction(
           nowMs: UInt64(Date().timeIntervalSince1970 * 1000)))
     }
 
@@ -769,12 +732,6 @@ public final class IrohLocationModule: Module {
 
     // MARK: - Native publish state
 
-    /// Advance and return the publish counter. Durable before it resolves — see `seq_store.rs`.
-    AsyncFunction("nextSeq") { () async throws -> Double in
-      guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
-      return Double(try await node.nextSeq())
-    }
-
     AsyncFunction("currentSeq") { () async throws -> Double in
       guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
       return Double(try await node.currentSeq())
@@ -823,9 +780,6 @@ public final class IrohLocationModule: Module {
     // Record where a drained envelope must be SENT to leave the device. The companion to
     // `setSharingRecipients`: that one says who to seal for, this one says who to hand the sealed
     // bytes to. Without it the drain publishes into a local replica nothing reconciles with.
-    //
-    // Same bindgen caveat as `pushTrail` below: needs `just bindgen-ios` on macOS before
-    // `node.setDeliveryConfig` exists in the generated Swift.
     AsyncFunction("setDeliveryConfig") {
       (peerTickets: [String], stashBaseUrl: String?, stashPsk: String?) async throws in
       guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
@@ -836,7 +790,6 @@ public final class IrohLocationModule: Module {
 
     // When the native drain last accepted, published and pushed. `device.health` reports these as
     // ages; the JS watermark row only ever saw the JS publish path, which the drain replaced.
-    // Same bindgen caveat as `pushTrail` below.
     AsyncFunction("publishWatermarks") { () async throws -> [String: Any?] in
       guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
       let w = try await node.publishWatermarks()
@@ -869,10 +822,6 @@ public final class IrohLocationModule: Module {
       return try await node.ticket()
     }
 
-    Function("deriveTopic") { (authorHex: String) -> String in
-      dataToHex(deriveTopic(authorEndpointId: hexToData(authorHex)))
-    }
-
     // Map tile decode (see rust/src/mvt.rs). AsyncFunction runs off the JS thread.
     // Bytes cross as Uint8Array <-> Data. Requires `just bindgen-ios` (macOS) so the
     // UniFFI Swift bindings include these free functions.
@@ -886,91 +835,6 @@ public final class IrohLocationModule: Module {
 
     AsyncFunction("h3CellsForPolygon") { (coordinates: [Double], resolution: Int) throws -> [String] in
       try h3CellsForPolygon(coordinates: coordinates, resolution: UInt8(resolution))
-    }
-
-    AsyncFunction("subscribe") { (topicHex: String, bootstrap: [String]) async throws -> String in
-      guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
-      let subscriptionId = UUID().uuidString
-      let bridge = EventBridge(module: self, subscriptionId: subscriptionId)
-      let sub = try await node.subscribe(
-        topic: hexToData(topicHex), bootstrap: bootstrap, listener: bridge)
-      self.subscriptions[subscriptionId] = sub
-      self.bridges[subscriptionId] = bridge
-      return subscriptionId
-    }
-
-    // Recipients are **endpoint ids**, not receiving keys: every fix lane is envelope v3 now, and
-    // a v3 wrap is keyed by the per-friend ratchet session, which is keyed by endpoint id
-    // (FORWARD-SECRECY.md 4.7). Returns the recipients left out, as "<endpointHex>:<reason>" —
-    // a friend with no session yet, a lapsed one, or one whose state could not be read. The
-    // caller must surface these rather than treat a short wrap list as success.
-    AsyncFunction("publish") {
-      (subscriptionId: String, seq: Double, fix: [String: Double], recipientEndpoints: [String], traceparent: String?) async throws -> [String] in
-      guard let sub = self.subscriptions[subscriptionId] else { return [] }
-      if let traceparent {
-        return try await sub.publishTraced(
-          seq: UInt64(seq), fix: locationFix(from: fix),
-          recipientEndpoints: recipientEndpoints, traceparent: traceparent)
-      } else {
-        return try await sub.publish(
-          seq: UInt64(seq), fix: locationFix(from: fix),
-          recipientEndpoints: recipientEndpoints)
-      }
-    }
-
-    // A null fix is an ordinary envelope with an empty padded payload (FORWARD-SECRECY.md §4.1) —
-    // the watcher half of the symmetric lanes. No fix dictionary: there is no position, only the
-    // tick's timestamp, which rides in the signed header as usual.
-    AsyncFunction("publishNull") {
-      (subscriptionId: String, seq: Double, ts: Double, watcherEndpoints: [String], traceparent: String?) async throws -> [String] in
-      guard let sub = self.subscriptions[subscriptionId] else { return [] }
-      if let traceparent {
-        return try await sub.publishNullTraced(
-          seq: UInt64(seq), ts: UInt64(ts),
-          recipientEndpoints: watcherEndpoints, traceparent: traceparent)
-      } else {
-        return try await sub.publishNull(
-          seq: UInt64(seq), ts: UInt64(ts),
-          recipientEndpoints: watcherEndpoints)
-      }
-    }
-
-    AsyncFunction("unsubscribe") { (subscriptionId: String) in
-      self.subscriptions.removeValue(forKey: subscriptionId)
-      self.bridges.removeValue(forKey: subscriptionId)
-    }
-
-    // ── Durable trail (iroh-docs) — see docs/social/ARCHITECTURE.md §5–6 ──────────────────
-
-    AsyncFunction("docsWrite") {
-      (subscriptionId: String, seq: Double, fix: [String: Double], recipientEndpoints: [String], traceparent: String?) async throws -> [String] in
-      guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
-      if let traceparent {
-        return try await node.docsWriteRatchetedTraced(
-          subscriptionId: subscriptionId, seq: UInt64(seq),
-          fix: locationFix(from: fix), recipientEndpoints: recipientEndpoints,
-          traceparent: traceparent)
-      } else {
-        return try await node.docsWriteRatcheted(
-          subscriptionId: subscriptionId, seq: UInt64(seq),
-          fix: locationFix(from: fix), recipientEndpoints: recipientEndpoints)
-      }
-    }
-
-    // Separate LWW slot from the fix lane (`docs::encode_nul_key`): a tick's two envelopes are
-    // wrapped for disjoint recipient sets, so one slot would make each supersede the other.
-    AsyncFunction("docsWriteNull") {
-      (subscriptionId: String, seq: Double, ts: Double, watcherEndpoints: [String], traceparent: String?) async throws -> [String] in
-      guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
-      if let traceparent {
-        return try await node.docsWriteNullRatchetedTraced(
-          subscriptionId: subscriptionId, seq: UInt64(seq), ts: UInt64(ts),
-          watcherEndpoints: watcherEndpoints, traceparent: traceparent)
-      } else {
-        return try await node.docsWriteNullRatcheted(
-          subscriptionId: subscriptionId, seq: UInt64(seq), ts: UInt64(ts),
-          watcherEndpoints: watcherEndpoints)
-      }
     }
 
     // Ratchet sessions + 4.6 recovery.
@@ -990,21 +854,6 @@ public final class IrohLocationModule: Module {
       return Int(try await node.resyncCount(peerEndpointHex: peerEndpoint))
     }
 
-    AsyncFunction("publishResync") { (recipientRecvPubs: [String]) async throws -> String in
-      guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
-      return try await node.publishResync(recipientRecvPubs: recipientRecvPubs)
-    }
-
-    AsyncFunction("pollResync") { (peerEndpoint: String, peerRecvPub: String) async throws -> Bool in
-      guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
-      return try await node.pollResync(peerEndpointHex: peerEndpoint, peerRecvPubHex: peerRecvPub)
-    }
-
-    AsyncFunction("clearResync") { () async throws in
-      guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
-      try await node.clearResync()
-    }
-
     AsyncFunction("forgetSession") { (peerEndpoint: String) async throws in
       guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
       try await node.forgetSession(peerEndpointHex: peerEndpoint)
@@ -1021,62 +870,6 @@ public final class IrohLocationModule: Module {
     AsyncFunction("syncLatest") { (peerTickets: [String], traceparent: String?) async throws in
       guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
       try await node.syncLatest(peerTickets: peerTickets, traceparent: traceparent)
-    }
-
-    // NOTE: needs `just bindgen-ios` on macOS before `node.pushTrail` exists in the generated
-    // Swift bindings; until then this file will not compile on iOS. The JS side guards on the
-    // export being present, so an older binary just degrades to no durable push.
-    AsyncFunction("pushTrail") { (peerTickets: [String], traceparent: String?) async throws in
-      guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
-      try await node.pushTrail(peerTickets: peerTickets, traceparent: traceparent)
-    }
-
-    /// The per-peer-deadline push. Declared in TS and called (guarded) for as long as it existed in
-    /// Rust, and exported by neither platform — so every push took the flat-budget fallback.
-    AsyncFunction("pushTrailBudgeted") {
-      (peers: [[String: Any]], traceparent: String?) async throws -> [[String: Any?]] in
-      guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
-      let dials = peers.compactMap { dial -> PeerDial? in
-        guard let ticket = dial["ticket"] as? String else { return nil }
-        let budget = (dial["budgetMs"] as? NSNumber)?.doubleValue ?? 0
-        return PeerDial(ticket: ticket, budgetMs: UInt64(max(0, budget)))
-      }
-      let reports = try await node.pushTrailBudgeted(peers: dials, traceparent: traceparent)
-      return reports.map { report in
-        [
-          "peer": report.peer,
-          "outcome": report.outcome,
-          "latencyMs": report.latencyMs.map { Double($0) },
-          "entriesSent": Double(report.entriesSent),
-          "budgetMs": Double(report.budgetMs),
-        ]
-      }
-    }
-
-    AsyncFunction("uploadTrailContent") { (baseUrl: String, psk: String?) async throws -> UInt64 in
-      guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
-      return try await node.uploadTrailContent(baseUrl: baseUrl, psk: psk)
-    }
-
-    // Live-mode request channel (ARCHITECTURE §9c). Same bindgen caveat as `pushTrail` above:
-    // needs `just bindgen-ios` on macOS before `node.docsWriteControl` / `node.readControl` exist
-    // in the generated Swift. The JS side guards on both exports, so an older binary degrades to
-    // "cannot send or receive live requests" rather than crashing.
-    AsyncFunction("docsWriteControl") { (msg: [String: Any], recipients: [String]) async throws in
-      guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
-      try await node.docsWriteControl(
-        msg: controlMsg(from: msg), recipients: recipients.map(hexToData))
-    }
-
-    AsyncFunction("readControl") { (author: String) async throws -> [[String: Any]] in
-      guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
-      let messages = try await node.readControl(author: hexToData(author))
-      return messages.map { msg in
-        [
-          "v": msg.v, "kind": msg.kind, "ts": msg.ts, "ttlMs": msg.ttlMs,
-          "nonce": dataToHex(msg.nonce),
-        ]
-      }
     }
 
     AsyncFunction("readLatest") { () async throws -> [[String: Any]] in
@@ -1272,7 +1065,7 @@ public final class IrohLocationModule: Module {
         "counts": statistics.counts.map { row -> [String: Any] in
           [
             "hour": row.hour, "source": row.source, "path": row.path,
-            "relaySetup": row.relaySetup, "mechanism": row.mechanism, "count": row.count,
+            "relaySetup": row.relaySetup, "count": row.count,
           ]
         },
       ]
@@ -1284,8 +1077,7 @@ public final class IrohLocationModule: Module {
       return transportDiagnosticsDict(try await node.transportDiagnostics(peerEndpointIds: peerEndpointIds))
     }
 
-    // What this replica can SERVE, per author — presence, never payload. Same bindgen caveat as
-    // `pushTrail` above: needs `just bindgen-ios` on macOS before `node.trailReplicaStatus` exists.
+    // What this replica can SERVE, per author — presence, never payload.
     AsyncFunction("trailReplicaStatus") { () async throws -> [[String: Any]] in
       guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
       return (try await node.trailReplicaStatus()).map { slot in

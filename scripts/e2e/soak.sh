@@ -105,7 +105,7 @@ USERNAME="soak$((RANDOM % 100000))"
 OUT_DIR="${OUT_DIR:-$SCRIPT_DIR/reports/soak-$(date +%Y%m%dT%H%M%S)}"
 mkdir -p "$OUT_DIR"
 SAMPLES="$OUT_DIR/samples.tsv"
-printf 'scenario\telapsed_s\ttimestamp\tbg_wake\tpublish_ok\tpublish_error\tstash_push_ok\tdrop_reasons\n' >"$SAMPLES"
+printf 'scenario\telapsed_s\ttimestamp\tbg_wake\tpublish_ok\tpublish_error\tdrop_reasons\n' >"$SAMPLES"
 log "Soak plan: ${#SCENARIO_FILES[@]} scenario(s) x ${SLOT_SECONDS}s each, sampling every ${SAMPLE_SECONDS}s, device $DEVICE"
 log "Output: $OUT_DIR"
 
@@ -116,16 +116,15 @@ sample_once() {
   local scenario_name="$1" run_start_ms="$2" elapsed="$3" events data
   data="$(app_data_dir "$DEVICE" "$APP_ID")"
   events="$(events_db_path "$data")"
-  local bg_wake publish_ok publish_error stash_push_ok drop_reasons
+  local bg_wake publish_ok publish_error drop_reasons
   bg_wake="$(event_log_count "$events" "$run_start_ms" device.health)"
   publish_ok="$(event_log_count "$events" "$run_start_ms" publish.fix ok)"
   publish_error="$(event_log_count "$events" "$run_start_ms" publish.fix error)"
-  stash_push_ok="$(event_log_count "$events" "$run_start_ms" trail.push.app ok)"
   drop_reasons="$(drop_reason_histogram "$events" "$run_start_ms" | tr '\n' ';')"
-  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
     "$scenario_name" "$elapsed" "$(date -u +%FT%TZ)" \
-    "$bg_wake" "$publish_ok" "$publish_error" "$stash_push_ok" "$drop_reasons" >>"$SAMPLES"
-  log "  [$scenario_name +${elapsed}s] device.health=$bg_wake publish.ok=$publish_ok publish.error=$publish_error stash.push.ok=$stash_push_ok${drop_reasons:+ drops=$drop_reasons}"
+    "$bg_wake" "$publish_ok" "$publish_error" "$drop_reasons" >>"$SAMPLES"
+  log "  [$scenario_name +${elapsed}s] device.health=$bg_wake publish.ok=$publish_ok publish.error=$publish_error${drop_reasons:+ drops=$drop_reasons}"
 }
 
 for f in "${SCENARIO_FILES[@]}"; do

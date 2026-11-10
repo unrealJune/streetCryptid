@@ -27,7 +27,6 @@ const report: DeliveryStatistics = {
       source: 'friend',
       path: 'bluetooth',
       relaySetup: 'unknown',
-      mechanism: 'gossip',
       count: 60,
     },
   ],

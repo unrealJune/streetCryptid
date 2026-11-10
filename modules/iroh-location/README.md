@@ -1,8 +1,10 @@
 # iroh-location (local Expo module)
 
 streetCryptid's decentralized, end-to-end-encrypted friend location core. Wraps
-**iroh 1.0** (QUIC transport) + **iroh-gossip 0.101** (live broadcast) and per-recipient
-crypto (Rust `rust/`), exposed to React Native via **UniFFI → Expo Modules API**.
+**iroh 1.x** (QUIC transport) + **iroh-docs 0.101** / **iroh-blobs 0.103** (one replicated
+namespace per author, synced live and by range reconciliation) and per-recipient crypto (Rust
+`rust/`), exposed to React Native via **UniFFI → Expo Modules API**. iroh-gossip is linked only
+because iroh-docs' live engine runs on it; the app opens no gossip topic of its own.
 
 > Design of record: [`docs/social/ARCHITECTURE.md`](../../docs/social/ARCHITECTURE.md).
 
@@ -16,13 +18,14 @@ and UniFFI bindings.
 
 ```
 rust/                 cargo crate `iroh-location` (crypto is unit-tested; iroh glue in lib.rs)
-  src/crypto.rs       envelope: RFC 8439 ChaCha20-Poly1305 + HPKE wrap + ed25519 sign
-  src/lib.rs          UniFFI domain API (LocationNode, Subscription, FixListener)
+  src/crypto.rs       envelope: ChaCha20-Poly1305 content + per-recipient wraps + ed25519 sign
+  src/docs.rs         the replica: own + friend namespaces, live sync, push, pull, prune
+  src/lib.rs          UniFFI domain API (LocationNode, ReplicaListener, pairing, profiles)
   src/bin/uniffi-bindgen.rs
 ios/                  IrohLocationModule.swift + IrohLocation.podspec (+ generated/ + xcframework)
 android/              build.gradle + IrohLocationModule.kt (+ src/main/jniLibs/ + generated Kotlin)
 src/                  TS API (types + native/web accessors)
-rust-wasm/            browser WASM crate (iroh relay-only + shared crypto)
+rust-wasm/            browser WASM crate (relay-only replica node; neither reads nor publishes)
 web/                  wasm-pack output imported by `IrohLocationModule.web.ts`
 index.ts             public JS entry (imported as `iroh-location`)
 ```
@@ -49,29 +52,26 @@ replica rereads. Collection runs in Rust, including JS-free background downloads
 developer telemetry. The optional `deliveryStatistics()` export is absent on older binaries
 and on web; those surfaces report unavailable rather than an invented zero.
 
-`receipt_collector.rs` correlates gossip at the actual connection's receive boundary and
-replica contents at the blob downloader's successful completion, **not** the peer supplying
-the signed docs entry. Two small optional hooks in the vendored upstream crates preserve
-wire formats, discovery, forwarding, retries and acceptance. A trial ratchet decrypt validates
-a downloaded update without advancing or persisting session keys needed by the later app read.
+`receipt_collector.rs` validates downloaded replica contents at the blob downloader's successful
+completion, **not** the peer supplying the signed docs entry. Its hook preserves wire formats,
+discovery and replication behavior. A trial ratchet decrypt validates a downloaded update without
+advancing or persisting session keys needed by the later app read.
+The `iroh-gossip` ALPN remains only for iroh-docs' internal replication; location updates no longer
+use a separate gossip delivery channel.
 
 The independent axes are deliverer (their phone / another friend / another device / stash /
 unknown), receive path (Bluetooth / private or link-local IP / other direct IP / internet relay /
-unknown), relay-assisted setup, and broadcast vs replica sync. mDNS is discovery, not transport;
+unknown), and relay-assisted setup. mDNS is discovery, not transport;
 a private address does not prove shared Wi-Fi. Path classification requires received application
 frame counters that account for the whole observation. Multiple families, missing counters,
-or partial/resumed downloads remain unknown. Gossip uses the receiving connection's cumulative
-history because a message may already be buffered before its read starts; after migration this
-can stay unknown until a fresh connection. Relay handshake traffic proves relay assistance;
+or partial/resumed downloads remain unknown. Relay handshake traffic proves relay assistance;
 disabled relays prove absence; a direct handshake alone leaves the setup category unknown.
-Legacy per-fix badges still show the nearest open path / replica-entry provider, not these
-measurements.
 
 `delivery_stats.rs` keeps anonymous hourly counters in `delivery-statistics.redb` under
 `state_dir`, plus keyed, per-update deduplication tokens for `(author, sequence)`. There are
 no per-friend counters, endpoint IDs, positions, payloads, or exact receipt timestamps in this
-database, and it is never uploaded. Connection/message correlation lives only in bounded
-memory. Both live and replica copies increment a single counter transactionally.
+database, and it is never uploaded. Connection setup evidence lives only in bounded memory.
+Repeated blob downloads and replica rereads do not increment the counters again.
 
 Today is retained but excluded from the average until local midnight. The denominator is
 `min(recorded_days, 30)`, including zero-update days, and filters never change it. Buckets keep
@@ -103,7 +103,7 @@ cargo install cargo-ndk cargo-make
 ```bash
 cd modules/iroh-location/rust
 cargo test           # crypto envelope tests (should pass everywhere)
-cargo build          # compiles iroh + gossip glue against the pinned versions
+cargo build          # compiles the iroh + docs glue against the pinned versions
 ```
 
 ### 2. iOS — XCFramework + Swift bindings
@@ -212,45 +212,28 @@ EXPO_PUBLIC_IROH_RELAY_TOKEN=<limited-scope client token>
 ```
 
 Browsers cannot use UDP hole punching, so iroh runs relay-only there; native clients
-retain direct IP and BLE paths alongside the same relay map. Connections remain iroh
-E2E-encrypted, and the app-layer envelope is interoperable with native because the WASM
-crate reuses `rust/src/crypto.rs` (postcard + RFC 8439 ChaCha20-Poly1305 + HPKE + ed25519).
-The token stays out of Git, but it is necessarily embedded in client builds because each
-client presents it to the relay.
+retain direct IP and BLE paths alongside the same relay map. The token stays out of Git, but it is
+necessarily embedded in client builds because each client presents it to the relay.
 
-**Durable trail (iroh-docs) on web.** The web path implements the full durable trail —
-`docsWrite`, `syncTrail`, `readTrail`, `pruneTrail`, `docTicket` — by reusing the native
-range-reconciliation logic verbatim (`rust/src/docs.rs` is `#[path]`-included by the WASM
-crate, exactly like `crypto.rs`). `iroh-docs` `0.101` / `iroh-blobs` `0.103` compile to
-`wasm32-unknown-unknown` when built with `default-features = false` (this drops the
-`fs-store`/`rpc`/redb backends, which are native-only). Reconciliation runs over the same
-relay-reachable connections as gossip.
+**The web node is a replica, not a peer.** It reuses `rust/src/docs.rs` verbatim by `#[path]`
+(`iroh-docs` `0.101` / `iroh-blobs` `0.103` compile to `wasm32-unknown-unknown` with
+`default-features = false`), so it can hold namespaces, import doc tickets, reconcile them
+(`syncLatest`), report `trailReplicaStatus`, `pruneTrail` and hand out its `docTicket`. It
+**neither opens nor seals a fix**: every envelope is v3, wrapped under a per-friend Double Ratchet
+(`FORWARD-SECRECY.md`), and a ratchet needs sequential state that survives a reload. A browser has
+no filesystem — both the blob store (`MemStore`) and the replica (`Docs::memory()`) are in-memory
+and vanish with the tab — so ratchet state kept there would rewind into key reuse; and sessions
+are installed by pairing, which the web build cannot do. So `readLatest` resolves `[]`, and
+`ingestFix` / `heartbeatFix` / `publishIntroduction` resolve a non-publishing outcome
+(`rejection: 'web-no-publish'`) rather than throwing, because the mounted heartbeat timer calls
+them on every platform. Making web a real peer means a persistent store (IndexedDB) with the
+rollback problem solved.
 
-Because a browser has no filesystem, both the iroh-blobs content store (`MemStore`) and the
-iroh-docs replica (`Docs::memory()`) are **in-memory**. **Durability caveat:** unlike native
-(which persists to disk under the app sandbox), the web trail is ephemeral — it is lost on
-page reload / tab close. Range reconciliation still recovers missed fixes within a live
-session and across peers, and the sealed envelope bytes are byte-identical to native, so a
-web peer's durable entries interoperate with native peers (and per-recipient revocation
-carries over). Recovered fixes surface via `onFix` with `backfill: true`; sync progress via
-`onSync`. If a browser-persistent store is needed later, wire iroh-blobs/iroh-docs to an
-IndexedDB-backed store.
-
-Every `onFix` also carries `via`: the LAST HOP the envelope took into this device — `relay` |
-`direct` | `lan` | `ble` for live gossip (classified from the delivering neighbour's active
-transport address), `live` when no active path can be read, and `docs` | `stash` for fixes
-recovered from the durable trail. It is deliberately not a claim about the author's own link:
-gossip is epidemic, so a live fix may have been forwarded by any neighbour in the swarm, and a
-`stash` fix was served by the mirror rather than by the friend. The browser build omits `via`.
-
-Beside it rides `viaPeer`: **who** performed that hop — the hex EndpointId of the neighbour whose
-datagram this was, which is exact where `via` is a classification. It is frequently NOT the fix's
-author, and that is the point: the swarm belongs to the author, so any of _their_ recipients can
-carry their fix here, including devices this one has never paired with, and the stash. Absent means
-nobody delivered it on that path — `readLatest` reports `viaPeer` only for a slot a reconciliation
-actually brought in (captured from iroh-docs' `InsertRemote`), never for one read back out of the
-replica. The app pairs the two values and never mixes a label from one delivery with a peer from
-another; see `describeDelivery` in `src/features/social/core/fix-transport.ts`.
+**Who delivered a fix.** Native `readLatest` rows carry `viaPeer` when a reconciliation brought
+that author's newest slot in: the hex EndpointId of the peer that served it (captured from
+iroh-docs' `InsertRemote`), never inferred from a replica read. It is frequently NOT the author —
+any of the author's recipients, or the stash, can serve their namespace — and that is the point.
+See `describeDelivery` in `src/features/social/core/fix-transport.ts`.
 
 `endpointIdFromTicket(ticket)` decodes an endpoint ticket to its EndpointId without a node, which
 is how the app recognises a configured stash as the deliverer instead of an unpaired device.
@@ -272,8 +255,8 @@ just trail-stash-client watch --once --json
 It loads relay, stash, PSK, and optional OTEL values from the existing `.env.local`. Pairing and
 watching use separate on-disk replicas. The watcher does not import the phone namespace into the
 live docs engine at all: it runs the lower-level range-reconciliation protocol directly against the
-configured stash endpoint, downloads blobs only from that same endpoint, and never joins the phone's
-gossip topic. The pairing command also registers the phone's read-ticket through
+configured stash endpoint, downloads blobs only from that same endpoint, and never joins the
+namespace's live-sync swarm. The pairing command also registers the phone's read-ticket through
 `POST /v1/namespaces`, so the test does not depend on the phone's stash opt-in setting.
 
 Keys and pair metadata are stored outside the repository under the platform data directory
@@ -294,9 +277,10 @@ Coordinates are printed or emitted as JSON but are not persisted in the CLI stat
 
 ## Status / next
 
-- `iroh-docs` durable trail recovery via range-based reconciliation — **done** on both
-  native (persistent fs replica) and web (in-memory replica; see §5 durability caveat).
-  Surfaced via `docsWrite`/`syncTrail`/`readTrail`/`pruneTrail`/`docTicket` + `onFix{backfill}`/`onSync`.
+- Location delivery is iroh-docs alone: `ingestFix` / `heartbeatFix` / `publishIntroduction`
+  seal into the own namespace and push it; friends' namespaces are live-synced, pulled
+  (`syncLatest`) and read (`readLatest`), with `onReplicaChanged` (`watchReplica`) announcing
+  remote inserts. Native keeps a persistent replica; web an in-memory one (§5).
 - Profile sync (§3), bilateral pairing (§4), and honest BLE status (§2) — **bridged** to JS.
   The Kotlin (`just bindgen-android`) and Swift (`--language swift`, host lib) UniFFI bindings are
   regenerated and the Expo wrappers expose `publishProfile`/`profileTicket`/`importProfileTicket`/
@@ -307,11 +291,12 @@ Coordinates are printed or emitted as JSON but are not persisted in the CLI stat
   `bleAvailable`/`bleCapabilities`/`nearbyBlePeers`/`bleHasScanHint`. Byte fields cross the bridge
   as lowercase hex; enums as camelCase strings; U64 epochs/timestamps as JS numbers. The web
   (WASM) build reports these unavailable (empty/false/null) and throws only on explicit pairing
-  actions — location sharing + durable trail keep working.
+  actions.
 - Background execution — **done** in the app layer (`src/features/social/net/background/`) over
   `expo-location` + `expo-task-manager`; see ARCHITECTURE.md §9.
 - **iOS XCFramework** is generated automatically for EAS device builds by the pre-install
   hook. For local device + simulator builds, regenerate the Swift bindings and both
   XCFramework slices with `just bindgen-ios` on macOS + Xcode (README §2).
 - Relay deployment configuration stays outside this public repository.
-- Pin `iroh-gossip`/`iroh-docs` versions carefully; they are pre-1.0 and move fast.
+- Pin `iroh-docs`/`iroh-blobs` (and the `iroh-gossip` they run on) carefully; they are pre-1.0
+  and move fast.

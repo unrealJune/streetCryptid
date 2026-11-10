@@ -37,16 +37,9 @@ pub enum RelaySetup {
     Unknown,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Mechanism {
-    Gossip,
-    Sync,
-}
-
 const SOURCES: &[&str] = &["author", "friend", "other", "stash", "unknown"];
 const PATHS: &[&str] = &["bluetooth", "local-ip", "direct-ip", "relay", "unknown"];
 const SETUPS: &[&str] = &["yes", "no", "unknown"];
-const MECHANISMS: &[&str] = &["gossip", "sync"];
 
 #[derive(Clone, Copy, Debug)]
 pub struct Receipt {
@@ -55,7 +48,6 @@ pub struct Receipt {
     pub source: Source,
     pub path: PathKind,
     pub relay_setup: RelaySetup,
-    pub mechanism: Mechanism,
 }
 
 pub fn local_hour() -> (i32, u8) {
@@ -69,7 +61,6 @@ pub struct DeliveryCount {
     pub source: String,
     pub path: String,
     pub relay_setup: String,
-    pub mechanism: String,
     pub count: u64,
 }
 
@@ -174,7 +165,6 @@ impl Store {
                 receipt.source as u8,
                 receipt.path as u8,
                 receipt.relay_setup as u8,
-                receipt.mechanism as u8,
             ]);
             let mut counts = transaction.open_table(COUNTS)?;
             let previous = counts.get(key.as_slice())?.map(|n| n.value()).unwrap_or(0);
@@ -211,12 +201,15 @@ impl Store {
             let floor = today.saturating_sub(30);
             let mut counts = transaction.open_table(COUNTS)?;
             for entry in counts.iter()? {
-                if entry?.0.value().len() != 9 {
+                let entry = entry?;
+                let key = entry.0.value();
+                if key.len() != 8 && (key.len() != 9 || key[8] > 1) {
                     bail!("invalid delivery statistics bucket");
                 }
             }
             counts.retain(|key, _| {
-                i32::from_be_bytes(key[..4].try_into().expect("length checked")) >= floor
+                key.len() >= 4
+                    && i32::from_be_bytes(key[..4].try_into().expect("length checked")) >= floor
             })?;
             transaction
                 .open_table(SEEN)?
@@ -244,21 +237,21 @@ impl Store {
             .ok_or_else(|| anyhow::anyhow!("missing collection start"))?
             .value();
         let recorded_days = today.saturating_sub(first).clamp(0, 30) as u32;
-        let mut totals: BTreeMap<[u8; 5], u64> = BTreeMap::new();
+        let mut totals: BTreeMap<[u8; 4], u64> = BTreeMap::new();
         for row in transaction.open_table(COUNTS)?.iter()? {
             let (key, count) = row?;
             let key = key.value();
-            if key.len() != 9 {
+            if key.len() != 8 && (key.len() != 9 || key[8] > 1) {
                 bail!("invalid delivery statistics bucket");
             }
             let day = i32::from_be_bytes(key[..4].try_into()?);
             if day < today && day >= today.saturating_sub(recorded_days as i32) {
-                let dimensions: [u8; 5] = key[4..].try_into()?;
+                let dimensions: [u8; 4] = key[4..8].try_into()?;
                 *totals.entry(dimensions).or_default() += count.value();
             }
         }
         let mut counts = Vec::new();
-        for ([hour, source, path, setup, mechanism], count) in totals {
+        for ([hour, source, path, setup], count) in totals {
             if hour >= 24 {
                 bail!("invalid delivery statistics hour");
             }
@@ -273,7 +266,6 @@ impl Store {
                 source: label(SOURCES, source)?,
                 path: label(PATHS, path)?,
                 relay_setup: label(SETUPS, setup)?,
-                mechanism: label(MECHANISMS, mechanism)?,
                 count,
             });
         }
@@ -296,7 +288,6 @@ mod tests {
             source: Source::Friend,
             path: PathKind::Bluetooth,
             relay_setup: RelaySetup::No,
-            mechanism: Mechanism::Gossip,
         }
     }
 
@@ -307,16 +298,7 @@ mod tests {
         {
             let store = Store::open(&root, &identity, 100).unwrap();
             assert!(store.record(&[42; 32], 1, receipt(100)).unwrap());
-            assert!(!store
-                .record(
-                    &[42; 32],
-                    1,
-                    Receipt {
-                        mechanism: Mechanism::Sync,
-                        ..receipt(100)
-                    }
-                )
-                .unwrap());
+            assert!(!store.record(&[42; 32], 1, receipt(100)).unwrap());
             assert!(store.record(&[42; 32], 2, receipt(100)).unwrap());
             assert_eq!(store.snapshot(100).unwrap().recorded_days, 0);
         }
@@ -352,10 +334,6 @@ mod tests {
                     relay_setup: RelaySetup::Yes,
                     ..receipt(1)
                 },
-                Receipt {
-                    mechanism: Mechanism::Sync,
-                    ..receipt(1)
-                },
                 receipt(2),
             ]
             .into_iter()
@@ -365,10 +343,37 @@ mod tests {
             }
             let report = store.snapshot(2).unwrap();
             assert_eq!(report.recorded_days, 1);
-            assert_eq!(report.counts.len(), 5);
-            assert_eq!(report.counts.iter().map(|row| row.count).sum::<u64>(), 5);
+            assert_eq!(report.counts.len(), 4);
+            assert_eq!(report.counts.iter().map(|row| row.count).sum::<u64>(), 4);
             assert_eq!(store.snapshot(40).unwrap().recorded_days, 30);
         }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn legacy_mechanism_buckets_are_merged_into_docs_only_totals() {
+        let root =
+            std::env::temp_dir().join(format!("sc-receipts-legacy-{}", rand::random::<u64>()));
+        let store = Store::open(&root, &[8; 32], 2).unwrap();
+        let transaction = store.db.begin_write().unwrap();
+        {
+            let mut counts = transaction.open_table(COUNTS).unwrap();
+            for mechanism in 0..=1 {
+                let mut key = 2_i32.to_be_bytes().to_vec();
+                key.extend([
+                    9,
+                    Source::Friend as u8,
+                    PathKind::Bluetooth as u8,
+                    RelaySetup::No as u8,
+                    mechanism,
+                ]);
+                counts.insert(key.as_slice(), 1).unwrap();
+            }
+        }
+        transaction.commit().unwrap();
+        let report = store.snapshot(3).unwrap();
+        assert_eq!(report.counts.len(), 1);
+        assert_eq!(report.counts[0].count, 2);
         std::fs::remove_dir_all(root).unwrap();
     }
 

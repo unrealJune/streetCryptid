@@ -1,6 +1,6 @@
 import type { DeliveryCount, DeliveryStatistics } from 'iroh-location';
 
-export type ReceiptDimension = 'source' | 'path' | 'relaySetup' | 'mechanism';
+export type ReceiptDimension = 'source' | 'path' | 'relaySetup';
 export type ReceiptGrouping = 'source' | 'path';
 export type ReceiptFilters = Partial<{ [K in ReceiptDimension]: DeliveryCount[K] }>;
 
@@ -20,14 +20,12 @@ export const RECEIPT_LABELS = {
     unknown: 'Unknown',
   },
   relaySetup: { yes: 'Observed', no: 'Disabled', unknown: 'Unknown' },
-  mechanism: { gossip: 'Live broadcast', sync: 'Replica sync' },
 } as const;
 
 export const RECEIPT_DIMENSIONS: Record<ReceiptDimension, string> = {
   source: 'Delivered by',
   path: 'Connection',
   relaySetup: 'Relay-assisted setup',
-  mechanism: 'Delivery method',
 };
 
 export function receiptChart(

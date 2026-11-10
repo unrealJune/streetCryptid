@@ -214,12 +214,7 @@ async fn bootstrap_and_prime(
     bootstrap_pair(a, b).await;
     let (first, second) = initiator_first(a, b);
     first
-        .docs_write_ratcheted(
-            "prime".into(),
-            0,
-            fix_at(1),
-            vec![hex(&second.endpoint_id())],
-        )
+        .docs_write_ratcheted(0, fix_at(1), vec![hex(&second.endpoint_id())])
         .await
         .expect("priming publish");
     replicate(first, stash, second).await;
@@ -256,7 +251,7 @@ async fn publish_and_deliver(
     ts: u64,
 ) -> Vec<iroh_location::IncomingFix> {
     let dropped = from
-        .docs_write_ratcheted("t".into(), seq, fix_at(ts), vec![hex(&to.endpoint_id())])
+        .docs_write_ratcheted(seq, fix_at(ts), vec![hex(&to.endpoint_id())])
         .await
         .expect("publish");
     assert!(
@@ -411,7 +406,7 @@ async fn a_restart_mid_publish_burns_a_counter_rather_than_reusing_one() {
 
     // Publish, but never deliver it — the envelope exists and its counter is spent.
     let dropped = author
-        .docs_write_ratcheted("t".into(), 1, fix_at(1000), vec![friend_id.clone()])
+        .docs_write_ratcheted(1, fix_at(1000), vec![friend_id.clone()])
         .await
         .expect("author publishes");
     assert!(
@@ -426,7 +421,7 @@ async fn a_restart_mid_publish_burns_a_counter_rather_than_reusing_one() {
     // already used would have had to skip persisting in the first place.
     for seq in 2..=4u64 {
         let dropped = author
-            .docs_write_ratcheted("t".into(), seq, fix_at(1000 + seq), vec![friend_id.clone()])
+            .docs_write_ratcheted(seq, fix_at(1000 + seq), vec![friend_id.clone()])
             .await
             .expect("author publishes after the restart");
         assert!(
@@ -559,12 +554,7 @@ async fn a_friend_offline_for_many_intervals_catches_up_to_the_current_fix() {
     // Roughly four hours of the 5-minute cold cadence, with the friend hearing none of it.
     for seq in 1..=48u64 {
         author
-            .docs_write_ratcheted(
-                "t".into(),
-                seq,
-                fix_at(10_000 + seq),
-                vec![friend_id.clone()],
-            )
+            .docs_write_ratcheted(seq, fix_at(10_000 + seq), vec![friend_id.clone()])
             .await
             .expect("author publishes while the friend is away");
     }
@@ -618,12 +608,7 @@ async fn beyond_the_acceptance_window_the_friend_needs_a_restart_not_patience() 
     // Past the shrunken window.
     for seq in 1..=u64::from(SMALL_WINDOW) + 8 {
         author
-            .docs_write_ratcheted(
-                "t".into(),
-                seq,
-                fix_at(30_000 + seq),
-                vec![friend_id.clone()],
-            )
+            .docs_write_ratcheted(seq, fix_at(30_000 + seq), vec![friend_id.clone()])
             .await
             .expect("author publishes");
     }
@@ -642,9 +627,9 @@ async fn beyond_the_acceptance_window_the_friend_needs_a_restart_not_patience() 
 
 /// **A friend who did not open the app for a day.** Replays 2026-10-09: an iPhone opened nothing
 /// for 25 h, so nothing reset its friend's sending chain, and the friend spent 570 positions on
-/// it — two per tick, because the gossip and docs lanes each take one — against a window of 512.
-/// Every later envelope read as "no wrap in this envelope belongs to us" until a restart. A gap
-/// like that is ordinary use and must be crossed by fast-forward alone.
+/// it — two per tick, because the gossip and docs lanes then took one each — against a window of
+/// 512. Every later envelope read as "no wrap in this envelope belongs to us" until a restart. A
+/// gap like that is ordinary use and must be crossed by fast-forward alone.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_day_without_opening_the_app_is_recovered_by_fast_forward() {
     let _network_test = NETWORK_TEST_LOCK.lock().await;
@@ -658,12 +643,7 @@ async fn a_day_without_opening_the_app_is_recovered_by_fast_forward() {
 
     for seq in 1..=600u64 {
         author
-            .docs_write_ratcheted(
-                "t".into(),
-                seq,
-                fix_at(30_000 + seq),
-                vec![friend_id.clone()],
-            )
+            .docs_write_ratcheted(seq, fix_at(30_000 + seq), vec![friend_id.clone()])
             .await
             .expect("author publishes");
     }
@@ -700,10 +680,10 @@ async fn crossing_envelopes_converge() {
     let b_id = b.endpoint_id();
 
     // Both publish before either reads.
-    a.docs_write_ratcheted("t".into(), 1, fix_at(1000), vec![hex(&b_id)])
+    a.docs_write_ratcheted(1, fix_at(1000), vec![hex(&b_id)])
         .await
         .expect("a publishes");
-    b.docs_write_ratcheted("t".into(), 1, fix_at(2000), vec![hex(&a_id)])
+    b.docs_write_ratcheted(1, fix_at(2000), vec![hex(&a_id)])
         .await
         .expect("b publishes");
 
@@ -850,12 +830,7 @@ async fn repeated_failures_mark_the_session_desynced() {
 
     for seq in 1..=4u64 {
         let dropped = talker
-            .docs_write_ratcheted(
-                "t".into(),
-                seq,
-                fix_at(seq),
-                vec![hex(&listener.endpoint_id())],
-            )
+            .docs_write_ratcheted(seq, fix_at(seq), vec![hex(&listener.endpoint_id())])
             .await
             .expect("the talker publishes");
         assert!(
@@ -915,7 +890,7 @@ async fn a_watch_only_friend_feeds_the_ratchet_with_null_fixes() {
     // The watcher's whole contribution is null fixes on the null lane.
     for seq in 1..=3u64 {
         let dropped = watcher
-            .docs_write_null_ratcheted("t".into(), seq, 90_000 + seq, vec![sharer_hex.clone()])
+            .docs_write_null_ratcheted(seq, 90_000 + seq, vec![sharer_hex.clone()])
             .await
             .expect("the watcher publishes a null fix");
         assert!(
@@ -1009,20 +984,10 @@ async fn converge(
         b.recover_sessions(std::slice::from_ref(&a_id)).await;
         let ts = 100_000 + seq_base + round;
         let _ = a
-            .docs_write_ratcheted(
-                "t".into(),
-                seq_base + 2 * round,
-                fix_at(ts),
-                vec![b_id.clone()],
-            )
+            .docs_write_ratcheted(seq_base + 2 * round, fix_at(ts), vec![b_id.clone()])
             .await;
         let _ = b
-            .docs_write_ratcheted(
-                "t".into(),
-                seq_base + 2 * round + 1,
-                fix_at(ts),
-                vec![a_id.clone()],
-            )
+            .docs_write_ratcheted(seq_base + 2 * round + 1, fix_at(ts), vec![a_id.clone()])
             .await;
         replicate(a, stash, b).await;
         replicate(b, stash, a).await;
@@ -1174,7 +1139,7 @@ async fn a_stuck_follower_with_no_reader_is_restarted_and_joins_natively() {
         .await;
     assert_eq!(outcome.restored, 1, "the leader restarted on the request");
     leader
-        .docs_write_ratcheted("t".into(), 50, fix_at(50_000), vec![follower_id.clone()])
+        .docs_write_ratcheted(50, fix_at(50_000), vec![follower_id.clone()])
         .await
         .expect("leader publishes with the restart header");
     replicate(&leader, &stash, &follower).await;
@@ -1185,7 +1150,7 @@ async fn a_stuck_follower_with_no_reader_is_restarted_and_joins_natively() {
         .await;
     assert_eq!(outcome.restored, 1, "joined natively");
     let dropped = follower
-        .docs_write_ratcheted("t".into(), 60, fix_at(60_000), vec![leader_id.clone()])
+        .docs_write_ratcheted(60, fix_at(60_000), vec![leader_id.clone()])
         .await
         .expect("follower publishes");
     assert!(
@@ -1227,7 +1192,7 @@ async fn a_mutual_lapse_heals_through_the_native_recovery_driver() {
     b.set_t_lapse_ms_for_tests(1).await.expect("lapse b");
     tokio::time::sleep(std::time::Duration::from_millis(5)).await;
     let dropped = a
-        .docs_write_ratcheted("t".into(), 1, fix_at(1000), vec![b_id.clone()])
+        .docs_write_ratcheted(1, fix_at(1000), vec![b_id.clone()])
         .await
         .expect("publish into the lapse");
     assert_eq!(dropped, vec![format!("{b_id}:lapsed")], "the lapse is real");
@@ -1320,12 +1285,7 @@ async fn a_restarted_reader_receives_without_anyone_reimporting_its_friends() {
     let reader = restart(reader).await;
 
     let dropped = author
-        .docs_write_ratcheted(
-            "t".into(),
-            1,
-            fix_at(5_000),
-            vec![hex(&reader.endpoint_id())],
-        )
+        .docs_write_ratcheted(1, fix_at(5_000), vec![hex(&reader.endpoint_id())])
         .await
         .expect("publish");
     assert!(dropped.is_empty(), "{dropped:?}");

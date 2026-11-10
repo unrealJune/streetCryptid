@@ -145,56 +145,6 @@ export interface DeliveryConfig {
 }
 
 /**
- * The last hop a fix took INTO this device — never a claim about the author's own link, because
- * gossip is epidemic and the stash is a mirror.
- *
- * `relay` | `direct` | `lan` | `ble` are live gossip paths; `live` means live but with no active
- * path to report; `docs` / `stash` mean the fix was recovered from the durable trail.
- */
-export type FixVia = 'relay' | 'direct' | 'lan' | 'ble' | 'live' | 'docs' | 'stash';
-
-export interface OnFixEvent {
-  author: string;
-  seq: number;
-  fix: NativeLocationFix;
-  /**
-   * True when this fix arrived via durable range-reconciliation (iroh-docs catch-up) rather than
-   * the live gossip path — lets the app distinguish backfill from live updates. Absent ⇒ live.
-   */
-  backfill?: boolean;
-  /** How the fix reached this device. Absent on binaries built before per-fix transport labels. */
-  via?: FixVia;
-  /**
-   * WHO performed that last hop: the hex EndpointId of the neighbour whose datagram this was.
-   * Gossip is epidemic, so this is frequently NOT {@link OnFixEvent.author} — it is whichever
-   * device in the author's swarm happened to carry the envelope here, which may be the stash or a
-   * peer this device has never paired with. Absent on binaries built before deliverer attribution.
-   */
-  viaPeer?: string;
-}
-
-export interface OnOpaqueEvent {
-  author: string;
-  seq: number;
-  /** `null` means a decrypted null-lane response; `opaque` means no payload was opened. */
-  kind?: 'null' | 'opaque';
-}
-
-export interface OnStatusEvent {
-  subscriptionId: string;
-  status: string;
-}
-
-/** Emitted when a durable-trail sync (range reconciliation) starts/completes for an author. */
-export interface OnSyncEvent {
-  author: string;
-  /** e.g. `started` | `completed` | `error`. */
-  status: string;
-  /** How many missed envelopes were pulled (on completion). */
-  recovered?: number;
-}
-
-/**
  * Recipients left out of a ratcheted publish, as `"<endpointIdHex>:<reason>"`.
  *
  * A short wrap list is never silently fine: a friend in here did **not** receive that fix. The
@@ -207,16 +157,9 @@ export interface OnSyncEvent {
  * - `no_sending_chain` — a responder that has not yet received the initiator's first envelope.
  *   Resolves itself on the next tick; not worth surfacing to a human.
  * - `state_unavailable` — their session state could not be read or persisted. Recoverable via
- *   §4.6 resync, which `isDesynced` will also be reporting.
+ *   the §4.6 restart the native drain runs, which `isDesynced` will also be reporting.
  */
 export type RatchetDropped = string;
-
-/** A decrypted fix read back from the local durable replica (see {@link IrohLocationApi.readLatest}). */
-export interface NativeIncomingFix {
-  author: string;
-  seq: number;
-  fix: NativeLocationFix;
-}
 
 /** A decrypted v3 envelope from the durable replica, including the position-less null lane. */
 export interface NativeRatchetEvent {
@@ -233,36 +176,6 @@ export interface NativeRatchetEvent {
    * on binaries built before per-entry attribution.
    */
   viaPeer?: string;
-}
-
-// ── Control messages (docs/social/ARCHITECTURE.md §9c) ──────────────────────────────────────
-
-/** Ask a friend to switch to the real-time live cadence. */
-export const CTL_KIND_LIVE_REQUEST = 1;
-/** Withdraw an outstanding {@link CTL_KIND_LIVE_REQUEST}. */
-export const CTL_KIND_LIVE_CANCEL = 2;
-
-/**
- * A control message: the live-mode request channel. Sealed with the same envelope machinery as a
- * fix and written to the sender's own trail namespace under a `ctl/` key, so the stash and every
- * pool member it is not wrapped for see only ciphertext. Carries no location.
- *
- * There is exactly ONE control slot per author — writing supersedes the previous message — so a
- * receiver can only ever see the sender's current intent. `ts` + `nonce` are the replay defence:
- * a replica could withhold an update and keep serving a stale request, so receivers MUST check
- * freshness and dedupe by `nonce`. See `src/features/social/net/live-requests.ts`.
- */
-export interface NativeControlMsg {
-  /** Wire version of the payload (currently 1). */
-  v: number;
-  /** One of `CTL_KIND_*`. Unknown kinds must be ignored, not treated as an error. */
-  kind: number;
-  /** When the sender created it (ms since epoch). */
-  ts: number;
-  /** Requested live window in ms; the receiver clamps it and may always refuse. */
-  ttlMs: number;
-  /** 16 random bytes as lowercase hex — this message's dedup identity. */
-  nonce: string;
 }
 
 // ── Profiles (docs/social/ARCHITECTURE.md §3) ───────────────────────────────────────────────
@@ -456,7 +369,6 @@ export interface DeliveryCount {
   source: 'author' | 'friend' | 'other' | 'stash' | 'unknown';
   path: 'bluetooth' | 'local-ip' | 'direct-ip' | 'relay' | 'unknown';
   relaySetup: 'yes' | 'no' | 'unknown';
-  mechanism: 'gossip' | 'sync';
   count: number;
 }
 
@@ -477,10 +389,9 @@ export interface TransportDiagnostics {
  * One author's fix slot as it exists in the LOCAL durable replica — what this device could hand
  * to a peer that asks.
  *
- * Deliberately NOT the same question as "have we seen this author's fix": the live gossip lane
- * writes app storage (`friend_latest`, the trail cache) too, and a fix that arrived that way never
- * enters the author's docs namespace — a pool member holds a READ ticket and cannot write there.
- * Reconciliation serves out of the replica, so only this answers "can this device relay author X".
+ * Deliberately NOT the same question as "have we seen this author's fix": app storage
+ * (`friend_latest`) keeps a fix after the replica has superseded or pruned it, and only the replica
+ * is served to a peer that reconciles with us. So only this answers "can this device relay author X".
  *
  * No location data: presence, not payload. `seq` / `fixTs` come from the envelope's signed
  * plaintext header, so nothing here needs a decrypt.
@@ -572,93 +483,50 @@ export interface OnFriendsPulledEvent {
   elapsedMs: number;
 }
 
+/**
+ * Friends whose fix or null slot just became readable in the local replica — by a friend's live
+ * push, a pull from the stash, or a sync a friend opened to us; the replica does not say which.
+ *
+ * Authors only, never payload: read them back with `readLatest`. Emitted only between
+ * `watchReplica` and `unwatchReplica`, and only for namespaces this device imported as a friend's.
+ */
+export interface OnReplicaChangedEvent {
+  /** Lowercase hex endpoint ids, one per author, deduplicated within the batch. */
+  authors: string[];
+}
+
 export type IrohLocationEvents = {
-  onFix: (event: OnFixEvent) => void;
-  onOpaque: (event: OnOpaqueEvent) => void;
-  onStatus: (event: OnStatusEvent) => void;
-  onSync: (event: OnSyncEvent) => void;
+  onReplicaChanged: (event: OnReplicaChangedEvent) => void;
   onNativeFix: (event: OnNativeFixEvent) => void;
   onFriendsPulled: (event: OnFriendsPulledEvent) => void;
 };
 
 /** The callable surface of the native module. */
-/** One peer to push to, and how long it is worth waiting for. Mirrors Rust `PeerDial`. */
-export interface NativePeerDial {
-  /** The peer's endpoint ticket. */
-  ticket: string;
-  /** Deadline for this peer. **Zero means do not wait** — see `pushTrailBudgeted`. */
-  budgetMs: number;
-}
-
-/**
- * What one peer did during a push. Mirrors Rust `PeerPushReport`.
- *
- * `silent` and `skipped` are deliberately distinct: silence is a fact about the PEER (it was
- * dialled and never answered), while skipped is a fact about US (we predicted it would not answer
- * and declined to wait). Conflating them would hide a predictor that had become too aggressive.
- */
-export interface NativePeerPushReport {
-  /** Full lowercase hex endpoint id, directly comparable to `friend.endpointId`. */
-  peer: string;
-  outcome: 'finished' | 'failed' | 'silent' | 'skipped';
-  /** Time from `start_sync` to this peer reporting. Absent when it never did. */
-  latencyMs?: number | null;
-  /** Entries handed to THIS peer. Zero unless `outcome` is `finished`. */
-  entriesSent: number;
-  /** The deadline this peer was granted. */
-  budgetMs: number;
-}
-
 export interface IrohLocationApi {
   /**
    * Create (or restore) the device node. Pass `null` to generate fresh keys; then
    * persist the returned secrets. Returns the stable ids + key material.
    */
   createNode(identitySecretHex: string | null, recvSecretHex: string | null): Promise<NodeKeys>;
-  /** Bind the iroh endpoint + spawn the gossip router. Idempotent. */
+  /**
+   * Bind the iroh endpoint and open the docs/blobs stores and every namespace in the book, each
+   * joined to iroh-docs' live sync. Idempotent.
+   */
   start(config?: TransportConfig): Promise<void>;
-  /** Drop subscriptions and release the native endpoint/router. */
+  /** Release this JS context's lease on the node; the last holder out shuts it down. */
   shutdown(): Promise<void>;
   /** A shareable endpoint ticket (dialing info) for the contact card / bootstrap. */
   ticket(): Promise<string>;
-  /** Derive the gossip topic (hex) for a given author's location stream. */
-  deriveTopic(authorEndpointIdHex: string): Promise<string>;
-  /** Join a topic; returns a subscription id. Inbound fixes arrive via `onFix`. */
-  subscribe(topicHex: string, bootstrapTickets: string[]): Promise<string>;
   /**
-   * Seal `fix` under each recipient's **ratchet session** and broadcast it on the topic
-   * (envelope v3 — FORWARD-SECRECY.md §4.7).
+   * Emit `onReplicaChanged` whenever a friend's fix or null slot becomes readable in the replica.
    *
-   * Recipients are **endpoint ids**, not receiving keys. A v3 wrap is keyed by the per-friend
-   * Double Ratchet session, and sessions are keyed by endpoint id; the long-term receiving key
-   * plays no part in the fix lanes any more. Passing recv keys here fails at the hex decode.
-   *
-   * Returns the recipients that were **left out** — see {@link RatchetDropped}. An empty array
-   * means everyone asked for got a wrap.
+   * Replication runs whether or not anyone watches; this only saves JS from polling the replica
+   * to notice. The module keeps the watch across node restarts and replacements, and the host
+   * drops it when the last app lease goes. OPTIONAL: guard with `typeof`.
    */
-  publish(
-    subscriptionId: string,
-    seq: number,
-    fix: NativeLocationFix,
-    recipientEndpointsHex: string[],
-    traceparent?: string | null
-  ): Promise<RatchetDropped[]>;
-  /** Leave a topic. */
-  unsubscribe(subscriptionId: string): Promise<void>;
-  /**
-   * Advance and return this device's next publish sequence number.
-   *
-   * The counter is persisted natively **before** this resolves, because the value goes straight
-   * onto the wire as half of an `author/seq` docs key and two envelopes under one key is a payload
-   * lost to last-write-wins. It lives in native rather than JS because expo-task-manager hands
-   * every headless callback a fresh JS context: each got its own copy of the module, its own
-   * cached counter, and its own belief that it was the only writer. No JS-side guard can close
-   * that — the guard would be duplicated along with the thing it guards.
-   *
-   * OPTIONAL: absent on binaries built before this API, so callers must guard with
-   * `typeof mod.nextSeq === 'function'` and fall back to the old `state-store.ts` path.
-   */
-  nextSeq?(): Promise<number>;
+  watchReplica?(): void;
+  /** Stop `onReplicaChanged`. OPTIONAL, as {@link watchReplica}. */
+  unwatchReplica?(): void;
   /**
    * Remember the transport settings natively, so a background wake can `start` without JS.
    *
@@ -669,13 +537,12 @@ export interface IrohLocationApi {
    */
   setTransportConfig?(config?: TransportConfig): Promise<void>;
   /**
-   * Run one captured fix through the native gate → outbox → seal → send pipeline.
+   * Run one captured fix through the native gate → outbox → seal → own docs namespace → push.
    *
-   * The same call the background runtime makes, exposed so the mounted app can exercise the exact
-   * path a wake takes rather than a parallel implementation of it. OPTIONAL.
+   * The ONLY way a position leaves this device, and the same call the background runtimes make,
+   * so the mounted app exercises the exact path a wake takes.
    */
-  ingestFix?(
-    subscriptionId: string,
+  ingestFix(
     fix: NativeLocationFix,
     battery: { level: number; charging: boolean; lowPower: boolean },
     intervalMs: number
@@ -705,10 +572,8 @@ export interface IrohLocationApi {
    * `parked` is what the caller can prove about motion, and decides the envelope's `fix_state`:
    * `true` a confirmed stop, `false` a stop just left, `null` no evidence either way — which is
    * what the mounted timer has, and why it must not claim `parked` (see `publish::Motion`).
-   * OPTIONAL.
    */
-  heartbeatFix?(
-    subscriptionId: string,
+  heartbeatFix(
     battery: { level: number; charging: boolean; lowPower: boolean },
     intervalMs: number,
     parked: boolean | null
@@ -720,9 +585,9 @@ export interface IrohLocationApi {
    * just paired cannot open anything published before they existed — their first sight of you is
    * otherwise the next scheduled publish, which on a parked iPhone is p90 92 minutes. Fills no
    * slot and does not move the cadence; see `DrainEngine::publish_introduction`. Resolves with
-   * `enqueued: 0` on a device that has never captured a position. OPTIONAL.
+   * `enqueued: 0` on a device that has never captured a position.
    */
-  publishIntroduction?(subscriptionId: string): Promise<NativeIngestOutcome>;
+  publishIntroduction(): Promise<NativeIngestOutcome>;
   /**
    * Re-program the native background runtime from the sampling policy's decision.
    *
@@ -899,8 +764,8 @@ export interface IrohLocationApi {
     lapsed: number;
     noSession: number;
     other: number;
-    /** `<endpoint hex>:<reason>` per friend left out. Absent on binaries that predate it. */
-    droppedPeers?: string[];
+    /** One per friend left out. Absent on binaries that predate it. */
+    droppedPeers?: RatchetDropped[];
   } | null>;
   /**
    * Who the native drain path will seal for RIGHT NOW, read back from its durable store.
@@ -920,9 +785,9 @@ export interface IrohLocationApi {
    *
    * The companion to {@link setSharingRecipients}: that call says who to seal for, this one says
    * who to hand the sealed bytes to. A device that knows the first but not the second publishes
-   * into its own local replica and reports success — `docsWrite` is local-only, and iroh-docs
-   * broadcasts a local insert solely for namespaces the live engine has marked as syncing, which a
-   * publish-only context never does. Two phones spent 2026-08-31 in exactly that state.
+   * into its own local replica and reports success — iroh-docs broadcasts a local insert only to
+   * the namespace's CURRENT live-sync neighbours, which a cold background wake usually has none
+   * of yet. Two phones spent 2026-08-31 in exactly that state.
    *
    * Persisted natively because the caller that most needs it is an OS location callback with no JS
    * context alive to supply it. Push on every pool change and every stash opt-in change, alongside
@@ -960,70 +825,26 @@ export interface IrohLocationApi {
     lastPublishedAt: number | null;
     lastPushedAt: number | null;
   }>;
-  /** The last sequence number handed out, without advancing. OPTIONAL, as {@link nextSeq}. */
+  /**
+   * The last publish sequence number the native drain handed out, without advancing.
+   *
+   * The counter lives natively and only the drain advances it, durably, before the envelope it
+   * numbers is sealed (`seq_store.rs`): expo-task-manager hands every headless callback a fresh JS
+   * context, so a JS-side counter was duplicated along with every guard on it, and two envelopes
+   * under one `author/seq` key is a payload lost to last-write-wins. OPTIONAL: absent on binaries
+   * built before the native counter.
+   */
   currentSeq?(): Promise<number>;
   /**
    * Raise the native counter to at least `floor`; resolves to whether it moved.
    *
    * Monotone, so it is safe to call repeatedly: this is both the one-time migration of the old
    * SecureStore value and the recovery path for an unreadable counter file. Raising can only skip
-   * values, never re-issue them. OPTIONAL, as {@link nextSeq}.
+   * values, never re-issue them. OPTIONAL, as {@link currentSeq}.
    */
   seedSeq?(floor: number): Promise<boolean>;
-  /**
-   * Broadcast a **null fix**: an envelope carrying an empty padded payload rather than a position
-   * (FORWARD-SECRECY.md §4.1). Wrapped for the friends we do NOT share position with, so every
-   * sharing relationship runs the protocol in both directions and a watcher's device contributes
-   * fresh key material on the same cadence a sharer does.
-   *
-   * Identical to {@link publish} in signing, AAD binding, `seq` monotonicity and — because the
-   * plaintext is padded to a fixed size class — ciphertext length, so the stash cannot tell the
-   * two lanes apart. `ts` is the tick's timestamp; it rides in the signed header exactly as a
-   * real fix's does.
-   *
-   * OPTIONAL: absent on iOS bindings generated before this API existed (Swift bindings only
-   * regenerate on macOS), so callers must guard with `typeof mod.publishNull === 'function'`.
-   */
-  publishNull?(
-    subscriptionId: string,
-    seq: number,
-    ts: number,
-    watcherEndpointsHex: string[],
-    traceparent?: string | null
-  ): Promise<RatchetDropped[]>;
 
   // ── Durable trail (iroh-docs) — see docs/social/ARCHITECTURE.md §5–6, §9 ────────────────────
-  /**
-   * Seal `fix` for `recipientsHex` and write it to OUR docs namespace under `author/seq`, mirroring
-   * the gossip broadcast. Same sealed bytes as {@link publish}, so per-recipient revocation carries
-   * over (a dropped recipient replicates ciphertext it can't open). Typically called alongside
-   * `publish` for every fix. `subscriptionId` ties the write to our own topic/namespace.
-   */
-  docsWrite(
-    subscriptionId: string,
-    seq: number,
-    fix: NativeLocationFix,
-    recipientEndpointsHex: string[],
-    traceparent?: string | null
-  ): Promise<RatchetDropped[]>;
-  /**
-   * Durable mirror of {@link publishNull}, written to a **separate** last-write-wins slot from the
-   * fix lane. The two envelopes a tick produces are wrapped for disjoint recipient sets, so a
-   * shared slot would make each silently supersede the other and a device that both shares and
-   * watches could keep only one lane durable.
-   *
-   * Same write-then-push rule as {@link docsWrite}: call {@link pushTrail} afterwards or it never
-   * leaves the device.
-   *
-   * OPTIONAL: same iOS bindgen caveat as {@link publishNull}.
-   */
-  docsWriteNull?(
-    subscriptionId: string,
-    seq: number,
-    ts: number,
-    watcherEndpointsHex: string[],
-    traceparent?: string | null
-  ): Promise<RatchetDropped[]>;
   /**
    * Reconcile every replicated namespace so each author's current fix is up to date locally.
    *
@@ -1040,25 +861,6 @@ export interface IrohLocationApi {
    */
   syncLatest(peerTickets: string[], traceparent?: string | null): Promise<void>;
   /**
-   * Push OUR trail namespace to `peerTickets` — the trail stash when it is enabled, and **every
-   * pool member** — and wait for the exchange to finish.
-   *
-   * **This is what actually gets a published fix off the phone.** {@link docsWrite} only writes the
-   * local replica; iroh-docs broadcasts a local insert only for namespaces that `start_sync` has
-   * marked as syncing, and nothing but this call (or {@link syncLatest}) does that. A context that
-   * publishes without it — every headless background wake — strands its envelopes on the device.
-   * Call it after draining a batch.
-   *
-   * The peer list is the send-side mirror of {@link syncLatest} and it is what makes the pool
-   * relay of ARCHITECTURE.md §1.3/§6 the normal flow: with a stash-only target an author's fix was
-   * broadcast to the durable server and to nobody else, so a friend could only relay it if it
-   * happened to dial the author during a reconciliation window. An empty list is valid and means
-   * "broadcast to whatever the live engine already knows".
-   *
-   * OPTIONAL: absent on iOS bindings generated before this API existed (Swift bindings only
-   * regenerate on macOS), so callers must guard with `typeof mod.pushTrail === 'function'`.
-   */
-  /**
    * Whether this binary refcounts the process-wide node instead of clobbering it.
    *
    * When true, a second `createNode` for the same identity ADOPTS the live node and `shutdown`
@@ -1069,52 +871,6 @@ export interface IrohLocationApi {
    * waiting. Guard with `typeof mod.nativeRuntimeAdoptsNode === 'function'`.
    */
   nativeRuntimeAdoptsNode?(): Promise<boolean>;
-  pushTrail?(peerTickets: string[], traceparent?: string | null): Promise<void>;
-  /**
-   * Push OUR trail namespace to each peer with **its own deadline**, and report what each did.
-   *
-   * The budgeted form of {@link pushTrail}, and the one the reachability model drives. A budget of
-   * `0` means "do not wait for this peer": the data is still handed to the live engine so the peer
-   * reconciles whenever it next wakes, but no background wake is held open for it.
-   *
-   * That distinction is the whole saving. Measured over 7 days, 74% of pushes burned the full 30s
-   * budget with `peers_failed = 0` — the missing peers had not refused, they had said nothing, and
-   * the old "wait until everyone reports" rule could never be satisfied. 41.7 hours a week.
-   *
-   * The returned rows are what `peer-reachability.ts` learns from; feed each to `foldObservation`.
-   *
-   * OPTIONAL for the same reason as {@link pushTrail}: a phone can be running an older binary than
-   * the JS bundle, so callers must guard with `typeof mod.pushTrailBudgeted === 'function'`.
-   */
-  pushTrailBudgeted?(
-    peers: NativePeerDial[],
-    traceparent?: string | null
-  ): Promise<NativePeerPushReport[]>;
-  /** Upload current opaque trail slots to the stash and wait for durable HTTP receipts. */
-  uploadTrailContent?(baseUrl: string, psk: string | null): Promise<number>;
-  /**
-   * Seal `msg` for `recipientsHex` and write it to OUR namespace's single control slot,
-   * superseding any previous control message from us (ARCHITECTURE §9c). `recipientsHex` is
-   * normally one friend — a live request addressed to one person should be readable by exactly
-   * that person.
-   *
-   * Call {@link pushTrail} afterwards, or it never leaves the device — the same
-   * write-then-push rule as {@link docsWrite}.
-   *
-   * OPTIONAL: absent on iOS bindings generated before this API existed (Swift bindings only
-   * regenerate on macOS), so callers must guard with `typeof mod.docsWriteControl === 'function'`.
-   */
-  docsWriteControl?(msg: NativeControlMsg, recipientsHex: string[]): Promise<void>;
-  /**
-   * Read `author`'s current control message from the local replica, if it is addressed to us.
-   * Empty when there is none, when it is for someone else, or when the content has not
-   * replicated yet — all indistinguishable, and all "nothing to act on".
-   *
-   * Freshness and dedup are the CALLER's responsibility; see {@link NativeControlMsg}.
-   *
-   * OPTIONAL: same iOS bindgen caveat as {@link docsWriteControl}.
-   */
-  readControl?(author: string): Promise<NativeControlMsg[]>;
   /**
    * Read every author's CURRENT decrypted fix out of the local replica — at most one per author,
    * ours included. Replaces the old per-author range read: with a single last-write-wins slot per
@@ -1130,8 +886,8 @@ export interface IrohLocationApi {
   // anything weaker (FORWARD-SECRECY.md §4.2, §4.6's "no automatic downgrade of any kind"). What
   // JS drives is recovery, and only recovery.
   //
-  // All OPTIONAL: absent on iOS bindings generated before this API existed (Swift bindings only
-  // regenerate on macOS), so callers must guard with `typeof mod.<name> === 'function'`.
+  // The restart itself runs inside the native drain (`restart::run_pass`); JS only reads health and
+  // erases sessions. All OPTIONAL: guard with `typeof mod.<name> === 'function'`.
 
   /**
    * Whether this peer's session needs a §4.6 restart: a run of distinct envelopes we could not
@@ -1145,20 +901,6 @@ export interface IrohLocationApi {
    * recovering is not recovering — past a small number, surface "re-pair with this friend".
    */
   resyncCount?(peerEndpointHex: string): Promise<number>;
-  /**
-   * Publish our restart control record (prekeys + outstanding requests) now, sealed to these
-   * friends' **receiving keys**. The native drain publishes it on its own; this only forces it.
-   * Returns our newest prekey's public half.
-   */
-  publishResync?(recipientRecvPubsHex: string[]): Promise<string>;
-  /**
-   * Run one native recovery pass for this peer (FORWARD-SECRECY.md §4.6): restart it if we lead
-   * the pair and it is due, adopt a waiting restart if we follow. Returns whether a session was
-   * installed. The receiving key argument is unused and kept for binding compatibility.
-   */
-  pollResync?(peerEndpointHex: string, peerRecvPubHex: string): Promise<boolean>;
-  /** A no-op kept for binding compatibility: nothing about a restart is held in memory. */
-  clearResync?(): Promise<void>;
   /** Forget a peer's ratchet session entirely — unfriend, or revoke. */
   forgetSession?(peerEndpointHex: string): Promise<void>;
   /**
@@ -1325,8 +1067,7 @@ export interface IrohLocationApi {
   /**
    * What this device's durable replica can SERVE, one record per author present in it.
    *
-   * OPTIONAL for the same reason as {@link pushTrail}: iOS Swift bindings regenerate only on
-   * macOS, so an installed dev client may predate the export.
+   * OPTIONAL: an installed dev client may predate the export.
    */
   trailReplicaStatus?(): Promise<TrailReplicaAuthor[]>;
 
