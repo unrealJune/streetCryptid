@@ -23,8 +23,11 @@ fills that gap with a machine someone already has: a laptop, a desktop, a Raspbe
 
 A repeater is **the stash run as a daemon**, with three differences:
 
-- **It is persistent.** A laptop restarts all the time, and the phones that granted it are not
-  awake to grant it again. It records every grant to disk and reopens all of them on start.
+- **It remembers who it carries, and nothing it carries.** A laptop restarts all the time, and
+  the phones that granted it are not awake to grant it again, so its identity, its roster and every
+  grant are on disk and reopen on start. The envelopes themselves are **in memory only**, like the
+  stash's (decided 2026-11-10): no sealed location is ever written to the machine's disk, and a
+  restart comes back carrying the same people and holding nothing until their phones sync again.
 - **It is not guaranteed to be up.** It is only _more likely_ to answer than a phone. Nothing on
   the delivery path may assume it is reachable (§5).
 - **Carrying a trail is opt-in; reading from it is not.** Each person chooses whether someone's
@@ -90,7 +93,7 @@ So there is **no consent to read and no consent to be read through**:
   never ends up connected to it through someone else's swarm.
 
 The one thing a person opts into is **carrying**: whether someone's repeaters replicate their own
-namespace on their behalf and they push to them. Carrying spends someone else's disk and gives
+namespace on their behalf and they push to them. Carrying spends someone else's memory and gives
 those machines a copy of your ciphertext to hold, so it is a choice and not a side effect.
 
 ## 3. The roster
@@ -404,7 +407,7 @@ with the same kind of switch. They stay different things on purpose:
 |              | hosted stash                                              | repeater                                                                    |
 | ------------ | --------------------------------------------------------- | --------------------------------------------------------------------------- |
 | owner        | **nobody**                                                | the roster's owner, who can remove people                                   |
-| keeps        | each author's latest fix, in memory, at most 48 hours     | everything granted, on disk, until released                                 |
+| keeps        | each author's latest fix, in memory, at most 48 hours     | each carried author's latest fix, in memory, until released or restarted    |
 | opt-in       | the delivery mode (`stash`), one switch                   | `Enroll` in a roster                                                        |
 | grant        | HTTP control API + a PSK baked into the build             | `Grant` over `streetcryptid/repeater/1`, with the namespace's own signature |
 | whose trails | mine **and every friend's** (`grantStash` registers both) | only people who enrolled, each proving the namespace is theirs              |
@@ -412,8 +415,8 @@ with the same kind of switch. They stay different things on purpose:
 
 **Decided (2026-11-08): the stash stays ownerless, with its rolling deletion.** An owner would be
 someone who can say whose trails it carries, and a server everyone shares should not have one.
-Forgetting on a clock is the stronger privacy promise, and it is one a repeater, whose point is
-keeping things, cannot make. So the stash gets no roster, no genesis and no operator key, and the
+Forgetting on a clock is the stronger privacy promise. A repeater forgets on a restart too (§1),
+but it answers to an owner and keeps what it carries until they release it. So the stash gets no roster, no genesis and no operator key, and the
 app carries a deliberate **carve-out** for it:
 
 - **Identification** is by configuration, as now: the stash is the endpoint in
@@ -492,13 +495,14 @@ needs plaintext, so it must be in the wrap set. What the protocol already implie
   namespaces exist, arrival times and sizes. It also learns the roster (members' endpoint ids),
   and the IP address of every phone that pushes to it or pulls from it, members or not. It cannot
   decrypt, cannot forge fixes, and cannot forge roster ops.
-  - The disk holds ciphertext, the grant book, the roster and `secret.key`.
+  - The disk holds the grant book (read capabilities), the roster and `secret.key`. Ciphertext
+    is in memory only, so a powered-off or stolen machine holds no envelopes at all.
   - The only extra harm from that key is impersonating that one repeater.
   - It cannot move the repeater into another roster: a new cert would need a new `AddRepeater`
     from that roster's owner.
 - **Any reader** can pull a carried namespace's ciphertext from a repeater, as from any other
   replica (§2.1). It cannot open anything not wrapped for it.
-- **A malicious member** can learn who else is carried, and can fill the repeater's disk with
+- **A malicious member** can learn who else is carried, and can fill the repeater's memory with
   their own namespaces, up to four each today. In an `open` roster that is anyone who saw a card.
   Quotas and the owner's `Remove` bound it. A member cannot have someone else's trail carried
   (§4.3).
@@ -514,7 +518,7 @@ All of the trail-stash work is one PR (trail-stash#8, with the spike folded in);
 is this one.
 
 0. **Spike: the stash on disk, with siblings.** Built and green.
-   - `Storage::Persistent`.
+   - `Storage::Persistent` (no longer what a repeater runs: see `Storage::MemoryRepeater`, §1).
    - A grant book that is written before a grant is acknowledged and fails the start when
      unreadable.
    - Adoption of on-disk entries into the content ledger.
@@ -546,10 +550,11 @@ is this one.
    - Delivery: pushes to rosters I am enrolled in, pulls from friends' repeaters, the
      receipt-gated early break, isolation, and telemetry.
 3. **Operations.**
-   - Disk blob GC, with the content ledger rebuilt before the store opens, since released content
-     still sits on disk.
+   - Built: `Storage::MemoryRepeater` — identity, roster and grant book on disk, replica and
+     ciphertext in RAM with the stash's GC — which also retires disk blob GC for repeaters.
    - Quotas.
-   - Packaging: systemd unit, launchd plist, Windows service, and a Home Assistant add-on.
+   - Packaging: systemd unit, launchd plist, Windows service (built, `apps/repeater`), and a Home
+     Assistant add-on.
    - Health on the daemon.
 
 ## 10. Open questions
