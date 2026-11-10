@@ -203,7 +203,7 @@ impl Store {
             for entry in counts.iter()? {
                 let entry = entry?;
                 let key = entry.0.value();
-                if key.len() != 8 && (key.len() != 9 || key[8] > 1) {
+                if key.len() != 8 {
                     bail!("invalid delivery statistics bucket");
                 }
             }
@@ -241,7 +241,7 @@ impl Store {
         for row in transaction.open_table(COUNTS)?.iter()? {
             let (key, count) = row?;
             let key = key.value();
-            if key.len() != 8 && (key.len() != 9 || key[8] > 1) {
+            if key.len() != 8 {
                 bail!("invalid delivery statistics bucket");
             }
             let day = i32::from_be_bytes(key[..4].try_into()?);
@@ -347,33 +347,6 @@ mod tests {
             assert_eq!(report.counts.iter().map(|row| row.count).sum::<u64>(), 4);
             assert_eq!(store.snapshot(40).unwrap().recorded_days, 30);
         }
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn legacy_mechanism_buckets_are_merged_into_docs_only_totals() {
-        let root =
-            std::env::temp_dir().join(format!("sc-receipts-legacy-{}", rand::random::<u64>()));
-        let store = Store::open(&root, &[8; 32], 2).unwrap();
-        let transaction = store.db.begin_write().unwrap();
-        {
-            let mut counts = transaction.open_table(COUNTS).unwrap();
-            for mechanism in 0..=1 {
-                let mut key = 2_i32.to_be_bytes().to_vec();
-                key.extend([
-                    9,
-                    Source::Friend as u8,
-                    PathKind::Bluetooth as u8,
-                    RelaySetup::No as u8,
-                    mechanism,
-                ]);
-                counts.insert(key.as_slice(), 1).unwrap();
-            }
-        }
-        transaction.commit().unwrap();
-        let report = store.snapshot(3).unwrap();
-        assert_eq!(report.counts.len(), 1);
-        assert_eq!(report.counts[0].count, 2);
         std::fs::remove_dir_all(root).unwrap();
     }
 
