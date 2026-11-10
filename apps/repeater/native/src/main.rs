@@ -230,14 +230,14 @@ async fn serve(args: Args, secret: SecretKey, settings: Arc<Settings>) -> Result
     };
     let power = power::KeepAwake::spawn(settings.keep_awake_flag());
     let storage = Arc::new(AtomicU64::new(storage_bytes(&dir)));
-    tracing::info!(
-        target: "repeater.host",
+    // Spans, not events: Loki keeps an event's message and drops its fields.
+    drop(tracing::info_span!(
+        "repeater.host.start",
         host.mode = mode.name(),
         host.version = VERSION,
         host.start_ms = started_at.elapsed().as_millis() as u64,
         disk.bytes = storage.load(Ordering::Relaxed),
-        "repeater.host.start"
-    );
+    ));
     let prune = tokio::spawn(node.clone().run_prune_loop(DEFAULT_PRUNE_INTERVAL_MIN));
     let siblings = tokio::spawn(trail_stash::repeater::run_sibling_loop(
         node.clone(),
@@ -296,12 +296,11 @@ async fn serve(args: Args, secret: SecretKey, settings: Arc<Settings>) -> Result
             Err(std::sync::mpsc::TrySendError::Disconnected(_)) => break,
         }
     }
-    tracing::info!(
-        target: "repeater.host",
+    drop(tracing::info_span!(
+        "repeater.host.stop",
         host.mode = mode.name(),
         uptime_s = started_at.elapsed().as_secs(),
-        "repeater.host.stop"
-    );
+    ));
     pulse.abort();
     prune.abort();
     siblings.abort();
