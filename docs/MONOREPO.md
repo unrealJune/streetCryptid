@@ -268,17 +268,21 @@ crate moved beside them); only the tip has to.
 
 ### PR C — the Windows client
 
-- `apps/repeater` lands as `repeater/windows` (`windows/` → `app/`, `native/` → `host/`, a
-  workspace member). It has never been committed, so the vendor/patch machinery never enters
-  history: `prepare-runtime.ps1`, `test-prepare-runtime.ps1`, `vendor/`, `native/upstream/` and
-  `memory-repeater.patch` are not added. `NOTICE` drops the pinned-SHA paragraph.
+The Windows client went ahead of the import, on `feat/windows-repeater` (the review items below are
+done there), still pulling trail-stash through `prepare-runtime.ps1` and
+`native/trail-stash.patch`. PR C turns that into the monorepo layout:
+
+- `apps/repeater` moves to `repeater/windows` (`windows/` → `app/`, `native/` → `host/`, a
+  workspace member; `core/`, `service/`, `tests/`, `scripts/` keep their names), and its own
+  `[patch.crates-io]` for noq goes, since the root workspace has it.
+- `prepare-runtime.ps1`, `test-prepare-runtime.ps1` and `trail-stash.patch` are deleted; `NOTICE`
+  drops the pinned-SHA paragraph.
 - The patch lands on `repeater/server` as reviewable commits, each with its tests:
-  1. `Storage::MemoryRepeater` — RAM ciphertext and replica, durable roster and grants;
+  1. per-entry fetch state, so releasing one namespace keeps another's missing shared content
+     tracked (fix; benefits the hosted stash);
   2. register namespace watchers before starting live sync (fix; benefits the hosted stash);
-  3. releasing one namespace keeps another's missing shared content tracked (fix);
-  4. bounded arrival notifications;
-  5. local receive opt-outs (see below — land it, or drop it, deliberately);
-  6. the multi-writer/multi-reader forwarding and restart tests.
+  3. bounded arrival notifications;
+  4. the desktop repeater tests (restart from disk, multi-writer/multi-reader forwarding).
 - The claim URL comes from the server crate instead of being formatted again in the host.
 - `ci-repeater-windows.yml` and `release-repeater-windows.yml` (`windows-v*`).
 
@@ -290,16 +294,14 @@ references to the old repo.
 
 ## Not in this plan
 
-These came out of the same review and are design questions, not moves:
+These came out of the same review. The Windows ones are done on `feat/windows-repeater`:
 
-- **The Windows client keeps less than §5.1 says a repeater keeps** — RAM only, the stash's
-  latest-fix/48 h retention, against "everything granted, on disk, until released". Either
-  record it in `REPEATERS.md` as the desktop's mode or give the desktop disk storage.
-- **A local "unsubscribe" contradicts the signed roster**: the member's cards and "Available
-  through friends" keep saying this machine carries them. Make it a roster-visible operation or
-  drop it.
-- **The Windows host has no telemetry at all.** Compile the server's `otel` feature into our own
-  builds only, the same build-time gate the phone uses.
-- **The host lives and dies with a logged-in UI**; `REPEATERS.md` §9 lists a Windows service.
-- **Unsigned auto-updates** on a machine holding an identity key make code signing a release gate.
+- ~~The Windows client keeps less than §5.1 says a repeater keeps~~ — it uses
+  `Storage::Persistent` now; `MemoryRepeater` is gone.
+- ~~A local "unsubscribe" contradicts the signed roster~~ — removed; removal happens on the phone.
+- ~~The Windows host has no telemetry at all~~ — the `otel` feature behind a build-time endpoint
+  and a per-span consent flag, plus `repeater.host.pulse`.
+- ~~The host lives and dies with a logged-in UI~~ — the Windows service (`service/`).
+- **Unsigned auto-updates** on a machine holding an identity key: the release workflow signs when
+  `REPEATER_SIGN_PARAMS` is provided; a certificate still has to be bought.
 - Renaming `trail-stash` (crate, image, chart, env) to the repeater it has become.
