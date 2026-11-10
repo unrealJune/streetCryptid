@@ -1,0 +1,23 @@
+streetCryptid Windows repeater
+
+The repeater runtime incorporates unrealJune/trail-stash, licensed under
+AGPL-3.0-or-later, pinned to 326c530149ded29c88e899c6cb2fe6a0bd0f4365.
+Source: https://github.com/unrealJune/trail-stash
+
+Local changes are distributed as native/trail-stash.patch:
+- Bounded notifications when location-fix content becomes locally servable.
+- Fetch state per entry, so namespaces sharing ciphertext are released independently.
+- Register namespace watchers before starting live synchronization.
+- Desktop repeater, content-arrival and multi-writer/multi-reader forwarding tests.
+
+The host is built against noq 1.4.0 with one fix (MIT OR Apache-2.0), from
+modules/iroh-location/rust/third_party/noq in the streetCryptid repository; its
+NOTICE lists the modification.
+
+The Windows app, Windows service, Rust host and build scripts are available at:
+https://github.com/unrealJune/streetCryptid/tree/main/apps/repeater
+
+Rajdhani and IBM Plex Mono font license notices are bundled in Assets.
+The animated lattice is adapted from this project's onboarding splash design.
+The icon is the streetCryptid mothman sigil (assets/images/mothman-logo.svg),
+rendered by scripts/make-icons.py.

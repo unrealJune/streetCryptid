@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  streetCryptid app logo — the "mothman" cryptid sigil (dark).
+  Source: CRYPTID_PRESETS.mothman in src/features/account/core/profile.ts
+        \.    ./
+         \(oo)/     (the "oo" eyes are the single amber accent)
+          )~~(
+         /_||_\
+  Vector strokes on a fixed 10x4 monospace grid — no font dependency, no distortion.
+  Palette from src/constants/cryptid-theme.ts. No gradients/glow/glass (DESIGN.md).
+-->
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024" role="img" aria-label="streetCryptid mothman sigil">
+  <title>streetCryptid — mothman sigil</title>
+  <rect x="0" y="0" width="1024" height="1024" rx="224" fill="#0a1420"/>
+  <rect x="64.5" y="64.5" width="895" height="895" rx="176" fill="none" stroke="#17293a" stroke-width="3"/>
+  <g stroke-linejoin="round">
+    <line x1="261.12" y1="275.12" x2="314.88" y2="370.88" stroke="#DCEBF0" stroke-width="27" stroke-linecap="round" fill="none"/>
+    <circle cx="352" cy="323" r="16.74" fill="#DCEBF0"/>
+    <circle cx="672" cy="323" r="16.74" fill="#DCEBF0"/>
+    <line x1="709.12" y1="370.88" x2="762.88" y2="275.12" stroke="#DCEBF0" stroke-width="27" stroke-linecap="round" fill="none"/>
+    <line x1="325.12" y1="401.12" x2="378.88" y2="496.88" stroke="#DCEBF0" stroke-width="27" stroke-linecap="round" fill="none"/>
+    <path d="M 428.8 401.12 Q 387.84 449 428.8 496.88" stroke="#DCEBF0" stroke-width="27" stroke-linecap="round" fill="none"/>
+    <circle cx="480" cy="441.44" r="17.28" fill="#EDA23C"/>
+    <circle cx="544" cy="441.44" r="17.28" fill="#EDA23C"/>
+    <path d="M 595.2 401.12 Q 636.16 449 595.2 496.88" stroke="#DCEBF0" stroke-width="27" stroke-linecap="round" fill="none"/>
+    <line x1="645.12" y1="496.88" x2="698.88" y2="401.12" stroke="#DCEBF0" stroke-width="27" stroke-linecap="round" fill="none"/>
+    <path d="M 403.2 527.12 Q 444.16 575 403.2 622.88" stroke="#DCEBF0" stroke-width="27" stroke-linecap="round" fill="none"/>
+    <path d="M 449.28 575 C 463.36 555 472.32 555 480 575 C 487.68 595 496.64 595 510.72 575" stroke="#DCEBF0" stroke-width="27" stroke-linecap="round" fill="none"/>
+    <path d="M 513.28 575 C 527.36 555 536.32 555 544 575 C 551.68 595 560.64 595 574.72 575" stroke="#DCEBF0" stroke-width="27" stroke-linecap="round" fill="none"/>
+    <path d="M 620.8 527.12 Q 579.84 575 620.8 622.88" stroke="#DCEBF0" stroke-width="27" stroke-linecap="round" fill="none"/>
+    <line x1="325.12" y1="748.88" x2="378.88" y2="653.12" stroke="#DCEBF0" stroke-width="27" stroke-linecap="round" fill="none"/>
+    <line x1="386" y1="748.88" x2="446" y2="748.88" stroke="#DCEBF0" stroke-width="27" stroke-linecap="round" fill="none"/>
+    <line x1="480" y1="653.12" x2="480" y2="748.88" stroke="#DCEBF0" stroke-width="27" stroke-linecap="round" fill="none"/>
+    <line x1="544" y1="653.12" x2="544" y2="748.88" stroke="#DCEBF0" stroke-width="27" stroke-linecap="round" fill="none"/>
+    <line x1="578" y1="748.88" x2="638" y2="748.88" stroke="#DCEBF0" stroke-width="27" stroke-linecap="round" fill="none"/>
+    <line x1="645.12" y1="653.12" x2="698.88" y2="748.88" stroke="#DCEBF0" stroke-width="27" stroke-linecap="round" fill="none"/>
+  </g>
+</svg>
