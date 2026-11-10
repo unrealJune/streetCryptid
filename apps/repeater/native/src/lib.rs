@@ -115,7 +115,7 @@ impl Settings {
     /// next deliberate change replaces it.
     pub fn open(dir: &Path) -> Self {
         let path = dir.join("host-settings.json");
-        let current = std::fs::read(&path)
+        let current: HostSettings = std::fs::read(&path)
             .ok()
             .map(|bytes| serde_json::from_slice(&bytes).unwrap_or_default())
             .unwrap_or_default();
