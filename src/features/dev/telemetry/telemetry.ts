@@ -62,9 +62,7 @@ export interface CreateTelemetryOptions {
 
 function categoryFor(name: string): string {
   if (/pair|ble|bump|profile/i.test(name)) return 'pairing';
-  if (
-    /transport|relay|gossip|docs|trail|stash|fix|outbox|engine|background|bg\.|push/i.test(name)
-  ) {
+  if (/transport|relay|docs|trail|stash|fix|outbox|engine|background|bg\.|push/i.test(name)) {
     return 'transport';
   }
   return 'system';
@@ -72,7 +70,6 @@ function categoryFor(name: string): string {
 
 function transportFor(name: string): string | undefined {
   if (/stash/i.test(name)) return 'stash';
-  if (/gossip/i.test(name)) return 'gossip';
   if (/docs|trail|backfill/i.test(name)) return 'durable trail';
   if (/ble|bump/i.test(name)) return 'BLE';
   if (/publish|fix|outbox|engine/i.test(name)) return 'iroh';

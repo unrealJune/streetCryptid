@@ -1,11 +1,7 @@
 import { NativeModule, registerWebModule } from 'expo-modules-core';
 import { Image } from 'react-native';
 
-import initWasm, {
-  derive_topic_hex,
-  WasmLocationNode,
-  type WasmLocationSubscription,
-} from '../web/iroh_location_wasm.js';
+import initWasm, { WasmLocationNode } from '../web/iroh_location_wasm.js';
 import { requireIrohRelayRuntimeConfig } from './relay-config';
 import type {
   IrohLocationApi,
@@ -14,9 +10,8 @@ import type {
   BlePeer,
   BluetoothRadioState,
   BumpResolution,
-  NativeIncomingFix,
+  NativeIngestOutcome,
   NativeRatchetEvent,
-  NativeLocationFix,
   NodeKeys,
   PairEvent,
   PairInvite,
@@ -28,24 +23,29 @@ import type {
   TrailReplicaAuthor,
   TransportDiagnostics,
   TransportConfig,
-  NativePeerDial,
-  NativePeerPushReport,
 } from './IrohLocation.types';
 
 const ID_KEY = 'sc.iroh.identitySecret';
 const RECV_KEY = 'sc.iroh.recvSecret';
 const wasmAsset = require('../web/iroh_location_wasm_bg.wasm') as number | string;
 
-type WasmEvent =
-  | { type: 'fix'; author: string; seq: number; fix: NativeLocationFix; backfill: boolean }
-  | { type: 'opaque'; author: string; seq: number }
-  | { type: 'status'; status: string }
-  | { type: 'sync'; author: string; status: string; recovered?: number };
-
-interface StoredSubscription {
-  sub: WasmLocationSubscription;
-  abort: AbortController;
-}
+/**
+ * What every publish call answers on web: nothing was accepted, nothing was sealed.
+ *
+ * Resolved rather than thrown because the mounted heartbeat timer calls these on every platform,
+ * and a throw there reads as a broken engine. An explicit "share now" still fails loudly, on the
+ * rejection.
+ */
+const WEB_DOES_NOT_PUBLISH: NativeIngestOutcome = {
+  accepted: false,
+  rejection: 'web-no-publish',
+  enqueued: 0,
+  published: 0,
+  pending: 0,
+  slotsSkipped: 0,
+  overflowDropped: 0,
+  suspended: false,
+};
 
 let wasmReady: Promise<void> | null = null;
 
@@ -53,7 +53,7 @@ let wasmReady: Promise<void> | null = null;
 function pairingUnsupported(method: string): Error {
   return new Error(
     `IrohLocation.${method} is unavailable on web: BLE and bilateral pairing require a native ` +
-      'dev-client build (Android/iOS). Location sharing and durable trail still work on web.'
+      'dev-client build (Android/iOS).'
   );
 }
 
@@ -86,8 +86,6 @@ export class IrohLocationNativeModule
   implements IrohLocationApi
 {
   private node: WasmLocationNode | null = null;
-  private readonly subscriptions = new Map<string, StoredSubscription>();
-  private nextSubscription = 1;
 
   async createNode(
     identitySecretHex: string | null,
@@ -120,8 +118,6 @@ export class IrohLocationNativeModule
   }
 
   async shutdown(): Promise<void> {
-    const subscriptionIds = [...this.subscriptions.keys()];
-    await Promise.all(subscriptionIds.map((id) => this.unsubscribe(id)));
     this.node?.free();
     this.node = null;
   }
@@ -131,156 +127,46 @@ export class IrohLocationNativeModule
     return this.requireNode().ticket();
   }
 
-  async deriveTopic(authorEndpointIdHex: string): Promise<string> {
-    await ensureWasm();
-    return derive_topic_hex(authorEndpointIdHex);
-  }
-
-  async subscribe(topicHex: string, bootstrapTickets: string[]): Promise<string> {
-    await ensureWasm();
-    const sub = await this.requireNode().subscribe(topicHex, bootstrapTickets);
-    const id = `web-${this.nextSubscription++}`;
-    const abort = new AbortController();
-    this.subscriptions.set(id, { sub, abort });
-    this.emit('onStatus', { subscriptionId: id, status: 'subscribed' });
-    void this.pumpSubscription(id, sub.receiver(), abort.signal);
-    return id;
-  }
-
-  // ── NO FORWARD SECRECY ON WEB ───────────────────────────────────────────────────────────────
+  // ── The web node replicates; it neither reads nor publishes ─────────────────────────────────
   //
-  // Native moved every fix lane to envelope v3 (ratcheted, FORWARD-SECRECY.md §4.7). This path
-  // did not, and cannot as it stands: a Double Ratchet needs sequential state that survives a
-  // reload, and the WASM build has no filesystem — its replica and blob store are both in-memory
-  // and vanish with the tab. Sequential state kept there would rewind on every reload, which is
-  // key reuse rather than a missing feature.
+  // Every fix is a v3 envelope sealed under a per-friend Double Ratchet (FORWARD-SECRECY.md).
+  // A ratchet needs sequential state that survives a reload, and the WASM build has no
+  // filesystem: its replica and blob store are in-memory and vanish with the tab, so ratchet state
+  // kept there would rewind on every reload — key reuse, not a missing feature. Sessions are also
+  // installed by pairing, which the web build cannot do. So the browser node holds and reconciles
+  // namespaces (a development surface for the replica), and the publish calls below decline.
   //
-  // So web still seals v2/HPKE to long-term receiving keys, and `recipientsHex` here really is
-  // receiving keys, not endpoint ids. Consequences, stated rather than buried:
-  //
-  //   * a web peer's fixes are NOT forward-secret, and a native peer cannot open them at all
-  //     (native reads v3 only) — web is a development surface, not a way to share location;
-  //   * the dropped-recipient array these return is always empty, because nothing here can be
-  //     dropped for want of a session.
-  //
-  // Making web a real peer again means either a persistent store (IndexedDB-backed, with the
-  // rollback problem solved) or accepting that it only ever watches. That is a product decision,
-  // not a port.
+  // Making web a real peer means a persistent store with the rollback problem solved. That is a
+  // product decision, not a port.
 
-  async publish(
-    subscriptionId: string,
-    seq: number,
-    fix: NativeLocationFix,
-    recipientsHex: string[],
-    _traceparent?: string | null
-  ): Promise<string[]> {
-    await ensureWasm();
-    const sub = this.subscriptions.get(subscriptionId)?.sub;
-    if (!sub) throw new Error(`Unknown IrohLocation subscription: ${subscriptionId}`);
-    await sub.publish(seq, fix, recipientsHex);
-    return [];
+  async ingestFix(): Promise<NativeIngestOutcome> {
+    return { ...WEB_DOES_NOT_PUBLISH };
   }
 
-  async publishNull(
-    subscriptionId: string,
-    seq: number,
-    ts: number,
-    recipientsHex: string[],
-    _traceparent?: string | null
-  ): Promise<string[]> {
-    await ensureWasm();
-    const sub = this.subscriptions.get(subscriptionId)?.sub;
-    if (!sub) throw new Error(`Unknown IrohLocation subscription: ${subscriptionId}`);
-    await sub.publish_null(seq, ts, recipientsHex);
-    return [];
+  async heartbeatFix(): Promise<NativeIngestOutcome> {
+    return { ...WEB_DOES_NOT_PUBLISH };
   }
 
-  async unsubscribe(subscriptionId: string): Promise<void> {
-    const stored = this.subscriptions.get(subscriptionId);
-    if (!stored) return;
-    this.subscriptions.delete(subscriptionId);
-    stored.abort.abort();
-    stored.sub.close();
-    this.emit('onStatus', { subscriptionId, status: 'unsubscribed' });
+  async publishIntroduction(): Promise<NativeIngestOutcome> {
+    return { ...WEB_DOES_NOT_PUBLISH };
   }
 
-  // ── Durable trail (iroh-docs) — in-memory replica over relay-reachable connections ──────────
-  // The browser (WASM) path is relay-only and has no filesystem, so the iroh-docs replica and its
-  // iroh-blobs content store are BOTH in-memory. The sealed envelope bytes are identical to native
-  // (shared rust/src/crypto.rs), so a web peer's durable entries interoperate with native peers and
-  // per-recipient revocation carries over. Durability caveat: the trail is ephemeral — it is lost on
-  // page reload / tab close. Range reconciliation still recovers missed fixes within a session and
-  // across peers. See modules/iroh-location/README.md §5.
-  async docsWrite(
-    subscriptionId: string,
-    seq: number,
-    fix: NativeLocationFix,
-    recipientsHex: string[],
-    _traceparent?: string | null
-  ): Promise<string[]> {
-    await ensureWasm();
-    await this.requireNode().docs_write(subscriptionId, seq, fix, recipientsHex);
-    return [];
-  }
-
-  async docsWriteNull(
-    subscriptionId: string,
-    seq: number,
-    ts: number,
-    recipientsHex: string[],
-    _traceparent?: string | null
-  ): Promise<string[]> {
-    await ensureWasm();
-    await this.requireNode().docs_write_null(subscriptionId, seq, ts, recipientsHex);
-    return [];
-  }
+  // ── Durable replica (iroh-docs) — in-memory, over relay-reachable connections ────────────────
+  // Relay-only and lost on page reload / tab close. See modules/iroh-location/README.md §5.
 
   async syncLatest(peerTickets: string[], _traceparent?: string | null): Promise<void> {
     await ensureWasm();
     await this.requireNode().sync_latest(peerTickets);
   }
 
-  async pushTrail(peerTickets: string[], _traceparent?: string | null): Promise<void> {
-    await ensureWasm();
-    await this.requireNode().push_trail(peerTickets);
-  }
-
-  /**
-   * Budgets are ignored here: the wasm node has no per-peer deadline plumbing, and the web build
-   * is never a background sender, so the cost this model exists to remove is not paid on web. The
-   * rows are still returned so a web caller folds the same observations as a device would.
-   */
-  async pushTrailBudgeted(
-    peers: NativePeerDial[],
-    _traceparent?: string | null
-  ): Promise<NativePeerPushReport[]> {
-    await this.pushTrail(
-      peers.map((peer) => peer.ticket),
-      _traceparent
-    );
-    return [];
-  }
-
-  // NOTE: `docsWriteControl` / `readControl` are deliberately NOT implemented here, and are
-  // optional on `IrohLocationApi` so callers already guard for them. Live mode (ARCHITECTURE §9c)
-  // needs continuous background location, which the web build cannot do — so a web peer can never
-  // be a live-mode subject. It could in principle be a watcher, but this replica is in-memory and
-  // ephemeral (lost on reload), so a control entry written here would be a request the sender
-  // cannot reliably withdraw. Absent beats half-working.
-
   async trailReplicaStatus(): Promise<TrailReplicaAuthor[]> {
     await ensureWasm();
     return (await this.requireNode().trail_replica_status()) as TrailReplicaAuthor[];
   }
 
+  /** Always empty: opening a friend's envelope needs the ratchet session web does not hold. */
   async readLatest(): Promise<NativeRatchetEvent[]> {
-    await ensureWasm();
-    const fixes = (await this.requireNode().read_latest()) as NativeIncomingFix[];
-    return fixes.map((incoming) => ({
-      ...incoming,
-      ts: incoming.fix.ts,
-      kind: 'fix',
-    }));
+    return [];
   }
 
   async pruneTrail(olderThanTs: number): Promise<void> {
@@ -304,8 +190,7 @@ export class IrohLocationNativeModule
 
   // ── Profiles / pairing / BLE: unsupported on the web (WASM) build ────────────────────────────
   // The browser path is relay-only with no BLE radio and no profile/pairing protocol wired into the
-  // WASM node. To keep the web build and existing location sharing working, read/poll/status calls
-  // degrade gracefully (empty results, `false`, `null`) so normal service initialization never
+  // WASM node. Read/poll/status calls degrade gracefully (empty results, `false`, `null`) so normal service initialization never
   // throws. Only explicit pairing actions (mint/initiate/respond/encode) throw a clear error.
 
   async publishProfile(
@@ -449,45 +334,6 @@ export class IrohLocationNativeModule
       throw new Error('IrohLocation web node has not been created. Call createNode() first.');
     }
     return this.node;
-  }
-
-  private async pumpSubscription(
-    subscriptionId: string,
-    stream: ReadableStream<WasmEvent>,
-    signal: AbortSignal
-  ): Promise<void> {
-    const reader = stream.getReader();
-    try {
-      while (!signal.aborted) {
-        const next = await reader.read();
-        if (next.done) break;
-        const event = next.value;
-        if (event.type === 'fix') {
-          this.emit('onFix', {
-            author: event.author,
-            seq: event.seq,
-            fix: event.fix,
-            backfill: event.backfill,
-          });
-        } else if (event.type === 'opaque') {
-          this.emit('onOpaque', { author: event.author, seq: event.seq, kind: 'opaque' });
-        } else if (event.type === 'sync') {
-          this.emit('onSync', {
-            author: event.author,
-            status: event.status,
-            recovered: event.recovered,
-          });
-        } else if (event.type === 'status') {
-          this.emit('onStatus', { subscriptionId, status: event.status });
-        }
-      }
-    } catch (error) {
-      if (!signal.aborted) {
-        this.emit('onStatus', { subscriptionId, status: `error: ${String(error)}` });
-      }
-    } finally {
-      reader.releaseLock();
-    }
   }
 }
 

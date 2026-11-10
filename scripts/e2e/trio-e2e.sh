@@ -210,17 +210,17 @@ for line in sys.stdin:
 
 deadline="$(($(date +%s) + TIMEOUT_SECONDS))"
 while [ "$(date +%s)" -lt "$deadline" ]; do
+  # The push to the stash is native (`trail.push` in Rust) and leaves no row in the app's journal;
+  # the observer decrypting a device's fix FROM the stash, below, is what proves it was pushed.
   if [ "$a_pipeline" -eq 0 ] &&
-    [ "$(device_event_log_count "$DEVICE_A" "$START_MS" publish.fix ok)" -gt 0 ] &&
-    [ "$(device_event_log_count "$DEVICE_A" "$START_MS" trail.push.app ok)" -gt 0 ]; then
+    [ "$(device_event_log_count "$DEVICE_A" "$START_MS" publish.fix ok)" -gt 0 ]; then
     a_pipeline=1
-    log "  device A pipeline: publish + stash push OK"
+    log "  device A pipeline: publish OK"
   fi
   if [ "$b_pipeline" -eq 0 ] &&
-    [ "$(device_event_log_count "$DEVICE_B" "$START_MS" publish.fix ok)" -gt 0 ] &&
-    [ "$(device_event_log_count "$DEVICE_B" "$START_MS" trail.push.app ok)" -gt 0 ]; then
+    [ "$(device_event_log_count "$DEVICE_B" "$START_MS" publish.fix ok)" -gt 0 ]; then
     b_pipeline=1
-    log "  device B pipeline: publish + stash push OK"
+    log "  device B pipeline: publish OK"
   fi
 
   if [ "$a_observed" -eq 0 ] || [ "$b_observed" -eq 0 ]; then

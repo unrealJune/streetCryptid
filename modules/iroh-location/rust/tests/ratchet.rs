@@ -193,7 +193,7 @@ fn the_default_window_still_has_an_edge() {
 }
 
 /// A reader who did not open the app for a day. The sender's chain only resets when the reader
-/// answers, and every tick spends two positions (gossip and docs lanes), so on 2026-10-09 an
+/// answers, and every tick then spent two positions (gossip and docs lanes), so on 2026-10-09 an
 /// iPhone away for 25 h was 570 positions behind — past the old 512 window, and unopenable
 /// until a restart. The default window must cross that by fast-forward alone.
 #[test]

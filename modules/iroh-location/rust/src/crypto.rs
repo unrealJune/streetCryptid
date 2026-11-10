@@ -32,8 +32,8 @@ pub const ENVELOPE_V: u8 = 2;
 
 /// The **ratcheted** envelope schema (FORWARD-SECRECY.md §4.7).
 ///
-/// v2 and v3 coexist deliberately rather than v3 replacing v2 outright. The fix path (gossip +
-/// docs) is v3, because that is the traffic the stash archives and the traffic forward secrecy is
+/// v2 and v3 coexist deliberately rather than v3 replacing v2 outright. The fix path (the
+/// author's docs slot) is v3, because that is the traffic the stash archives and the traffic forward secrecy is
 /// for. HPKE/v2 remains for pairing and any pre-session traffic — including the §4.6 resync
 /// record, which cannot be ratchet-sealed because it is the thing that re-establishes the
 /// ratchet — and for the mesh path, whose forward secrecy is left open by §8.1.

@@ -95,9 +95,10 @@ pub trait GateStateStore: Send + Sync {
 
 /// Where a sealed envelope goes — the engine's only dependency on the network.
 ///
-/// One method rather than separate live and durable calls: both lanes carry the *same sealed
-/// bytes*, so splitting them here would invite an implementation that sealed twice and let
-/// per-recipient revocation diverge between them.
+/// Every envelope is written to this node's own iroh-docs namespace and nowhere else: replication
+/// is the whole transport. A friend whose replica is live receives the entry as iroh-docs hands it
+/// over, and one that is asleep reconciles it later from us or from anyone holding the namespace
+/// (the stash, a pool member). There is no second, live-only path to keep in step with this one.
 pub trait PublishSink: Send + Sync {
     fn publish(
         &self,
@@ -137,11 +138,11 @@ pub trait PublishSink: Send + Sync {
 
     /// Get everything just published **off the device**, once per drain that sent anything.
     ///
-    /// Not an optimisation and not a lifecycle hook: [`Self::publish`] writes the local replica and
-    /// broadcasts to a live swarm that, on a background wake, is empty. iroh-docs broadcasts a
-    /// local insert only for namespaces the live engine has marked as syncing, which a publish-only
-    /// context never does — so until something reconciles with a peer, an "published" envelope has
-    /// not left the phone.
+    /// Not an optimisation and not a lifecycle hook: [`Self::publish`] writes the local replica, and
+    /// iroh-docs announces a local insert only to the namespace's current live neighbours — on a
+    /// background wake, usually nobody: the friends are asleep and the stash keeps no standing
+    /// connection to us. Until something reconciles with a peer, a "published" envelope has not
+    /// left the phone.
     ///
     /// It is part of this trait rather than a call the platform layer makes afterwards because
     /// leaving it to the caller is exactly how it went missing: the JS orchestration used to do it,

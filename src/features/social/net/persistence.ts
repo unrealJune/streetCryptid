@@ -6,7 +6,7 @@ import {
   type DeliveryMode,
 } from '../core/delivery-mode';
 import type { PoolState } from '../core/pool';
-import type { RatchetActivity } from '../core/types';
+import type { FixTransport, RatchetActivity } from '../core/types';
 import { InMemoryKV, type PersistentKV } from './background/persistent-kv';
 import {
   InMemoryTrailStorage,
@@ -33,6 +33,9 @@ import {
  */
 
 const DB_NAME = 'streetcryptid.social.db';
+
+/** Every label {@link FixTransport} admits — anything else in a row is legacy and dropped. */
+const FIX_TRANSPORTS: readonly [FixTransport, FixTransport] = ['docs', 'sync'];
 
 interface SqliteDb {
   execAsync(sql: string): Promise<void>;
@@ -93,6 +96,19 @@ function getDb(): Promise<SqliteDb | null> {
         await db.execAsync('ALTER TABLE friend_latest ADD COLUMN via_peer TEXT');
       } catch {
         // Column already present.
+      }
+      // Clear provenance written by transports that no longer exist (the gossip lane's
+      // `relay`/`direct`/`lan`/`ble`/`live`, and a `stash` label nothing derives any more). Every
+      // friend fix now arrives by docs replication; a stale label beside its peer would describe a
+      // delivery this build cannot make. Idempotent: the second run matches nothing.
+      try {
+        await db.runAsync(
+          `UPDATE friend_latest SET via = NULL, via_peer = NULL
+             WHERE via IS NOT NULL AND via NOT IN (?, ?)`,
+          ...FIX_TRANSPORTS
+        );
+      } catch (error) {
+        reportStorageDegraded({ scope: 'open.via-migration', reason: 'statement-failed', error });
       }
       // One-shot migration off the old combined `trail` table. Our own rows move across — that
       // half is the user's own history and dropping it would erase their trail on upgrade — while
@@ -181,14 +197,21 @@ interface TrailRow {
   via_peer?: string | null;
 }
 
+function isFixTransport(value: string | null): value is FixTransport {
+  return value !== null && (FIX_TRANSPORTS as readonly string[]).includes(value);
+}
+
 function rowToPoint(row: TrailRow): TrailPoint {
+  // Label and peer are one record: a row whose label is not one this build can produce keeps
+  // neither, rather than a peer with nothing to say how it was involved.
+  const via = isFixTransport(row.via) ? row.via : undefined;
   return {
     author: row.author,
     seq: Number(row.seq),
     fix: JSON.parse(row.fix) as TrailPoint['fix'],
     receivedAt: Number(row.received_at),
-    ...(row.via ? { via: row.via as NonNullable<TrailPoint['via']> } : {}),
-    ...(row.via_peer ? { viaPeer: row.via_peer } : {}),
+    ...(via ? { via } : {}),
+    ...(via && row.via_peer ? { viaPeer: row.via_peer } : {}),
   };
 }
 
@@ -235,14 +258,14 @@ class SqliteTrailStorage implements TrailStorage {
     if (!db) return this.fallback.putFriendLatest(point);
     try {
       // The WHERE guard is the last-write-wins rule in SQL: a delivery carrying an OLDER payload
-      // than the row we hold is dropped, so out-of-order arrival (gossip racing a docs
-      // reconciliation) cannot rewind a friend's position on the map. It orders by `(fix_ts, seq)`
+      // than the row we hold is dropped, so out-of-order arrival (reconciliation with several
+      // peers) cannot rewind a friend's position on the map. It orders by `(fix_ts, seq)`
       // rather than fix_ts alone so a tie cannot turn on row order.
       //
       // The tie admits `seq >=`, not `>`, so that RE-delivery of the fix we already hold still
-      // reaches the `via` merge below: `refreshTrailFromReplica` re-reads the whole replica after
-      // each sync and routinely beats the callback carrying the precise label. Nothing else in the
-      // row changes on that path — equal `(fix_ts, seq)` is the same fix.
+      // reaches the `via` merge below, where a read that names the serving peer sharpens one that
+      // did not. Nothing else in the row changes on that path — equal `(fix_ts, seq)` is the same
+      // fix.
       await db.runAsync(
         `INSERT INTO friend_latest (author, seq, fix, received_at, fix_ts, via, via_peer)
            VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -384,49 +407,6 @@ export async function saveRatchetActivity(
   activity: Readonly<Record<string, RatchetActivity>>
 ): Promise<void> {
   await kv.set(RATCHET_ACTIVITY_KEY, JSON.stringify(activity));
-}
-
-const RATCHET_DROPS_KEY = 'sc.social.ratchetDrops';
-
-/**
- * How many recipients the last ratcheted publish left out, by reason (FORWARD-SECRECY §4.5).
- *
- * Persisted purely so `device.health` can report it. "Every fix I publish is sealed for nobody" is
- * the most consequential state this system has, and it lived only in a Loki log line written by the
- * publishing process — so the device-health dashboard showed a green fleet through a day-long
- * mutual lapse in which two phones published on schedule and neither could see the other. A count
- * on the periodic record makes it a thing you can graph the absence of, which is the whole premise
- * of that dashboard.
- */
-export interface RatchetDropCounts {
-  /** Recipients left out of the most recent publish, for any reason. */
-  total: number;
-  /** …of which had gone quiet past `T_lapse`. */
-  lapsed: number;
-  /** …of which have no session at all, which only an in-person re-pair fixes. */
-  noSession: number;
-}
-
-export async function loadRatchetDrops(kv: PersistentKV): Promise<RatchetDropCounts | null> {
-  const raw = await kv.get(RATCHET_DROPS_KEY);
-  if (!raw) return null;
-  try {
-    const parsed = JSON.parse(raw) as Partial<RatchetDropCounts>;
-    return {
-      total: typeof parsed.total === 'number' ? parsed.total : 0,
-      lapsed: typeof parsed.lapsed === 'number' ? parsed.lapsed : 0,
-      noSession: typeof parsed.noSession === 'number' ? parsed.noSession : 0,
-    };
-  } catch {
-    return null;
-  }
-}
-
-export async function saveRatchetDrops(
-  kv: PersistentKV,
-  counts: Readonly<RatchetDropCounts>
-): Promise<void> {
-  await kv.set(RATCHET_DROPS_KEY, JSON.stringify(counts));
 }
 
 const STASH_OPTIN_KEY = 'sc.social.stashOptIn';

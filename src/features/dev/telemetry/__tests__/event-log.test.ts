@@ -16,7 +16,7 @@ describe('local event log', () => {
     const span = telemetry.startSpan('publish.fix', {
       attributes: { recipients: 2, 'sc.seq': 7 },
     });
-    span.addEvent('gossip.publish.completed');
+    span.addEvent('docs.write.completed');
     span.setStatus('ok');
     span.end();
 
@@ -34,7 +34,7 @@ describe('local event log', () => {
     expect(getEventLog()[0].details).toEqual(
       expect.objectContaining({
         attributes: expect.objectContaining({ recipients: 2, 'sc.seq': 7 }),
-        events: [expect.objectContaining({ name: 'gossip.publish.completed' })],
+        events: [expect.objectContaining({ name: 'docs.write.completed' })],
       })
     );
   });

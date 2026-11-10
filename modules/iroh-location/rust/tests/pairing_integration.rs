@@ -31,6 +31,32 @@ async fn start_node() -> Arc<LocationNode> {
     node
 }
 
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Start `n` nodes, ordered by endpoint id. The first is the ratchet INITIATOR towards every other
+/// (`initiator_by_endpoint`), so it can publish to each of them straight after [`bootstrap_pair`]
+/// without a priming envelope — which is what these relay tests need from their author.
+async fn start_nodes_author_first(n: usize) -> Vec<Arc<LocationNode>> {
+    let mut nodes = Vec::with_capacity(n);
+    for _ in 0..n {
+        nodes.push(start_node().await);
+    }
+    nodes.sort_by_key(|node| node.endpoint_id());
+    nodes
+}
+
+/// The FORWARD-SECRECY §4.6 bootstrap, with the two ephemerals handed across in-process.
+async fn bootstrap_pair(a: &Arc<LocationNode>, b: &Arc<LocationNode>) {
+    let a_id = hex(&a.endpoint_id());
+    let b_id = hex(&b.endpoint_id());
+    let a_eph = a.begin_session(b_id.clone()).await.expect("a ephemeral");
+    let b_eph = b.begin_session(a_id.clone()).await.expect("b ephemeral");
+    a.complete_session(b_id, b_eph).await.expect("a completes");
+    b.complete_session(a_id, a_eph).await.expect("b completes");
+}
+
 /// Poll an `Option`-returning async expression until it is `Some`, or panic after `$secs`.
 ///
 /// Declared here rather than beside its other users below: `macro_rules!` resolution is textual,
@@ -52,9 +78,9 @@ macro_rules! poll_until {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn explicit_stash_peer_reconciles_an_imported_friend_trail() {
-    let author = start_node().await;
-    let stash = start_node().await;
-    let phone = start_node().await;
+    let mut nodes = start_nodes_author_first(3).await;
+    let (author, stash, phone) = (nodes.remove(0), nodes.remove(0), nodes.remove(0));
+    bootstrap_pair(&author, &phone).await;
 
     let author_id = author.endpoint_id();
     let fix = iroh_location::LocationFix {
@@ -66,10 +92,11 @@ async fn explicit_stash_peer_reconciles_an_imported_friend_trail() {
         state: None,
         published_delta_s: None,
     };
-    author
-        .docs_write("test".into(), 1, fix, vec![phone.recv_public()])
+    let dropped = author
+        .docs_write_ratcheted(1, fix, vec![hex(&phone.endpoint_id())])
         .await
         .expect("author writes encrypted trail fix");
+    assert!(dropped.is_empty(), "no recipient dropped: {dropped:?}");
     let trail_ticket = author.doc_ticket().await.expect("author trail ticket");
 
     stash
@@ -84,12 +111,21 @@ async fn explicit_stash_peer_reconciles_an_imported_friend_trail() {
         .await
         .expect("stash explicitly reconciles with author");
     assert!(
+        stash
+            .trail_replica_status()
+            .await
+            .expect("stash reports its replica")
+            .iter()
+            .any(|slot| slot.author == author_id && slot.seq == 1 && slot.has_content),
+        "the stash must hold the author's sealed fix"
+    );
+    assert!(
         !stash
-            .read_latest()
+            .read_latest_ratcheted()
             .await
             .expect("stash reads opaque trail")
             .iter()
-            .any(|entry| entry.author == author_id && entry.seq == 1),
+            .any(|entry| entry.author == author_id),
         "stash must remain unable to decrypt the replicated fix"
     );
     author.shutdown().await.expect("author goes offline");
@@ -107,7 +143,7 @@ async fn explicit_stash_peer_reconciles_an_imported_friend_trail() {
         .expect("phone explicitly reconciles with stash");
 
     let recovered = phone
-        .read_latest()
+        .read_latest_ratcheted()
         .await
         .expect("phone reads recovered friend trail");
     assert!(
@@ -134,16 +170,15 @@ async fn explicit_stash_peer_reconciles_an_imported_friend_trail() {
 ///    ever carried the trail stash, so a device could recover from the author or from the durable
 ///    server and from nobody else — which is strictly narrower than the design, and left a device
 ///    unable to obtain a fix that a friend beside it was demonstrably holding.
-///  * A relay can only serve what is in its REPLICA. A fix that reaches it over live gossip lands
-///    in app storage, not in the author's namespace (a friend holds a read ticket and cannot write
-///    there), so the relay must have reconciled with the author at least once. That is why this
-///    test syncs `relay` against the author before taking the author away, and it is the same
-///    precondition scripts/e2e/relay-e2e.sh has to arrange on real devices.
+///  * A relay can only serve what is in its REPLICA, and only an entry that came to it through the
+///    author's namespace is there. This test syncs `relay` against the author after the fix exists
+///    and before taking the author away; its sibling below gets the same entry there by push.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_pool_member_serves_an_absent_authors_fix() {
-    let author = start_node().await;
-    let relay = start_node().await;
-    let late = start_node().await;
+    let mut nodes = start_nodes_author_first(3).await;
+    let (author, relay, late) = (nodes.remove(0), nodes.remove(0), nodes.remove(0));
+    bootstrap_pair(&author, &relay).await;
+    bootstrap_pair(&author, &late).await;
 
     let author_id = author.endpoint_id();
     let fix = iroh_location::LocationFix {
@@ -157,15 +192,15 @@ async fn a_pool_member_serves_an_absent_authors_fix() {
     };
     // Sealed for BOTH friends: the late device must be able to decrypt what the relay hands on,
     // which is the whole point of the wrap set (§4.1).
-    author
-        .docs_write(
-            "relay-case".into(),
+    let dropped = author
+        .docs_write_ratcheted(
             7,
             fix,
-            vec![relay.recv_public(), late.recv_public()],
+            vec![hex(&relay.endpoint_id()), hex(&late.endpoint_id())],
         )
         .await
         .expect("author writes an encrypted fix for both friends");
+    assert!(dropped.is_empty(), "no recipient dropped: {dropped:?}");
     let trail_ticket = author.doc_ticket().await.expect("author trail ticket");
 
     // The relay reconciles with the author while the author is still up — this is what puts the
@@ -211,7 +246,7 @@ async fn a_pool_member_serves_an_absent_authors_fix() {
     .expect("late device reconciles with the relay");
 
     let recovered = late
-        .read_latest()
+        .read_latest_ratcheted()
         .await
         .expect("late device reads its replica");
     assert!(
@@ -241,9 +276,10 @@ async fn a_pool_member_serves_an_absent_authors_fix() {
 /// peer relay the normal flow rather than luck.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_published_fix_reaches_the_pool_without_a_reconciliation_window() {
-    let author = start_node().await;
-    let relay = start_node().await;
-    let late = start_node().await;
+    let mut nodes = start_nodes_author_first(3).await;
+    let (author, relay, late) = (nodes.remove(0), nodes.remove(0), nodes.remove(0));
+    bootstrap_pair(&author, &relay).await;
+    bootstrap_pair(&author, &late).await;
 
     let author_id = author.endpoint_id();
     let trail_ticket = author.doc_ticket().await.expect("author trail ticket");
@@ -272,19 +308,20 @@ async fn a_published_fix_reaches_the_pool_without_a_reconciliation_window() {
         state: None,
         published_delta_s: None,
     };
-    author
-        .docs_write(
-            "push-to-pool".into(),
+    let dropped = author
+        .docs_write_ratcheted(
             11,
             fix,
-            vec![relay.recv_public(), late.recv_public()],
+            vec![hex(&relay.endpoint_id()), hex(&late.endpoint_id())],
         )
         .await
         .expect("author writes an encrypted fix for both friends");
-    // The publish-side half: `docs_write` only touches the local replica, and this is the call that
-    // gets it off the device — to the POOL, with no stash anywhere in this test.
+    assert!(dropped.is_empty(), "no recipient dropped: {dropped:?}");
+    // The publish-side half: the write lands in the local replica (and the live engine may
+    // broadcast it to a neighbour that happens to be joined), and this is the call that gets it
+    // off the device deliberately — to the POOL, with no stash anywhere in this test.
     author
-        .push_trail(vec![relay_ticket.clone()], None)
+        .push_trail(vec![relay_ticket.clone()])
         .await
         .expect("author pushes its trail to the pool");
 
@@ -316,7 +353,7 @@ async fn a_published_fix_reaches_the_pool_without_a_reconciliation_window() {
         late.sync_latest(vec![relay_ticket.clone()], None)
             .await
             .expect("late device reconciles with the relay");
-        late.read_latest()
+        late.read_latest_ratcheted()
             .await
             .expect("late device reads its replica")
             .into_iter()
@@ -694,7 +731,7 @@ async fn a_completed_bump_leaves_both_sides_with_a_ratchet_session() {
         published_delta_s: None,
     };
     let dropped = sender
-        .docs_write_ratcheted("test".into(), 1, fix, vec![receiver_hex.clone()])
+        .docs_write_ratcheted(1, fix, vec![receiver_hex.clone()])
         .await
         .expect("ratcheted publish");
     assert!(
@@ -736,7 +773,9 @@ async fn a_refused_hello_fails_fast_and_says_so() {
     invite.secret[0] ^= 0xff;
     // Pay B's one-time relay wait (`our_endpoint_ticket`, 10 s against the unreachable test relay)
     // up front, so the clock below measures the dial and nothing else.
-    b.create_invite(300).await.expect("B warms its endpoint ticket");
+    b.create_invite(300)
+        .await
+        .expect("B warms its endpoint ticket");
 
     let started = std::time::Instant::now();
     let err = tokio::time::timeout(std::time::Duration::from_secs(20), b.initiate_pair(invite))
