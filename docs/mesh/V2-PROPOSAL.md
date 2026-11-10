@@ -1,6 +1,6 @@
 # streetCryptid — Mesh v2 proposal (pucks, HaLow carriers, offline messaging)
 
-> Status: **proposal, rev 1 (2026-11-10). Nothing here is implemented or measured.** This is a
+> Status: **proposal, rev 2 (2026-11-10). Nothing here is implemented or measured.** This is a
 > brainstorm record, not a spec. [`DESIGN.md`](./DESIGN.md) stays the design of record until the
 > spikes in §11 are run. Every capacity number below is arithmetic, and several prices are
 > estimates. Read `DESIGN.md`, [`../social/FORWARD-SECRECY.md`](../social/FORWARD-SECRECY.md) and
@@ -17,7 +17,7 @@ What changes from the design of record:
 - **HaLow for reach.** About 5 in 100 pucks are carriers with a sub-GHz HaLow radio that joins clusters across a venue. ESP-NOW handles everything local.
 - **Every puck holds everything.** Capsules shrink from about 400 bytes per friend to about 45 bytes per fix, so the whole venue's state floods to every puck. Nobody queries for anything, so there is nothing to observe.
 - **Messaging is in scope.** It is a non-goal in the design of record.
-- **Room for post-quantum key exchange.** Big key-exchange material moves to a separate, chunked session plane.
+- **No key exchange on the radio.** Mesh keys derive from the paired session by a clock-indexed chain; any re-key happens over iroh when a phone is online.
 - **Abuse resistance.** Anonymous hardware-backed tickets plus per-capsule broadcast authentication, both still research.
 
 What stays unsolved: jamming can be tolerated but not prevented, and a transmitting puck can always be located by its signal. Internet egress is deferred, not dropped.
@@ -81,7 +81,7 @@ Wi-Fi Aware cannot carry the mesh itself. The constraints ledger in `DESIGN.md` 
 
 ## 4. Crypto and wire format
 
-Split the traffic into two planes: a small symmetric data plane that floods constantly, and a session plane that carries the big, rare key-exchange material.
+The mesh carries only symmetric traffic. Keys come from the paired session, and everything asymmetric stays on iroh.
 
 **Data plane (location fixes)**
 
@@ -90,21 +90,21 @@ Split the traffic into two planes: a small symmetric data plane that floods cons
 - Proposed capsule, about 45 bytes: version and class (1), epoch (2), tag (8), counter (2), ciphertext for a venue-grid position and timestamp (about 12), AEAD tag (12), broadcast-auth MAC (8).
 - A fix is sent only when the user has moved.
 
-**Session plane (pairwise)**
+**Where the keys come from**
 
-- The existing pairwise ratchet sessions distribute and rotate sender keys and carry messages.
-- Asymmetric ratchet steps run over iroh whenever a phone is online. Over the mesh they travel as low-priority, erasure-coded chunks, the way Signal's SPQR does it ([paper](https://cs.nyu.edu/~dodis/ps/migrating.pdf)).
-- A naive ML-KEM-768 step is 2,272 bytes ([NIST talk](https://csrc.nist.gov/csrc/media/presentations/2025/post-quantum-ratcheting-for-signal/post-quantum_ratcheting-schmidt_1.14.pdf)). Chunked, it is about 50 capsule-sized pieces, any sufficient subset of which rebuilds it.
-- Offline, keys hash-ratchet forward each epoch. Forward secrecy holds at epoch granularity; post-compromise healing pauses until the next asymmetric step.
+- Both phones export a mesh secret from the paired session's root, hash it forward once per mesh epoch by the clock, and delete the old value. No return path is needed. This is the proposal in `FORWARD-SECRECY.md` §8.1 (repair item R7 in its §10).
+- A sender key is distributed, rotated and revoked over the pairwise session while phones are online.
+- Asymmetric steps, classical or post-quantum, never ride the mesh. Rev 1 of this proposal sent them as erasure-coded chunks; that is withdrawn. A post-quantum secret mixed into the session root at pairing and at each restart protects every key derived afterwards (`POST-QUANTUM.md` §3), so the radio needs no KEM bytes.
+- Forward secrecy on the mesh is per epoch. There is no healing on the mesh path; healing happens when the session next ratchets online.
 
-**Why this is also a post-quantum answer for the mesh**
+**Why this is also the post-quantum answer for the mesh**
 
-Today's capsule key derives from a static X25519 secret (`DESIGN.md` §3.2), so a recording of the venue's radio can be decrypted if that ever breaks. Deriving sender keys from a session root that was established with a hybrid post-quantum exchange makes the recorded traffic safe at no per-capsule cost.
+Today's capsule key derives from a static X25519 secret (`DESIGN.md` §3.2), so a recording of the venue's radio can be decrypted if that ever breaks. Keys derived from a session root that was established with a hybrid exchange are safe at no per-capsule cost.
 
 **Format room**
 
-- Capsules pad to a few fixed sizes so a fix, a message and a session chunk look alike in length.
-- A 2-bit class stays visible so relays can shed load (fix, message, session, ticket). That leaks the kind of capsule; it is a deliberate trade.
+- Capsules pad to a few fixed sizes so a fix and a message look alike in length.
+- A 2-bit class stays visible so relays can shed load (fix, message, ticket, reserved). That leaks the kind of capsule; it is a deliberate trade.
 - This replaces the normative format in `DESIGN.md` §3.2, so it needs a new version byte and new test vectors.
 
 **Costs of the sender key**
@@ -114,12 +114,10 @@ Today's capsule key derives from a static X25519 secret (`DESIGN.md` §3.2), so 
 
 ## 5. Fit with the existing security docs
 
-This proposal departs from two documents of record, and both departures need a decision before any code.
+`FORWARD-SECRECY.md` rev 5 and `POST-QUANTUM.md` rev 2 (pull request #197) were revised alongside this proposal, and the mesh key derivation above is their repair item R7. Two questions stay open here.
 
-- **Sender key versus per-pair message keys.** `FORWARD-SECRECY.md` §4.2 gives every friend their own message key for every fix, one AEAD invocation per key. A sender key shared across friends gives that up on the mesh path: forward secrecy becomes per epoch, not per message, and removing a friend takes a key rotation instead of dropping one wrap. If that is unacceptable, per-recipient capsules of about 45 bytes still cut traffic roughly 9 times against today's 5 capsules of 400 bytes, before any ratchet header.
-- **Ratchet header size.** `POST-QUANTUM.md` §3 notes the 32-byte ratchet public key rides in every wrap. A 45-byte capsule has no room for it, so the mesh path would carry ratchet steps only on the session plane.
-- **Post-quantum on the mesh.** `POST-QUANTUM.md` §3 recommends a hybrid re-key at epoch boundaries, not per message, and defers the mesh question to P3. "Re-key online, coast offline" is the same idea with the re-key moved off the radio; chunked session capsules are the option for re-keying while offline. This proposal is input to that P3 decision, not a replacement for it.
-- **No skipped-message keys.** `FORWARD-SECRECY.md` §4.2 deliberately stores none, because location is last-write-wins. Messages are not, so messaging (§6) needs either a separate message chain with bounded skipped-key storage or strictly ordered delivery. §9 of that document rejects the skipped-key table for location; the argument has to be re-examined for messages.
+- **Sender key versus per-pair keys.** The clock-indexed chain is per pair, so the default that follows from `FORWARD-SECRECY.md` is one capsule per friend under that pair's epoch key. At about 45 bytes each, that still cuts traffic roughly 9 times against today's 5 capsules of 400 bytes. A sender key shared across friends gets the full 45 times in §8, at the price of a key rotation to remove a friend and a key that several phones hold. §8's table assumes the sender key; divide its gains by the friend count for the per-pair option.
+- **No skipped-message keys.** `FORWARD-SECRECY.md` §4.2 deliberately stores none, because location is last-write-wins. Messages are not, so messaging (§6) needs either a separate message chain with bounded skipped-key storage or strictly ordered delivery.
 
 ## 6. Messaging over the mesh
 
@@ -184,7 +182,7 @@ How that sits against the hardware:
 - **Radio.** ESP-NOW defaults to a 1 Mbps PHY rate, at which Espressif measured about 214 kbps of real throughput in the open ([FAQ](https://docs.espressif.com/projects/espressif-esp-faq/en/latest/application-solution/esp-now.html)). With two to three times overhead for redundancy, 10,000 people fits at the default rate.
 - **Headroom.** The rate is configurable per peer up to the fastest Wi-Fi rates, and v2.0 frames hold 1,470 bytes, so one frame batches about 30 capsules (same FAQ). 100,000 people needs the faster rates, which is plausible when neighbors are meters apart.
 
-Not counted: messages, tickets and session chunks, which add load; movement gating, which removes it. The simulator in §11 exists to replace this table with measurements.
+Not counted: messages and tickets, which add load; movement gating, which removes it. The simulator in §11 exists to replace this table with measurements.
 
 ## 9. Open questions
 
@@ -235,7 +233,7 @@ The first three can start today and need no hardware on the desk.
 - [ ] Order phases 1 and 2. The HaLow parts ship from China, so order them with the first batch.
 - [ ] Build the `just mesh-sim` harness: suppressed flooding plus reconciliation with fake radios at 100, 1,000 and 10,000 pucks, reporting airtime per neighborhood.
 - [ ] Run spike S0.2 on the first two boards: beacon wake and an 8-second BLE sync, phone pocketed, app suspended and terminated. Record results in `docs/mesh/spike-results.md`.
-- [ ] Decide the sender-key question in §5, then draft capsule v2 in `modules/iroh-location/rust/src/mesh.rs` with new test vectors.
+- [ ] Decide the sender-key question in §5, then draft capsule v2 and the session-derived mesh keys (`FORWARD-SECRECY.md` §10, R7) in `modules/iroh-location/rust/src/mesh.rs` with new test vectors.
 - [ ] Bring up HaLow: one XIAO plus module as a client of the HaLowLink 2, pushing test-vector capsules.
 - [ ] Walk test through a real crowd: ESP-NOW at default and fast rates beside HaLow, logging range and loss.
 - [ ] Measure puck current draw in each radio posture.
@@ -252,8 +250,6 @@ These were read as search results on 2026-11-10, not opened in full.
 - [morsemicro/halow ESP-IDF component](https://components.espressif.com/components/morsemicro/halow)
 - [Espressif ESP-NOW FAQ](https://docs.espressif.com/projects/espressif-esp-faq/en/latest/application-solution/esp-now.html)
 - [Espressif ESP32-S3 Digital Signature peripheral](https://docs.espressif.com/projects/esp-idf/en/v4.4.8/esp32s3/api-reference/peripherals/ds.html)
-- [Dodis et al., Triple Ratchet paper](https://cs.nyu.edu/~dodis/ps/migrating.pdf)
-- [NIST talk: post-quantum ratcheting for Signal](https://csrc.nist.gov/csrc/media/presentations/2025/post-quantum-ratcheting-for-signal/post-quantum_ratcheting-schmidt_1.14.pdf)
 - [Liu and Ning, Multilevel µTESLA](https://people.cs.vt.edu/~wjlou/htmls/teaching/CS6204-F11/files/MutiTesla-liu.pdf)
 - [Ren, Lou, Zhang, Multi-user Broadcast Authentication](https://www.cnsr.ictas.vt.edu/publication/chapter/BookChapter_Ren09.pdf)
 - [Pöpper, Strasser, Čapkun, Jamming-resistant Broadcast Communication without Shared Keys](https://static.usenix.org/events/sec09/tech/full_papers/popper.pdf)
