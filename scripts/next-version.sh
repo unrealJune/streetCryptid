@@ -17,12 +17,19 @@
 # Usage:
 #   scripts/next-version.sh [--force auto|patch|minor|major]
 #
+# The bump is applied to the last release TAG, not to app.json. The two agree after every release
+# that finished, but a run that commits its bump and then fails to push the tag leaves app.json
+# ahead of anything shipped: v3.0.0 was committed that way on 2026-11-10, and bumping from app.json
+# would have made the next push release 4.0.0. `unreleased` reports that state so the workflow can
+# stop and let someone choose, rather than ship a version nobody confirmed.
+#
 # Prints `key=value` lines on stdout:
 #   release=true|false     whether a release should happen at all
 #   bump=<reason>          major | minor | patch | initial | forced-<level> | none
 #   version=<x.y.z>        the version to release (unchanged from app.json when bump=initial)
-#   previous_version       the version currently in app.json
+#   previous_version       the last released version (app.json's when nothing is tagged yet)
 #   previous_tag           the tag the commit range started from (empty on the first release)
+#   unreleased=<x.y.z>     app.json's version when it differs from the last tag, otherwise empty
 #   tag=v<x.y.z>
 #
 # Requires the full git history and tags (actions/checkout with fetch-depth: 0).
@@ -58,13 +65,10 @@ if [[ -z "$force" ]]; then
 fi
 
 current="$(jq -er '.expo.version | strings' "$repo_root/app.json")"
-if [[ ! "$current" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+if [[ ! "$current" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
   echo "app.json expo.version must be a plain MAJOR.MINOR.PATCH version, found: $current" >&2
   exit 1
 fi
-major="${BASH_REMATCH[1]}"
-minor="${BASH_REMATCH[2]}"
-patch="${BASH_REMATCH[3]}"
 
 package_version="$(jq -er '.version | strings' "$repo_root/package.json")"
 if [[ "$package_version" != "$current" ]]; then
@@ -74,13 +78,30 @@ fi
 
 previous_tag="$(git -C "$repo_root" describe --tags --abbrev=0 --match 'v[0-9]*.[0-9]*.[0-9]*' 2>/dev/null || true)"
 
+base="$current"
+unreleased=''
+if [[ -n "$previous_tag" ]]; then
+  base="${previous_tag#v}"
+  if [[ "$current" != "$base" ]]; then
+    unreleased="$current"
+  fi
+fi
+if [[ ! "$base" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+  echo "The last release tag must be a plain vMAJOR.MINOR.PATCH, found: $previous_tag" >&2
+  exit 1
+fi
+major="${BASH_REMATCH[1]}"
+minor="${BASH_REMATCH[2]}"
+patch="${BASH_REMATCH[3]}"
+
 emit() {
   local release="$1" bump="$2" version="$3"
   printf 'release=%s\n' "$release"
   printf 'bump=%s\n' "$bump"
   printf 'version=%s\n' "$version"
-  printf 'previous_version=%s\n' "$current"
+  printf 'previous_version=%s\n' "$base"
   printf 'previous_tag=%s\n' "$previous_tag"
+  printf 'unreleased=%s\n' "$unreleased"
   printf 'tag=v%s\n' "$version"
 }
 
@@ -132,7 +153,7 @@ if [[ -n "$subjects" ]] &&
 fi
 
 if [[ "$level" == 'none' ]]; then
-  emit false none "$current"
+  emit false none "$base"
   exit 0
 fi
 
