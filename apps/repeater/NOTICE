@@ -5,6 +5,7 @@ AGPL-3.0-or-later, pinned to 326c530149ded29c88e899c6cb2fe6a0bd0f4365.
 Source: https://github.com/unrealJune/trail-stash
 
 Local changes are distributed as native/trail-stash.patch:
+- Storage::MemoryRepeater: identity, roster and grants on disk, content in RAM.
 - Bounded notifications when location-fix content becomes locally servable.
 - Fetch state per entry, so namespaces sharing ciphertext are released independently.
 - Register namespace watchers before starting live synchronization.

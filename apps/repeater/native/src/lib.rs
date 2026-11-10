@@ -60,12 +60,13 @@ pub fn identity(dir: &Path) -> Result<SecretKey> {
 
 pub async fn start(dir: &Path, secret: SecretKey) -> Result<Arc<StashNode>> {
     let config = StashConfig::from_env(|_| None);
-    // On disk, like every repeater (REPEATERS.md §5.1): a Windows restart for an update is
-    // exactly when a phone is most likely to be asleep, so what was carried must survive it.
+    // Memory only, like every repeater (REPEATERS.md §5.1): the identity, roster and grants stay
+    // in `dir`, and no location ciphertext ever touches the disk. A restart comes back as the
+    // same repeater, carrying the same people, holding nothing until their phones sync again.
     tokio::time::timeout(
         Duration::from_secs(30),
         StashNode::spawn_with(
-            Storage::Persistent(dir.into()),
+            Storage::MemoryRepeater(dir.into()),
             secret,
             config.retention,
             &[],
@@ -156,21 +157,6 @@ impl Settings {
     }
 }
 
-/// Bytes the node keeps on disk: the replica, the ciphertext and the small control files.
-pub fn storage_bytes(dir: &Path) -> u64 {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return 0;
-    };
-    entries
-        .flatten()
-        .map(|entry| match entry.file_type() {
-            Ok(kind) if kind.is_dir() => storage_bytes(&entry.path()),
-            Ok(_) => entry.metadata().map(|m| m.len()).unwrap_or(0),
-            Err(_) => 0,
-        })
-        .sum()
-}
-
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Snapshot {
@@ -190,7 +176,6 @@ pub struct Snapshot {
     pub connections_opened: u64,
     pub bytes_received: u64,
     pub bytes_sent: u64,
-    pub storage_bytes: u64,
     pub settings: HostSettings,
     pub telemetry_available: bool,
 }
@@ -199,7 +184,6 @@ pub struct Snapshot {
 pub struct HostInfo {
     pub version: &'static str,
     pub mode: &'static str,
-    pub storage_bytes: u64,
     pub settings: HostSettings,
     pub telemetry_available: bool,
 }
@@ -244,7 +228,6 @@ pub fn snapshot(node: &StashNode, host: HostInfo) -> Snapshot {
             + socket.recv_data_ipv6.get()
             + socket.recv_data_relay.get(),
         bytes_sent: socket.send_ipv4.get() + socket.send_ipv6.get() + socket.send_relay.get(),
-        storage_bytes: host.storage_bytes,
         settings: host.settings,
         telemetry_available: host.telemetry_available,
     }
@@ -307,15 +290,6 @@ mod tests {
     }
 
     #[test]
-    fn storage_counts_nested_files() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(dir.path().join("blobs").join("a")).unwrap();
-        std::fs::write(dir.path().join("blobs").join("a").join("one"), [0u8; 10]).unwrap();
-        std::fs::write(dir.path().join("secret.key"), [0u8; 32]).unwrap();
-        assert_eq!(storage_bytes(dir.path()), 42);
-    }
-
-    #[test]
     fn only_one_host_can_hold_a_directory() {
         let dir = tempfile::tempdir().unwrap();
         let first = claim_directory(dir.path()).unwrap();
@@ -373,7 +347,6 @@ mod tests {
             HostInfo {
                 version: "test",
                 mode: "user",
-                storage_bytes: 0,
                 settings: HostSettings::default(),
                 telemetry_available: false,
             },

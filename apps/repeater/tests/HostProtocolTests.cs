@@ -57,10 +57,9 @@ public class HostProtocolTests
         var message = HostProtocol.Parse(
             "{\"protocol\":2,\"kind\":\"snapshot\",\"runId\":\"run\",\"snapshot\":{\"protocol\":2," +
             "\"version\":\"0.2.0\",\"mode\":\"service\",\"endpointId\":\"ab\",\"claimed\":true," +
-            "\"members\":[],\"tracked\":2,\"missing\":1,\"received\":3,\"storageBytes\":4096," +
+            "\"members\":[],\"tracked\":2,\"missing\":1,\"received\":3," +
             "\"settings\":{\"telemetry\":true,\"keepAwake\":true},\"telemetryAvailable\":true}}");
         Assert.Equal("service", message.Snapshot!.Mode);
-        Assert.Equal(4096UL, message.Snapshot.StorageBytes);
         Assert.Equal(new HostSettings(true, true), message.Snapshot.Settings);
     }
 

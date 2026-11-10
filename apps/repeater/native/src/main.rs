@@ -1,6 +1,6 @@
 use std::io::{BufRead, Read, Write};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -8,8 +8,8 @@ use anyhow::{bail, Result};
 use iroh::SecretKey;
 use serde::Deserialize;
 use streetcryptid_repeater_host::{
-    claim_directory, identity, snapshot, start, storage_bytes, HostInfo, HostSettings, Settings,
-    PROTOCOL, SERVICE_MARKER,
+    claim_directory, identity, snapshot, start, HostInfo, HostSettings, Settings, PROTOCOL,
+    SERVICE_MARKER,
 };
 use trail_stash::config::{DEFAULT_PEER_SYNC_INTERVAL_MIN, DEFAULT_PRUNE_INTERVAL_MIN};
 
@@ -229,14 +229,12 @@ async fn serve(args: Args, secret: SecretKey, settings: Arc<Settings>) -> Result
         _ = stopped.recv() => return Ok(()),
     };
     let power = power::KeepAwake::spawn(settings.keep_awake_flag());
-    let storage = Arc::new(AtomicU64::new(storage_bytes(&dir)));
     // Spans, not events: Loki keeps an event's message and drops its fields.
     drop(tracing::info_span!(
         "repeater.host.start",
         host.mode = mode.name(),
         host.version = VERSION,
         host.start_ms = started_at.elapsed().as_millis() as u64,
-        disk.bytes = storage.load(Ordering::Relaxed),
     ));
     let prune = tokio::spawn(node.clone().run_prune_loop(DEFAULT_PRUNE_INTERVAL_MIN));
     let siblings = tokio::spawn(trail_stash::repeater::run_sibling_loop(
@@ -244,14 +242,7 @@ async fn serve(args: Args, secret: SecretKey, settings: Arc<Settings>) -> Result
         vec![],
         Duration::from_secs(DEFAULT_PEER_SYNC_INTERVAL_MIN * 60),
     ));
-    let pulse = tokio::spawn(run_pulse(
-        node.clone(),
-        dir.clone(),
-        mode,
-        storage.clone(),
-        power.clone(),
-        started_at,
-    ));
+    let pulse = tokio::spawn(run_pulse(node.clone(), mode, power.clone(), started_at));
     let run_id = streetcryptid_repeater_host::hex(iroh::SecretKey::generate().public().as_bytes());
     let mut arrivals = node.subscribe_arrivals();
     let (writer, _worker) = spawn_output(std::io::stdout());
@@ -260,7 +251,6 @@ async fn serve(args: Args, secret: SecretKey, settings: Arc<Settings>) -> Result
     let info = || HostInfo {
         version: VERSION,
         mode: mode.name(),
-        storage_bytes: storage.load(Ordering::Relaxed),
         settings: settings.get(),
         telemetry_available: TELEMETRY_ENDPOINT.is_some_and(|e| !e.trim().is_empty()),
     };
@@ -309,12 +299,10 @@ async fn serve(args: Args, secret: SecretKey, settings: Arc<Settings>) -> Result
 }
 
 /// One `repeater.host.pulse` span every [`PULSE_INTERVAL`]: what the node holds, what it has
-/// moved, what it occupies on disk, and whether it is keeping the machine awake.
+/// moved, and whether it is keeping the machine awake.
 async fn run_pulse(
     node: Arc<trail_stash::node::StashNode>,
-    dir: PathBuf,
     mode: Mode,
-    storage: Arc<AtomicU64>,
     power: Arc<power::KeepAwake>,
     started_at: Instant,
 ) {
@@ -322,10 +310,6 @@ async fn run_pulse(
     interval.tick().await;
     loop {
         interval.tick().await;
-        let walk = dir.clone();
-        if let Ok(bytes) = tokio::task::spawn_blocking(move || storage_bytes(&walk)).await {
-            storage.store(bytes, Ordering::Relaxed);
-        }
         let (missing, tracked) = node.content_stats();
         let members = node
             .repeater()
@@ -353,7 +337,6 @@ async fn run_pulse(
                 + socket.recv_data_relay.get(),
             net.bytes_out =
                 socket.send_ipv4.get() + socket.send_ipv6.get() + socket.send_relay.get(),
-            disk.bytes = storage.load(Ordering::Relaxed),
             power.on_ac = power.on_ac(),
             power.keep_awake = power.holding(),
         );

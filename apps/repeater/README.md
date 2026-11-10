@@ -51,7 +51,8 @@ thickened small sizes for the tray and title bar. Re-run it when the sigil chang
 ### Tests
 
 `just repeater-test` runs the Rust host tests, the desktop tests in the patched trail-stash (real
-iroh nodes: claim, grant, receive, serve, restart from disk, removal), the C# tests (protocol,
+iroh nodes: claim, grant, receive, serve, a restart that keeps the claim and grants but no content,
+removal), the C# tests (protocol,
 preferences, the identity move), format checks, and `test-host.ps1` against the built host.
 CI also runs `test-service.ps1`, which installs the real service on the (elevated, disposable)
 runner, moves a per-user identity into it, talks to it over its pipe, and moves the identity back
@@ -109,8 +110,8 @@ carries and never changes the roster on its own — a local opt-out would leave 
 repeater card claiming a carrier that refuses them. To stop carrying someone, remove them on the
 phone (Settings → Repeaters).
 
-The status shows people carried, encrypted items ready to forward (including control records),
-missing content labelled "waiting for data", and the bytes kept on disk. Received location updates
+The status shows people carried, encrypted items ready to forward (including control records) and
+missing content labelled "waiting for data". Received location updates
 count newly servable fixes, not status polls. Received/sent bytes and connection counts come from
 the endpoint's transport counters, include sync/protocol overhead and reset when the host restarts;
 they are not proof that a friend decrypted a location.
@@ -122,15 +123,15 @@ activity; reduced motion stops animation, and high contrast omits the decorative
 
 ## Storage and recovery
 
-The node keeps everything on disk, like every repeater (`docs/social/REPEATERS.md` §5.1): the
-private identity, the signed roster, namespace grants, the iroh-docs replica (`docs/`) and the
-ciphertext (`blobs/`), in `%LOCALAPPDATA%\streetCryptid\Repeater` per user or
-`%ProgramData%\streetCryptid\Repeater` under the service. A restart — for a Windows update, most
-often — serves what it carried before without any phone re-sending it. Retention follows the
-trail-stash defaults (latest fix per author, 48-hour stale backstop, 15-minute pruning, five-minute
-sibling synchronization). Retention releases the ledger's references but blob garbage collection is
-not wired for the on-disk store yet (REPEATERS.md phase 3), so `blobs/` grows slowly; the status
-and the telemetry pulse report its size.
+What the repeater carries lives in memory only, like every repeater (`docs/social/REPEATERS.md`
+§1): the iroh-docs replica and the ciphertext are never written to disk
+(`Storage::MemoryRepeater`). On disk, in `%LOCALAPPDATA%\streetCryptid\Repeater` per user or
+`%ProgramData%\streetCryptid\Repeater` under the service, are only what makes it the same repeater:
+the private identity, the signed roster, the namespace grants (read capabilities) and the settings.
+A restart — for a Windows update, most often — comes back claimed and carrying the same people,
+holding nothing until their phones sync again. Retention follows the trail-stash defaults (latest
+fix per author, 48-hour stale backstop, 15-minute pruning, five-minute sibling synchronization),
+and released ciphertext is reclaimed by the in-memory store's garbage collection.
 
 If the identity or settings are damaged, restore them rather than deleting them or claiming a
 replacement. Preserve the whole state directory when migrating an installation by hand. Only one
@@ -144,8 +145,7 @@ repository variable) compile the trail-stash OTLP exporter in; others have none.
 is sent until the person leaves **Send diagnostics** on at setup: the host starts with it off, and
 the choice is enforced per span, so turning it off stops export at once. What is sent: the stash's
 own `repeater.*` spans and `repeater.host.start` / `.pulse` / `.stop` (every five minutes: roster
-size, tracked/missing content, arrivals, connections, bytes in/out, bytes on disk, power state,
-uptime), keyed by the short endpoint id as `service.instance.id`. A silent gap between pulses is
+size, tracked/missing content, arrivals, connections, bytes in/out, power state, uptime), keyed by the short endpoint id as `service.instance.id`. A silent gap between pulses is
 how a sleeping, powered-off or wedged repeater shows up. Never a location: everything carried is
 ciphertext the PC cannot read.
 

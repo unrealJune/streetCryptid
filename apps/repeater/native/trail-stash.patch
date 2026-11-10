@@ -133,10 +133,61 @@ index 8bceba2..595ad86 100644
      fn forgetting_a_namespace_keeps_hashes_another_still_names() {
          let mut index = ContentIndex::new();
 diff --git a/rust/src/node.rs b/rust/src/node.rs
-index 8728db6..f1c55ca 100644
+index 8728db6..4291091 100644
 --- a/rust/src/node.rs
 +++ b/rust/src/node.rs
-@@ -175,10 +175,12 @@ pub struct StashNode {
+@@ -6,21 +6,22 @@
+ //! read-tickets, watches each for new remote entries, and nudges subscribers via the [`Waker`].
+ //! Nothing is written to disk; a restart clears the replica and devices re-register.
+ //!
+-//! ## Persistent mode: a repeater
+-//! The same node also runs on disk ([`Storage::Persistent`]) as a **repeater**: a self-hosted,
++//! ## A repeater
++//! The same node also runs as a **repeater** ([`Storage::MemoryRepeater`]): a self-hosted,
+ //! ciphertext-blind replica that lives on a laptop, a desktop or a Pi and is merely *more likely*
+-//! to be awake than a phone (streetCryptid `docs/social/REPEATERS.md`). Three things differ, and
+-//! only three:
+-//! * the replica and blobs are on disk, and every grant is written to a [`NamespaceBook`], so a
+-//!   restart reopens every namespace without a phone having to grant it again;
+-//! * on start, entries already in the replica are adopted into the content ledger, so content that
+-//!   had not landed before the restart is still chased;
++//! to be awake than a phone (streetCryptid `docs/social/REPEATERS.md`). Two things differ, and
++//! only two:
++//! * its identity, roster and every grant are on disk (the [`NamespaceBook`]), so a restart is the
++//!   same repeater carrying the same people without a phone having to claim or grant it again —
++//!   while the replica and the ciphertext stay in RAM like the stash's, and a restart forgets
++//!   them ([`Storage::Persistent`] keeps those on disk too, and adopts what the replica held);
+ //! * it reconciles every namespace with **sibling repeaters** ([`StashNode::sync_peers`]), so two
+ //!   repeaters that were up at different times converge without any phone in the middle.
+ //!
+ //! Everything else — reconciliation, content settling, retention — is the stash's code, unchanged.
+-//! Blob GC is not wired for the on-disk store yet (`REPEATERS.md`, phase 3): retention releases the
+-//! ledger's reference, but the bytes stay on disk until it is.
++//! Blob GC is not wired for the on-disk store yet (`REPEATERS.md`, phase 3): with
++//! [`Storage::Persistent`] retention releases the ledger's reference, but the bytes stay on disk
++//! until it is. In RAM the sweep below reclaims them.
+ //!
+ //! ## Content is not entries
+ //! iroh-docs reconciliation moves *entry records*; the bytes they name are a separate iroh-blobs
+@@ -156,9 +157,15 @@ pub enum PutOutcome {
+ pub enum Storage {
+     /// RAM only: the hosted stash. A restart clears everything and phones re-grant.
+     Memory,
+-    /// On disk under this directory: a repeater. `docs/` holds the replica, `blobs/` the
+-    /// ciphertext, and `namespaces.json` the [`NamespaceBook`] of every grant.
++    /// On disk under this directory: `docs/` holds the replica, `blobs/` the ciphertext, and
++    /// `namespaces.json` the [`NamespaceBook`] of every grant.
+     Persistent(PathBuf),
++    /// A repeater (streetCryptid `docs/social/REPEATERS.md` §5.1): the replica and the ciphertext
++    /// in RAM, exactly as [`Storage::Memory`], and only what makes it the same repeater on disk
++    /// under this directory — its roster, its claim and the [`NamespaceBook`] of every grant. A
++    /// restart reopens every namespace empty and refills it from the next phone that syncs; it
++    /// never serves a location it kept from before.
++    MemoryRepeater(PathBuf),
+ }
+ 
+ /// The always-on, ciphertext-blind stash node.
+@@ -175,11 +182,13 @@ pub struct StashNode {
      /// and backs the missing-content health signal. `std::sync::Mutex`: every critical section is
      /// a few map operations with no `.await` inside.
      content: Arc<std::sync::Mutex<ContentIndex>>,
@@ -144,16 +195,18 @@ index 8728db6..f1c55ca 100644
 -    /// release policy decides no unreleased docs entry still needs the hash, so a fetch is retried
 -    /// for as long as the entry is worth serving.
 -    tracked: Mutex<HashMap<Hash, TrackedEntry>>,
+-    /// Every grant, on disk — `Some` only for [`Storage::Persistent`]. See [`crate::book`].
 +    /// Fetch and activity state belongs to an entry, not just its hash: different namespaces or
 +    /// keys may reference the same bytes and can be released independently.
 +    tracked: Mutex<HashMap<(NsBytes, Vec<u8>, Hash), TrackedEntry>>,
 +    arrivals: tokio::sync::broadcast::Sender<u64>,
 +    arrival_count: std::sync::atomic::AtomicU64,
 +    namespace_watchers: std::sync::Mutex<HashMap<NsBytes, tokio::task::AbortHandle>>,
-     /// Every grant, on disk — `Some` only for [`Storage::Persistent`]. See [`crate::book`].
++    /// Every grant, on disk — `Some` only for a node with a directory. See [`crate::book`].
      book: Option<std::sync::Mutex<NamespaceBook>>,
      /// The repeater protocol's state — `Some` exactly when `book` is. See [`crate::repeater`].
-@@ -198,10 +200,13 @@ struct TrackedEntry {
+     repeater: Option<Arc<Repeater>>,
+@@ -198,10 +207,13 @@ struct TrackedEntry {
      /// friends' trails too, so it can serve content for an author that is long offline. Trying it
      /// first is also strictly better odds than the author — it was connected moments ago.
      delivered_by: iroh::EndpointId,
@@ -168,7 +221,38 @@ index 8728db6..f1c55ca 100644
      /// Whether subscribers have already been woken for this entry (wakes fire once).
      woken: bool,
      /// Earliest time to retry the content fetch — exponential backoff so an author that is asleep
-@@ -381,6 +386,9 @@ impl StashNode {
+@@ -298,7 +310,20 @@ impl StashNode {
+         // process would grow for its entire lifetime once it started storing content for real.
+         let content = Arc::new(std::sync::Mutex::new(ContentIndex::new()));
+         let (blobs, docs, book, repeater): (iroh_blobs::api::Store, Docs, _, _) = match &storage {
+-            Storage::Memory => {
++            Storage::Memory | Storage::MemoryRepeater(_) => {
++                let (book, repeater) = match &storage {
++                    Storage::MemoryRepeater(dir) => {
++                        std::fs::create_dir_all(dir)
++                            .map_err(|e| anyhow!("create {}: {e}", dir.display()))?;
++                        let book = NamespaceBook::load(dir.join("namespaces.json"))
++                            .map_err(|e| anyhow!("{e}"))?;
++                        (
++                            Some(std::sync::Mutex::new(book)),
++                            Some(Arc::new(Repeater::open(dir, &seed)?)),
++                        )
++                    }
++                    _ => (None, None),
++                };
+                 let protect = content.clone();
+                 let mem = MemStore::new_with_opts(iroh_blobs::store::mem::Options {
+                     gc_config: Some(iroh_blobs::store::GcConfig {
+@@ -322,7 +347,7 @@ impl StashNode {
+                     .spawn(endpoint.clone(), (*mem).clone(), gossip.clone())
+                     .await
+                     .map_err(|e| anyhow!("spawn docs: {e}"))?;
+-                ((*mem).clone(), docs, None, None)
++                ((*mem).clone(), docs, book, repeater)
+             }
+             Storage::Persistent(dir) => {
+                 // The same stores the phones use (`modules/iroh-location/rust/src/lib.rs`). No GC
+@@ -381,6 +406,9 @@ impl StashNode {
              handles: Mutex::new(HashMap::new()),
              content,
              tracked: Mutex::new(HashMap::new()),
@@ -178,7 +262,7 @@ index 8728db6..f1c55ca 100644
              book,
              repeater,
              tasks: std::sync::Mutex::new(Vec::new()),
-@@ -448,13 +456,14 @@ impl StashNode {
+@@ -448,13 +476,14 @@ impl StashNode {
              let entry = entry?;
              let hash = entry.content_hash();
              let present = self.blobs.blobs().has(hash).await.unwrap_or(false);
@@ -196,7 +280,7 @@ index 8728db6..f1c55ca 100644
              adopted += 1;
              if present {
                  continue;
-@@ -471,7 +480,7 @@ impl StashNode {
+@@ -471,7 +500,7 @@ impl StashNode {
              self.tracked
                  .lock()
                  .await
@@ -205,7 +289,7 @@ index 8728db6..f1c55ca 100644
                  .or_insert_with(|| TrackedEntry {
                      namespace: ns,
                      author,
-@@ -479,6 +488,9 @@ impl StashNode {
+@@ -479,6 +508,9 @@ impl StashNode {
                      seq,
                      first_seen_ms: now_ms(),
                      content_present: false,
@@ -215,7 +299,7 @@ index 8728db6..f1c55ca 100644
                      // The process that received the record owned its wake.
                      woken: true,
                      next_attempt_ms: 0,
-@@ -709,15 +721,23 @@ impl StashNode {
+@@ -709,15 +741,23 @@ impl StashNode {
                  tracing::warn!(error = %e, "repeater: leaving a released namespace failed");
              }
          }
@@ -247,7 +331,7 @@ index 8728db6..f1c55ca 100644
          tracing::info!("repeater: stopped carrying a namespace");
          Ok(())
      }
-@@ -861,24 +881,14 @@ impl StashNode {
+@@ -861,24 +901,14 @@ impl StashNode {
          // Hold the map lock through the first import so two simultaneous registrations cannot both
          // create watchers/start the same namespace. Registrations are rare control-plane calls;
          // serializing this small critical section is preferable to duplicate live engines.
@@ -280,7 +364,7 @@ index 8728db6..f1c55ca 100644
          };
  
          // A repeater writes the grant down before reporting success, so a grant it acknowledged is
-@@ -894,7 +904,28 @@ impl StashNode {
+@@ -894,7 +924,28 @@ impl StashNode {
          let first = self.registry.register(ns_bytes, subscription);
          tracing::Span::current().record("first_watch", first);
          if first {
@@ -310,7 +394,7 @@ index 8728db6..f1c55ca 100644
          }
          Ok(ns_bytes)
      }
-@@ -917,16 +948,10 @@ impl StashNode {
+@@ -917,16 +968,10 @@ impl StashNode {
  
      /// Watch one namespace: on each new *remote* entry, run the delivery-service admission check
      /// (passthrough today) and, if admitted, wake the namespace's subscribers.
@@ -329,7 +413,7 @@ index 8728db6..f1c55ca 100644
              while let Some(ev) = events.next().await {
                  match ev {
                      Ok(LiveEvent::InsertRemote { entry, from, .. }) => {
-@@ -950,56 +975,90 @@ impl StashNode {
+@@ -950,56 +995,90 @@ impl StashNode {
                                  "sc.author",
                                  tracing::field::display(crate::telemetry::short_hex(&author)),
                              );
@@ -448,7 +532,7 @@ index 8728db6..f1c55ca 100644
                          }
                      }
                      Ok(_) => {}
-@@ -1011,6 +1070,15 @@ impl StashNode {
+@@ -1011,6 +1090,15 @@ impl StashNode {
              }
          });
          node.track_task(task.abort_handle());
@@ -464,7 +548,7 @@ index 8728db6..f1c55ca 100644
      }
  
      async fn handle(&self, ns: NsBytes) -> Option<Doc> {
-@@ -1030,8 +1098,8 @@ impl StashNode {
+@@ -1030,8 +1118,8 @@ impl StashNode {
          loop {
              ticker.tick().await;
              let settled = self.settle_once(now_ms()).await;
@@ -475,7 +559,7 @@ index 8728db6..f1c55ca 100644
              }
          }
      }
-@@ -1048,23 +1116,32 @@ impl StashNode {
+@@ -1048,23 +1136,32 @@ impl StashNode {
      /// Returns entries whose subscribers should be woken, each flagged with whether it is being
      /// released *without* content (the fallback path). Waking is one-shot; fetching is not — an
      /// entry woken degraded keeps being retried, so late content still becomes servable.
@@ -514,7 +598,7 @@ index 8728db6..f1c55ca 100644
                  continue; // pruned out from under us mid-pass
              };
              if present {
-@@ -1073,6 +1150,11 @@ impl StashNode {
+@@ -1073,6 +1170,11 @@ impl StashNode {
                      .lock()
                      .expect("content index poisoned")
                      .mark_present(*hash.as_bytes());
@@ -526,7 +610,7 @@ index 8728db6..f1c55ca 100644
              } else if now >= entry.next_attempt_ms {
                  live.attempts = live.attempts.saturating_add(1);
                  live.next_attempt_ms = now + TrackedEntry::backoff_ms(live.attempts);
-@@ -1081,12 +1163,154 @@ impl StashNode {
+@@ -1081,12 +1183,154 @@ impl StashNode {
              let overdue = now.saturating_sub(live.first_seen_ms) >= WAKE_FALLBACK_MS;
              if !live.woken && (present || overdue) {
                  live.woken = true;
@@ -682,7 +766,7 @@ index 8728db6..f1c55ca 100644
      /// Fetch an entry's bytes from anyone who might have them.
      ///
      /// Candidates are the peer that delivered the record and the entry's author (its `EndpointId`
-@@ -1134,19 +1358,28 @@ impl StashNode {
+@@ -1134,19 +1378,28 @@ impl StashNode {
      }
  
      /// Run the delivery-service admission check and, if admitted, wake the namespace's subscribers.
@@ -713,7 +797,7 @@ index 8728db6..f1c55ca 100644
              if degraded {
                  tracing::warn!(
                      "stash: waking without content after {}ms — the writer never handed over its \
-@@ -1156,23 +1389,28 @@ impl StashNode {
+@@ -1156,23 +1409,28 @@ impl StashNode {
              }
              // The bytes are ours now; reading them back is cheap and keeps the delivery service
              // honest — a real MLS DS must see real framing, not the empty slice it used to get.
@@ -758,7 +842,7 @@ index 8728db6..f1c55ca 100644
                  Admission::Accept => {
                      let targets = self.registry.wake_targets(&entry.namespace);
                      tracing::Span::current().record("wake_targets", targets.len());
-@@ -1218,9 +1456,8 @@ impl StashNode {
+@@ -1218,9 +1476,8 @@ impl StashNode {
      ///
      /// A blob is released only when the last unreleased entry referencing it is gone, so two
      /// namespaces — or a fix plus a control entry in the same namespace — holding identical
@@ -770,7 +854,7 @@ index 8728db6..f1c55ca 100644
      #[tracing::instrument(
          name = "stash.prune",
          skip_all,
-@@ -1239,6 +1476,11 @@ impl StashNode {
+@@ -1239,6 +1496,11 @@ impl StashNode {
              let Some(doc) = self.handle(ns).await else {
                  continue;
              };
@@ -782,7 +866,7 @@ index 8728db6..f1c55ca 100644
              let stream = doc.get_many(Query::all().build()).await?;
              tokio::pin!(stream);
              let mut candidates = Vec::new();
-@@ -1264,11 +1506,21 @@ impl StashNode {
+@@ -1264,11 +1526,21 @@ impl StashNode {
              let kept_hashes = candidates
                  .iter()
                  .zip(decisions.iter())
@@ -807,7 +891,7 @@ index 8728db6..f1c55ca 100644
                  let Some(reason) = decision else {
                      continue;
                  };
-@@ -1278,29 +1530,19 @@ impl StashNode {
+@@ -1278,29 +1550,19 @@ impl StashNode {
                  if reason.is_expired() {
                      expired += 1;
                  }
@@ -848,7 +932,7 @@ index 8728db6..f1c55ca 100644
          }
          let span = tracing::Span::current();
          span.record("released", released);
-@@ -1508,13 +1750,19 @@ async fn unsubscribe_handler(
+@@ -1508,13 +1770,19 @@ async fn unsubscribe_handler(
  
  // ── helpers ──────────────────────────────────────────────────────────────────────────────
  
@@ -874,11 +958,39 @@ index 8728db6..f1c55ca 100644
  }
  
  // ── two-node integration test (real iroh nodes) ───────────────────────────────────────────
+diff --git a/rust/src/repeater.rs b/rust/src/repeater.rs
+index e020a69..e72df30 100644
+--- a/rust/src/repeater.rs
++++ b/rust/src/repeater.rs
+@@ -1,7 +1,8 @@
+ //! The live repeater: the `streetcryptid/repeater/1` handler, the roster it keeps on disk, and the
+ //! client calls phones and sibling repeaters make. **Behind the `live` feature.**
+ //!
+-//! A [`Repeater`] exists only for a persistent node (`Storage::Persistent`). It belongs to at most
++//! A [`Repeater`] exists only for a node with a directory (`Storage::MemoryRepeater`, or
++//! `Storage::Persistent`). It belongs to at most
+ //! one roster, owned by the phone that claimed it, and it keeps that roster in `roster.bin` next
+ //! to the grant book. What it enforces is **carrying**: whose namespaces it holds and accepts
+ //! pushes for. Reading stays open — iroh-docs serves any peer that names a namespace, and that is
 diff --git a/rust/src/repeater_tests.rs b/rust/src/repeater_tests.rs
-index 914c803..923b007 100644
+index 914c803..924fb42 100644
 --- a/rust/src/repeater_tests.rs
 +++ b/rust/src/repeater_tests.rs
-@@ -56,6 +56,259 @@ async fn spawn_repeater(dir: &std::path::Path, seed: u8) -> Result<Arc<StashNode
+@@ -44,8 +44,12 @@ fn scratch(name: &str) -> PathBuf {
+ }
+ 
+ async fn spawn_repeater(dir: &std::path::Path, seed: u8) -> Result<Arc<StashNode>> {
++    spawn_stored(Storage::MemoryRepeater(dir.to_path_buf()), seed).await
++}
++
++async fn spawn_stored(storage: Storage, seed: u8) -> Result<Arc<StashNode>> {
+     StashNode::spawn_with(
+-        Storage::Persistent(dir.to_path_buf()),
++        storage,
+         SecretKey::from_bytes(&[seed; 32]),
+         RetentionPolicy::from_hours(48),
+         &[],
+@@ -56,12 +60,284 @@ async fn spawn_repeater(dir: &std::path::Path, seed: u8) -> Result<Arc<StashNode
      .await
  }
  
@@ -963,8 +1075,9 @@ index 914c803..923b007 100644
 +}
 +
 +#[tokio::test]
-+async fn desktop_repeater_keeps_content_across_restart_and_reports_it_once() -> Result<()> {
-+    let dir = scratch("desktop-persistent");
++async fn desktop_repeater_keeps_its_roster_and_grants_but_never_content_across_restart(
++) -> Result<()> {
++    let dir = scratch("desktop-memory");
 +    let node = spawn_repeater(&dir, 151).await?;
 +    let (owner, mut roster) = claim(&node, 152, None, Policy::Open).await?;
 +    let phone = Phone::spawn(153, b"desktop-memory-ciphertext").await?;
@@ -1047,21 +1160,35 @@ index 914c803..923b007 100644
 +            .is_err(),
 +        "a control entry and repeated sync must not create fix activity"
 +    );
-+    assert!(dir.join("docs").is_dir());
-+    assert!(dir.join("blobs").is_dir());
-+    // The writer is gone before the restart: what the repeater serves next comes from its disk.
-+    phone.vanish().await;
++    assert!(
++        !dir.join("docs").exists(),
++        "a repeater keeps no replica on disk"
++    );
++    assert!(
++        !dir.join("blobs").exists(),
++        "a repeater keeps no ciphertext on disk"
++    );
 +    node.shutdown().await;
 +    drop(node);
++    // The same repeater comes back — claimed, carrying the same namespace — holding nothing.
 +    let reopened = reopen_repeater(&dir, 151).await?;
 +    assert!(reopened.repeater().unwrap().claim_secret().is_none());
 +    assert!(reopened.handle(namespace).await.is_some());
-+    wait_servable(&reopened, 2, "content kept on disk across the restart").await;
++    assert_eq!(reopened.content_stats(), (0, 0));
++    // Until the writer syncs again, and then without a second grant.
++    let mut arrivals = reopened.subscribe_arrivals();
++    phone.doc.start_sync(vec![reopened.endpoint_addr()]).await?;
++    wait_servable(
++        &reopened,
++        2,
++        "the writer's newest fix and control entry after the restart",
++    )
++    .await;
 +    assert_eq!(
-+        reopened.arrival_count(),
-+        0,
-+        "content restored from disk is not a new arrival"
++        tokio::time::timeout(Duration::from_secs(5), arrivals.recv()).await??,
++        1
 +    );
++    phone.vanish().await;
 +    let remove = sign_onto(&mut roster, 152, Action::Remove { member });
 +    call(
 +        &owner,
@@ -1138,7 +1265,18 @@ index 914c803..923b007 100644
  /// Reopen a repeater's directory. The previous instance's stores close asynchronously after its
  /// router shuts down, so a reopen in the same process may briefly find them still held.
  async fn reopen_repeater(dir: &std::path::Path, seed: u8) -> Result<Arc<StashNode>> {
-@@ -74,6 +327,8 @@ async fn reopen_repeater(dir: &std::path::Path, seed: u8) -> Result<Arc<StashNod
++    reopen(Storage::MemoryRepeater(dir.to_path_buf()), seed).await
++}
++
++async fn reopen(storage: Storage, seed: u8) -> Result<Arc<StashNode>> {
+     let mut last = None;
+     for _ in 0..40 {
+-        match spawn_repeater(dir, seed).await {
++        match spawn_stored(storage.clone(), seed).await {
+             Ok(node) => return Ok(node),
+             Err(e) => last = Some(e),
+         }
+@@ -74,6 +350,8 @@ async fn reopen_repeater(dir: &std::path::Path, seed: u8) -> Result<Arc<StashNod
  struct Phone {
      ticket: String,
      doc: Doc,
@@ -1147,7 +1285,7 @@ index 914c803..923b007 100644
      endpoint: Endpoint,
      router: Router,
      /// The namespace's write key — what proves this phone owns the trail it grants.
-@@ -104,12 +359,9 @@ impl Phone {
+@@ -104,12 +382,9 @@ impl Phone {
              .iter()
              .map(|b| format!("{b:02x}"))
              .collect();
@@ -1163,7 +1301,7 @@ index 914c803..923b007 100644
          let ticket = doc
              .share(ShareMode::Read, AddrInfoOptions::RelayAndAddresses)
              .await?
-@@ -124,12 +376,21 @@ impl Phone {
+@@ -124,12 +399,21 @@ impl Phone {
          Ok(Self {
              ticket,
              doc,
@@ -1185,7 +1323,7 @@ index 914c803..923b007 100644
      /// The phone goes away for good: nothing it held can be fetched from it after this.
      async fn vanish(self) {
          let _ = self.router.shutdown().await;
-@@ -191,6 +452,52 @@ async fn read_through(seed: u8, ticket: &str, from: iroh::EndpointAddr) -> Resul
+@@ -191,6 +475,52 @@ async fn read_through(seed: u8, ticket: &str, from: iroh::EndpointAddr) -> Resul
      })
  }
  
@@ -1238,6 +1376,30 @@ index 914c803..923b007 100644
  /// Poll until the node holds `tracked` entries and every one of them has its bytes.
  async fn wait_servable(node: &StashNode, tracked: usize, what: &str) {
      for _ in 0..300 {
+@@ -206,11 +536,12 @@ async fn wait_servable(node: &StashNode, tracked: usize, what: &str) {
+ }
+ 
+ #[tokio::test]
+-async fn a_repeater_serves_a_trail_after_restarting_with_the_writer_gone() -> Result<()> {
++async fn a_persistent_node_serves_a_trail_after_restarting_with_the_writer_gone() -> Result<()> {
++    // Repeaters keep content in RAM now; `Storage::Persistent` still promises this.
+     let dir = scratch("restart");
+     let payload = b"sealed-envelope-held-across-a-restart";
+ 
+-    let repeater = spawn_repeater(&dir, 51).await?;
++    let repeater = spawn_stored(Storage::Persistent(dir.clone()), 51).await?;
+     let phone = Phone::spawn(52, payload).await?;
+     repeater.register(&phone.ticket, None).await?;
+     // Production topology: the phone dials the repeater, never the other way round.
+@@ -223,7 +554,7 @@ async fn a_repeater_serves_a_trail_after_restarting_with_the_writer_gone() -> Re
+     drop(repeater);
+ 
+     // Same directory, same identity — a laptop that rebooted. No phone grants anything again.
+-    let repeater = reopen_repeater(&dir, 51).await?;
++    let repeater = reopen(Storage::Persistent(dir.clone()), 51).await?;
+     assert_eq!(
+         repeater.content_stats(),
+         (0, 1),
 diff --git a/rust/src/retention.rs b/rust/src/retention.rs
 index b2f1273..8724fdf 100644
 --- a/rust/src/retention.rs

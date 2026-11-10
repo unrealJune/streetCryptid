@@ -282,7 +282,9 @@ done there), still pulling trail-stash through `prepare-runtime.ps1` and
      tracked (fix; benefits the hosted stash);
   2. register namespace watchers before starting live sync (fix; benefits the hosted stash);
   3. bounded arrival notifications;
-  4. the desktop repeater tests (restart from disk, multi-writer/multi-reader forwarding).
+  4. `Storage::MemoryRepeater` (identity, roster and grants on disk, content in RAM) — what every
+     repeater runs since 2026-11-10 — and the desktop repeater tests (a restart keeps the claim
+     and grants but no content; multi-writer/multi-reader forwarding).
 - The claim URL comes from the server crate instead of being formatted again in the host.
 - `ci-repeater-windows.yml` and `release-repeater-windows.yml` (`windows-v*`).
 
@@ -296,8 +298,9 @@ references to the old repo.
 
 These came out of the same review. The Windows ones are done on `feat/windows-repeater`:
 
-- ~~The Windows client keeps less than §5.1 says a repeater keeps~~ — it uses
-  `Storage::Persistent` now; `MemoryRepeater` is gone.
+- The Windows client keeps less than §5.1 said a repeater keeps — **the rule changed instead**
+  (2026-11-10): repeaters keep what they carry in memory only (`REPEATERS.md` §1,
+  `Storage::MemoryRepeater`).
 - ~~A local "unsubscribe" contradicts the signed roster~~ — removed; removal happens on the phone.
 - ~~The Windows host has no telemetry at all~~ — the `otel` feature behind a build-time endpoint
   and a per-span consent flag, plus `repeater.host.pulse`.

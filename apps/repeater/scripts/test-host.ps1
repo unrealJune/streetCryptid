@@ -70,8 +70,12 @@ try {
             $child.Dispose()
         }
     }
-    foreach ($kept in 'docs', 'blobs', 'secret.key', 'host-settings.json') {
+    foreach ($kept in 'secret.key', 'host-settings.json') {
         if (!(Test-Path (Join-Path $state $kept))) { throw "The host keeps no $kept on disk." }
+    }
+    # Memory only: no replica and no ciphertext on disk, ever.
+    foreach ($never in 'docs', 'blobs') {
+        if (Test-Path (Join-Path $state $never)) { throw "The host wrote $never to disk." }
     }
 
     # A directory whose identity went to the service must never start a second one.
@@ -84,7 +88,7 @@ try {
         if (!$child.HasExited) { $child.Kill($true); $child.WaitForExit() }
         $child.Dispose()
     }
-    Write-Output 'Host starts on disk, keeps identity and settings, refuses service-owned state, and stops on pipe EOF.'
+    Write-Output 'Host keeps identity and settings but no content on disk, refuses service-owned state, and stops on pipe EOF.'
 } finally {
     Remove-Item -LiteralPath $state -Recurse -Force
 }

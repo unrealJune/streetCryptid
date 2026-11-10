@@ -297,7 +297,7 @@ public sealed partial class MainWindow : Window
         HostText.Text = (value.Mode == "service"
                 ? "Runs as a Windows service, whether or not anyone is signed in."
                 : "Runs while this app is open.") +
-            $" Keeps {FormatBytes(value.StorageBytes)} on disk." +
+            " Keeps what it carries in memory only." +
             (value.Settings?.KeepAwake == true ? " Keeps the PC awake on mains power." : "");
         PolicyStatus.Text = $"Membership: {value.Policy ?? "Unknown"}. To stop carrying someone, " +
             "remove them from this repeater on your phone (Settings → Repeaters).";

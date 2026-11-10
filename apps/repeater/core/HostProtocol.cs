@@ -11,7 +11,7 @@ public sealed record HostSnapshot(
     string? Policy, string[] Members, ulong Tracked, ulong Missing, ulong Received,
     ulong Connections = 0, ulong ConnectionsOpened = 0,
     ulong BytesReceived = 0, ulong BytesSent = 0,
-    string? Version = null, string? Mode = null, ulong StorageBytes = 0,
+    string? Version = null, string? Mode = null,
     HostSettings? Settings = null, bool TelemetryAvailable = false);
 
 /// <summary>
