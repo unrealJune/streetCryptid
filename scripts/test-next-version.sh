@@ -149,6 +149,34 @@ commit_in repeater/server/README.md "$(printf 'feat(server)!: drop the v0 API
 BREAKING CHANGE: server only.')"
 assert_bump "a breaking server change is not an app major" false none 1.0.0
 
+# Another repository's history merged in with --allow-unrelated-histories is not the app's, even
+# where it touches a path the app links (repeater/protocol): it never sat behind an app tag, so it
+# would otherwise all land in one range. What is built on top of it afterwards still counts.
+git -C "$work" tag v1.6.0
+imported="$test_root/imported"
+git init --quiet "$imported"
+git -C "$imported" config user.email "import-test@example.com"
+git -C "$imported" config user.name "Import Test"
+git -C "$imported" config core.autocrlf false
+mkdir -p "$imported/repeater/protocol/src"
+echo 'pub fn roster() {}' > "$imported/repeater/protocol/src/lib.rs"
+git -C "$imported" add -A
+git -C "$imported" commit --quiet -m "feat(repeater)!: a whole other product's history"
+git -C "$work" fetch --quiet "$imported" HEAD
+git -C "$work" merge --quiet --allow-unrelated-histories --no-edit -m "chore: import" FETCH_HEAD
+assert_bump "imported history is not an app release" false none 1.0.0
+
+# A branch made BEFORE the previous tag and merged after it still counts.
+git -C "$work" checkout --quiet -b old-branch v1.4.0
+commit_in src/old.ts "feat(map): finished on a branch older than the last release"
+git -C "$work" checkout --quiet -
+git -C "$work" merge --quiet --no-ff --no-edit -m "merge an old branch" old-branch
+assert_bump "a branch older than the previous tag still counts" true minor 1.1.0
+
+git -C "$work" tag v1.7.0
+commit_in repeater/protocol/src/lib.rs "fix(protocol): built on the imported crate"
+assert_bump "work on imported code after the import counts" true patch 1.0.1
+
 # Version bookkeeping is only trustworthy when both manifests agree.
 write_manifests 1.0.0
 sed -i.bak 's/"version": "1.0.0"/"version": "1.4.0"/' "$work/package.json"
