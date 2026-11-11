@@ -25,7 +25,8 @@
 #   previous_tag           the tag the commit range started from (empty on the first release)
 #   tag=v<x.y.z>
 #
-# Requires the full git history and tags (actions/checkout with fetch-depth: 0).
+# Requires the full git history and tags (actions/checkout with fetch-depth: 0). Only `v*` tags are
+# app releases; the imported trail-stash tags were renamed to `server-v*` so `--match` skips them.
 
 set -euo pipefail
 
@@ -110,8 +111,13 @@ fi
 
 # Merge commits carry the branch name, not a Conventional Commit subject, so they never decide a
 # bump. Squash-merged pull requests keep their subject and do.
-subjects="$(git -C "$repo_root" log --no-merges --format='%s' "$previous_tag..HEAD")"
-bodies="$(git -C "$repo_root" log --no-merges --format='%B' "$previous_tag..HEAD")"
+#
+# The repeater server and the Windows repeater release under their own tags (`server-v*`,
+# `windows-v*`), so a commit confined to them must not cut a store release. `repeater/protocol/`
+# still counts: the phone links it.
+app_paths=(-- . ':!repeater/server' ':!repeater/windows')
+subjects="$(git -C "$repo_root" log --no-merges --format='%s' "$previous_tag..HEAD" "${app_paths[@]}")"
+bodies="$(git -C "$repo_root" log --no-merges --format='%B' "$previous_tag..HEAD" "${app_paths[@]}")"
 
 # Most of this repository's history predates Conventional Commits, so an unrecognized subject is
 # treated as a shipping change and earns a patch. Only commits that are explicitly housekeeping

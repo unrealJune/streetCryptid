@@ -1,0 +1,102 @@
+[package]
+name = "trail-stash"
+version = "0.3.1"
+edition = "2021"
+publish = false
+license = "AGPL-3.0-or-later"
+description = "streetCryptid always-on, ciphertext-blind, stateless iroh-docs replica + push-to-sync waker (offline trail delivery)"
+
+# Its own workspace until the root one lands (docs/MONOREPO.md, PR B), so this lockfile and the
+# deployed image stay exactly what they were before the import.
+[workspace]
+members = ["../protocol"]
+
+[lib]
+name = "trail_stash"
+
+[features]
+# Default build is the PURE core only: config, retention, subscription registry, the MLS
+# delivery-service seam, the waker seam, and control-API validation. It has no iroh/tokio deps
+# so `cargo test` is fast and runs on any host (mirrors how docs.rs keeps pure helpers testable
+# without a live node).
+default = []
+# `live` pulls in the iroh stack + async runtime + HTTP server to actually run the in-memory
+# replica and control API. Off by default; required to build the `trail-stash` binary.
+live = [
+    "dep:iroh",
+    "dep:iroh-docs",
+    "dep:iroh-blobs",
+    "dep:iroh-gossip",
+    "dep:iroh-tickets",
+    "dep:tokio",
+    "dep:n0-future",
+    "dep:anyhow",
+    "dep:axum",
+    "dep:reqwest",
+    "dep:tracing",
+    "dep:tracing-subscriber",
+    "dep:qrcode",
+]
+# `otel` layers OTLP export (traces + logs) onto the `live` node — see src/telemetry.rs for the
+# layering and the redaction guarantees. Compiled into the shipped image (Dockerfile builds
+# `--features live,otel`) but DORMANT until `OTEL_EXPORTER_OTLP_ENDPOINT` is set, so operators
+# who never configure a collector run exactly the code they ran before.
+otel = [
+    "live",
+    "dep:opentelemetry",
+    "dep:opentelemetry_sdk",
+    "dep:opentelemetry-otlp",
+    "dep:tracing-opentelemetry",
+    "dep:opentelemetry-appender-tracing",
+]
+
+[dependencies]
+# --- pure core (always compiled) ---
+serde = { version = "1", features = ["derive"] }
+serde_json = "1" # push-payload construction (pure, tested) + live JSON
+thiserror = "2"
+# The roster and the repeater wire, shared with streetCryptid's core (which git-depends on it).
+streetcryptid-repeater = { path = "../protocol" }
+# Repeater identity (live) and the persisted roster.
+ed25519-dalek = "2"
+postcard = { version = "1", default-features = false, features = ["alloc"] }
+# The repeater's claim QR code on the console (live binary only; no image backends).
+qrcode = { version = "0.14", default-features = false, optional = true }
+
+# --- live node only (see `live` feature). Versions match modules/iroh-location/rust so the
+# stash speaks the exact same docs/blobs/gossip protocols as the phones. ---
+iroh = { version = "1", optional = true }
+iroh-docs = { version = "0.101", optional = true }
+iroh-blobs = { version = "0.103", optional = true }
+iroh-gossip = { version = "0.101", optional = true }
+iroh-tickets = { version = "1", optional = true }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "signal"], optional = true }
+n0-future = { version = "0.2", optional = true }
+anyhow = { version = "1", optional = true }
+axum = { version = "0.7", optional = true }
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "http2"], optional = true }
+tracing = { version = "0.1", optional = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = true }
+
+# --- developer telemetry (see the `otel` feature and src/telemetry.rs). Versions match
+# modules/iroh-location/rust so both ends of a trace speak the same OTLP vintage. HTTP/protobuf
+# over reqwest — the collector endpoint is plain HTTP inside the cluster/LAN. ---
+opentelemetry = { version = "0.31", optional = true }
+opentelemetry_sdk = { version = "0.31", optional = true }
+opentelemetry-otlp = { version = "0.31", default-features = false, features = [
+    "trace",
+    "logs",
+    "http-proto",
+    # MUST be the BLOCKING reqwest client: the SDK's batch processors run on a plain dedicated
+    # thread with no tokio reactor, and the async client panics there ("there is no reactor
+    # running"), killing the export pipeline seconds after startup (seen live, 2026-07-14).
+    "reqwest-blocking-client",
+    "reqwest-rustls",
+], optional = true }
+tracing-opentelemetry = { version = "0.32", optional = true }
+opentelemetry-appender-tracing = { version = "0.31", optional = true }
+
+[[bin]]
+name = "trail-stash"
+path = "src/bin/trail-stash.rs"
+required-features = ["live"]

@@ -1,0 +1,182 @@
+name: Release / repeater server
+
+# Builds and publishes the trail-stash container image and Helm chart to GHCR. Moved from the
+# trail-stash repository's `publish.yml` (docs/MONOREPO.md, "Releases").
+#
+# Versioning:
+#   - push to main that touches the server -> image :latest + :sha-<short>, chart 0.0.0-<short>
+#     (appVersion sha-<short>). Production tracks exactly this: the HelmRelease pins the chart to
+#     0.0.0-<sha> and the pod follows :latest by digest. `<short>` is a commit of this repository.
+#   - tag server-v1.2.3 -> image :1.2.3 + :1.2 + :latest, chart 1.2.3 (appVersion 1.2.3)
+#
+# The path filter is what keeps an app commit from rolling the stash pod. It names the server, the
+# protocol it links, the build context's ignore file and this workflow; the root workspace files
+# join it with PR B.
+#
+# The image and chart packages were created by the trail-stash repository. Each needs this
+# repository granted write under its "Manage Actions access", or the push fails with a 403.
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - repeater/server/**
+      - repeater/protocol/**
+      - .dockerignore
+      - .github/workflows/release-repeater-server.yml
+    tags:
+      - server-v*.*.*
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  # Two publishes racing could leave :latest on the older commit.
+  group: release-repeater-server
+  cancel-in-progress: false
+
+env:
+  REGISTRY: ghcr.io
+  RUST_TOOLCHAIN: 1.97.0
+
+jobs:
+  # ---- gate: fast pure-core unit tests (no iroh) --------------------------------
+  test:
+    name: Test (pure core)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: repeater/server
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
+          rustup default "$RUST_TOOLCHAIN"
+
+      - name: Restore Rust compilation cache
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          workspaces: repeater/server -> target
+          key: repeater-server
+          save-if: false
+
+      - name: cargo test (pure core)
+        run: cargo test --locked --workspace
+
+  # ---- build + push the image, then package + push the chart -------------------
+  image:
+    name: Image
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      appver: ${{ steps.ver.outputs.appver }}
+      chartver: ${{ steps.ver.outputs.chartver }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Compute image tags and versions
+        id: ver
+        run: |
+          set -euo pipefail
+          owner="${GITHUB_REPOSITORY_OWNER,,}"           # GHCR requires a lowercase path
+          image="${REGISTRY}/${owner}/trail-stash"
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            v="${GITHUB_REF_NAME#server-v}"
+            if [[ ! "$v" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "Tag $GITHUB_REF_NAME is not server-vMAJOR.MINOR.PATCH." >&2
+              exit 1
+            fi
+            mm="${v%.*}"
+            tags="${image}:${v},${image}:${mm},${image}:latest"
+            appver="${v}"
+            chartver="${v}"
+          else
+            short="$(git rev-parse --short HEAD)"
+            tags="${image}:sha-${short},${image}:latest"
+            appver="sha-${short}"
+            chartver="0.0.0-${short}"
+          fi
+          {
+            echo "tags=${tags}"
+            echo "appver=${appver}"
+            echo "chartver=${chartver}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+
+      - name: Log in to GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push image
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        with:
+          context: .
+          file: repeater/server/Dockerfile
+          push: true
+          # arm64 works but emulated Rust builds of the full iroh stack are very slow.
+          # Add ",linux/arm64" here (and a docker/setup-qemu-action step above) if you need it.
+          platforms: linux/amd64
+          tags: ${{ steps.ver.outputs.tags }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.licenses=AGPL-3.0-or-later
+            org.opencontainers.image.description=Ciphertext-blind, stateless iroh-docs replica + push waker
+          cache-from: type=gha,scope=trail-stash
+          cache-to: type=gha,mode=max,scope=trail-stash
+
+  chart:
+    name: Chart
+    needs: image
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Helm
+        uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4.3.1
+
+      - name: Log in to the GHCR Helm registry
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GHCR_USER: ${{ github.actor }}
+        run: echo "$GHCR_TOKEN" | helm registry login "$REGISTRY" -u "$GHCR_USER" --password-stdin
+
+      - name: Package and push chart
+        env:
+          CHART_VERSION: ${{ needs.image.outputs.chartver }}
+          APP_VERSION: ${{ needs.image.outputs.appver }}
+        run: |
+          set -euo pipefail
+          owner="${GITHUB_REPOSITORY_OWNER,,}"
+          helm package repeater/server/charts/trail-stash \
+            --version "$CHART_VERSION" \
+            --app-version "$APP_VERSION" \
+            --destination "$RUNNER_TEMP"
+          helm push "$RUNNER_TEMP/trail-stash-${CHART_VERSION}.tgz" "oci://${REGISTRY}/${owner}/charts"
