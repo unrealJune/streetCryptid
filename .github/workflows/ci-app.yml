@@ -180,6 +180,11 @@ jobs:
       - name: Test release versioning
         run: bash scripts/test-next-version.sh
 
+      # Lives here rather than in the server lane: the script and its rules
+      # (scripts/lib/conventional-commits.sh) are shared with the app's release, under scripts/.
+      - name: Test repeater server release versioning
+        run: bash scripts/test-next-server-version.sh
+
       - name: Install Linux build dependencies
         run: |
           sudo apt-get update

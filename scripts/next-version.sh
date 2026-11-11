@@ -31,6 +31,8 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=scripts/lib/conventional-commits.sh
+source "$repo_root/scripts/lib/conventional-commits.sh"
 force='auto'
 
 while (($#)); do
@@ -109,58 +111,16 @@ if [[ -z "$previous_tag" ]]; then
   exit 0
 fi
 
-# Merge commits carry the branch name, not a Conventional Commit subject, so they never decide a
-# bump. Squash-merged pull requests keep their subject and do.
-#
 # The repeater server and the Windows repeater release under their own tags (`server-v*`,
 # `windows-v*`), so a commit confined to them must not cut a store release. `repeater/protocol/`
-# still counts: the phone links it.
-#
-# History imported from another repository (trail-stash, merged with --allow-unrelated-histories)
-# is not the app's either, wherever its files now live: it lands in the range all at once, because
-# none of it was ever behind an app tag. A commit counts only if it descends from one of the
-# previous tag's root commits. (Not `--ancestry-path`, which would also drop commits from branches
-# made before the previous tag.)
-app_paths=(-- . ':!repeater/server' ':!repeater/windows')
-app_roots=()
-while IFS= read -r app_root; do
-  app_roots+=("$app_root")
-done < <(git -C "$repo_root" rev-list --max-parents=0 "$previous_tag")
-
+# still counts: the phone links it. Which commits count, and how far they bump, is shared with the
+# server's release (scripts/lib/conventional-commits.sh).
 app_commits=()
 while IFS= read -r commit; do
-  for app_root in "${app_roots[@]}"; do
-    if git -C "$repo_root" merge-base --is-ancestor "$app_root" "$commit"; then
-      app_commits+=("$commit")
-      break
-    fi
-  done
-done < <(git -C "$repo_root" rev-list --no-merges "$previous_tag..HEAD" "${app_paths[@]}")
+  app_commits+=("$commit")
+done < <(release_commits "$repo_root" "$previous_tag" . ':!repeater/server' ':!repeater/windows')
 
-subjects=''
-bodies=''
-if ((${#app_commits[@]})); then
-  subjects="$(git -C "$repo_root" log --no-walk=unsorted --format='%s' "${app_commits[@]}")"
-  bodies="$(git -C "$repo_root" log --no-walk=unsorted --format='%B' "${app_commits[@]}")"
-fi
-
-# Most of this repository's history predates Conventional Commits, so an unrecognized subject is
-# treated as a shipping change and earns a patch. Only commits that are explicitly housekeeping
-# are ignored, and a push made up entirely of them releases nothing.
-housekeeping='^(docs|chore|ci|test|style|build|refactor)(\([^)]*\))?:'
-
-level='none'
-if [[ -n "$subjects" ]] && grep -Evq "$housekeeping" <<<"$subjects"; then
-  level='patch'
-fi
-if [[ "$level" != 'none' ]] && grep -Eq '^feat(\([^)]*\))?:' <<<"$subjects"; then
-  level='minor'
-fi
-if [[ -n "$subjects" ]] &&
-  { grep -Eq '^[a-zA-Z]+(\([^)]*\))?!:' <<<"$subjects" ||
-    grep -Eq '^BREAKING[ -]CHANGE:' <<<"$bodies"; }; then
-  level='major'
-fi
+level="$(bump_level "$repo_root" ${app_commits[@]+"${app_commits[@]}"})"
 
 if [[ "$level" == 'none' ]]; then
   emit false none "$current"

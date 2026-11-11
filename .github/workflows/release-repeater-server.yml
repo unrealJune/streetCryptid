@@ -1,17 +1,23 @@
 name: Release / repeater server
 
-# Builds and publishes the trail-stash container image and Helm chart to GHCR. Moved from the
-# trail-stash repository's `publish.yml` (docs/MONOREPO.md, "Releases").
+# Builds and publishes the trail-stash container image and Helm chart to GHCR, and cuts the
+# server's releases. Moved from the trail-stash repository's `publish.yml` (docs/MONOREPO.md,
+# "Releases").
 #
-# Versioning:
-#   - push to main that touches the server -> image :latest + :sha-<short>, chart 0.0.0-<short>
-#     (appVersion sha-<short>). Production tracks exactly this: the HelmRelease pins the chart to
-#     0.0.0-<sha> and the pod follows :latest by digest. `<short>` is a commit of this repository.
-#   - tag server-v1.2.3 -> image :1.2.3 + :1.2 + :latest, chart 1.2.3 (appVersion 1.2.3)
+# Every push to main that touches the server:
+#   - image :latest + :sha-<short>, chart 0.0.0-<short> (appVersion sha-<short>). Production
+#     tracks exactly this: the HelmRelease pins the chart to 0.0.0-<sha> and the pod follows :latest
+#     by digest. `<short>` is a commit of this repository.
+#   - and when scripts/next-server-version.sh finds a releasable Conventional Commit since the last
+#     `server-v*` tag (the app's rules, scripts/lib/conventional-commits.sh): image :x.y.z + :x.y,
+#     chart x.y.z, then the tag `server-vx.y.z` on that commit. The tag is pushed LAST, so a failed
+#     publish never leaves a release behind that has nothing in it.
+#
+# A tag pushed by hand (`server-v1.2.3`) still publishes that version on its own. The tag this
+# workflow pushes does not start it again: GITHUB_TOKEN pushes never trigger workflows.
 #
 # The path filter is what keeps an app commit from rolling the stash pod. It names the server, the
-# protocol it links, the build context's ignore file and this workflow; the root workspace files
-# join it with PR B.
+# protocol it links, the build context's ignore file and this workflow.
 #
 # The image and chart packages were created by the trail-stash repository. Each needs this
 # repository granted write under its "Manage Actions access", or the push fails with a 403.
@@ -28,12 +34,23 @@ on:
     tags:
       - server-v*.*.*
   workflow_dispatch:
+    inputs:
+      bump:
+        description: Release to cut. `auto` follows the Conventional Commits since the last server tag.
+        type: choice
+        options:
+          - auto
+          - patch
+          - minor
+          - major
+        default: auto
 
 permissions:
   contents: read
 
 concurrency:
-  # Two publishes racing could leave :latest on the older commit.
+  # Releases move a tag and :latest, so they must never overlap, and a queued one must not be
+  # thrown away (it would compute its version from the tags the previous one pushed).
   group: release-repeater-server
   cancel-in-progress: false
 
@@ -71,51 +88,108 @@ jobs:
       - name: cargo test (pure core)
         run: cargo test --locked --workspace
 
+  # ---- what this run publishes ------------------------------------------------
+  version:
+    name: Resolve the release
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      short: ${{ steps.ver.outputs.short }}
+      release: ${{ steps.ver.outputs.release }}
+      version: ${{ steps.ver.outputs.version }}
+      tag: ${{ steps.ver.outputs.tag }}
+      push_tag: ${{ steps.ver.outputs.push_tag }}
+      rolling: ${{ steps.ver.outputs.rolling }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Resolve the release
+        id: ver
+        env:
+          BUMP: ${{ inputs.bump || 'auto' }}
+        run: |
+          set -euo pipefail
+          short="$(git rev-parse --short HEAD)"
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            version="${GITHUB_REF_NAME#server-v}"
+            if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "Tag $GITHUB_REF_NAME is not server-vMAJOR.MINOR.PATCH." >&2
+              exit 1
+            fi
+            release=true
+            tag="$GITHUB_REF_NAME"
+            push_tag=false
+            rolling=false
+          else
+            out="$(bash scripts/next-server-version.sh --force "$BUMP")"
+            echo "$out"
+            release="$(sed -n 's/^release=//p' <<<"$out")"
+            version="$(sed -n 's/^version=//p' <<<"$out")"
+            tag="$(sed -n 's/^tag=//p' <<<"$out")"
+            # Releases are cut from main only; a dispatch on another branch publishes nothing
+            # versioned.
+            if [[ "$GITHUB_REF" != "refs/heads/main" ]]; then
+              release=false
+            fi
+            push_tag="$release"
+            rolling=true
+          fi
+          {
+            echo "short=${short}"
+            echo "release=${release}"
+            echo "version=${version}"
+            echo "tag=${tag}"
+            echo "push_tag=${push_tag}"
+            echo "rolling=${rolling}"
+          } >> "$GITHUB_OUTPUT"
+          {
+            echo "### Repeater server"
+            if [[ "$release" == "true" ]]; then
+              echo "Release **${tag}** at \`${short}\`."
+            else
+              echo "No release: nothing since the last server tag that ships. Publishing \`sha-${short}\` only."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
   # ---- build + push the image, then package + push the chart -------------------
   image:
     name: Image
-    needs: test
+    needs: version
     runs-on: ubuntu-latest
     timeout-minutes: 60
     permissions:
       contents: read
       packages: write
-    outputs:
-      appver: ${{ steps.ver.outputs.appver }}
-      chartver: ${{ steps.ver.outputs.chartver }}
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
-      - name: Compute image tags and versions
-        id: ver
+      - name: Compute image tags
+        id: tags
+        env:
+          SHORT: ${{ needs.version.outputs.short }}
+          RELEASE: ${{ needs.version.outputs.release }}
+          VERSION: ${{ needs.version.outputs.version }}
+          ROLLING: ${{ needs.version.outputs.rolling }}
         run: |
           set -euo pipefail
           owner="${GITHUB_REPOSITORY_OWNER,,}"           # GHCR requires a lowercase path
           image="${REGISTRY}/${owner}/trail-stash"
-          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
-            v="${GITHUB_REF_NAME#server-v}"
-            if [[ ! "$v" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-              echo "Tag $GITHUB_REF_NAME is not server-vMAJOR.MINOR.PATCH." >&2
-              exit 1
-            fi
-            mm="${v%.*}"
-            tags="${image}:${v},${image}:${mm},${image}:latest"
-            appver="${v}"
-            chartver="${v}"
-          else
-            short="$(git rev-parse --short HEAD)"
-            tags="${image}:sha-${short},${image}:latest"
-            appver="sha-${short}"
-            chartver="0.0.0-${short}"
+          tags=("${image}:latest")
+          if [[ "$ROLLING" == "true" ]]; then
+            tags+=("${image}:sha-${SHORT}")
           fi
-          {
-            echo "tags=${tags}"
-            echo "appver=${appver}"
-            echo "chartver=${chartver}"
-          } >> "$GITHUB_OUTPUT"
+          if [[ "$RELEASE" == "true" ]]; then
+            tags+=("${image}:${VERSION}" "${image}:${VERSION%.*}")
+          fi
+          (IFS=,; echo "tags=${tags[*]}") >> "$GITHUB_OUTPUT"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
@@ -136,7 +210,7 @@ jobs:
           # arm64 works but emulated Rust builds of the full iroh stack are very slow.
           # Add ",linux/arm64" here (and a docker/setup-qemu-action step above) if you need it.
           platforms: linux/amd64
-          tags: ${{ steps.ver.outputs.tags }}
+          tags: ${{ steps.tags.outputs.tags }}
           labels: |
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
@@ -147,7 +221,9 @@ jobs:
 
   chart:
     name: Chart
-    needs: image
+    needs:
+      - version
+      - image
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -168,15 +244,53 @@ jobs:
           GHCR_USER: ${{ github.actor }}
         run: echo "$GHCR_TOKEN" | helm registry login "$REGISTRY" -u "$GHCR_USER" --password-stdin
 
-      - name: Package and push chart
+      # 0.0.0-<short> on every main push (what production pins), x.y.z on a release.
+      - name: Package and push charts
         env:
-          CHART_VERSION: ${{ needs.image.outputs.chartver }}
-          APP_VERSION: ${{ needs.image.outputs.appver }}
+          SHORT: ${{ needs.version.outputs.short }}
+          RELEASE: ${{ needs.version.outputs.release }}
+          VERSION: ${{ needs.version.outputs.version }}
+          ROLLING: ${{ needs.version.outputs.rolling }}
         run: |
           set -euo pipefail
           owner="${GITHUB_REPOSITORY_OWNER,,}"
-          helm package repeater/server/charts/trail-stash \
-            --version "$CHART_VERSION" \
-            --app-version "$APP_VERSION" \
-            --destination "$RUNNER_TEMP"
-          helm push "$RUNNER_TEMP/trail-stash-${CHART_VERSION}.tgz" "oci://${REGISTRY}/${owner}/charts"
+          publish() {
+            local chart_version="$1" app_version="$2"
+            helm package repeater/server/charts/trail-stash \
+              --version "$chart_version" \
+              --app-version "$app_version" \
+              --destination "$RUNNER_TEMP"
+            helm push "$RUNNER_TEMP/trail-stash-${chart_version}.tgz" "oci://${REGISTRY}/${owner}/charts"
+          }
+          if [[ "$ROLLING" == "true" ]]; then
+            publish "0.0.0-${SHORT}" "sha-${SHORT}"
+          fi
+          if [[ "$RELEASE" == "true" ]]; then
+            publish "$VERSION" "$VERSION"
+          fi
+
+  # ---- record the release, only once everything in it exists -------------------
+  tag:
+    name: Tag the release
+    needs:
+      - version
+      - image
+      - chart
+    if: needs.version.outputs.push_tag == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Push the tag
+        env:
+          TAG: ${{ needs.version.outputs.tag }}
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git tag --annotate "$TAG" --message "Repeater server ${TAG#server-v}" "$GITHUB_SHA"
+          git push origin "refs/tags/$TAG"

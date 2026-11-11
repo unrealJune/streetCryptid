@@ -16,8 +16,9 @@ cleanup() {
 trap cleanup EXIT
 
 work="$test_root/repo"
-mkdir -p "$work/scripts"
+mkdir -p "$work/scripts/lib"
 cp "$repo_root/scripts/next-version.sh" "$repo_root/scripts/apply-version.sh" "$work/scripts/"
+cp "$repo_root/scripts/lib/conventional-commits.sh" "$work/scripts/lib/"
 
 write_manifests() {
   local version="$1"
