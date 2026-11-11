@@ -9,7 +9,7 @@
 //!
 //! ## Claiming, and why it attests the owner
 //! An unclaimed repeater holds a one-time **claim secret**, shown only on its own console as a
-//! claim link ([`streetcryptid_repeater::wire::claim_link`]) and replaced every [`CLAIM_WINDOW_MS`]. A
+//! claim link ([`streetcryptid_repeater::wire::claim_url`], also a QR code) and replaced every [`CLAIM_WINDOW_MS`]. A
 //! `Claim` must present it, and must come from the endpoint that signed the roster's genesis — the
 //! QUIC handshake authenticates the caller, so "the phone at my console" and "the owner the roster
 //! names" are the same key or the claim is refused. The repeater then signs a [`RepeaterCert`]

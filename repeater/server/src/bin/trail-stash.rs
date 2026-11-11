@@ -126,9 +126,12 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-/// While the repeater is unclaimed, print its claim link to the console — and a fresh one each
-/// time the old one expires. Printed with `println!`, not through tracing: the log pipeline
-/// redacts identifier-length runs, and this link is meant for exactly one reader, at this screen.
+/// While the repeater is unclaimed, print its claim link to the console as a QR code and as text,
+/// and a fresh one each time the old one expires. Both are the https form
+/// ([`streetcryptid_repeater::wire::claim_url`]), so the phone's own camera opens streetCryptid on
+/// the code and the text pastes into it. Printed with `println!`, not through tracing: the log
+/// pipeline redacts identifier-length runs, and this link is meant for exactly one reader, at this
+/// screen.
 async fn print_claim_links(node: Arc<StashNode>) {
     let Some(repeater) = node.repeater().cloned() else {
         return;
@@ -138,11 +141,18 @@ async fn print_claim_links(node: Arc<StashNode>) {
         match repeater.claim_secret() {
             None => return,
             Some(secret) if Some(secret) != last => {
+                let url = streetcryptid_repeater::wire::claim_url(&node.node_ticket(), &secret);
+                let qr = qrcode::QrCode::new(url.as_bytes())
+                    .map(|code| {
+                        code.render::<qrcode::render::unicode::Dense1x2>()
+                            .quiet_zone(true)
+                            .build()
+                    })
+                    .unwrap_or_default();
                 println!(
-                    "\nUnclaimed repeater. Scan or paste this in streetCryptid (Settings > Repeaters > \
-                     Claim) within {} minutes:\n\n  {}\n",
+                    "\nUnclaimed repeater. Within {} minutes, scan this with your phone's camera, \
+                     or paste the link in streetCryptid (Settings > Repeaters):\n\n{qr}\n\n  {url}\n",
                     trail_stash::repeater::CLAIM_WINDOW_MS / 60_000,
-                    streetcryptid_repeater::wire::claim_link(&node.node_ticket(), &secret)
                 );
                 last = Some(secret);
             }
