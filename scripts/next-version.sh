@@ -115,9 +115,34 @@ fi
 # The repeater server and the Windows repeater release under their own tags (`server-v*`,
 # `windows-v*`), so a commit confined to them must not cut a store release. `repeater/protocol/`
 # still counts: the phone links it.
+#
+# History imported from another repository (trail-stash, merged with --allow-unrelated-histories)
+# is not the app's either, wherever its files now live: it lands in the range all at once, because
+# none of it was ever behind an app tag. A commit counts only if it descends from one of the
+# previous tag's root commits. (Not `--ancestry-path`, which would also drop commits from branches
+# made before the previous tag.)
 app_paths=(-- . ':!repeater/server' ':!repeater/windows')
-subjects="$(git -C "$repo_root" log --no-merges --format='%s' "$previous_tag..HEAD" "${app_paths[@]}")"
-bodies="$(git -C "$repo_root" log --no-merges --format='%B' "$previous_tag..HEAD" "${app_paths[@]}")"
+app_roots=()
+while IFS= read -r app_root; do
+  app_roots+=("$app_root")
+done < <(git -C "$repo_root" rev-list --max-parents=0 "$previous_tag")
+
+app_commits=()
+while IFS= read -r commit; do
+  for app_root in "${app_roots[@]}"; do
+    if git -C "$repo_root" merge-base --is-ancestor "$app_root" "$commit"; then
+      app_commits+=("$commit")
+      break
+    fi
+  done
+done < <(git -C "$repo_root" rev-list --no-merges "$previous_tag..HEAD" "${app_paths[@]}")
+
+subjects=''
+bodies=''
+if ((${#app_commits[@]})); then
+  subjects="$(git -C "$repo_root" log --no-walk=unsorted --format='%s' "${app_commits[@]}")"
+  bodies="$(git -C "$repo_root" log --no-walk=unsorted --format='%B' "${app_commits[@]}")"
+fi
 
 # Most of this repository's history predates Conventional Commits, so an unrecognized subject is
 # treated as a shipping change and earns a patch. Only commits that are explicitly housekeeping
