@@ -6,8 +6,10 @@ publish = false
 license = "AGPL-3.0-or-later"
 description = "streetCryptid always-on, ciphertext-blind, stateless iroh-docs replica + push-to-sync waker (offline trail delivery)"
 
+# Its own workspace until the root one lands (docs/MONOREPO.md, PR B), so this lockfile and the
+# deployed image stay exactly what they were before the import.
 [workspace]
-members = ["repeater"]
+members = ["../protocol"]
 
 [lib]
 name = "trail_stash"
@@ -54,7 +56,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1" # push-payload construction (pure, tested) + live JSON
 thiserror = "2"
 # The roster and the repeater wire, shared with streetCryptid's core (which git-depends on it).
-streetcryptid-repeater = { path = "repeater" }
+streetcryptid-repeater = { path = "../protocol" }
 # Repeater identity (live) and the persisted roster.
 ed25519-dalek = "2"
 postcard = { version = "1", default-features = false, features = ["alloc"] }

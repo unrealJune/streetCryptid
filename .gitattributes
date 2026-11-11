@@ -6,3 +6,8 @@ modules/iroh-location/ios/generated/** -whitespace text eol=lf
 
 # EAS executes shell hooks on macOS; keep them free of Windows CRLF conversion.
 *.sh text eol=lf
+
+# The repeater server's Dockerfile, shell and Helm templates run on Linux; trail-stash kept the whole
+# tree LF, and so does this one.
+repeater/server/** text=auto eol=lf
+repeater/protocol/** text=auto eol=lf

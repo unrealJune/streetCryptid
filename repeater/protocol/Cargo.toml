@@ -3,6 +3,8 @@ name = "streetcryptid-repeater"
 version = "0.1.0"
 edition = "2021"
 publish = false
+# A member of the server's workspace, which is not a parent directory. Goes with PR B's root workspace.
+workspace = "../server"
 license = "AGPL-3.0-or-later"
 description = "What a streetCryptid phone and a repeater must agree on byte for byte: the roster, the attestation chain, and the streetcryptid/repeater/1 wire"
 

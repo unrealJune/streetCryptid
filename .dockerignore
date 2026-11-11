@@ -1,0 +1,10 @@
+# The only image built from this repository is the repeater server's
+# (`docker build -f repeater/server/Dockerfile .`). An allowlist, so the context never carries
+# node_modules, every target/ or the app. The root Cargo workspace files join it with PR B
+# (docs/MONOREPO.md).
+*
+!repeater/protocol/
+!repeater/server/Cargo.toml
+!repeater/server/Cargo.lock
+!repeater/server/src/
+**/target/

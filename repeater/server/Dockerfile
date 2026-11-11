@@ -5,8 +5,12 @@
 # (developer telemetry — compiled in but dormant until OTEL_EXPORTER_OTLP_ENDPOINT is set; see
 # src/telemetry.rs). The first build is slow (iroh + deps); BuildKit cache mounts keep re-builds
 # fast.
+#
+# The build context is the REPOSITORY ROOT (`docker build -f repeater/server/Dockerfile .`), because
+# the server links `repeater/protocol` by path. The root `.dockerignore` is an allowlist, so the
+# context is the two crates and nothing else (no node_modules, no target/).
 FROM rust:1-slim-bookworm AS build
-WORKDIR /src
+WORKDIR /src/repeater/server
 
 # Native toolchain the iroh/rustls dependency tree needs to compile from source. If a build ever
 # fails on a missing tool, it is almost always one of these.
@@ -14,13 +18,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential cmake perl pkg-config protobuf-compiler \
     && rm -rf /var/lib/apt/lists/*
 
-COPY Cargo.toml Cargo.lock ./
-COPY src ./src
-COPY repeater ./repeater
+COPY repeater/protocol /src/repeater/protocol
+COPY repeater/server/Cargo.toml repeater/server/Cargo.lock ./
+COPY repeater/server/src ./src
 
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/src/target \
-    cargo build --release --features live,otel --bin trail-stash \
+    --mount=type=cache,target=/src/repeater/server/target \
+    cargo build --locked --release --features live,otel --bin trail-stash \
     && cp target/release/trail-stash /trail-stash
 
 # --- runtime stage -------------------------------------------------------
@@ -32,7 +36,7 @@ FROM gcr.io/distroless/cc-debian12:nonroot AS runtime
 LABEL org.opencontainers.image.title="trail-stash" \
       org.opencontainers.image.description="Ciphertext-blind, stateless iroh-docs replica + push waker (offline trail delivery)" \
       org.opencontainers.image.licenses="AGPL-3.0-or-later" \
-      org.opencontainers.image.source="https://github.com/unrealJune/trail-stash"
+      org.opencontainers.image.source="https://github.com/unrealJune/streetCryptid"
 
 COPY --from=build /trail-stash /trail-stash
 
