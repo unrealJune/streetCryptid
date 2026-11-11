@@ -1,0 +1,18 @@
+[package]
+name = "streetcryptid-repeater"
+version = "0.1.0"
+edition = "2021"
+publish = false
+license = "AGPL-3.0-or-later"
+description = "What a streetCryptid phone and a repeater must agree on byte for byte: the roster, the attestation chain, and the streetcryptid/repeater/1 wire"
+
+# Pure on purpose: no iroh, no tokio, no I/O. The repeater (trail-stash, iroh 1.0) and the app's
+# core (iroh 1.4) each bring their own transport and call into this for every byte that crosses
+# between them, so the two sides can never disagree about what an op, a cert or a proof is.
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
+# ed25519-dalek 2 is what both sides already sign with.
+ed25519-dalek = "2"
+postcard = { version = "1", default-features = false, features = ["alloc"] }
+blake3 = "1"
