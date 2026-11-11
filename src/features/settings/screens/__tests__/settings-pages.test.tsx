@@ -4,6 +4,7 @@ import { SettingsMenuRow } from '../../components/settings-menu-row';
 import { SettingsPage, SettingsSection } from '../../components/settings-page';
 import { DeliveryOptions } from '../../components/delivery-options';
 import { FriendConnectionDetailsRow } from '../../components/friend-connection-details-row';
+import { OnboardingReplayRow } from '../../components/onboarding-replay-row';
 import AdvancedScreen from '../advanced-screen';
 import AppearanceScreen from '../appearance-screen';
 import AppDataScreen from '../app-data-screen';
@@ -33,6 +34,7 @@ jest.mock('../../components/friend-connection-details-row', () => ({
   FriendConnectionDetailsRow: () => null,
 }));
 jest.mock('../../components/event-log-panel', () => ({ EventLogPanel: () => null }));
+jest.mock('../../components/onboarding-replay-row', () => ({ OnboardingReplayRow: () => null }));
 
 const mockSetDelivery = jest.fn().mockResolvedValue(undefined);
 jest.mock('@/features/social/hooks/use-location-sharing', () => ({
@@ -98,14 +100,12 @@ describe('settings pages', () => {
     expect(renderer.root.findByType(SettingsPage).props.subtitle).toBeUndefined();
   });
 
-  it('offers friend diagnostics without the onboarding preview', () => {
+  it('offers friend diagnostics and an onboarding replay', () => {
     act(() => {
       renderer = create(<DebugScreen />);
     });
     expect(renderer.root.findAllByType(FriendConnectionDetailsRow)).toHaveLength(1);
-    expect(
-      renderer.root.findAllByType(SettingsSection).map((section) => section.props.label)
-    ).not.toContain('ONBOARDING');
+    expect(renderer.root.findAllByType(OnboardingReplayRow)).toHaveLength(1);
   });
 
   it('changes delivery without exposing or changing the underlying cadence', async () => {

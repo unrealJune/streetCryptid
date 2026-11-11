@@ -25,9 +25,8 @@ import {
   installConsoleTelemetryBridge,
   startUiLivenessProbe,
 } from '@/features/dev/telemetry';
-import { BackgroundReliabilityGate } from '@/features/social/components/background-reliability-gate';
-import { LocationDisclosureGate } from '@/features/social/components/location-disclosure-gate';
 import { PairingOverlays } from '@/features/social/components/pairing-overlays';
+import { PermissionsGate } from '@/features/social/components/permissions-gate';
 import { LocationSharingProvider } from '@/features/social/hooks/use-location-sharing';
 
 // Keep warnings/errors in the local event journal and optionally ship them to the OTLP collector.
@@ -64,25 +63,25 @@ export default function RootLayout() {
         <CryptidProfileProvider>
           <AnimatedSplashOverlay />
           <CryptidAccountGate>
-            <LocationSharingProvider>
-              <LocationDisclosureGate>
-                <BackgroundReliabilityGate>
-                  {/* No tab bar, no header: the map is the app, and everything else
-                    is a floating island or a sheet pushed over it. */}
-                  <Stack screenOptions={{ headerShown: false }}>
-                    <Stack.Screen name="index" />
-                    <Stack.Screen
-                      name="pairing"
-                      options={{ animation: 'fade', gestureEnabled: false }}
-                    />
-                    <Stack.Screen name="settings" options={{ presentation: 'modal' }} />
-                  </Stack>
-                  {/* Pairing interrupts are global: a verification challenge or a
-                    discovery can land while you are anywhere in the app. */}
-                  <PairingOverlays />
-                </BackgroundReliabilityGate>
-              </LocationDisclosureGate>
-            </LocationSharingProvider>
+            {/* In front of the provider, so node init finds every permission already decided
+              instead of prompting over whatever is on screen. */}
+            <PermissionsGate>
+              <LocationSharingProvider>
+                {/* No tab bar, no header: the map is the app, and everything else
+                  is a floating island or a sheet pushed over it. */}
+                <Stack screenOptions={{ headerShown: false }}>
+                  <Stack.Screen name="index" />
+                  <Stack.Screen
+                    name="pairing"
+                    options={{ animation: 'fade', gestureEnabled: false }}
+                  />
+                  <Stack.Screen name="settings" options={{ presentation: 'modal' }} />
+                </Stack>
+                {/* Pairing interrupts are global: a verification challenge or a
+                  discovery can land while you are anywhere in the app. */}
+                <PairingOverlays />
+              </LocationSharingProvider>
+            </PermissionsGate>
           </CryptidAccountGate>
         </CryptidProfileProvider>
       </ThemeProvider>

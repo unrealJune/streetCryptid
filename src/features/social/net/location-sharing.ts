@@ -106,6 +106,8 @@ import {
   loadSharingEnabled,
   clearLegacyShareInterval,
   saveSharingEnabled,
+  loadPermissionsAsked,
+  savePermissionAsked,
   saveTransportPreferences,
   type TransportPreferences,
   DEFAULT_TRANSPORT_PREFERENCES,
@@ -3189,10 +3191,20 @@ export class LocationSharingService {
       // cannot be started at all. Ask for the notification permission first so the ongoing
       // notification is visible from the start — but do not gate on the answer, because Android
       // runs the service either way and a denial costs visibility rather than sharing.
-      try {
-        await this.mod?.ensureNotificationPermission?.();
-      } catch {
-        // Best-effort: a refused or unavailable prompt must not stop sharing from starting.
+      //
+      // Only when onboarding's notification step has not already asked: this runs on every launch
+      // with sharing on, and Android shows the dialog again after one denial, so asking here
+      // regardless put an unexplained prompt in front of every launch of a phone that said no. An
+      // install with a step record gets this ask recorded too (one that onboarded before the steps
+      // existed has no record, and creating one would make `PermissionsGate` treat it as new).
+      const asked = await loadPermissionsAsked(this.kv).catch(() => null);
+      if (!asked?.has('notifications')) {
+        try {
+          await this.mod?.ensureNotificationPermission?.();
+        } catch {
+          // Best-effort: a refused or unavailable prompt must not stop sharing from starting.
+        }
+        if (asked) await savePermissionAsked(this.kv, 'notifications').catch(() => undefined);
       }
       this.setNativeBackground(true);
       // Arm the revive fence around where we are now.

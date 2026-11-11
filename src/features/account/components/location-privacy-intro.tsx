@@ -1,7 +1,9 @@
 import { Pressable, StyleSheet, View } from 'react-native';
 
 import { useColorScheme } from '@/hooks/use-color-scheme';
+import { CopyText } from '@/components/copy-text';
 import { ThemedText } from '@/components/themed-text';
+import { ONBOARDING_COPY } from '@/copy/onboarding';
 import { CryptidThemes, Spacing } from '@/constants/theme';
 import { SettingsPage } from '@/features/settings/components/settings-page';
 
@@ -16,35 +18,20 @@ import { SettingsPage } from '@/features/settings/components/settings-page';
  * the completed-onboarding marker (see `finish()` there), so this is seen exactly once per install
  * and replayed in full if setup is abandoned halfway.
  *
- * Distinct from `LocationDisclosureScreen`, which comes after onboarding, is required by Play
- * policy, states what the OS permission is used for, and carries the accept/decline that gates
- * background location. This one asks for nothing.
+ * Distinct from the location step of `PermissionsGate`, which comes after onboarding, is required
+ * by Play policy, states what the OS permission is used for, and carries the accept/decline that
+ * gates background location. This one asks for nothing.
  *
- * The copy is product copy: keep it whole, and keep it honest about the middle of the network
+ * The copy is product copy (`src/copy/onboarding.md`): keep it whole, and keep it honest about the middle of the network
  * seeing that two anonymous IDs exchanged bytes.
  */
 
-const LEDE = 'In a minute you’ll pick how your location travels. Here’s what’s carrying it.';
-
-const BODY = [
-  'Every fix is encrypted on your phone before it leaves — individually, for each friend you share it with. Only their phones hold the keys. We can’t read where you’ve been. Not as a promise we’re making, but as a consequence of how it’s built.',
-  'Mostly there’s no we in the path at all. Your phone talks to your friends’ phones directly, and the infrastructure that helps them find each other only ever handles data it can’t read. There is no streetCryptid server holding your trail — there is no streetCryptid server at all. There are no accounts either: no email, no password, nothing to spill.',
-  'We built it this way because the alternative has a known ending. Anything that holds your data long enough gets breached, or acquired, or has a quarter bad enough to make selling it sound reasonable. We would rather not ask you to trust us — we’d rather not be in a position where you have to.',
-  'Which is also why all of it is open, under a license that requires anyone running it as a service to publish their changes too. The encryption, the delivery routes, the code that decides what leaves your phone — all of it is readable, by you or by someone you trust more than us.',
-] as const;
-
 /**
- * The one paragraph that takes something away rather than offering it, so it gets the amber edge
- * the rest of the app uses for a caveat — and no label above it, because a heading would turn a
- * sentence written to be read into a section someone skips.
+ * The words are in `src/copy/onboarding.md`, the letter's paragraphs separated by blank lines. Any
+ * of the prose left empty there is left off the page.
  */
-const CAVEAT =
-  'What we won’t tell you is that nothing at all is visible. Delivering an encrypted fix means something in the middle can see that two anonymous IDs passed data between them — that’s true of every network, and true of this one. What that data says, and where you are, stays yours. The privacy policy says what each route can see.';
-
-const NEXT =
-  'Next screen asks how you want your location to travel, and tells you what each route costs.';
-
-const SIGNOFF = '— the streetCryptid team.';
+const COPY = ONBOARDING_COPY.privacy;
+const LETTER = COPY.letter?.split('\n\n') ?? [];
 
 export function LocationPrivacyIntro({
   onBack,
@@ -59,20 +46,20 @@ export function LocationPrivacyIntro({
   return (
     <SettingsPage
       kind="onboarding"
-      title="Where your location goes"
-      subtitle={LEDE}
+      title={COPY.title}
+      subtitle={COPY.lede}
       testID="privacy-onboarding"
       footerRail={{
         back: {
-          label: 'Back',
-          accessibilityLabel: 'Back to profile',
+          label: COPY.back,
+          accessibilityLabel: COPY.backLabel,
           icon: { ios: 'chevron.left', android: 'arrow_back', web: 'arrow_back' },
           onPress: onBack,
         },
         primary: {
-          label: 'Continue',
-          railLabel: 'Next',
-          accessibilityLabel: 'Continue to delivery',
+          label: COPY.continue,
+          railLabel: COPY.railContinue,
+          accessibilityLabel: COPY.continueLabel,
           icon: { ios: 'chevron.right', android: 'arrow_forward', web: 'arrow_forward' },
           color: chrome.green,
           ink: chrome.bg,
@@ -84,15 +71,15 @@ export function LocationPrivacyIntro({
         <View style={styles.actions}>
           <Pressable
             accessibilityRole="button"
-            accessibilityLabel="Back to profile"
+            accessibilityLabel={COPY.backLabel}
             onPress={onBack}
             style={styles.back}
           >
-            <ThemedText type="smallBold">Back</ThemedText>
+            <ThemedText type="smallBold">{COPY.back}</ThemedText>
           </Pressable>
           <Pressable
             accessibilityRole="button"
-            accessibilityLabel="Continue to delivery"
+            accessibilityLabel={COPY.continueLabel}
             onPress={onContinue}
             testID="onboarding-privacy-continue"
             style={({ pressed }) => [
@@ -101,37 +88,50 @@ export function LocationPrivacyIntro({
             ]}
           >
             <ThemedText type="smallBold" style={{ color: chrome.bg }}>
-              Continue
+              {COPY.continue}
             </ThemedText>
           </Pressable>
         </View>
       }
     >
-      <View style={styles.body}>
-        {BODY.map((paragraph) => (
-          <ThemedText
-            key={paragraph.slice(0, 32)}
+      {LETTER.length ? (
+        <View style={styles.body}>
+          {LETTER.map((paragraph) => (
+            <CopyText
+              key={paragraph.slice(0, 32)}
+              text={paragraph}
+              type="small"
+              themeColor="textSecondary"
+              style={styles.paragraph}
+            />
+          ))}
+        </View>
+      ) : null}
+
+      {COPY.caveat ? (
+        <View style={[styles.card, { borderColor: chrome.amber }]}>
+          <CopyText
+            text={COPY.caveat}
             type="small"
             themeColor="textSecondary"
             style={styles.paragraph}
-          >
-            {paragraph}
-          </ThemedText>
-        ))}
-      </View>
+          />
+        </View>
+      ) : null}
 
-      <View style={[styles.card, { borderColor: chrome.amber }]}>
-        <ThemedText type="small" themeColor="textSecondary" style={styles.paragraph}>
-          {CAVEAT}
+      {COPY.next ? (
+        <CopyText
+          text={COPY.next}
+          type="small"
+          themeColor="textSecondary"
+          style={styles.paragraph}
+        />
+      ) : null}
+      {COPY.signoff ? (
+        <ThemedText type="small" themeColor="textSecondary" style={styles.signoff}>
+          {COPY.signoff}
         </ThemedText>
-      </View>
-
-      <ThemedText type="small" themeColor="textSecondary" style={styles.paragraph}>
-        {NEXT}
-      </ThemedText>
-      <ThemedText type="small" themeColor="textSecondary" style={styles.signoff}>
-        {SIGNOFF}
-      </ThemedText>
+      ) : null}
     </SettingsPage>
   );
 }

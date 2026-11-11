@@ -6,6 +6,15 @@ const ANDROID_17_API_LEVEL = 37;
 const ACCESS_LOCAL_NETWORK = 'android.permission.ACCESS_LOCAL_NETWORK' as Permission;
 const NEARBY_WIFI_DEVICES = 'android.permission.NEARBY_WIFI_DEVICES' as Permission;
 
+/** A function, not a constant: `PermissionsAndroid` is not something to touch at import on web. */
+function bluetoothRuntimePermissions(): Permission[] {
+  return [
+    PermissionsAndroid.PERMISSIONS.BLUETOOTH_SCAN,
+    PermissionsAndroid.PERMISSIONS.BLUETOOTH_ADVERTISE,
+    PermissionsAndroid.PERMISSIONS.BLUETOOTH_CONNECT,
+  ];
+}
+
 /**
  * Requests the runtime permission that gates iroh's same-Wi-Fi (local network) connectivity. On
  * Android 17+ this is ACCESS_LOCAL_NETWORK; on the Android 16 opt-in phase it is
@@ -34,11 +43,7 @@ export async function ensurePairingPermissions(): Promise<boolean> {
   if (Platform.OS !== 'android') return true;
 
   if (Number(Platform.Version) >= 31) {
-    const permissions = [
-      PermissionsAndroid.PERMISSIONS.BLUETOOTH_SCAN,
-      PermissionsAndroid.PERMISSIONS.BLUETOOTH_ADVERTISE,
-      PermissionsAndroid.PERMISSIONS.BLUETOOTH_CONNECT,
-    ];
+    const permissions = bluetoothRuntimePermissions();
     const result = await PermissionsAndroid.requestMultiple(permissions);
     return permissions.every(
       (permission) => result[permission] === PermissionsAndroid.RESULTS.GRANTED
@@ -49,4 +54,36 @@ export async function ensurePairingPermissions(): Promise<boolean> {
     PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION
   );
   return result === PermissionsAndroid.RESULTS.GRANTED;
+}
+
+/**
+ * Whether {@link ensurePairingPermissions} would succeed, WITHOUT prompting. Node init reads this:
+ * the asking belongs to onboarding's Bluetooth step (`PermissionsGate`) and, after a "Not now", to
+ * the Bump button — never to a launch, where the dialog arrives unexplained.
+ */
+export async function hasPairingPermissions(): Promise<boolean> {
+  if (Platform.OS !== 'android') return true;
+  try {
+    if (Number(Platform.Version) >= 31) {
+      const granted = await Promise.all(
+        bluetoothRuntimePermissions().map((permission) => PermissionsAndroid.check(permission))
+      );
+      return granted.every(Boolean);
+    }
+    return await PermissionsAndroid.check(PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION);
+  } catch {
+    return false;
+  }
+}
+
+/** Whether the local-network gate {@link ensureLocalNetworkPermission} asks for is granted. */
+export async function hasLocalNetworkPermission(): Promise<boolean> {
+  if (Platform.OS !== 'android') return true;
+  const permission =
+    Number(Platform.Version) >= ANDROID_17_API_LEVEL ? ACCESS_LOCAL_NETWORK : NEARBY_WIFI_DEVICES;
+  try {
+    return await PermissionsAndroid.check(permission);
+  } catch {
+    return false;
+  }
 }

@@ -1,3 +1,5 @@
+import { ONBOARDING_COPY } from '@/copy/onboarding';
+
 /**
  * How a sealed location envelope is allowed to travel from this phone to a friend's.
  *
@@ -64,12 +66,14 @@ export interface DeliveryModeCopy {
   readonly title: string;
   /** Uppercase micro-label for the segmented control. */
   readonly segment: string;
-  readonly body: string;
+  /** Over the explanation, under the segmented control; absent when the copy leaves it empty. */
+  readonly heading?: string;
+  readonly body?: string;
   /** A second, quieter line. Present only where the mode has a real caveat to state. */
   readonly note: string | null;
 }
 
-export function mutualFriendRelayExplanation(platform: string): string {
+export function mutualFriendRelayExplanation(platform: string): string | undefined {
   const name =
     platform === 'ios'
       ? 'iOS'
@@ -78,22 +82,25 @@ export function mutualFriendRelayExplanation(platform: string): string {
         : platform === 'web'
           ? 'the web'
           : 'your device';
-  return `Because of restrictions on background processing on ${name}, this method is not reliable for daily usage unless you’re working with a very large pool of mutual friends. Enabling this setting may cause you to have unreliable or missed location updates.`;
+  return ONBOARDING_COPY.deliveryMutual.body?.replace('{platform}', name);
 }
 
+/** The words are in `src/copy/onboarding.md`; Settings → Delivery shows the same ones. */
 export const DELIVERY_MODE_COPY: Readonly<Record<DeliveryMode, DeliveryModeCopy>> = {
   mutual: {
     id: 'mutual',
-    title: 'Mutual Friends',
-    segment: 'MUTUAL FRIENDS',
+    title: ONBOARDING_COPY.deliveryMutual.title,
+    segment: ONBOARDING_COPY.deliveryMutual.segment,
+    heading: ONBOARDING_COPY.deliveryMutual.heading,
     body: mutualFriendRelayExplanation('unknown'),
     note: null,
   },
   stash: {
     id: 'stash',
-    title: 'Mutuals + Stash Server',
-    segment: 'STASH',
-    body: 'If your friends are offline and can’t receive your location updates, using stash will allow friends to catch up with your location updates when they come back online. Stash entries are encrypted and can only be read by your friends, and are auto deleted after a short period of time.',
+    title: ONBOARDING_COPY.deliveryStash.title,
+    segment: ONBOARDING_COPY.deliveryStash.segment,
+    heading: ONBOARDING_COPY.deliveryStash.heading,
+    body: ONBOARDING_COPY.deliveryStash.body,
     note: null,
   },
 };

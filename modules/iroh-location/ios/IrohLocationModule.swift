@@ -1099,6 +1099,20 @@ public final class IrohLocationModule: Module {
       await BluetoothRadioProbe.shared.state()
     }
 
+    // ── Onboarding permission steps (OnboardingPermissions.swift) ───────────────────────────
+
+    Function("bluetoothAuthorization") { () -> String in
+      BluetoothAccess.current()
+    }
+
+    AsyncFunction("requestBluetoothAccess") { () async -> String in
+      await BluetoothAccess.request()
+    }
+
+    AsyncFunction("requestLocalNetworkAccess") { () async -> String in
+      await LocalNetworkProbe.request()
+    }
+
     AsyncFunction("bleCapabilities") { () async throws -> [String: Any] in
       guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
       return bleCapabilitiesDict(await node.bleCapabilities())
