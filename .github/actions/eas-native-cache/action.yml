@@ -69,7 +69,7 @@ runs:
       uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: ~/.cache/streetcryptid/native/${{ inputs.platform }}
-        key: eas-local-native-${{ inputs.platform }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('modules/iroh-location/rust/src/**', 'modules/iroh-location/rust/third_party/**', 'modules/iroh-location/rust/Cargo.toml', 'modules/iroh-location/rust/Cargo.lock', 'scripts/eas-build-pre-install.sh', 'scripts/generate-uniffi-bindings.sh') }}
+        key: eas-local-native-${{ inputs.platform }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('modules/iroh-location/rust/src/**', 'modules/iroh-location/rust/third_party/**', 'modules/iroh-location/rust/Cargo.toml', 'Cargo.toml', 'Cargo.lock', 'third_party/**', 'repeater/protocol/**', 'scripts/eas-build-pre-install.sh', 'scripts/generate-uniffi-bindings.sh') }}
 
     - name: Restore and save the native artifacts
       id: restore-and-save
@@ -77,4 +77,4 @@ runs:
       uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: ~/.cache/streetcryptid/native/${{ inputs.platform }}
-        key: eas-local-native-${{ inputs.platform }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('modules/iroh-location/rust/src/**', 'modules/iroh-location/rust/third_party/**', 'modules/iroh-location/rust/Cargo.toml', 'modules/iroh-location/rust/Cargo.lock', 'scripts/eas-build-pre-install.sh', 'scripts/generate-uniffi-bindings.sh') }}
+        key: eas-local-native-${{ inputs.platform }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('modules/iroh-location/rust/src/**', 'modules/iroh-location/rust/third_party/**', 'modules/iroh-location/rust/Cargo.toml', 'Cargo.toml', 'Cargo.lock', 'third_party/**', 'repeater/protocol/**', 'scripts/eas-build-pre-install.sh', 'scripts/generate-uniffi-bindings.sh') }}

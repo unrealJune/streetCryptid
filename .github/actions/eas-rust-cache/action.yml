@@ -56,7 +56,8 @@ runs:
         # scripts/eas-build-pre-install.sh runs from the copy EAS makes under runner.temp, so the
         # target directory has to be an absolute path back into the cached workspace checkout.
         {
-          echo "CARGO_TARGET_DIR=$GITHUB_WORKSPACE/modules/iroh-location/rust/target"
+          # The root Cargo workspace's target directory.
+          echo "CARGO_TARGET_DIR=$GITHUB_WORKSPACE/target"
           echo "RUSTUP_TOOLCHAIN=stable"
           echo "SC_EAS_RUST_CACHE_SAVE=${{ inputs.save }}"
         } >> "$GITHUB_ENV"
@@ -69,7 +70,7 @@ runs:
       id: cargo-cache
       uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
       with:
-        workspaces: modules/iroh-location/rust -> target
+        workspaces: . -> target
         # shared-key (unlike key) also drops the job id from the prefix, so the warm job and the
         # build job share one entry.
         shared-key: eas-local-${{ inputs.platform }}

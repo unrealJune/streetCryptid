@@ -10,7 +10,8 @@ fi
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 crate_dir="$repo_root/modules/iroh-location/rust"
-target_dir="${CARGO_TARGET_DIR:-$crate_dir/target}"
+# The crate is a member of the root Cargo workspace, whose target directory is the repository's.
+target_dir="${CARGO_TARGET_DIR:-$repo_root/target}"
 if [[ "$target_dir" != /* ]]; then
   target_dir="$crate_dir/$target_dir"
 fi
@@ -37,17 +38,30 @@ else
   SHA_CMD=(shasum -a 256)
 fi
 
-# Identity of a native build: the crate sources, the exact compiler, and the two scripts that
-# decide how they are compiled. Paths are kept RELATIVE on purpose -- the warm job on main runs
-# from $GITHUB_WORKSPACE while this hook runs from the copy EAS makes under runner.temp, and an
-# absolute path in the hash input would make those two never agree.
+# Identity of a native build: the crate sources, everything the workspace feeds into them, the
+# exact compiler, and the two scripts that decide how they are compiled. Paths are kept RELATIVE on
+# purpose -- the warm job on main runs from $GITHUB_WORKSPACE while this hook runs from the copy EAS
+# makes under runner.temp, and an absolute path in the hash input would make those two never agree.
+#
+# The workspace inputs are the ones a stale .so would otherwise hide: the root Cargo.toml (its
+# profiles and [patch.crates-io]), the one Cargo.lock, the patched crates under third_party/, and
+# repeater/protocol, which the phone links by path -- a protocol change that reused an old .so
+# would ship an old roster rule whose UniFFI checksums still match, with no error anywhere. The
+# server is deliberately absent: the phone does not link it.
 compute_digest() {
   {
     rustc -V 2> /dev/null || echo 'rustc-unknown'
-    printf 'profile-v1\n'
+    printf 'profile-v2\n'
     (
       cd "$crate_dir"
-      find src third_party Cargo.toml Cargo.lock -type f |
+      find src third_party Cargo.toml -type f |
+        LC_ALL=C sort |
+        tr '\n' '\0' |
+        xargs -0 "${SHA_CMD[@]}"
+    )
+    (
+      cd "$repo_root"
+      find Cargo.toml Cargo.lock third_party repeater/protocol -type f |
         LC_ALL=C sort |
         tr '\n' '\0' |
         xargs -0 "${SHA_CMD[@]}"

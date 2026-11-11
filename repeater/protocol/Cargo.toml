@@ -3,13 +3,11 @@ name = "streetcryptid-repeater"
 version = "0.1.0"
 edition = "2021"
 publish = false
-# A member of the server's workspace, which is not a parent directory. Goes with PR B's root workspace.
-workspace = "../server"
 license = "AGPL-3.0-or-later"
 description = "What a streetCryptid phone and a repeater must agree on byte for byte: the roster, the attestation chain, and the streetcryptid/repeater/1 wire"
 
-# Pure on purpose: no iroh, no tokio, no I/O. The repeater (trail-stash, iroh 1.0) and the app's
-# core (iroh 1.4) each bring their own transport and call into this for every byte that crosses
+# Pure on purpose: no iroh, no tokio, no I/O. The repeater (trail-stash) and the app's core each
+# bring their own transport and call into this for every byte that crosses
 # between them, so the two sides can never disagree about what an op, a cert or a proof is.
 [dependencies]
 serde = { version = "1", features = ["derive"] }

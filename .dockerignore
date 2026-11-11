@@ -1,10 +1,17 @@
 # The only image built from this repository is the repeater server's
 # (`docker build -f repeater/server/Dockerfile .`). An allowlist, so the context never carries
-# node_modules, every target/ or the app. The root Cargo workspace files join it with PR B
-# (docs/MONOREPO.md).
+# node_modules, every target/ or the app.
+#
+# Cargo loads every workspace member's manifest -- and the phone's path dependencies -- even for
+# `-p trail-stash`, so the phone crates come along whole. They are a few MB of source and are
+# never compiled here.
 *
+!Cargo.toml
+!Cargo.lock
+!third_party/
 !repeater/protocol/
 !repeater/server/Cargo.toml
-!repeater/server/Cargo.lock
 !repeater/server/src/
+!modules/iroh-location/rust/
+!modules/iroh-location/rust-wasm/
 **/target/

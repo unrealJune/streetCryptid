@@ -37,7 +37,7 @@ social_db="$app_data/Documents/SQLite/streetcryptid.social.db"
 events_db="$app_data/Documents/SQLite/streetcryptid.events.db"
 
 observer_state="$("$SCRIPT_DIR/ensure-stash-observer.sh" "$DEVICE" "$OBSERVER_STATE_DIR")"
-observer_bin="$REPO_ROOT/modules/iroh-location/rust/target/debug/trail-stash-client"
+observer_bin="$REPO_ROOT/target/debug/trail-stash-client"
 
 observe_once() {
   perl -e 'alarm shift; exec @ARGV' 45 \

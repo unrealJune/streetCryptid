@@ -87,7 +87,7 @@ jobs:
           path: modules/iroh-location/web
           # Must stay byte-identical to the key in copilot-setup-steps.yml so the two workflows
           # share one entry instead of each rebuilding the bindings.
-          key: wasm-output-${{ runner.os }}-rust-1.97.0-wasm-pack-0.15.0-binaryen-117-${{ hashFiles('modules/iroh-location/rust-wasm/Cargo.lock', 'modules/iroh-location/rust-wasm/Cargo.toml', 'modules/iroh-location/rust-wasm/src/**/*.rs', 'modules/iroh-location/rust/Cargo.lock', 'modules/iroh-location/rust/Cargo.toml', 'modules/iroh-location/rust/src/**/*.rs', 'justfile') }}
+          key: wasm-output-${{ runner.os }}-rust-1.97.0-wasm-pack-0.15.0-binaryen-117-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'third_party/**', 'modules/iroh-location/rust-wasm/Cargo.toml', 'modules/iroh-location/rust-wasm/src/**/*.rs', 'modules/iroh-location/rust/Cargo.toml', 'modules/iroh-location/rust/src/**/*.rs', 'justfile') }}
 
       - name: Install Linux build dependencies
         if: steps.wasm-bindings.outputs.cache-hit != 'true'
@@ -109,7 +109,7 @@ jobs:
         if: steps.wasm-bindings.outputs.cache-hit != 'true'
         uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
-          workspaces: modules/iroh-location/rust-wasm -> target
+          workspaces: . -> target
           key: wasm
           save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
@@ -202,7 +202,7 @@ jobs:
       - name: Restore Rust compilation cache
         uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
-          workspaces: modules/iroh-location/rust -> target
+          workspaces: . -> target
           key: native
           save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 

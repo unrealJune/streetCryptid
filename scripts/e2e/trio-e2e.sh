@@ -69,7 +69,7 @@ done
 log "Edge 1/3: pairing $DEVICE_A <-> $DEVICE_B"
 bash "$SCRIPT_DIR/pairing-e2e.sh" "$DEVICE_A" "$DEVICE_B" >&2
 
-STASH_CLI="$REPO_ROOT/modules/iroh-location/rust/target/debug/trail-stash-client"
+STASH_CLI="$REPO_ROOT/target/debug/trail-stash-client"
 # One retry per edge. The SAS handshake has a real deadline, and the observer's side of it starts
 # a fresh CLI process — iroh node, relay discovery, first dial — against a state directory the
 # PREVIOUS edge's process has only just released. Back to back, that occasionally misses the

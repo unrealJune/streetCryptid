@@ -110,13 +110,22 @@ make_tree() {
     "$root/scripts" \
     "$root/modules/iroh-location/rust/src" \
     "$root/modules/iroh-location/rust/third_party/vendored" \
+    "$root/third_party/noq" \
+    "$root/repeater/protocol/src" \
+    "$root/repeater/server/src" \
     "$root/modules/iroh-location/android/src/main/java" \
     "$root/modules/iroh-location/ios"
 
   printf 'pub fn lib() {}\n' > "$root/modules/iroh-location/rust/src/lib.rs"
   printf 'pub fn vendored() {}\n' > "$root/modules/iroh-location/rust/third_party/vendored/lib.rs"
   printf '[package]\nname = "iroh-location"\n' > "$root/modules/iroh-location/rust/Cargo.toml"
-  printf '# lockfile\n' > "$root/modules/iroh-location/rust/Cargo.lock"
+  # The root workspace: one manifest, one lockfile, the shared patch, and the protocol crate the
+  # phone links by path. A server source sits beside them to prove it is NOT a digest input.
+  printf '[workspace]\n' > "$root/Cargo.toml"
+  printf '# lockfile\n' > "$root/Cargo.lock"
+  printf 'pub fn noq() {}\n' > "$root/third_party/noq/lib.rs"
+  printf 'pub fn roster() {}\n' > "$root/repeater/protocol/src/lib.rs"
+  printf 'fn main() {}\n' > "$root/repeater/server/src/main.rs"
 
   cp "$repo_root/scripts/eas-build-pre-install.sh" "$root/scripts/"
   cp "$repo_root/scripts/build-profile.sh" "$root/scripts/"
@@ -224,11 +233,26 @@ run_hook "$test_root/b" android 'arm64-v8a' # settle on a hit before each mutati
 assert_rebuild_after 'a crate source' \
   bash -c "printf 'pub fn changed() {}\n' >> '$test_root/b/modules/iroh-location/rust/src/lib.rs'"
 assert_rebuild_after 'the lockfile' \
-  bash -c "printf '# bumped\n' >> '$test_root/b/modules/iroh-location/rust/Cargo.lock'"
+  bash -c "printf '# bumped\n' >> '$test_root/b/Cargo.lock'"
+assert_rebuild_after 'the workspace manifest' \
+  bash -c "printf '[profile.release]\n' >> '$test_root/b/Cargo.toml'"
+assert_rebuild_after 'the shared noq patch' \
+  bash -c "printf 'pub fn fixed() {}\n' >> '$test_root/b/third_party/noq/lib.rs'"
+# The phone links the protocol by path, so a protocol-only change must miss: reusing the old .so
+# would ship an old roster rule whose UniFFI checksums still match.
+assert_rebuild_after 'the repeater protocol' \
+  bash -c "printf 'pub fn rule() {}\n' >> '$test_root/b/repeater/protocol/src/lib.rs'"
 assert_rebuild_after 'a vendored dependency' \
   bash -c "printf 'pub fn v2() {}\n' >> '$test_root/b/modules/iroh-location/rust/third_party/vendored/lib.rs'"
 assert_rebuild_after 'the build script' \
   bash -c "printf '# comment\n' >> '$test_root/b/scripts/eas-build-pre-install.sh'"
+
+# The phone does not link the server: changing it must NOT cost a native rebuild.
+printf 'fn changed() {}\n' >> "$test_root/b/repeater/server/src/main.rs"
+run_hook "$test_root/b" android 'arm64-v8a'
+if built; then
+  fail "a server-only change invalidated the native cache"
+fi
 
 # The Rust toolchain is the input GitHub's hashFiles cannot see, which is exactly why the hook
 # computes a digest of its own instead of trusting the cache key.
@@ -253,9 +277,10 @@ rm -rf \
   "$test_root/b/modules/iroh-location/ios/generated"
 
 # tree b has drifted from tree a by now, so restore it before expecting a hit.
-rm -rf "$test_root/b/modules/iroh-location/rust" "$test_root/b/scripts"
-cp -R "$test_root/a/modules/iroh-location/rust" "$test_root/b/modules/iroh-location/rust"
-cp -R "$test_root/a/scripts" "$test_root/b/scripts"
+for path in modules/iroh-location/rust scripts Cargo.toml Cargo.lock third_party repeater; do
+  rm -rf "${test_root:?}/b/$path"
+  cp -R "$test_root/a/$path" "$test_root/b/$path"
+done
 
 run_hook "$test_root/b" ios
 if built; then
@@ -268,4 +293,4 @@ fi
 [[ -f "$test_root/b/modules/iroh-location/ios/generated/iroh_location.swift" ]] ||
   fail "the iOS cache hit did not restore the Swift bindings"
 
-echo "The native artifact cache reused artifacts across checkouts and ABI subsets, and rebuilt for every change to the sources, the lockfile, the build script, and the toolchain."
+echo "The native artifact cache reused artifacts across checkouts and ABI subsets, and rebuilt for every change to the sources, the workspace (manifest, lockfile, noq patch, repeater protocol), the build script, and the toolchain, and kept serving through a server-only change."

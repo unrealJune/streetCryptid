@@ -50,10 +50,6 @@ zeroize = { version = "1", features = ["derive"] }
 [package.metadata.wasm-pack.profile.release]
 wasm-opt = ["--enable-nontrapping-float-to-int", "--enable-bulk-memory"]
 
-[profile.release]
-codegen-units = 1
-strip = "symbols"
-debug = false
-lto = true
-opt-level = "z"
-panic = "abort"
+# Its release settings differ from the phone's (fat LTO, one codegen unit, panic = "abort"); Cargo
+# reads profiles only at the workspace root, so `just build-wasm` applies them through
+# CARGO_PROFILE_RELEASE_* (see /Cargo.toml).
