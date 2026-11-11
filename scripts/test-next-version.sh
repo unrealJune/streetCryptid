@@ -41,9 +41,13 @@ EOF
 EOF
 }
 
+# Every commit touches a file: next-version.sh scopes its range by path, and git prunes a commit
+# that changes nothing from a path-limited log.
 commit() {
   local message="$1"
-  git -C "$work" commit --quiet --allow-empty -m "$message"
+  echo "$message" >> "$work/CHANGES"
+  git -C "$work" add -A
+  git -C "$work" commit --quiet -m "$message"
 }
 
 field() {
@@ -119,6 +123,31 @@ commit "chore: shuffle comments"
 git -C "$work" checkout --quiet -
 git -C "$work" merge --quiet --no-ff -m "feat: merge the topic branch" topic
 assert_bump "merge subject ignored" false none 1.0.0
+
+# The repeater products release under their own tags. A server tag is never the app's previous
+# release, and a commit confined to repeater/server or repeater/windows never cuts a store release.
+git -C "$work" tag v1.3.0
+git -C "$work" tag server-v9.9.9
+commit_in() {
+  local path="$1" message="$2"
+  mkdir -p "$work/$(dirname "$path")"
+  echo "$message" >> "$work/$path"
+  git -C "$work" add -A
+  git -C "$work" commit --quiet -m "$message"
+}
+commit_in repeater/server/src/lib.rs "feat(server): a repeater feature"
+commit_in repeater/windows/app/App.cs "fix(windows): a desktop fix"
+assert_bump "server tags are not app releases" false none 1.0.0
+expect "previous tag skips server-v" v1.3.0 "$(field previous_tag "$(next_version)")"
+
+commit_in repeater/protocol/src/roster.rs "fix(protocol): the phone links this"
+assert_bump "protocol changes still release the app" true patch 1.0.1
+
+git -C "$work" tag v1.4.0
+commit_in repeater/server/README.md "$(printf 'feat(server)!: drop the v0 API
+
+BREAKING CHANGE: server only.')"
+assert_bump "a breaking server change is not an app major" false none 1.0.0
 
 # Version bookkeeping is only trustworthy when both manifests agree.
 write_manifests 1.0.0
