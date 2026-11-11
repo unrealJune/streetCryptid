@@ -86,7 +86,9 @@ export interface MapEngineState {
   /**
    * Report a live (mid-gesture/fling) transform for the readouts only: the `readouts` store is
    * re-measured at it; nothing is built, the committed camera does not move, and nothing here
-   * re-renders. The caller throttles it: each call is one coverage measurement on the JS thread.
+   * re-renders. The measurement runs a macrotask later, coalesced (the newest camera wins), so the
+   * gesture's own JS hop — which also moves the labels and starts the prefetch — does not wait on
+   * it. A `commit` supersedes a measurement still pending. The caller still throttles the calls.
    */
   readonly track: (t: ViewTransform) => void;
   /**
@@ -218,6 +220,10 @@ export function useMapEngine(
    * keeps them stable across region publications.
    */
   const measureRef = useRef<(settle: boolean) => void>(() => {});
+  /** Whether `readoutCameraRef` is a committed camera rather than a live one from `track`. */
+  const readoutSettledRef = useRef(true);
+  /** The coalesced live measurement `track` has scheduled, if any. */
+  const pendingTrackRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [region, setRegion] = useState<MapRegion | null>(null);
   /** A build in flight over an uncovered area (drives the skeleton). */
   const [pending, setPending] = useState<PendingLoad | null>(null);
@@ -378,7 +384,12 @@ export function useMapEngine(
       // Absolute commits are idempotent — dedupe to skip identical rebuild churn
       // (pan and pinch each finalize the same gesture).
       setTarget((prev) => (cameraAlmostEqual(prev, next, viewport) ? prev : next));
+      if (pendingTrackRef.current !== null) {
+        clearTimeout(pendingTrackRef.current);
+        pendingTrackRef.current = null;
+      }
       readoutCameraRef.current = next;
+      readoutSettledRef.current = true;
       measureRef.current(true);
     },
     [viewport, anchor, constraints]
@@ -392,9 +403,21 @@ export function useMapEngine(
         viewport,
         constraints
       );
-      measureRef.current(false);
+      readoutSettledRef.current = false;
+      if (pendingTrackRef.current !== null) return;
+      pendingTrackRef.current = setTimeout(() => {
+        pendingTrackRef.current = null;
+        measureRef.current(false);
+      }, 0);
     },
     [viewport, anchor, constraints]
+  );
+  useEffect(
+    () => () => {
+      if (pendingTrackRef.current !== null) clearTimeout(pendingTrackRef.current);
+      pendingTrackRef.current = null;
+    },
+    []
   );
 
   const prefetchAt = useCallback(
@@ -444,16 +467,18 @@ export function useMapEngine(
   );
 
   // Measure the readouts at `readoutCameraRef` into the store. `settle` also advances
-  // `settledCoverage`, the copy for consumers that must not re-render mid-gesture.
+  // `settledCoverage` and `settledPlaceName`, the copies for consumers that must not re-render
+  // mid-gesture.
   const measure = useCallback(
     (settle: boolean) => {
       const cam = readoutCameraRef.current;
       const coverage = viewport
         ? quantizeCoverage(coverageInView(exploration.index(), grid, cam, viewport))
         : 0;
+      const placeName = region ? nearestPlaceName(region.places, cam.center, cam.zoom) : null;
       sink.set({
         coverage,
-        ...(settle ? { settledCoverage: coverage } : null),
+        ...(settle ? { settledCoverage: coverage, settledPlaceName: placeName } : null),
         // The same cutoff `coverageInView` uses to bail — read it directly so the chrome can tell
         // "0% explored" apart from "no number means anything here". NOT the same as whether the
         // layer draws: the ladder keeps drawing coarse rungs far below this.
@@ -462,7 +487,7 @@ export function useMapEngine(
         // county (`headlineTiers` in `readout.ts`). The region's places, not the camera's: a
         // prefetch keeps the region ahead of a pan, so the live center is inside it everywhere but
         // the leading edge of a fast fling.
-        placeName: region ? nearestPlaceName(region.places, cam.center, cam.zoom) : null,
+        placeName,
       });
     },
     [viewport, exploration, grid, region, sink]
@@ -470,9 +495,11 @@ export function useMapEngine(
   useEffect(() => {
     measureRef.current = measure;
   }, [measure]);
-  // A newly published region only changes the place name (and may land mid-gesture), so it does
-  // not settle. New exploration or a resize changes what the settled number should say.
-  useEffect(() => measureRef.current(false), [region]);
+  // A newly published region only changes the place name. It settles only while the readouts sit
+  // at a committed camera: the build a commit started lands after it, and the settled name has to
+  // come from that region, while a prefetch landing mid-gesture must not re-render the screen.
+  // New exploration or a resize changes what the settled number should say.
+  useEffect(() => measureRef.current(readoutSettledRef.current), [region]);
   useEffect(
     () => measureRef.current(true),
     // explorationVersion re-keys it: the index is identity-stable but mutable.
