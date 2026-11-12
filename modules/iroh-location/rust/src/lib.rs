@@ -1342,6 +1342,24 @@ impl LocationNode {
     /// Best-effort by design: a failure means offline delivery is degraded for those fixes, not
     /// that the live engine or a later [`Self::sync_latest`] is broken.
     pub async fn push_trail(&self, peer_tickets: Vec<String>) -> Result<(), LocationError> {
+        self.push_trail_within(
+            peer_tickets,
+            std::time::Duration::from_secs(docs::PUSH_TIMEOUT_SECS),
+        )
+        .await
+    }
+
+    /// [`Self::push_trail`] under a caller's deadline instead of [`docs::PUSH_TIMEOUT_SECS`].
+    ///
+    /// The native drain on a background iOS wake passes what is left of the OS's allowance (see
+    /// [`NodeSink::flush`]), because a push that outlives the background-task assertion is not
+    /// cut short — the process is suspended inside it, and on 2026-11-10 one `trail.push` read
+    /// 162.8 s that way. `budget` is recorded as `push.budget_ms`.
+    async fn push_trail_within(
+        &self,
+        peer_tickets: Vec<String>,
+        budget: std::time::Duration,
+    ) -> Result<(), LocationError> {
         use tracing::Instrument;
         let requested = peer_tickets.len();
         let peers: Vec<EndpointAddr> = peer_tickets
@@ -1354,6 +1372,7 @@ impl LocationNode {
             sc.author = %telemetry::short_hex(&self.author),
             sync.peers_requested = requested,
             sync.peers_dialed = peers.len(),
+            push.budget_ms = budget.as_millis() as u64,
             entries_sent = tracing::field::Empty,
             peers_finished = tracing::field::Empty,
             peers_failed = tracing::field::Empty,
@@ -1376,7 +1395,6 @@ impl LocationNode {
             let trail = started.trail.clone();
             let ns = trail.own_namespace();
 
-            let budget = std::time::Duration::from_secs(docs::PUSH_TIMEOUT_SECS);
             let sent = trail.push(ns, peers, budget).await.map_err(|e| {
                 tracing::warn!(error = %e, "trail push failed");
                 LocationError::Network(e.to_string())
@@ -4535,6 +4553,44 @@ fn record_wrap_drops(dropped: &[(Vec<u8>, sessions::DropReason)]) {
 /// and one ratchet position spent per recipient.
 struct NodeSink<'a> {
     node: &'a LocationNode,
+    /// When the caller's time runs out, for a budgeted call (`ingest_fix_within`,
+    /// `heartbeat_fix_within`); `None` pushes on the ordinary [`docs::PUSH_TIMEOUT_SECS`].
+    deadline: Option<tokio::time::Instant>,
+}
+
+/// Below this a push is not started: a cold dial alone takes longer, and starting one the OS will
+/// suspend half-way is how a `trail.push` comes to last minutes. The envelopes wait in the replica.
+const PUSH_MIN_BUDGET: std::time::Duration = std::time::Duration::from_millis(2_000);
+
+impl<'a> NodeSink<'a> {
+    fn unbounded(node: &'a LocationNode) -> Self {
+        Self {
+            node,
+            deadline: None,
+        }
+    }
+
+    /// A sink whose push must finish `budget_ms` from now, counted from the start of the call so
+    /// that the drain-lock wait and the seal come out of the same allowance as the push. A budget
+    /// too large to represent is no budget at all.
+    fn within(node: &'a LocationNode, budget_ms: u64) -> Self {
+        Self {
+            node,
+            deadline: tokio::time::Instant::now()
+                .checked_add(std::time::Duration::from_millis(budget_ms)),
+        }
+    }
+
+    /// The push deadline right now: the ordinary one, clamped to what is left of the caller's.
+    fn push_budget(&self) -> std::time::Duration {
+        let full = std::time::Duration::from_secs(docs::PUSH_TIMEOUT_SECS);
+        match self.deadline {
+            None => full,
+            Some(deadline) => deadline
+                .saturating_duration_since(tokio::time::Instant::now())
+                .min(full),
+        }
+    }
 }
 
 impl publish::PublishSink for NodeSink<'_> {
@@ -4627,8 +4683,20 @@ impl publish::PublishSink for NodeSink<'_> {
         if config.is_empty() {
             return Ok(publish::FlushOutcome::NoTargets);
         }
+        // Under a caller's deadline, a push that cannot fit is not started. Recorded as a span of
+        // its own: a deferred push leaves no `trail.push`, and an absence is not evidence.
+        let budget = self.push_budget();
+        if budget < PUSH_MIN_BUDGET {
+            tracing::info_span!(
+                "trail.push.deferred",
+                push.budget_ms = budget.as_millis() as u64,
+                sync.peers_requested = config.peer_tickets.len(),
+            )
+            .in_scope(|| {});
+            return Ok(publish::FlushOutcome::Deferred);
+        }
         // This is the push. Its success or failure is the whole of whether the entries left.
-        node.push_trail(config.peer_tickets.clone())
+        node.push_trail_within(config.peer_tickets.clone(), budget)
             .await
             .map_err(|e| publish::PublishError::Send(e.to_string()))?;
         // The blob upload is a SEPARATE fact and must not be able to discard the push above.
@@ -4643,12 +4711,32 @@ impl publish::PublishSink for NodeSink<'_> {
         // Stash-only and gated on the OPT-IN, not on the stash merely being built into this
         // bundle. Uploading for a user who switched the stash off would PUT sealed envelopes into
         // a namespace nothing registered.
+        //
+        // Under a deadline it gets whatever the push left, and is skipped when that is nothing:
+        // the push is what the friend's map reads, and the stash reports a missing blob itself.
         if let Some((base_url, psk)) = config.stash() {
-            if let Err(err) = node.upload_trail_content(base_url.to_string(), psk).await {
-                tracing::warn!(
+            let upload = node.upload_trail_content(base_url.to_string(), psk);
+            let result = match self.deadline {
+                None => Some(upload.await),
+                Some(deadline) => {
+                    if deadline.saturating_duration_since(tokio::time::Instant::now())
+                        < PUSH_MIN_BUDGET
+                    {
+                        None
+                    } else {
+                        tokio::time::timeout_at(deadline, upload).await.ok()
+                    }
+                }
+            };
+            match result {
+                Some(Ok(_)) => {}
+                Some(Err(err)) => tracing::warn!(
                     error = %err,
                     "trail content upload failed; entries reconciled but their blobs may be missing"
-                );
+                ),
+                None => tracing::warn!(
+                    "trail content upload skipped: the caller's background budget ran out"
+                ),
             }
         }
         Ok(publish::FlushOutcome::Pushed)
@@ -4714,7 +4802,7 @@ impl LocationNode {
         now_ms: u64,
     ) -> Result<publish::IngestOutcome, LocationError> {
         let ports = DrainPorts::of(self).await?;
-        let sink = NodeSink { node: self };
+        let sink = NodeSink::unbounded(self);
         ports
             .engine(self, &sink)
             .ingest(fix, battery, interval_ms, now_ms)
@@ -4739,7 +4827,55 @@ impl LocationNode {
         parked: Option<bool>,
     ) -> Result<publish::IngestOutcome, LocationError> {
         let ports = DrainPorts::of(self).await?;
-        let sink = NodeSink { node: self };
+        let sink = NodeSink::unbounded(self);
+        ports
+            .engine(self, &sink)
+            .heartbeat(
+                publish::Motion::from_parked(parked),
+                battery,
+                interval_ms,
+                now_ms,
+            )
+            .await
+            .map_err(|e| LocationError::Network(e.to_string()))
+    }
+
+    /// [`Self::ingest_fix`] for a caller with a deadline: an iOS background wake, which owns only
+    /// the seconds its background-task assertion buys.
+    ///
+    /// The gate, the seal and the commit run exactly as unbudgeted — they are local, and the seal
+    /// is the part that must not be lost. Only the push is bounded: clamped to what is left of
+    /// `budget_ms` (counted from this call's start), and not started when that is under two
+    /// seconds, in which case the outcome says `push_deferred` and the envelopes wait in the
+    /// replica for the next push.
+    pub async fn ingest_fix_within(
+        &self,
+        fix: LocationFix,
+        battery: gate::BatteryState,
+        interval_ms: u64,
+        now_ms: u64,
+        budget_ms: u64,
+    ) -> Result<publish::IngestOutcome, LocationError> {
+        let sink = NodeSink::within(self, budget_ms);
+        let ports = DrainPorts::of(self).await?;
+        ports
+            .engine(self, &sink)
+            .ingest(fix, battery, interval_ms, now_ms)
+            .await
+            .map_err(|e| LocationError::Network(e.to_string()))
+    }
+
+    /// [`Self::heartbeat_fix`] under a deadline. See [`Self::ingest_fix_within`].
+    pub async fn heartbeat_fix_within(
+        &self,
+        battery: gate::BatteryState,
+        interval_ms: u64,
+        now_ms: u64,
+        parked: Option<bool>,
+        budget_ms: u64,
+    ) -> Result<publish::IngestOutcome, LocationError> {
+        let sink = NodeSink::within(self, budget_ms);
+        let ports = DrainPorts::of(self).await?;
         ports
             .engine(self, &sink)
             .heartbeat(
@@ -4764,7 +4900,7 @@ impl LocationNode {
         now_ms: u64,
     ) -> Result<publish::IngestOutcome, LocationError> {
         let ports = DrainPorts::of(self).await?;
-        let sink = NodeSink { node: self };
+        let sink = NodeSink::unbounded(self);
         ports
             .engine(self, &sink)
             .publish_introduction(now_ms)

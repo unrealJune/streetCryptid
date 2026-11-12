@@ -100,7 +100,7 @@ bg.refresh         (the OS-scheduled periodic wake; bg.refresh.expired if iOS cu
       └ publish.fix        (sc.seq)
         └ docs.write       (sc.entry_hash, sc.envelope, dropped, sc.drop_reason?, dropped_peers?)  ─ LOCAL replica; live engine broadcasts it
       └ session.recover    (desynced, primed, restarted, requested, withdrawn, await_prekey, no_key, control_written)  ─ §4.6, once per drain
-      └ trail.push         (entries_sent, finished)  ─ reconciliation ─►  stash.entry.received (sc.entry_hash)
+      └ trail.push         (entries_sent, finished, push.budget_ms)  ─ reconciliation ─►  stash.entry.received (sc.entry_hash)
         ├ trail.push.live       (waiting on the node lock)
         ├ trail.push.open       (doc handle + event subscription)
         ├ trail.push.start_sync (peers)
@@ -110,6 +110,7 @@ bg.refresh         (the OS-scheduled periodic wake; bg.refresh.expired if iOS cu
         ├ trail.push.peer  (sc.peer, peer.outcome)
         ├ peer.contact     (send, per peer that finished)
         └ trail.content.upload (stash blob PUT; stash opted in only)
+      └ trail.push.deferred (push.budget_ms)  ─ iOS: sealed, no background time left to push; instead of trail.push
                                                         replica watch: peer.contact (recv, from_author?)
                                                                   └ trail.sync.app (recovered)
                                                                     └ fix.received.app (sc.seq, transport_path, transport_peer?)
@@ -356,6 +357,30 @@ phase spans say where. `trail.push.wait{ended}` is `all-reported` (every dialled
 { name = "trail.push.wait" } | select(span.ended, span.pending)
 ```
 
+### A push inside an iOS background wake (`push.budget_ms`, `trail.push.deferred`)
+
+The 30 s deadline is a monotonic clock, and a monotonic clock does not advance while the process is
+suspended. On iOS a native publish used to run as a bare `Task` after the Core Location callback
+returned, with no background-task assertion, so iOS suspended it wherever it was: over 2026-11-08..11
+`trail.push.wait` read p50 47 s and up to 1507 s on iPhones, and on 2026-11-11 a `CLVisit` arrival's
+parked declaration on `e485af31aa` was never sealed at all. Since then every native publish runs
+under a `PublishAssertion` (`ios/PublishAssertion.swift`) taken in the callback itself, and its drain
+is budgeted (`ingest_fix_within` / `heartbeat_fix_within`): the seal always runs, and the push gets
+what is left of `backgroundTimeRemaining` less 5 s (`push.budget_ms` on `trail.push`; 30 000 is the
+ordinary unbudgeted case). With under 2 s left the push is not started and `trail.push.deferred`
+says so; `engine.ingest` / `engine.heartbeat` carry `push_deferred`, and the runtime asks for a
+`NativeRefreshTask` wake if none is pending, because a phone that has just parked will not move to
+give Core Location a reason to wake it.
+
+On a fixed build, a `trail.push.wait` far past its `budget_ms` on an iPhone is the assertion not
+holding, not slow peers:
+
+```traceql
+{ name = "trail.push" && resource.os.type = "ios" && duration > 35s } | select(span.push.budget_ms, span.finished, span.peers_silent)
+{ name = "trail.push.deferred" } | select(resource.service.instance.id, span.push.budget_ms)
+{ name = "location.runtime" && span.location.event = "publish_assertion" } | select(span.location.reason, span.location.detail)
+```
+
 **`stash.grant`** (`streetcryptid-core`, Rust) — the node registering our trail namespace and every
 friend's with the stash (`POST /v1/namespaces`, read ticket only). The stash keeps that list in
 memory and forgets it on restart, after which every sync with it ends `NotFound` and every content
@@ -515,14 +540,15 @@ invisible.
 `location.runtime` (`streetcryptid-core`, so it ships from a JS-free process) is that state machine
 reporting itself, from `LocationRuntimeReporter.swift` through `location_runtime.rs`:
 
-| `location.event`                                                           | Fires                                                                                                                                                                          |
-| -------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `pulse`                                                                    | every 5 min from a background timer while the process runs — NOT from the delivery path                                                                                        |
-| `main_stalled`                                                             | the pulse's main-thread probe went unanswered for 10 s (once per stall)                                                                                                        |
-| `started`                                                                  | `start()` armed the runtime; `location.reason` is the wake reason                                                                                                              |
-| `transition`                                                               | `moving` ⇄ `stopped`; `location.reason` is the stop evidence or the wake reason                                                                                                |
-| `visit` / `fence_exit`                                                     | a `CLVisit` (`arrival` / `departure`) or a stop-anchor exit. A visit's `location.detail` is what it did: `parked`, `pending`, `stale`, `already-parked`, `unparked`, `ignored` |
-| `paused` / `resumed` / `location_error` / `fence_failed` / `authorization` | the Core Location callbacks that used to reach only `NSLog`                                                                                                                    |
+| `location.event`                                                           | Fires                                                                                                                                                                                                                                                                                                                  |
+| -------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pulse`                                                                    | every 5 min from a background timer while the process runs — NOT from the delivery path                                                                                                                                                                                                                                |
+| `main_stalled`                                                             | the pulse's main-thread probe went unanswered for 10 s (once per stall)                                                                                                                                                                                                                                                |
+| `started`                                                                  | `start()` armed the runtime; `location.reason` is the wake reason                                                                                                                                                                                                                                                      |
+| `transition`                                                               | `moving` ⇄ `stopped`; `location.reason` is the stop evidence or the wake reason                                                                                                                                                                                                                                        |
+| `visit` / `fence_exit`                                                     | a `CLVisit` (`arrival` / `departure`) or a stop-anchor exit. A visit's `location.detail` is what it did: `parked`, `pending`, `stale`, `already-parked`, `unparked`, `ignored`                                                                                                                                         |
+| `paused` / `resumed` / `location_error` / `fence_failed` / `authorization` | the Core Location callbacks that used to reach only `NSLog`                                                                                                                                                                                                                                                            |
+| `publish_assertion`                                                        | native publish work outlived its background-task assertion: `reason = expired` (iOS ran the expiration handler mid-seal or mid-push) or `stranded` (a later process found assertions an earlier one never ended — killed holding them). `location.detail` has the lane and `held_ms`. Also counted in `wake.publish_*` |
 
 Read a pulse like this:
 
@@ -905,6 +931,9 @@ foreground resume. Its value is in the _mismatches_:
 | `wake.pull_overruns` > 0                                                                            | a pull came back well past its budget: the process was suspended mid-pull                                                                                                                                                                                                                |
 | `wake.pull_delivered` small against `wake.syncs`                                                    | most pulls bring nothing — the friends are not publishing, or the stash is not reachable                                                                                                                                                                                                 |
 | `wake.pull_no_time` climbing                                                                        | wakes arrive with too little background time left to give a pull a budget                                                                                                                                                                                                                |
+| `wake.publish_expired` or `wake.publish_stranded` > 0                                               | iOS cut a native publish off mid-seal or mid-push (`expired`), or the process died holding its assertion (`stranded`). Whatever was sealed waits in the replica for the next push; read `location.runtime{event=publish_assertion}` for the lane                                         |
+| `wake.publish_push_deferred` climbing                                                               | publishes are sealing with no background time left to push — the wakes are too short for the peers, or a claim and its fix are sharing one wake. Each one asks for a `NativeRefreshTask` wake                                                                                            |
+| `wake.publish_held_ms_max` near 30000                                                               | a publish used the whole ~30 s allowance an assertion buys. `publish_held_ms_total / publish_begun` is the typical hold                                                                                                                                                                  |
 | `bg.refresh.expired` present at all                                                                 | iOS is cutting the periodic refresh short. Invisible before this span existed: a terminated refresh and one that was never scheduled both leave a span that never ends                                                                                                                   |
 
 `location.*` comes from the native runtime's `nativeBackgroundState()` (`BackgroundLocationRuntime`

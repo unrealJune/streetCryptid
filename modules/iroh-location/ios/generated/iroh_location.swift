@@ -1044,6 +1044,11 @@ public protocol LocationNodeProtocol: AnyObject, Sendable {
     func heartbeatFix(battery: BatteryState, intervalMs: UInt64, nowMs: UInt64, parked: Bool?) async throws  -> IngestOutcome
     
     /**
+     * [`Self::heartbeat_fix`] under a deadline. See [`Self::ingest_fix_within`].
+     */
+    func heartbeatFixWithin(battery: BatteryState, intervalMs: UInt64, nowMs: UInt64, parked: Bool?, budgetMs: UInt64) async throws  -> IngestOutcome
+    
+    /**
      * The ed25519 identity secret — persist in the OS secure store.
      */
     func identitySecret()  -> Data
@@ -1074,6 +1079,18 @@ public protocol LocationNodeProtocol: AnyObject, Sendable {
      * that delivered the fix.
      */
     func ingestFix(fix: LocationFix, battery: BatteryState, intervalMs: UInt64, nowMs: UInt64) async throws  -> IngestOutcome
+    
+    /**
+     * [`Self::ingest_fix`] for a caller with a deadline: an iOS background wake, which owns only
+     * the seconds its background-task assertion buys.
+     *
+     * The gate, the seal and the commit run exactly as unbudgeted — they are local, and the seal
+     * is the part that must not be lost. Only the push is bounded: clamped to what is left of
+     * `budget_ms` (counted from this call's start), and not started when that is under two
+     * seconds, in which case the outcome says `push_deferred` and the envelopes wait in the
+     * replica for the next push.
+     */
+    func ingestFixWithin(fix: LocationFix, battery: BatteryState, intervalMs: UInt64, nowMs: UInt64, budgetMs: UInt64) async throws  -> IngestOutcome
     
     /**
      * Begin an invite-based pair from a decoded [`PairInvite`]. Returns the session id.
@@ -2040,6 +2057,26 @@ open func heartbeatFix(battery: BatteryState, intervalMs: UInt64, nowMs: UInt64,
 }
     
     /**
+     * [`Self::heartbeat_fix`] under a deadline. See [`Self::ingest_fix_within`].
+     */
+open func heartbeatFixWithin(battery: BatteryState, intervalMs: UInt64, nowMs: UInt64, parked: Bool?, budgetMs: UInt64)async throws  -> IngestOutcome  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_iroh_location_fn_method_locationnode_heartbeat_fix_within(
+                    self.uniffiCloneHandle(),
+                    FfiConverterTypeBatteryState_lower(battery),FfiConverterUInt64.lower(intervalMs),FfiConverterUInt64.lower(nowMs),FfiConverterOptionBool.lower(parked),FfiConverterUInt64.lower(budgetMs)
+                )
+            },
+            pollFunc: ffi_iroh_location_rust_future_poll_rust_buffer,
+            completeFunc: ffi_iroh_location_rust_future_complete_rust_buffer,
+            freeFunc: ffi_iroh_location_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeIngestOutcome_lift,
+            errorHandler: FfiConverterTypeLocationError_lift
+        )
+}
+    
+    /**
      * The ed25519 identity secret — persist in the OS secure store.
      */
 open func identitySecret() -> Data  {
@@ -2112,6 +2149,33 @@ open func ingestFix(fix: LocationFix, battery: BatteryState, intervalMs: UInt64,
                 uniffi_iroh_location_fn_method_locationnode_ingest_fix(
                     self.uniffiCloneHandle(),
                     FfiConverterTypeLocationFix_lower(fix),FfiConverterTypeBatteryState_lower(battery),FfiConverterUInt64.lower(intervalMs),FfiConverterUInt64.lower(nowMs)
+                )
+            },
+            pollFunc: ffi_iroh_location_rust_future_poll_rust_buffer,
+            completeFunc: ffi_iroh_location_rust_future_complete_rust_buffer,
+            freeFunc: ffi_iroh_location_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeIngestOutcome_lift,
+            errorHandler: FfiConverterTypeLocationError_lift
+        )
+}
+    
+    /**
+     * [`Self::ingest_fix`] for a caller with a deadline: an iOS background wake, which owns only
+     * the seconds its background-task assertion buys.
+     *
+     * The gate, the seal and the commit run exactly as unbudgeted — they are local, and the seal
+     * is the part that must not be lost. Only the push is bounded: clamped to what is left of
+     * `budget_ms` (counted from this call's start), and not started when that is under two
+     * seconds, in which case the outcome says `push_deferred` and the envelopes wait in the
+     * replica for the next push.
+     */
+open func ingestFixWithin(fix: LocationFix, battery: BatteryState, intervalMs: UInt64, nowMs: UInt64, budgetMs: UInt64)async throws  -> IngestOutcome  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_iroh_location_fn_method_locationnode_ingest_fix_within(
+                    self.uniffiCloneHandle(),
+                    FfiConverterTypeLocationFix_lower(fix),FfiConverterTypeBatteryState_lower(battery),FfiConverterUInt64.lower(intervalMs),FfiConverterUInt64.lower(nowMs),FfiConverterUInt64.lower(budgetMs)
                 )
             },
             pollFunc: ffi_iroh_location_rust_future_poll_rust_buffer,
@@ -4903,6 +4967,13 @@ public struct IngestOutcome: Equatable, Hashable {
      * Publishing is suspended on critical battery. Distinct from "nothing was due".
      */
     public var suspended: Bool
+    /**
+     * Something this call sealed, or a recovery it started, is waiting in the replica for a push
+     * the caller's budget left no time for ([`FlushOutcome::Deferred`]). Only a budgeted call
+     * (`ingest_fix_within` / `heartbeat_fix_within`) can set it. The next push carries it; the
+     * caller's job is to make sure there is a next wake.
+     */
+    public var pushDeferred: Bool
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
@@ -4937,7 +5008,13 @@ public struct IngestOutcome: Equatable, Hashable {
          */overflowDropped: UInt32, 
         /**
          * Publishing is suspended on critical battery. Distinct from "nothing was due".
-         */suspended: Bool) {
+         */suspended: Bool, 
+        /**
+         * Something this call sealed, or a recovery it started, is waiting in the replica for a push
+         * the caller's budget left no time for ([`FlushOutcome::Deferred`]). Only a budgeted call
+         * (`ingest_fix_within` / `heartbeat_fix_within`) can set it. The next push carries it; the
+         * caller's job is to make sure there is a next wake.
+         */pushDeferred: Bool) {
         self.accepted = accepted
         self.rejection = rejection
         self.enqueued = enqueued
@@ -4947,6 +5024,7 @@ public struct IngestOutcome: Equatable, Hashable {
         self.slotsSkipped = slotsSkipped
         self.overflowDropped = overflowDropped
         self.suspended = suspended
+        self.pushDeferred = pushDeferred
     }
 
     
@@ -4973,7 +5051,8 @@ public struct FfiConverterTypeIngestOutcome: FfiConverterRustBuffer {
                 pending: FfiConverterUInt32.read(from: &buf), 
                 slotsSkipped: FfiConverterUInt32.read(from: &buf), 
                 overflowDropped: FfiConverterUInt32.read(from: &buf), 
-                suspended: FfiConverterBool.read(from: &buf)
+                suspended: FfiConverterBool.read(from: &buf), 
+                pushDeferred: FfiConverterBool.read(from: &buf)
         )
     }
 
@@ -4987,6 +5066,7 @@ public struct FfiConverterTypeIngestOutcome: FfiConverterRustBuffer {
         FfiConverterUInt32.write(value.slotsSkipped, into: &buf)
         FfiConverterUInt32.write(value.overflowDropped, into: &buf)
         FfiConverterBool.write(value.suspended, into: &buf)
+        FfiConverterBool.write(value.pushDeferred, into: &buf)
     }
 }
 
@@ -8059,6 +8139,13 @@ public enum LocationRuntimeKind: Equatable, Hashable {
      * Authorization changed. `reason` is the new status.
      */
     case authorization
+    /**
+     * Native publish work did not finish inside its background-task assertion. `reason` is
+     * `expired` (iOS ran the expiration handler mid-work) or `stranded` (a later process found
+     * assertions an earlier one never ended: it was killed holding them); `detail` says which
+     * lane and how long it had been held. The durable `wake.publish_*` counters say the same.
+     */
+    case publishAssertion
 
 
 
@@ -8101,6 +8188,8 @@ public struct FfiConverterTypeLocationRuntimeKind: FfiConverterRustBuffer {
         case 10: return .fenceFailed
         
         case 11: return .authorization
+        
+        case 12: return .publishAssertion
         
         default: throw UniffiInternalError.unexpectedEnumCase
         }
@@ -8152,6 +8241,10 @@ public struct FfiConverterTypeLocationRuntimeKind: FfiConverterRustBuffer {
         
         case .authorization:
             writeInt(&buf, Int32(11))
+        
+        
+        case .publishAssertion:
+            writeInt(&buf, Int32(12))
         
         }
     }
@@ -10054,6 +10147,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_iroh_location_checksum_method_locationnode_heartbeat_fix() != 49997) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_iroh_location_checksum_method_locationnode_heartbeat_fix_within() != 58916) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_iroh_location_checksum_method_locationnode_identity_secret() != 6853) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -10064,6 +10160,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_method_locationnode_ingest_fix() != 21806) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_iroh_location_checksum_method_locationnode_ingest_fix_within() != 40339) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_method_locationnode_initiate_pair() != 61841) {
