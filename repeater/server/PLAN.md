@@ -13,7 +13,7 @@
 > **client opt-in + StashClient**, **expo-notifications push tokens + background
 > sync**, a **Friends-tab toggle**, and a **Dockerfile + `INSTALL.md`** deploy
 > runbook (all TS jest-tested). **Only remaining glue:** APNs-JWT/FCM-OAuth
-> credential *minting* (payload construction + send path are done; the sender
+> credential _minting_ (payload construction + send path are done; the sender
 > currently reads a static bearer). Keep in sync with the streetCryptid app's
 > `ARCHITECTURE.md` (§5–6, §9, §10).
 
@@ -36,7 +36,7 @@
   boundary; the trail data's security never rests on it (E2E encrypted regardless).
 - **Stateless & fully in-memory.** No disk, no database. The docs replica
   (`Docs::memory()`), the blobs store (`MemStore`), and the `(namespace → push
-  token)` subscription registry all live in RAM only. A restart clears
+token)` subscription registry all live in RAM only. A restart clears
   everything; devices re-register opportunistically. This is the same deliberate
   tradeoff as `pairing-mailbox` (in-memory, restart-clears) and is a security
   property: nothing user-derived is ever at rest on the stash.
@@ -54,12 +54,12 @@
 Location sharing has two channels (ARCHITECTURE §5):
 
 - **Live path** (iroh-gossip) — ephemeral, needs both phones online at once. Not
-  the thing to fix; it is *designed* to drop history.
+  the thing to fix; it is _designed_ to drop history.
 - **Durable path** (iroh-docs) — every fix is also written under `author/seq` to
   a replicated namespace, and a rejoining peer runs range reconciliation to
   backfill (`docs.rs::sync` / `sync_all`).
 
-The durable path already *is* store-and-forward, but §1.3 assumes **some other
+The durable path already _is_ store-and-forward, but §1.3 assumes **some other
 pool member is online** when you reconnect. In a two-person pool (A↔B) that set
 is empty: only A holds A's namespace, so if A and B are never online together,
 reconciliation never runs and B never receives A's trail.
@@ -74,7 +74,7 @@ running server-side, that imports each user's trail-namespace **read-ticket** an
 replicates the encrypted envelopes 24/7.
 
 - **It is ciphertext-blind by construction.** Per-recipient wraps (§4) are only
-  minted for *active recipients*; the stash is never a recipient, so it is never
+  minted for _active recipients_; the stash is never a recipient, so it is never
   wrapped for. It holds pure opaque bytes forever. It sees exactly what a relay
   sees — namespace membership, timing, sizes (already threat-modeled in §10,
   "relay operator"). It performs **no crypto** and has **no keys** to user data.
@@ -94,7 +94,7 @@ client.
 
 ## The other half: push-to-sync (designed in from the start)
 
-A replica makes data *available*; a backgrounded phone still has to **wake and
+A replica makes data _available_; a backgrounded phone still has to **wake and
 pull** (ARCHITECTURE §9: force-stop blocks delivery; OS background limits delay
 it). So the stash also runs a small waker:
 
@@ -104,7 +104,7 @@ it). So the stash also runs a small waker:
 3. The device's headless runtime wakes → `syncTrail` → reconciles against the
    stash → backfills the missed fixes.
 
-Waking the *author* of the new entry is a harmless no-op (it already has the
+Waking the _author_ of the new entry is a harmless no-op (it already has the
 data), so the waker does not need to distinguish writer from reader.
 
 **Metadata note:** to wake devices the stash learns `(namespace → push tokens)`.
@@ -116,15 +116,15 @@ locations.
 
 ### Client-visible config (repo-root `.env`)
 
-| Variable | Purpose |
-| --- | --- |
+| Variable                         | Purpose                                                                                                                                                                                                           |
+| -------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `EXPO_PUBLIC_TRAIL_STASH_TICKET` | The stash node's iroh node/endpoint ticket. The app parses it to an `EndpointAddr` and adds it to the peer list for `sync`/`sync_all`. Unset → no stash; behavior falls back to today's peer-only reconciliation. |
-| `EXPO_PUBLIC_TRAIL_STASH_URL` | Base URL of the stash's small HTTP control API (grant submission + push registration). |
+| `EXPO_PUBLIC_TRAIL_STASH_URL`    | Base URL of the stash's small HTTP control API (grant submission + push registration).                                                                                                                            |
 
 ### Grant + subscribe API (HTTP, on `EXPO_PUBLIC_TRAIL_STASH_URL`)
 
 One call per namespace the device participates in (its own + each imported
-friend). Presenting a **read-ticket** *is* the grant — a read-ticket is a
+friend). Presenting a **read-ticket** _is_ the grant — a read-ticket is a
 capability, no other auth needed to replicate.
 
 - `POST /v1/namespaces` — body `{ readTicket, pushToken, platform }`.
@@ -163,12 +163,12 @@ As before, this releases **content**, not docs entry records. The stash imports
 read capabilities and cannot delete phone-authored docs entries; dropping blob
 references is the memory bound it can enforce unilaterally.
 
-| Variable | Default | Purpose |
-| --- | --- | --- |
-| `TRAIL_STASH_RETENTION_HOURS` | `48` | Release a latest fix after this many silent hours; superseded fixes are released on the next prune regardless of age. |
-| `TRAIL_STASH_PRUNE_INTERVAL_MIN` | `15` | How often the prune sweep runs. |
-| `PORT` | `8787` | Control-API port. |
-| `APNS_*` / `FCM_*` | — | Push provider credentials (kept out of the repo, per §7). |
+| Variable                         | Default | Purpose                                                                                                               |
+| -------------------------------- | ------- | --------------------------------------------------------------------------------------------------------------------- |
+| `TRAIL_STASH_RETENTION_HOURS`    | `48`    | Release a latest fix after this many silent hours; superseded fixes are released on the next prune regardless of age. |
+| `TRAIL_STASH_PRUNE_INTERVAL_MIN` | `15`    | How often the prune sweep runs.                                                                                       |
+| `PORT`                           | `8787`  | Control-API port.                                                                                                     |
+| `APNS_*` / `FCM_*`               | —       | Push provider credentials (kept out of the repo, per §7).                                                             |
 
 ## MLS seam (interface + passthrough stub)
 
@@ -187,7 +187,7 @@ pub struct PassthroughDelivery; // admits every envelope unchanged — current b
 
 - **Now:** `PassthroughDelivery` accepts all bytes as opaque. Ciphertext-blindness
   is preserved; the stash keeps no MLS state.
-- **Later:** a real impl can become aware of MLS message *framing* (handshake vs
+- **Later:** a real impl can become aware of MLS message _framing_ (handshake vs
   application, epoch/Commit ordering, Welcome routing) — but never group secrets.
   It slots in where the replica admits a reconciled `InsertRemote`, no other
   plumbing changes.
@@ -222,11 +222,12 @@ configurable; push-to-sync in scope from the start; opt-in; stateless in-memory;
 MLS delivery-service seam stubbed.
 
 **Phase 1 — stash node + reconciliation.**
+
 - Standalone crate `infra/trail-stash/rust` (does **not** depend on
   `iroh-location`: the stash never decrypts, so it needs only iroh + docs + blobs
-  + gossip). Boots a headless node with **in-memory** `Docs::memory()` + `MemStore`
-  and relay transport; **no** GPS, **no** gossip publish.  *(pure core: DONE &
-  tested; live `node.rs`: written, unverified pending iroh build.)*
+  - gossip). Boots a headless node with **in-memory** `Docs::memory()` + `MemStore`
+    and relay transport; **no** GPS, **no** gossip publish. _(pure core: DONE &
+    tested; live `node.rs`: written, unverified pending iroh build.)_
 - Control API (`POST /v1/namespaces`, `DELETE …/subscription`, `/healthz`) →
   passive `docs.import_namespace(ticket.capability)` + `start_sync([])` + in-memory subscription
   registry. Registration never dials ticket bootstrap nodes: the phone already has the stash
@@ -237,11 +238,12 @@ MLS delivery-service seam stubbed.
   most one latest fix per author per namespace while fresh, and uses the window
   only as a stale-author backstop. A restart still clears everything.
 - Client (later this phase): a user **opt-in** toggle; when on, `POST
-  /v1/namespaces` for its own + each friend's namespace; add
+/v1/namespaces` for its own + each friend's namespace; add
   `EXPO_PUBLIC_TRAIL_STASH_TICKET` to the `sync`/`sync_all` peer list. Verify B
   backfills A's trail with **A offline** and only the stash up.
 
 **Phase 2 — push-to-sync waker. (DONE, minus credential minting.)**
+
 - Stash watches `LiveEvent::InsertRemote` per namespace → silent push to that
   namespace's subscribed tokens (`node.rs` → `waker.rs` `HttpPushWaker`).
 - Payloads (`push.rs`) are silent/background/data-only and tested.
@@ -254,6 +256,7 @@ MLS delivery-service seam stubbed.
   fully-suspended wake (the receive listener covers the common case).
 
 **Phase 3 — harden + operate.**
+
 - Subscription auth/renewal, token rotation, rate limiting (mirror
   `pairing-mailbox` hardening), per-namespace replication caps.
 - Self-host deployment (Docker), retention/GC ops, metrics. Deployment creds stay

@@ -88,7 +88,7 @@ headless mobile task sleep immediately after the request completes.
 - `content_tracked` — replicated entries whose ciphertext the stash is responsible for.
 - `content_missing` — how many of those it does **not** actually hold the bytes for.
 
-`content_missing` is the number to alert on. iroh-docs replicates entry *records*; the
+`content_missing` is the number to alert on. iroh-docs replicates entry _records_; the
 bytes they name are a separate transfer, so a stash can hold a full trail it cannot serve
 a single fix from — readers just get `Unable to download <hash>` while every other signal
 looks perfectly healthy. It spikes as entries arrive and should fall back to ~0 within
@@ -96,22 +96,22 @@ seconds. **Persistently non-zero means offline delivery is broken.**
 
 ## Environment variables
 
-| Variable | Default | Description |
-| --- | --- | --- |
-| `TRAIL_STASH_SECRET_KEY` | — | **Required.** 64 hex chars (32-byte ed25519 seed) giving the stash a stable dialable identity so its ticket survives restarts. A key, not user data — inject from a secret manager. Generate: `openssl rand -hex 32`. |
-| `PORT` | `8787` | Control-API port. |
-| `TRAIL_STASH_RETENTION_HOURS` | `48` | Backstop for each author's latest fix (clamped 1–336). Superseded fixes are released on the next prune regardless of age; this window only decides how long to keep the final dot from an author who goes silent. |
-| `TRAIL_STASH_PRUNE_INTERVAL_MIN` | `15` | How often the retention sweep runs (clamped 1–1440). |
-| `TRAIL_STASH_RELAY_URLS` | — | Comma-separated custom iroh relay URLs. Unset uses the built-in n0 relay map. Use the same URLs as the app's `EXPO_PUBLIC_IROH_RELAY_URLS`. |
-| `TRAIL_STASH_RELAY_TOKEN` | — | Optional bearer token sent to every configured custom relay. |
-| `TRAIL_STASH_PSK` | — | Control-API pre-shared key. When set, `/v1/*` requires `Authorization: Bearer <psk>`. Must match the app's `EXPO_PUBLIC_TRAIL_STASH_PSK`. Unset ⇒ gate disabled (warned at startup). |
-| `APNS_BUNDLE_ID` / `APNS_HOST` | — / `api.push.apple.com` | Enables the APNs push route. |
-| `FCM_PROJECT_ID` | — | Enables the FCM push route. |
-| `APNS_BEARER` / `FCM_BEARER` | — | **Placeholder** static push credentials (`EnvCredentials`) until real APNs-JWT / FCM-OAuth minting lands. |
-| `OTEL_EXPORTER_OTLP_ENDPOINT` | — | Developer telemetry (`otel` builds, which the published image is): OTLP/HTTP collector base URL (e.g. `http://otel-collector:4318`; see the streetCryptid repo's `infra/otel/`). Unset ⇒ telemetry fully dormant. Exports traces + logs; log bodies pass the same redaction as console output, but span/log *attributes* from dependencies do not — point it only at a developer-controlled collector, never a hosted log store. |
-| `OTEL_SERVICE_NAME` | `trail-stash` | Telemetry service name. |
+| Variable                         | Default                  | Description                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| -------------------------------- | ------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `TRAIL_STASH_SECRET_KEY`         | —                        | **Required.** 64 hex chars (32-byte ed25519 seed) giving the stash a stable dialable identity so its ticket survives restarts. A key, not user data — inject from a secret manager. Generate: `openssl rand -hex 32`.                                                                                                                                                                                                            |
+| `PORT`                           | `8787`                   | Control-API port.                                                                                                                                                                                                                                                                                                                                                                                                                |
+| `TRAIL_STASH_RETENTION_HOURS`    | `48`                     | Backstop for each author's latest fix (clamped 1–336). Superseded fixes are released on the next prune regardless of age; this window only decides how long to keep the final dot from an author who goes silent.                                                                                                                                                                                                                |
+| `TRAIL_STASH_PRUNE_INTERVAL_MIN` | `15`                     | How often the retention sweep runs (clamped 1–1440).                                                                                                                                                                                                                                                                                                                                                                             |
+| `TRAIL_STASH_RELAY_URLS`         | —                        | Comma-separated custom iroh relay URLs. Unset uses the built-in n0 relay map. Use the same URLs as the app's `EXPO_PUBLIC_IROH_RELAY_URLS`.                                                                                                                                                                                                                                                                                      |
+| `TRAIL_STASH_RELAY_TOKEN`        | —                        | Optional bearer token sent to every configured custom relay.                                                                                                                                                                                                                                                                                                                                                                     |
+| `TRAIL_STASH_PSK`                | —                        | Control-API pre-shared key. When set, `/v1/*` requires `Authorization: Bearer <psk>`. Must match the app's `EXPO_PUBLIC_TRAIL_STASH_PSK`. Unset ⇒ gate disabled (warned at startup).                                                                                                                                                                                                                                             |
+| `APNS_BUNDLE_ID` / `APNS_HOST`   | — / `api.push.apple.com` | Enables the APNs push route.                                                                                                                                                                                                                                                                                                                                                                                                     |
+| `FCM_PROJECT_ID`                 | —                        | Enables the FCM push route.                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `APNS_BEARER` / `FCM_BEARER`     | —                        | **Placeholder** static push credentials (`EnvCredentials`) until real APNs-JWT / FCM-OAuth minting lands.                                                                                                                                                                                                                                                                                                                        |
+| `OTEL_EXPORTER_OTLP_ENDPOINT`    | —                        | Developer telemetry (`otel` builds, which the published image is): OTLP/HTTP collector base URL (e.g. `http://otel-collector:4318`; see the streetCryptid repo's `infra/otel/`). Unset ⇒ telemetry fully dormant. Exports traces + logs; log bodies pass the same redaction as console output, but span/log _attributes_ from dependencies do not — point it only at a developer-controlled collector, never a hosted log store. |
+| `OTEL_SERVICE_NAME`              | `trail-stash`            | Telemetry service name.                                                                                                                                                                                                                                                                                                                                                                                                          |
 
-Retention releases **content**, not entry records. The stash holds a *read* capability, so
+Retention releases **content**, not entry records. The stash holds a _read_ capability, so
 it cannot delete another author's entries — retiring those is the author's job, and their
 tombstones replicate here like any other write. The ciphertext is what actually occupies
 this RAM-only process, and dropping our reference to it (after which the blob GC sweep
@@ -123,7 +123,7 @@ author exists, because the app renders friends as a single latest dot and no lon
 back-catalogue. `TRAIL_STASH_RETENTION_HOURS` remains as a stale-author backstop for that one
 latest fix.
 
-`ctl/hex(author)` control entries are never treated as *superseded* — they are one
+`ctl/hex(author)` control entries are never treated as _superseded_ — they are one
 overwritten-in-place slot per author carrying current live-mode requests, not history — but they
 are still subject to the retention window, and so is any key the stash cannot parse. Nothing is
 exempt from the window: in a RAM-only process, declining to release what you do not understand is
