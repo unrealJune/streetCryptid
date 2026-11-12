@@ -1,11 +1,12 @@
 # One set of whitespace rules for every product in the repository: the Expo app (TypeScript),
 # the Rust crates, the Windows repeater (C#, XAML, PowerShell), and the YAML and Markdown around
 # them. Prettier (app, Markdown, YAML), rustfmt (rustfmt.toml) and `dotnet format` read this too.
+# Line endings are .gitattributes's: Windows checkouts are CRLF, and `dotnet format` would flag
+# every line of them against an end_of_line here.
 root = true
 
 [*]
 charset = utf-8
-end_of_line = lf
 insert_final_newline = true
 trim_trailing_whitespace = true
 indent_style = space
