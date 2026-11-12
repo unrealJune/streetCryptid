@@ -45,7 +45,8 @@ enum State {
 #[derive(Debug, Default)]
 pub struct ContentIndex {
     state: HashMap<ContentHash, State>,
-    by_namespace: HashMap<NamespaceId, HashSet<ContentHash>>,
+    by_namespace: HashMap<NamespaceId, HashMap<ContentHash, u64>>,
+    revision: u64,
 }
 
 impl ContentIndex {
@@ -55,9 +56,44 @@ impl ContentIndex {
 
     /// Record that an entry in `ns` references `hash`. Idempotent, and never downgrades a hash
     /// that is already present (re-reconciling an old entry must not resurrect it as missing).
-    pub fn want(&mut self, ns: NamespaceId, hash: ContentHash) {
-        self.by_namespace.entry(ns).or_default().insert(hash);
+    pub fn want(&mut self, ns: NamespaceId, hash: ContentHash) -> u64 {
+        self.revision = self.revision.saturating_add(1);
+        self.by_namespace
+            .entry(ns)
+            .or_default()
+            .insert(hash, self.revision);
         self.state.entry(hash).or_insert(State::Wanted);
+        self.revision
+    }
+
+    /// Capture before querying a namespace, so a concurrent insert cannot be pruned from an
+    /// older view of the replica.
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    /// Forget hashes absent from a complete replica query, including values overwritten in place.
+    /// Only references observed before the query are eligible; later inserts wait for the next
+    /// sweep. Return hashes whose final namespace reference was removed.
+    pub fn forget_unseen(
+        &mut self,
+        ns: &NamespaceId,
+        before: u64,
+        kept: &HashSet<ContentHash>,
+    ) -> Vec<ContentHash> {
+        let forgotten: Vec<_> = self
+            .by_namespace
+            .get(ns)
+            .into_iter()
+            .flat_map(|hashes| hashes.iter())
+            .filter_map(|(hash, revision)| {
+                (*revision <= before && !kept.contains(hash)).then_some(*hash)
+            })
+            .collect();
+        forgotten
+            .into_iter()
+            .filter(|hash| self.forget(ns, hash))
+            .collect()
     }
 
     /// Record that the bytes for `hash` are now in the local store. Ignores hashes nobody asked
@@ -77,7 +113,7 @@ impl ContentIndex {
     pub fn is_tracked_for(&self, ns: &NamespaceId, hash: &ContentHash) -> bool {
         self.by_namespace
             .get(ns)
-            .is_some_and(|hashes| hashes.contains(hash))
+            .is_some_and(|hashes| hashes.contains_key(hash))
     }
 
     /// Whether the bytes have landed — i.e. whether the stash can actually serve this entry.
@@ -89,7 +125,7 @@ impl ContentIndex {
     pub fn is_present_for(&self, ns: &NamespaceId, hash: &ContentHash) -> bool {
         self.by_namespace
             .get(ns)
-            .is_some_and(|hashes| hashes.contains(hash))
+            .is_some_and(|hashes| hashes.contains_key(hash))
             && self.is_present(hash)
     }
 
@@ -106,7 +142,7 @@ impl ContentIndex {
     pub fn forget(&mut self, ns: &NamespaceId, hash: &ContentHash) -> bool {
         let removed = match self.by_namespace.get_mut(ns) {
             Some(hashes) => {
-                let removed = hashes.remove(hash);
+                let removed = hashes.remove(hash).is_some();
                 if hashes.is_empty() {
                     self.by_namespace.remove(ns);
                 }
@@ -120,7 +156,7 @@ impl ContentIndex {
         let still_referenced = self
             .by_namespace
             .values()
-            .any(|hashes| hashes.contains(hash));
+            .any(|hashes| hashes.contains_key(hash));
         if !still_referenced {
             self.state.remove(hash);
         }
@@ -134,8 +170,8 @@ impl ContentIndex {
             return Vec::new();
         };
         let mut released = Vec::new();
-        for hash in hashes {
-            let still_referenced = self.by_namespace.values().any(|h| h.contains(&hash));
+        for (hash, _) in hashes {
+            let still_referenced = self.by_namespace.values().any(|h| h.contains_key(&hash));
             if !still_referenced {
                 self.state.remove(&hash);
                 released.push(hash);
@@ -175,6 +211,25 @@ mod tests {
     const NS_A: NamespaceId = [1u8; 32];
     const NS_B: NamespaceId = [2u8; 32];
     const HASH: ContentHash = [9u8; 32];
+
+    #[test]
+    fn a_sweep_cannot_forget_a_reference_added_during_its_query() {
+        let mut index = ContentIndex::new();
+        index.want(NS_A, HASH);
+        let before = index.revision();
+        index.want(NS_A, HASH);
+        index.want(NS_A, OTHER);
+        assert!(index
+            .forget_unseen(&NS_A, before, &HashSet::new())
+            .is_empty());
+        assert!(index.is_tracked_for(&NS_A, &HASH));
+        assert!(index.is_tracked_for(&NS_A, &OTHER));
+
+        let before = index.revision();
+        let kept = HashSet::from([OTHER]);
+        assert_eq!(index.forget_unseen(&NS_A, before, &kept), vec![HASH]);
+        assert!(index.is_tracked_for(&NS_A, &OTHER));
+    }
 
     #[test]
     fn forgetting_a_namespace_keeps_hashes_another_still_names() {

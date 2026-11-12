@@ -6,21 +6,22 @@
 //! read-tickets, watches each for new remote entries, and nudges subscribers via the [`Waker`].
 //! Nothing is written to disk; a restart clears the replica and devices re-register.
 //!
-//! ## Persistent mode: a repeater
-//! The same node also runs on disk ([`Storage::Persistent`]) as a **repeater**: a self-hosted,
+//! ## A repeater
+//! The same node also runs as a **repeater** ([`Storage::MemoryRepeater`]): a self-hosted,
 //! ciphertext-blind replica that lives on a laptop, a desktop or a Pi and is merely *more likely*
-//! to be awake than a phone (streetCryptid `docs/social/REPEATERS.md`). Three things differ, and
-//! only three:
-//! * the replica and blobs are on disk, and every grant is written to a [`NamespaceBook`], so a
-//!   restart reopens every namespace without a phone having to grant it again;
-//! * on start, entries already in the replica are adopted into the content ledger, so content that
-//!   had not landed before the restart is still chased;
+//! to be awake than a phone (streetCryptid `docs/social/REPEATERS.md`). Two things differ, and
+//! only two:
+//! * its identity, roster and every grant are on disk (the [`NamespaceBook`]), so a restart is the
+//!   same repeater carrying the same people without a phone having to claim or grant it again —
+//!   while the replica and the ciphertext stay in RAM like the stash's, and a restart forgets
+//!   them ([`Storage::Persistent`] keeps those on disk too, and adopts what the replica held);
 //! * it reconciles every namespace with **sibling repeaters** ([`StashNode::sync_peers`]), so two
 //!   repeaters that were up at different times converge without any phone in the middle.
 //!
 //! Everything else — reconciliation, content settling, retention — is the stash's code, unchanged.
-//! Blob GC is not wired for the on-disk store yet (`REPEATERS.md`, phase 3): retention releases the
-//! ledger's reference, but the bytes stay on disk until it is.
+//! Blob GC is not wired for the on-disk store yet (`REPEATERS.md`, phase 3): with
+//! [`Storage::Persistent`] retention releases the ledger's reference, but the bytes stay on disk
+//! until it is. In RAM the sweep below reclaims them.
 //!
 //! ## Content is not entries
 //! iroh-docs reconciliation moves *entry records*; the bytes they name are a separate iroh-blobs
@@ -156,9 +157,15 @@ pub enum PutOutcome {
 pub enum Storage {
     /// RAM only: the hosted stash. A restart clears everything and phones re-grant.
     Memory,
-    /// On disk under this directory: a repeater. `docs/` holds the replica, `blobs/` the
-    /// ciphertext, and `namespaces.json` the [`NamespaceBook`] of every grant.
+    /// On disk under this directory: `docs/` holds the replica, `blobs/` the ciphertext, and
+    /// `namespaces.json` the [`NamespaceBook`] of every grant.
     Persistent(PathBuf),
+    /// A repeater (streetCryptid `docs/social/REPEATERS.md` §5.1): the replica and the ciphertext
+    /// in RAM, exactly as [`Storage::Memory`], and only what makes it the same repeater on disk
+    /// under this directory — its roster, its claim and the [`NamespaceBook`] of every grant. A
+    /// restart reopens every namespace empty and refills it from the next phone that syncs; it
+    /// never serves a location it kept from before.
+    MemoryRepeater(PathBuf),
 }
 
 /// The always-on, ciphertext-blind stash node.
@@ -175,11 +182,13 @@ pub struct StashNode {
     /// and backs the missing-content health signal. `std::sync::Mutex`: every critical section is
     /// a few map operations with no `.await` inside.
     content: Arc<std::sync::Mutex<ContentIndex>>,
-    /// Replicated entries and what the settle loop still owes them. Entries live here until the
-    /// release policy decides no unreleased docs entry still needs the hash, so a fetch is retried
-    /// for as long as the entry is worth serving.
-    tracked: Mutex<HashMap<Hash, TrackedEntry>>,
-    /// Every grant, on disk — `Some` only for [`Storage::Persistent`]. See [`crate::book`].
+    /// Fetch and activity state belongs to an entry, not just its hash: different namespaces or
+    /// keys may reference the same bytes and can be released independently.
+    tracked: Mutex<HashMap<(NsBytes, Vec<u8>, Hash), TrackedEntry>>,
+    arrivals: tokio::sync::broadcast::Sender<u64>,
+    arrival_count: std::sync::atomic::AtomicU64,
+    namespace_watchers: std::sync::Mutex<HashMap<NsBytes, tokio::task::AbortHandle>>,
+    /// Every grant, on disk — `Some` only for a node with a directory. See [`crate::book`].
     book: Option<std::sync::Mutex<NamespaceBook>>,
     /// The repeater protocol's state — `Some` exactly when `book` is. See [`crate::repeater`].
     repeater: Option<Arc<Repeater>>,
@@ -198,10 +207,13 @@ struct TrackedEntry {
     /// friends' trails too, so it can serve content for an author that is long offline. Trying it
     /// first is also strictly better odds than the author — it was connected moments ago.
     delivered_by: iroh::EndpointId,
-    seq: u64,
+    seq: Option<u64>,
     first_seen_ms: u64,
     /// Whether the bytes are in the local store — i.e. whether this entry is servable.
     content_present: bool,
+    is_fix: bool,
+    activity_sent: bool,
+    observed_revision: u64,
     /// Whether subscribers have already been woken for this entry (wakes fire once).
     woken: bool,
     /// Earliest time to retry the content fetch — exponential backoff so an author that is asleep
@@ -298,7 +310,20 @@ impl StashNode {
         // process would grow for its entire lifetime once it started storing content for real.
         let content = Arc::new(std::sync::Mutex::new(ContentIndex::new()));
         let (blobs, docs, book, repeater): (iroh_blobs::api::Store, Docs, _, _) = match &storage {
-            Storage::Memory => {
+            Storage::Memory | Storage::MemoryRepeater(_) => {
+                let (book, repeater) = match &storage {
+                    Storage::MemoryRepeater(dir) => {
+                        std::fs::create_dir_all(dir)
+                            .map_err(|e| anyhow!("create {}: {e}", dir.display()))?;
+                        let book = NamespaceBook::load(dir.join("namespaces.json"))
+                            .map_err(|e| anyhow!("{e}"))?;
+                        (
+                            Some(std::sync::Mutex::new(book)),
+                            Some(Arc::new(Repeater::open(dir, &seed)?)),
+                        )
+                    }
+                    _ => (None, None),
+                };
                 let protect = content.clone();
                 let mem = MemStore::new_with_opts(iroh_blobs::store::mem::Options {
                     gc_config: Some(iroh_blobs::store::GcConfig {
@@ -322,7 +347,7 @@ impl StashNode {
                     .spawn(endpoint.clone(), (*mem).clone(), gossip.clone())
                     .await
                     .map_err(|e| anyhow!("spawn docs: {e}"))?;
-                ((*mem).clone(), docs, None, None)
+                ((*mem).clone(), docs, book, repeater)
             }
             Storage::Persistent(dir) => {
                 // The same stores the phones use (`modules/iroh-location/rust/src/lib.rs`). No GC
@@ -381,6 +406,9 @@ impl StashNode {
             handles: Mutex::new(HashMap::new()),
             content,
             tracked: Mutex::new(HashMap::new()),
+            arrivals: tokio::sync::broadcast::channel(64).0,
+            arrival_count: std::sync::atomic::AtomicU64::new(0),
+            namespace_watchers: std::sync::Mutex::new(HashMap::new()),
             book,
             repeater,
             tasks: std::sync::Mutex::new(Vec::new()),
@@ -448,13 +476,14 @@ impl StashNode {
             let entry = entry?;
             let hash = entry.content_hash();
             let present = self.blobs.blobs().has(hash).await.unwrap_or(false);
-            {
+            let observed_revision = {
                 let mut content = self.content.lock().expect("content index poisoned");
-                content.want(ns, *hash.as_bytes());
+                let revision = content.want(ns, *hash.as_bytes());
                 if present {
                     content.mark_present(*hash.as_bytes());
                 }
-            }
+                revision
+            };
             adopted += 1;
             if present {
                 continue;
@@ -471,7 +500,7 @@ impl StashNode {
             self.tracked
                 .lock()
                 .await
-                .entry(hash)
+                .entry((ns, entry.key().to_vec(), hash))
                 .or_insert_with(|| TrackedEntry {
                     namespace: ns,
                     author,
@@ -479,6 +508,9 @@ impl StashNode {
                     seq,
                     first_seen_ms: now_ms(),
                     content_present: false,
+                    is_fix: is_fix_key(entry.key()),
+                    activity_sent: true,
+                    observed_revision,
                     // The process that received the record owned its wake.
                     woken: true,
                     next_attempt_ms: 0,
@@ -709,15 +741,23 @@ impl StashNode {
                 tracing::warn!(error = %e, "repeater: leaving a released namespace failed");
             }
         }
-        self.registry.forget(&ns);
-        self.content
+        if let Some(watcher) = self
+            .namespace_watchers
             .lock()
-            .expect("content index poisoned")
-            .forget_namespace(&ns);
-        self.tracked
-            .lock()
-            .await
-            .retain(|_, entry| entry.namespace != ns);
+            .expect("watchers poisoned")
+            .remove(&ns)
+        {
+            watcher.abort();
+        }
+        {
+            let mut tracked = self.tracked.lock().await;
+            self.registry.forget(&ns);
+            self.content
+                .lock()
+                .expect("content index poisoned")
+                .forget_namespace(&ns);
+            tracked.retain(|(namespace, _, _), _| *namespace != ns);
+        }
         tracing::info!("repeater: stopped carrying a namespace");
         Ok(())
     }
@@ -861,24 +901,14 @@ impl StashNode {
         // Hold the map lock through the first import so two simultaneous registrations cannot both
         // create watchers/start the same namespace. Registrations are rare control-plane calls;
         // serializing this small critical section is preferable to duplicate live engines.
-        let doc = {
-            let mut handles = self.handles.lock().await;
-            if let Some(doc) = handles.get(&ns_bytes) {
-                doc.clone()
-            } else {
-                let doc = self
-                    .docs
-                    .import_namespace(ticket.capability)
-                    .await
-                    .map_err(|e| anyhow!("import namespace capability: {e}"))?;
-                // Enable gossip/listening without using the ticket's author addresses as outbound
-                // sync targets. The phone's explicit stash sync supplies the first connection.
-                doc.start_sync(Vec::new())
-                    .await
-                    .map_err(|e| anyhow!("join namespace without bootstrap peers: {e}"))?;
-                handles.insert(ns_bytes, doc.clone());
-                doc
-            }
+        let mut handles = self.handles.lock().await;
+        let doc = if let Some(doc) = handles.get(&ns_bytes) {
+            doc.clone()
+        } else {
+            self.docs
+                .import_namespace(ticket.capability)
+                .await
+                .map_err(|e| anyhow!("import namespace capability: {e}"))?
         };
 
         // A repeater writes the grant down before reporting success, so a grant it acknowledged is
@@ -894,7 +924,28 @@ impl StashNode {
         let first = self.registry.register(ns_bytes, subscription);
         tracing::Span::current().record("first_watch", first);
         if first {
-            self.clone().spawn_watch(ns_bytes, doc);
+            // Subscribe BEFORE enabling the live engine. A returning peer can deliver its
+            // whole replica immediately; spawning a task that subscribes later loses those
+            // entries forever (the settle loop only knows entries the watcher saw).
+            if let Err(error) = self.clone().spawn_watch(ns_bytes, doc.clone()).await {
+                self.registry.forget(&ns_bytes);
+                return Err(error);
+            }
+        }
+        if !handles.contains_key(&ns_bytes) {
+            if let Err(error) = doc.start_sync(Vec::new()).await {
+                self.registry.forget(&ns_bytes);
+                if let Some(watcher) = self
+                    .namespace_watchers
+                    .lock()
+                    .expect("watchers poisoned")
+                    .remove(&ns_bytes)
+                {
+                    watcher.abort();
+                }
+                return Err(error.into());
+            }
+            handles.insert(ns_bytes, doc);
         }
         Ok(ns_bytes)
     }
@@ -917,16 +968,10 @@ impl StashNode {
 
     /// Watch one namespace: on each new *remote* entry, run the delivery-service admission check
     /// (passthrough today) and, if admitted, wake the namespace's subscribers.
-    fn spawn_watch(self: Arc<Self>, ns_bytes: NsBytes, doc: Doc) {
+    async fn spawn_watch(self: Arc<Self>, ns_bytes: NsBytes, doc: Doc) -> Result<()> {
+        let mut events = doc.subscribe().await?;
         let node = self.clone();
         let task = tokio::spawn(async move {
-            let mut events = match doc.subscribe().await {
-                Ok(e) => e,
-                Err(e) => {
-                    tracing::warn!("stash: subscribe failed: {e}");
-                    return;
-                }
-            };
             while let Some(ev) = events.next().await {
                 match ev {
                     Ok(LiveEvent::InsertRemote { entry, from, .. }) => {
@@ -950,56 +995,90 @@ impl StashNode {
                                 "sc.author",
                                 tracing::field::display(crate::telemetry::short_hex(&author)),
                             );
-                            current.record("sc.seq", seq);
+                            if let Some(seq) = seq {
+                                current.record("sc.seq", seq);
+                            }
 
                             // Reconciliation delivered the *record*; the bytes are a separate
                             // transfer. Registering the hash both authorizes the writer's push and
                             // puts the entry on the missing-content ledger until it lands.
-                            self.content
-                                .lock()
-                                .expect("content index poisoned")
-                                .want(ns_bytes, *hash.as_bytes());
-
+                            {
+                                let _tracked = self.tracked.lock().await;
+                                if !self.registry.is_known(&ns_bytes) {
+                                    return None;
+                                }
+                                self.content
+                                    .lock()
+                                    .expect("content index poisoned")
+                                    .want(ns_bytes, *hash.as_bytes());
+                            }
                             let present = self.blobs.blobs().has(hash).await.unwrap_or(false);
-                            current.record("content_present", present);
-                            let entry = TrackedEntry {
+                            let key = entry.key().to_vec();
+                            let mut entry = TrackedEntry {
                                 namespace: ns_bytes,
                                 author,
                                 delivered_by: from,
                                 seq,
                                 first_seen_ms: now_ms(),
                                 content_present: present,
-                                // Woken immediately below when the content is already here;
-                                // otherwise the settle loop owns the wake.
-                                woken: present,
+                                is_fix: is_fix_key(entry.key()),
+                                activity_sent: false,
+                                observed_revision: 0,
+                                woken: false,
                                 next_attempt_ms: 0,
                                 attempts: 0,
                             };
+                            let admission = if present && entry.is_fix {
+                                self.admit_present(hash, &entry).await
+                            } else {
+                                None
+                            };
+                            if present && entry.is_fix && admission.is_none() {
+                                entry.content_present = false;
+                            }
+                            let present = entry.content_present;
+                            current.record("content_present", present);
                             // Re-reconciling a known entry must not reset its fetch backoff or
-                            // re-wake subscribers, so only insert what we do not already track.
-                            let known = self
-                                .tracked
-                                .lock()
-                                .await
-                                .entry(hash)
-                                .or_insert_with(|| entry.clone())
-                                .woken;
-                            if present {
-                                // Already here — a re-reconciled entry, or the docs engine's
-                                // downloader won the race against the writer going to sleep.
-                                self.content
+                            // re-wake subscribers, even if another key shares its content hash.
+                            let should_wake = {
+                                let mut tracked = self.tracked.lock().await;
+                                if !self.registry.is_known(&ns_bytes) {
+                                    return None;
+                                }
+                                let observed_revision = self
+                                    .content
                                     .lock()
                                     .expect("content index poisoned")
-                                    .mark_present(*hash.as_bytes());
-                            }
+                                    .want(ns_bytes, *hash.as_bytes());
+                                entry.observed_revision = observed_revision;
+                                let live = tracked
+                                    .entry((ns_bytes, key, hash))
+                                    .or_insert_with(|| entry.clone());
+                                live.observed_revision = observed_revision;
+                                let should_wake = present && !live.woken;
+                                if present {
+                                    live.content_present = true;
+                                    self.content
+                                        .lock()
+                                        .expect("content index poisoned")
+                                        .mark_present(*hash.as_bytes());
+                                    self.record_arrival(
+                                        hash,
+                                        live,
+                                        matches!(admission.as_ref(), Some(Admission::Accept)),
+                                    );
+                                    live.woken = true;
+                                }
+                                should_wake
+                            };
                             // The settle loop owns every other path to a wake.
-                            (present && !known).then_some(entry)
+                            should_wake.then_some((entry, admission))
                         }
                         .instrument(span)
                         .await;
 
-                        if let Some(entry) = ready {
-                            self.wake_for(hash, &entry, false).await;
+                        if let Some((entry, admission)) = ready {
+                            self.wake_for(hash, &entry, false, admission).await;
                         }
                     }
                     Ok(_) => {}
@@ -1011,6 +1090,15 @@ impl StashNode {
             }
         });
         node.track_task(task.abort_handle());
+        if let Some(old) = node
+            .namespace_watchers
+            .lock()
+            .expect("watchers poisoned")
+            .insert(ns_bytes, task.abort_handle())
+        {
+            old.abort();
+        };
+        Ok(())
     }
 
     async fn handle(&self, ns: NsBytes) -> Option<Doc> {
@@ -1030,8 +1118,8 @@ impl StashNode {
         loop {
             ticker.tick().await;
             let settled = self.settle_once(now_ms()).await;
-            for (hash, entry, degraded) in settled {
-                self.wake_for(hash, &entry, degraded).await;
+            for (hash, entry, degraded, admission) in settled {
+                self.wake_for(hash, &entry, degraded, admission).await;
             }
         }
     }
@@ -1048,23 +1136,32 @@ impl StashNode {
     /// Returns entries whose subscribers should be woken, each flagged with whether it is being
     /// released *without* content (the fallback path). Waking is one-shot; fetching is not — an
     /// entry woken degraded keeps being retried, so late content still becomes servable.
-    async fn settle_once(&self, now: u64) -> Vec<(Hash, TrackedEntry, bool)> {
-        let outstanding: Vec<(Hash, TrackedEntry)> = {
+    async fn settle_once(&self, now: u64) -> Vec<(Hash, TrackedEntry, bool, Option<Admission>)> {
+        let outstanding: Vec<((NsBytes, Vec<u8>, Hash), TrackedEntry)> = {
             let tracked = self.tracked.lock().await;
             tracked
                 .iter()
                 .filter(|(_, entry)| !entry.content_present)
-                .map(|(hash, entry)| (*hash, entry.clone()))
+                .map(|(key, entry)| (key.clone(), entry.clone()))
                 .collect()
         };
 
         let mut wake = Vec::new();
-        for (hash, entry) in outstanding {
-            let present = self.blobs.blobs().has(hash).await.unwrap_or(false)
+        for (key, entry) in outstanding {
+            let hash = key.2;
+            let mut present = self.blobs.blobs().has(hash).await.unwrap_or(false)
                 || (now >= entry.next_attempt_ms && self.fetch_content(hash, &entry).await);
+            let admission = if present && entry.is_fix {
+                self.admit_present(hash, &entry).await
+            } else {
+                None
+            };
+            if present && entry.is_fix && admission.is_none() {
+                present = false;
+            }
 
             let mut tracked = self.tracked.lock().await;
-            let Some(live) = tracked.get_mut(&hash) else {
+            let Some(live) = tracked.get_mut(&key) else {
                 continue; // pruned out from under us mid-pass
             };
             if present {
@@ -1073,6 +1170,11 @@ impl StashNode {
                     .lock()
                     .expect("content index poisoned")
                     .mark_present(*hash.as_bytes());
+                self.record_arrival(
+                    hash,
+                    live,
+                    matches!(admission.as_ref(), Some(Admission::Accept)),
+                );
             } else if now >= entry.next_attempt_ms {
                 live.attempts = live.attempts.saturating_add(1);
                 live.next_attempt_ms = now + TrackedEntry::backoff_ms(live.attempts);
@@ -1081,10 +1183,152 @@ impl StashNode {
             let overdue = now.saturating_sub(live.first_seen_ms) >= WAKE_FALLBACK_MS;
             if !live.woken && (present || overdue) {
                 live.woken = true;
-                wake.push((hash, entry, !present));
+                wake.push((hash, entry, !present, admission));
             }
         }
         wake
+    }
+
+    /// UI activity observes newly servable fixes, independently of push wakes. A degraded wake
+    /// can happen before bytes arrive, so its one-shot flag must never suppress this transition.
+    /// This bounded channel is deliberately lossy: a hidden desktop must not backpressure sync.
+    pub fn subscribe_arrivals(&self) -> tokio::sync::broadcast::Receiver<u64> {
+        self.arrivals.subscribe()
+    }
+
+    pub fn arrival_count(&self) -> u64 {
+        self.arrival_count
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    async fn admit_present(&self, hash: Hash, entry: &TrackedEntry) -> Option<Admission> {
+        let bytes = self.blobs.blobs().get_bytes(hash).await.ok()?;
+        Some(self.delivery.admit(&EnvelopeRef {
+            namespace: &entry.namespace,
+            author: &entry.author,
+            seq: entry.seq.unwrap_or_default(),
+            bytes: &bytes,
+        }))
+    }
+
+    fn record_arrival(&self, hash: Hash, entry: &mut TrackedEntry, admitted: bool) {
+        if !admitted || !entry.is_fix || !entry.content_present || entry.activity_sent {
+            return;
+        }
+        if !self.registry.is_known(&entry.namespace)
+            || !self
+                .content
+                .lock()
+                .expect("content index poisoned")
+                .is_tracked_for(&entry.namespace, hash.as_bytes())
+        {
+            return;
+        }
+        entry.activity_sent = true;
+        let sequence = self
+            .arrival_count
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            + 1;
+        let _ = self.arrivals.send(sequence);
+    }
+
+    #[cfg(test)]
+    async fn test_activity_transitions() -> Result<()> {
+        let node = Self::spawn(
+            SecretKey::from_bytes(&[161; 32]),
+            RetentionPolicy::from_hours(48),
+            &[],
+            None,
+            default_delivery(),
+            default_waker(),
+        )
+        .await?;
+        let hash = Hash::from_bytes([4; 32]);
+        let mut events = node.subscribe_arrivals();
+        let mut entry = TrackedEntry {
+            namespace: [5; 32],
+            author: vec![6; 32],
+            delivered_by: node.endpoint.id(),
+            seq: Some(1),
+            first_seen_ms: 0,
+            content_present: false,
+            is_fix: true,
+            activity_sent: false,
+            observed_revision: 0,
+            woken: true,
+            next_attempt_ms: 0,
+            attempts: 0,
+        };
+        node.registry.register(entry.namespace, None);
+        node.content
+            .lock()
+            .unwrap()
+            .want(entry.namespace, *hash.as_bytes());
+        node.record_arrival(hash, &mut entry, true);
+        assert!(events.try_recv().is_err(), "metadata is not content");
+        entry.content_present = true;
+        node.record_arrival(hash, &mut entry, false);
+        assert!(events.try_recv().is_err(), "rejected entries must not ping");
+        node.record_arrival(hash, &mut entry, true);
+        assert_eq!(
+            events.try_recv().unwrap(),
+            1,
+            "degraded wake must not suppress arrival"
+        );
+        node.record_arrival(hash, &mut entry, true);
+        assert!(
+            events.try_recv().is_err(),
+            "duplicate content must not ping"
+        );
+        entry.activity_sent = false;
+        entry.is_fix = false;
+        node.record_arrival(hash, &mut entry, true);
+        assert!(events.try_recv().is_err(), "control entries must not ping");
+        entry.is_fix = true;
+        node.content
+            .lock()
+            .unwrap()
+            .forget_namespace(&entry.namespace);
+        node.registry.forget(&entry.namespace);
+        node.record_arrival(hash, &mut entry, true);
+        assert!(
+            events.try_recv().is_err(),
+            "removed namespaces must not ping"
+        );
+
+        let other_namespace = [7; 32];
+        let key = b"same/fix".to_vec();
+        entry.content_present = false;
+        node.content
+            .lock()
+            .unwrap()
+            .want(entry.namespace, *hash.as_bytes());
+        node.content
+            .lock()
+            .unwrap()
+            .want(other_namespace, *hash.as_bytes());
+        let mut other = entry.clone();
+        other.namespace = other_namespace;
+        {
+            let mut tracked = node.tracked.lock().await;
+            tracked.insert((entry.namespace, key.clone(), hash), entry.clone());
+            tracked.insert((other_namespace, key.clone(), hash), other);
+        }
+        node.release(entry.namespace).await?;
+        assert!(
+            node.tracked
+                .lock()
+                .await
+                .contains_key(&(other_namespace, key, hash)),
+            "releasing one namespace must not abandon another's missing shared content"
+        );
+        assert!(node
+            .content
+            .lock()
+            .unwrap()
+            .is_tracked_for(&other_namespace, hash.as_bytes()));
+        node.shutdown().await;
+        Ok(())
     }
 
     /// Fetch an entry's bytes from anyone who might have them.
@@ -1134,19 +1378,28 @@ impl StashNode {
     }
 
     /// Run the delivery-service admission check and, if admitted, wake the namespace's subscribers.
-    async fn wake_for(&self, hash: Hash, entry: &TrackedEntry, degraded: bool) {
+    async fn wake_for(
+        &self,
+        hash: Hash,
+        entry: &TrackedEntry,
+        degraded: bool,
+        admission: Option<Admission>,
+    ) {
         use tracing::Instrument;
         let span = tracing::info_span!(
             "stash.entry.ready",
             sc.namespace = %crate::telemetry::short_hex(&entry.namespace),
             sc.entry_hash = %crate::telemetry::short_hex(hash.as_bytes()),
             sc.author = %crate::telemetry::short_hex(&entry.author),
-            sc.seq = entry.seq,
+            sc.seq = tracing::field::Empty,
             wake_targets = tracing::field::Empty,
             // true ⇒ woken without content: subscribers will sync and find nothing to download.
             degraded = degraded,
         );
         async {
+            if let Some(seq) = entry.seq {
+                tracing::Span::current().record("sc.seq", seq);
+            }
             if degraded {
                 tracing::warn!(
                     "stash: waking without content after {}ms — the writer never handed over its \
@@ -1156,23 +1409,28 @@ impl StashNode {
             }
             // The bytes are ours now; reading them back is cheap and keeps the delivery service
             // honest — a real MLS DS must see real framing, not the empty slice it used to get.
-            let bytes = if degraded {
-                Vec::new()
-            } else {
-                self.blobs
-                    .blobs()
-                    .get_bytes(hash)
-                    .await
-                    .map(|b| b.to_vec())
-                    .unwrap_or_default()
+            let admission = match admission {
+                Some(admission) => admission,
+                None => {
+                    let bytes = if degraded {
+                        Vec::new()
+                    } else {
+                        self.blobs
+                            .blobs()
+                            .get_bytes(hash)
+                            .await
+                            .map(|b| b.to_vec())
+                            .unwrap_or_default()
+                    };
+                    self.delivery.admit(&EnvelopeRef {
+                        namespace: &entry.namespace,
+                        author: &entry.author,
+                        seq: entry.seq.unwrap_or_default(),
+                        bytes: &bytes,
+                    })
+                }
             };
-            let env = EnvelopeRef {
-                namespace: &entry.namespace,
-                author: &entry.author,
-                seq: entry.seq,
-                bytes: &bytes,
-            };
-            match self.delivery.admit(&env) {
+            match admission {
                 Admission::Accept => {
                     let targets = self.registry.wake_targets(&entry.namespace);
                     tracing::Span::current().record("wake_targets", targets.len());
@@ -1218,9 +1476,8 @@ impl StashNode {
     ///
     /// A blob is released only when the last unreleased entry referencing it is gone, so two
     /// namespaces — or a fix plus a control entry in the same namespace — holding identical
-    /// ciphertext can't have one's sweep pull the rug from the other. `self.tracked` is removed
-    /// only after the content index reports that last reference, because a still-referenced
-    /// missing blob must keep being fetched.
+    /// ciphertext can't have one's sweep pull the rug from the other. Fetch state is kept per
+    /// retained entry, so releasing one namespace never stops another from fetching a shared blob.
     #[tracing::instrument(
         name = "stash.prune",
         skip_all,
@@ -1239,6 +1496,11 @@ impl StashNode {
             let Some(doc) = self.handle(ns).await else {
                 continue;
             };
+            let before = self
+                .content
+                .lock()
+                .expect("content index poisoned")
+                .revision();
             let stream = doc.get_many(Query::all().build()).await?;
             tokio::pin!(stream);
             let mut candidates = Vec::new();
@@ -1264,11 +1526,21 @@ impl StashNode {
             let kept_hashes = candidates
                 .iter()
                 .zip(decisions.iter())
-                .filter_map(|(candidate, decision)| decision.is_none().then_some(candidate.hash))
+                .filter_map(|(candidate, decision)| {
+                    decision.is_none().then_some(*candidate.hash.as_bytes())
+                })
+                .collect::<HashSet<_>>();
+            let kept_entries = candidates
+                .iter()
+                .zip(decisions.iter())
+                .filter_map(|(candidate, decision)| {
+                    decision
+                        .is_none()
+                        .then_some((candidate.key.clone(), candidate.hash))
+                })
                 .collect::<HashSet<_>>();
 
-            let mut forget_hashes = HashSet::new();
-            for (candidate, decision) in candidates.into_iter().zip(decisions) {
+            for decision in decisions {
                 let Some(reason) = decision else {
                     continue;
                 };
@@ -1278,29 +1550,19 @@ impl StashNode {
                 if reason.is_expired() {
                     expired += 1;
                 }
-                // Sets, not linear scans: a namespace that has not been swept since before
-                // latest-only retention shipped can still hold thousands of entries, and this ran
-                // once per candidate.
-                if kept_hashes.contains(&candidate.hash) {
-                    continue;
-                }
-                forget_hashes.insert(candidate.hash);
             }
 
-            for hash in forget_hashes {
-                // Drop our reference so the sweep can free the ciphertext once nobody else in the
-                // content index still names it.
-                let last_reference = self
-                    .content
-                    .lock()
-                    .expect("content index poisoned")
-                    .forget(&ns, hash.as_bytes());
-                if last_reference {
-                    // Stop chasing content only when no unreleased entry still needs this hash.
-                    self.tracked.lock().await.remove(&hash);
-                    released += 1;
-                }
-            }
+            // An overwritten LWW entry is absent from the query altogether, so considering only
+            // explicit release decisions would protect its old hash forever. Hold the tracked
+            // lock through the index update so a new reference cannot lose its fetch state.
+            let mut tracked = self.tracked.lock().await;
+            let mut content = self.content.lock().expect("content index poisoned");
+            released += content.forget_unseen(&ns, before, &kept_hashes).len() as u64;
+            tracked.retain(|(namespace, key, hash), entry| {
+                *namespace != ns
+                    || entry.observed_revision > before
+                    || kept_entries.contains(&(key.clone(), *hash))
+            });
         }
         let span = tracing::Span::current();
         span.record("released", released);
@@ -1508,13 +1770,19 @@ async fn unsubscribe_handler(
 
 // ── helpers ──────────────────────────────────────────────────────────────────────────────
 
-/// Decode the `hex(author)/{seq:020}` docs key (see `docs.rs::encode_key`) into `(author, seq)`.
-/// On any parse hiccup returns `(empty, 0)` — the passthrough delivery service ignores these
-/// fields, and a future MLS impl can treat an undecodable key as reject.
-fn decode_author_seq(key: &[u8]) -> (Vec<u8>, u64) {
+fn is_fix_key(key: &[u8]) -> bool {
+    crate::retention::decode_latest_fix_author(key).is_some()
+        || crate::retention::decode_fix_key(key).is_some()
+}
+
+/// Current fix keys omit the sequence; do not report a fabricated telemetry value.
+fn decode_author_seq(key: &[u8]) -> (Vec<u8>, Option<u64>) {
     crate::retention::decode_fix_key(key)
-        .map(|key| (key.author, key.seq))
-        .unwrap_or_else(|| (Vec::new(), 0))
+        .map(|key| (key.author, Some(key.seq)))
+        .or_else(|| {
+            crate::retention::decode_latest_fix_author(key).map(|author| (author.to_vec(), None))
+        })
+        .unwrap_or_else(|| (Vec::new(), None))
 }
 
 // ── two-node integration test (real iroh nodes) ───────────────────────────────────────────

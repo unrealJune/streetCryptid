@@ -96,6 +96,17 @@ pub fn decode_fix_key(key: &[u8]) -> Option<FixKey> {
     Some(FixKey { author, seq })
 }
 
+/// Decode the current last-write-wins fix key. Its sequence is in the envelope, not the key.
+pub fn decode_latest_fix_author(key: &[u8]) -> Option<[u8; 32]> {
+    let author = key.strip_suffix(b"/fix")?;
+    if author.len() != 64 {
+        return None;
+    }
+    hex_decode(std::str::from_utf8(author).ok()?)?
+        .try_into()
+        .ok()
+}
+
 /// One docs entry as seen by the pure release selector.
 #[derive(Debug, Clone, Copy)]
 pub struct RetentionEntry<'a> {
@@ -216,6 +227,18 @@ fn hex_decode(s: &str) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn current_fix_keys_require_a_full_hex_author() {
+        let valid = format!("{}/fix", "ab".repeat(32));
+        assert_eq!(decode_latest_fix_author(valid.as_bytes()), Some([0xab; 32]));
+        assert!(decode_latest_fix_author(b"abcd/fix").is_none());
+        assert!(
+            decode_latest_fix_author(format!("{}/fix/extra", "ab".repeat(32)).as_bytes()).is_none()
+        );
+        assert!(decode_latest_fix_author(format!("{}/fix", "zz".repeat(32)).as_bytes()).is_none());
+        assert!(decode_latest_fix_author(format!("ctl/{}", "ab".repeat(32)).as_bytes()).is_none());
+    }
 
     fn hex_encode(bytes: &[u8]) -> String {
         let mut s = String::with_capacity(bytes.len() * 2);
