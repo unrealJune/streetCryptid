@@ -7,6 +7,7 @@
 #
 #   repeater/server/**, .dockerignore (the server image's)   -> server
 #   repeater/windows/**                                      -> windows
+#   assets/images/mothman-logo*.svg (the Windows icon's source) -> app + windows
 #   repeater/protocol/**, Cargo.toml, Cargo.lock,
 #   rust-toolchain.toml, third_party/**, .github/**,
 #   this script, any other repeater/ path                    -> every lane
@@ -38,6 +39,10 @@ classify() {
     case "$path" in
       repeater/server/* | .dockerignore) server=true ;;
       repeater/windows/*) windows=true ;;
+      assets/images/mothman-logo*.svg)
+        app=true
+        windows=true
+        ;;
       repeater/protocol/* | Cargo.toml | Cargo.lock | rust-toolchain.toml | third_party/* | \
         .github/* | scripts/ci-changes.sh | repeater/*)
         app=true

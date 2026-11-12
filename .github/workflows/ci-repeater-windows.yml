@@ -1,24 +1,16 @@
-name: Repeater CI
+name: CI / repeater windows
+
+# The Windows repeater (repeater/windows): the WinUI app, the native-AOT service and the Rust host,
+# built, tested and packaged for x64 and ARM64 on matching Windows runners (~90 minutes). Called by
+# `ci.yml` as its Windows lane, and by `release-repeater-windows.yml` with the version to stamp.
 
 on:
-  pull_request:
-    paths:
-      - 'apps/repeater/**'
-      - 'assets/images/mothman-logo*.svg'
-      - 'modules/iroh-location/rust/third_party/noq/**'
-      - '.github/workflows/repeater-*.yml'
-  push:
-    branches: [main]
-    paths:
-      - 'apps/repeater/**'
-      - 'assets/images/mothman-logo*.svg'
-      - 'modules/iroh-location/rust/third_party/noq/**'
-      - '.github/workflows/repeater-*.yml'
   workflow_call:
     inputs:
       version:
         type: string
-        required: true
+        required: false
+        default: ''
     secrets:
       # signtool parameters (`vpk pack --signParams`), e.g. Azure Trusted Signing's dlib and
       # metadata. Only a release passes it; every other build stays an unsigned preview.
@@ -57,36 +49,41 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # NuGet packages (and the vpk tool) restore from cache, keyed on the locked-mode lockfiles
+      # every project restores against, so a hit is exactly the packages a cold restore would get.
       - uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
         with:
           dotnet-version: '10.0.403'
+          cache: true
+          cache-dependency-path: |
+            repeater/windows/**/packages.lock.json
+            repeater/windows/.config/dotnet-tools.json
+      # rust-toolchain.toml selects the version; this installs it with rustfmt.
       - name: Install pinned Rust toolchain
-        run: |
-          rustup toolchain install 1.97.0 --profile minimal --component rustfmt
-          rustup override set 1.97.0
-      - name: Prepare pinned upstream
-        run: .\apps\repeater\scripts\prepare-runtime.ps1
+        run: rustup toolchain install 1.97.0 --profile minimal --component rustfmt
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
-          workspaces: apps/repeater/native
-          key: repeater-${{ matrix.arch }}
-          save-if: ${{ github.event_name != 'pull_request' }}
+          workspaces: . -> target
+          key: repeater-windows-${{ matrix.arch }}
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
       - name: Test, publish and package matching native binaries
         run: |
-          .\apps\repeater\scripts\build.ps1 -Architecture '${{ matrix.arch }}' `
+          .\repeater\windows\scripts\build.ps1 -Architecture '${{ matrix.arch }}' `
             -Test -Package -Version $env:REPEATER_VERSION
       # The runner is disposable and elevated: install the real service, talk to it, remove it.
       - name: Install, exercise and remove the Windows service
-        run: .\apps\repeater\scripts\test-service.ps1 -AppDirectory '.\apps\repeater\artifacts\win-${{ matrix.arch }}\app'
+        run: .\repeater\windows\scripts\test-service.ps1 -AppDirectory '.\repeater\windows\artifacts\win-${{ matrix.arch }}\app'
+      # Everything the host is built from, for the AGPL source offer that travels with a release.
       - name: Record source provenance
         run: |
-          $path = '.\apps\repeater\artifacts\win-${{ matrix.arch }}\releases'
+          $path = '.\repeater\windows\artifacts\win-${{ matrix.arch }}\releases'
           git archive --format=zip --output="$path\repeater-source-${{ matrix.arch }}.zip" HEAD `
-            apps/repeater modules/iroh-location/rust/third_party/noq assets/images/mothman-logo.svg
+            repeater/windows repeater/server repeater/protocol third_party `
+            Cargo.toml Cargo.lock rust-toolchain.toml LICENSE assets/images/mothman-logo.svg
           "$env:GITHUB_SHA" | Set-Content "$path\source-${{ matrix.arch }}.txt"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: repeater-win-${{ matrix.arch }}
-          path: apps/repeater/artifacts/win-${{ matrix.arch }}/releases/
+          path: repeater/windows/artifacts/win-${{ matrix.arch }}/releases/
           if-no-files-found: error
           retention-days: 14

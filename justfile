@@ -537,10 +537,10 @@ update message="update":
 next-version:
     bash scripts/next-version.sh
 
-# The same for the repeater server: the `server-v*` tag the next push to main would cut
-# (.github/workflows/release-repeater-server.yml), and why.
-next-server-version:
-    bash scripts/next-server-version.sh
+# The same for a repeater (`server` or `windows`): the tag the next push to main would cut
+# (.github/workflows/release-repeater-{server,windows}.yml), and why.
+next-repeater-version product="server":
+    bash scripts/next-repeater-version.sh {{product}}
 
 # Write a version into app.json + package.json (what the release workflow commits).
 set-version version:
@@ -553,7 +553,7 @@ test-release:
     bash scripts/test-build-profile-isolation.sh
     bash scripts/test-native-cache.sh
     bash scripts/test-next-version.sh
-    bash scripts/test-next-server-version.sh
+    bash scripts/test-next-repeater-version.sh
 
 # --- Housekeeping ------------------------------------------------------------
 
