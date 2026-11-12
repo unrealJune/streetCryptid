@@ -40,11 +40,10 @@ third_party/
 modules/iroh-location/ios/generated/
 modules/iroh-location/android/src/main/java/uniffi/
 
-# Imported with its history from the trail-stash repository; formatted in its own commit (PR D in
-# docs/MONOREPO.md) so the import stays a pure move. Chart templates are Go templates, which are
-# not YAML until rendered, and stay ignored after that.
-repeater/server/
-repeater/protocol/
+# The repeater server's Helm templates are Go templates, which are not YAML until rendered; the
+# protocol's golden vectors are compared byte for byte.
+repeater/server/charts/*/templates/
+repeater/protocol/tests/fixtures/
 
 # Windows repeater build outputs and NuGet-generated lockfiles
 repeater/windows/**/bin/

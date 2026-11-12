@@ -13,15 +13,15 @@ image:
   repository: ghcr.io/unrealjune/trail-stash
   # Pin to an immutable tag (a git sha, e.g. sha-abc1234, or a semver) in production.
   # Defaults to the chart's appVersion when left empty.
-  tag: ""
+  tag: ''
   pullPolicy: IfNotPresent
 
 # Secrets for pulling a private GHCR image, e.g. [{ name: ghcr-creds }].
 # Not needed if you make the GHCR package public (see PUBLISHING.md).
 imagePullSecrets: []
 
-nameOverride: ""
-fullnameOverride: ""
+nameOverride: ''
+fullnameOverride: ''
 
 # ---------------------------------------------------------------------------
 # Secret material. TRAIL_STASH_SECRET_KEY gives the stash a STABLE identity so
@@ -44,14 +44,14 @@ fullnameOverride: ""
 secret:
   # Name of a pre-existing Secret to consume. When set, inline values below are ignored
   # and the chart creates no Secret of its own.
-  existingSecret: ""
+  existingSecret: ''
 
   # Inline values (used only when existingSecret is empty). secretKey is REQUIRED in that case.
-  secretKey: ""   # TRAIL_STASH_SECRET_KEY — 64 lowercase hex chars. openssl rand -hex 32
-  psk: ""         # TRAIL_STASH_PSK — control-API bearer. Strongly recommended; unset ⇒ open API.
-  apnsBearer: ""  # APNS_BEARER — placeholder static push credential (optional).
-  fcmBearer: ""   # FCM_BEARER  — placeholder static push credential (optional).
-  relayToken: "" # TRAIL_STASH_RELAY_TOKEN — bearer token for custom iroh relays (optional).
+  secretKey: '' # TRAIL_STASH_SECRET_KEY — 64 lowercase hex chars. openssl rand -hex 32
+  psk: '' # TRAIL_STASH_PSK — control-API bearer. Strongly recommended; unset ⇒ open API.
+  apnsBearer: '' # APNS_BEARER — placeholder static push credential (optional).
+  fcmBearer: '' # FCM_BEARER  — placeholder static push credential (optional).
+  relayToken: '' # TRAIL_STASH_RELAY_TOKEN — bearer token for custom iroh relays (optional).
 
   # Keys read from whichever Secret is used (existing or chart-created). Change these to
   # match the key names in your existingSecret if they differ.
@@ -67,9 +67,9 @@ secret:
 # ---------------------------------------------------------------------------
 config:
   port: 8787
-  retentionHours: 48       # stale-author backstop for latest fixes (clamped 1–336 by the server)
-  pruneIntervalMin: 15      # prune sweep cadence (clamped 1–1440)
-  logLevel: info            # RUST_LOG / tracing env-filter (e.g. info, trail_stash=debug)
+  retentionHours: 48 # stale-author backstop for latest fixes (clamped 1–336 by the server)
+  pruneIntervalMin: 15 # prune sweep cadence (clamped 1–1440)
+  logLevel: info # RUST_LOG / tracing env-filter (e.g. info, trail_stash=debug)
   # Custom iroh relay URLs. Empty uses the built-in n0 relay map. Configure the same
   # relay set as the clients use in EXPO_PUBLIC_IROH_RELAY_URLS.
   relayUrls: []
@@ -78,9 +78,9 @@ config:
   # Push wake (optional). Leave IDs empty to keep the waker a no-op; offline catch-up
   # still works via reconciliation. Bearers come from the Secret (secret.apnsBearer / fcmBearer).
   push:
-    apnsBundleId: ""        # e.g. com.unrealjune.streetcryptid — enables the APNs route
+    apnsBundleId: '' # e.g. com.unrealjune.streetcryptid — enables the APNs route
     apnsHost: api.push.apple.com
-    fcmProjectId: ""        # enables the FCM route
+    fcmProjectId: '' # enables the FCM route
 
   # Developer telemetry (optional; the image is built with the `otel` feature). Point endpoint at
   # an OTLP/HTTP collector (e.g. http://otel-collector:4318 — the streetCryptid infra/otel stack)
@@ -88,8 +88,8 @@ config:
   # NOT for production log shipping: exported log bodies are redacted, but span/log attributes
   # from dependencies are not — use only with a developer-controlled collector.
   otel:
-    endpoint: ""            # OTEL_EXPORTER_OTLP_ENDPOINT
-    serviceName: ""         # OTEL_SERVICE_NAME (default: trail-stash)
+    endpoint: '' # OTEL_EXPORTER_OTLP_ENDPOINT
+    serviceName: '' # OTEL_SERVICE_NAME (default: trail-stash)
 
 service:
   type: ClusterIP
@@ -100,7 +100,7 @@ service:
 # UDP required. Ingress is OFF by default; enable it if you want the chart to front it.
 ingress:
   enabled: false
-  className: ""
+  className: ''
   annotations: {}
   hosts:
     - host: stash.example.com
@@ -123,7 +123,7 @@ resources:
 # Pod-level hardening. The service writes nothing to disk, so the root FS is read-only.
 podSecurityContext:
   runAsNonRoot: true
-  runAsUser: 65532        # distroless "nonroot"
+  runAsUser: 65532 # distroless "nonroot"
   runAsGroup: 65532
   fsGroup: 65532
   seccompProfile:
@@ -139,7 +139,7 @@ securityContext:
 
 serviceAccount:
   create: true
-  name: ""
+  name: ''
   annotations: {}
 
 # Liveness/readiness both hit GET /healthz (always-open, returns 200).

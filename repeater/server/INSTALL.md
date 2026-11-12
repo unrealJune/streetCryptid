@@ -40,9 +40,10 @@ openssl rand -hex 32   # → TRAIL_STASH_PSK         (control-API pre-shared key
 
 ## Step 2 — build the image
 
+From the repository root (the build needs the whole Cargo workspace):
+
 ```bash
-cd infra/trail-stash/rust
-DOCKER_BUILDKIT=1 docker build -t trail-stash .
+DOCKER_BUILDKIT=1 docker build -f repeater/server/Dockerfile -t trail-stash .
 ```
 
 The first build compiles the full iroh stack and is slow (several minutes); re-builds are fast via
@@ -52,16 +53,16 @@ there.
 
 ## Step 3 — run it
 
-| Env var | Required | Default | Purpose |
-| --- | --- | --- | --- |
-| `TRAIL_STASH_SECRET_KEY` | **yes** | — | 64-hex node identity seed (Step 1). |
-| `TRAIL_STASH_PSK` | recommended | — | Control-API bearer; unset ⇒ open API (warned at startup). |
-| `PORT` | no | `8787` | Control-API port. |
-| `TRAIL_STASH_RETENTION_HOURS` | no | `48` | Prune window (clamped 1–336). Lower ⇒ less data at rest. |
-| `TRAIL_STASH_PRUNE_INTERVAL_MIN` | no | `15` | Prune sweep cadence. |
-| `APNS_BUNDLE_ID` / `APNS_HOST` | for iOS push | — / `api.push.apple.com` | Enables the APNs route. |
-| `FCM_PROJECT_ID` | for Android push | — | Enables the FCM route. |
-| `APNS_BEARER` / `FCM_BEARER` | for push | — | **Placeholder** static push credentials (see "Push"). |
+| Env var                          | Required         | Default                  | Purpose                                                   |
+| -------------------------------- | ---------------- | ------------------------ | --------------------------------------------------------- |
+| `TRAIL_STASH_SECRET_KEY`         | **yes**          | —                        | 64-hex node identity seed (Step 1).                       |
+| `TRAIL_STASH_PSK`                | recommended      | —                        | Control-API bearer; unset ⇒ open API (warned at startup). |
+| `PORT`                           | no               | `8787`                   | Control-API port.                                         |
+| `TRAIL_STASH_RETENTION_HOURS`    | no               | `48`                     | Prune window (clamped 1–336). Lower ⇒ less data at rest.  |
+| `TRAIL_STASH_PRUNE_INTERVAL_MIN` | no               | `15`                     | Prune sweep cadence.                                      |
+| `APNS_BUNDLE_ID` / `APNS_HOST`   | for iOS push     | — / `api.push.apple.com` | Enables the APNs route.                                   |
+| `FCM_PROJECT_ID`                 | for Android push | —                        | Enables the FCM route.                                    |
+| `APNS_BEARER` / `FCM_BEARER`     | for push         | —                        | **Placeholder** static push credentials (see "Push").     |
 
 ```bash
 docker run -d --name trail-stash -p 8787:8787 \
@@ -97,8 +98,8 @@ helm install trail-stash oci://ghcr.io/<owner>/charts/trail-stash \
 > — do not scale it up.
 
 Expose the control API over TLS with your own ingress/reverse proxy pointing at
-`svc/trail-stash:8787` (or set `ingress.enabled=true`). Then continue at **Step 6**. To publish the
-image/chart yourself rather than consuming someone else's, see `PUBLISHING.md`.
+`svc/trail-stash:8787` (or set `ingress.enabled=true`). Then continue at **Step 6**. The published
+image and chart come from `.github/workflows/release-repeater-server.yml` in this repository.
 
 ## Step 4 — provision the dial ticket
 
@@ -152,7 +153,7 @@ token for wake-ups.
      -d '{"read_ticket":"not-a-real-ticket"}'                                           # → 400 (past the gate)
    ```
 3. **Reconciliation logic** is covered by the in-repo integration test (real two-node import →
-   reconcile → wake): `cd infra/trail-stash/rust && cargo test --features live`.
+   reconcile → wake): `cargo test -p trail-stash --features live` (or `just server::test-live`).
 4. **Real devices:** enable the toggle on two paired phones, move one while the other is fully
    backgrounded/offline, then bring the second online — its friend's missed trail should backfill.
 
@@ -162,7 +163,7 @@ Without push, offline catch-up still works — it just waits for the phone's nex
 wake a backgrounded phone promptly:
 
 - Set `APNS_BUNDLE_ID` (= `com.unrealjune.streetcryptid`) and/or `FCM_PROJECT_ID`.
-- Provide credentials. **Current limitation:** the sender reads a *static* bearer from
+- Provide credentials. **Current limitation:** the sender reads a _static_ bearer from
   `APNS_BEARER` / `FCM_BEARER` (placeholder `EnvCredentials`). Production needs short-lived
   credentials — an APNs ES256 JWT and an FCM OAuth2 access token, refreshed on a timer. That
   credential-minting is the one remaining piece (tracked in `PLAN.md`); the payload construction and
