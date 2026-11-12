@@ -1,3 +1,25 @@
+# Repository map
+
+One repository, three products, one Cargo workspace (`Cargo.toml`, `docs/MONOREPO.md`):
+
+- **The app** — the Expo app at the root (`src/`, `modules/`, `app.json`, …) and its Rust core
+  (`modules/iroh-location/rust`, plus the browser bridge in `rust-wasm`). Releases as `v*` to the
+  stores (`release.yml`).
+- **The repeater server** — `repeater/server` (crate `trail-stash`): the hosted stash and the
+  Linux/Docker repeater, with its Helm chart. Releases as `server-v*` plus the image and chart on
+  GHCR. Its own notes: `repeater/server/AGENTS.md`.
+- **The Windows repeater** — `repeater/windows`: WinUI app, Windows service, Rust host. Releases as
+  `windows-v*-preview.N`. Its own notes: `repeater/windows/AGENTS.md`.
+- **Shared** — `repeater/protocol` (the roster and wire the phone and every repeater agree on, with
+  golden vectors) and `third_party/noq` (patched for every crate).
+
+CI runs a lane per product (`ci.yml` → `ci-app.yml`, `ci-repeater-server.yml`,
+`ci-repeater-windows.yml`, chosen by `scripts/ci-changes.sh`); `Required` passes skipped lanes.
+Every product releases from Conventional Commits on its own paths
+(`scripts/lib/conventional-commits.sh`), so a commit's type and the files it touches decide what
+ships: `feat`/`fix` release, `docs`/`chore`/`ci`/`build`/`test`/`refactor`/`style` do not. Build
+Rust with `-p`, never `--workspace` with features.
+
 # Expo HAS CHANGED
 
 Read the exact versioned docs at https://docs.expo.dev/versions/v58.0.0/ before writing any code.
@@ -30,7 +52,7 @@ Conventions when changing that code:
 - Instrumentation lives at drop-decision points and stamps `sc.author` / `sc.seq` /
   `sc.entry_hash` / `sc.drop_reason`. JS uses `src/features/dev/telemetry/` (a hand-rolled
   OTLP-JSON client — do NOT add the OpenTelemetry JS SDK; it misbehaves in Hermes headless
-  contexts). Rust (both `modules/iroh-location/rust` and the trail-stash repo) uses plain
+  contexts). Rust (both `modules/iroh-location/rust` and `repeater/server`) uses plain
   `tracing` spans; OTLP is a subscriber layer behind the `otel` cargo feature (default-on in
   the mobile crate; keep call sites free of `#[cfg]`).
 - **Two gates, and the build-time one is the real one.** `EXPO_PUBLIC_DEV_TELEMETRY=1` compiles

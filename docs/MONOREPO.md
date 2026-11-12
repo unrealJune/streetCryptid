@@ -1,5 +1,34 @@
 # Bringing the repeater into this repo
 
+## Status (2026-11-11): done
+
+| Step | PR                                                                                        |
+| ---- | ----------------------------------------------------------------------------------------- |
+| 0    | trail-stash #9 merged; GHCR packages granted to this repository; archive still pending    |
+| A    | #198 import with history; #200, #201 release follow-ups                                   |
+| B    | #199 one workspace (deployed the stash on iroh 1.4.1 as `server-v0.5.0`)                  |
+| C    | #202 the Windows client, its stash patch, automatic Windows releases                      |
+| D    | the tidy: `.editorconfig`, actionlint, just modules, agent docs, Prettier over the server |
+
+Where the result differs from the plan underneath, the code is right and this document is history:
+
+- **Profiles.** Cargo reads profiles only at the workspace root, and the crates disagreed:
+  `release` is the phone's; `server-release` (Dockerfile) and `desktop-release` (the Windows
+  host) reproduce what those had; `just build-wasm` applies the bridge's settings through
+  `CARGO_PROFILE_RELEASE_*`. The wasm bridge was on iroh 1.0.2 too and moved with the stash.
+- **Releases are automatic for every product.** `scripts/lib/conventional-commits.sh` holds one
+  set of rules; `next-version.sh` (app, `v*`) and `next-repeater-version.sh <server|windows>`
+  (`server-v*`, `windows-v*-preview.1`) apply them to each product's own paths. Only commits that
+  descend from the previous tag's roots count, so an imported history never releases anything,
+  and the app ignores what never ships in it (workflows, docs, the justfile, ignore files).
+- **The stash patch landed as one `feat(server)` commit**, not four: every hunk in `node.rs`
+  touches the entry key, the arrival channel, the watcher map and the new storage mode at once.
+- **The phone's path dependency on `repeater/protocol`** belongs to #187, where the git-tag
+  dependency lives; `main` never had it.
+- **`[workspace.dependencies]` was not adopted.** The one lockfile already unifies versions, and
+  `workspace = true` changes how `default-features` combines in ways only a device build shows.
+- The Windows lane takes ~18 minutes per architecture warm, not 90 (that is its timeout).
+
 > Plan of record, 2026-11-09, for folding [trail-stash](https://github.com/unrealJune/trail-stash)
 > and the Windows repeater into this repository: one Cargo workspace, one CI entry point with a
 > lane per product, and a tag namespace per product. The design is
