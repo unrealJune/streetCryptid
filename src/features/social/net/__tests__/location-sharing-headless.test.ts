@@ -3,13 +3,11 @@ import type { Telemetry } from '@/features/dev/telemetry';
 
 import type { DeliveryMode } from '../../core/delivery-mode';
 import type { PoolState } from '../../core/pool';
-import { loadWatermarks, WATERMARKS_KEY } from '../background/watermarks';
-import type { PersistentKV } from '../background/persistent-kv';
 
 /**
  * Headless-init wiring. A background TaskManager/BGTask callback runs in a fresh JS context with no
  * React tree, so {@link LocationSharingService.init} takes the `headless` path and deliberately
- * skips gossip subscriptions, profile publishing and pairing polling.
+ * skips the replica watch, profile publishing and pairing polling.
  *
  * What it must NOT skip is re-opening the friends' trail namespaces: native `syncTrail` reconciles
  * the namespaces held in its handle cache, and a fresh node starts with only our own in there. When
@@ -20,12 +18,14 @@ import type { PersistentKV } from '../background/persistent-kv';
 class FakeNativeModule {
   calls = {
     importDocTicket: [] as string[],
-    subscribe: [] as { topic: string; bootstrap: string[] }[],
+    importProfileTicket: [] as string[],
+    watchReplica: 0,
     syncTrail: [] as { since: number; peerTicket: string | null }[],
-    pushTrail: [] as { peerTickets: string[] }[],
-    uploadTrailContent: [] as { baseUrl: string }[],
-    publish: [] as unknown[][],
-    docsWrite: [] as unknown[][],
+    setDeliveryConfig: [] as {
+      peerTickets: string[];
+      stashBaseUrl: string | null;
+      stashPsk: string | null;
+    }[],
     setSharingRecipients: [] as { recipients: string[]; watchers: string[] }[],
     setRecipientKeys: [] as { endpoints: string[]; keys: string[] }[],
   };
@@ -44,19 +44,19 @@ class FakeNativeModule {
   async importDocTicket(ticket: string) {
     this.calls.importDocTicket.push(ticket);
   }
-  async deriveTopic(id: string) {
-    return `topic-${id}`;
+  async importProfileTicket(ticket: string) {
+    this.calls.importProfileTicket.push(ticket);
   }
-  async subscribe(topic: string, bootstrap: string[]) {
-    this.calls.subscribe.push({ topic, bootstrap });
-    return `sub-${topic}`;
+  watchReplica() {
+    this.calls.watchReplica += 1;
   }
-  async unsubscribe() {}
-  async publish(...args: unknown[]) {
-    this.calls.publish.push(args);
-  }
-  async docsWrite(...args: unknown[]) {
-    this.calls.docsWrite.push(args);
+  unwatchReplica() {}
+  async setDeliveryConfig(
+    peerTickets: string[],
+    stashBaseUrl: string | null,
+    stashPsk: string | null
+  ) {
+    this.calls.setDeliveryConfig.push({ peerTickets, stashBaseUrl, stashPsk });
   }
   async setSharingRecipients(recipients: string[], watchers: string[]) {
     this.calls.setSharingRecipients.push({ recipients, watchers });
@@ -67,16 +67,6 @@ class FakeNativeModule {
   async syncTrail(since: number, peerTicket: string | null) {
     this.calls.syncTrail.push({ since, peerTicket });
   }
-  async pushTrail(peerTickets: string[]) {
-    this.calls.pushTrail.push({ peerTickets });
-  }
-  // An arrow property, not a prototype method: the service reads this off the module and calls it
-  // unbound (Expo's native module proxy binds its own functions), so a prototype method here would
-  // lose `this` and throw into the best-effort catch instead of recording the call.
-  uploadTrailContent = async (baseUrl: string) => {
-    this.calls.uploadTrailContent.push({ baseUrl });
-    return 1;
-  };
   async readTrail() {
     return [];
   }
@@ -158,11 +148,7 @@ function stashDeps() {
   return { stash: { configured: true, registerNamespace: async () => {} } };
 }
 
-/**
- * Capture what the service reports. `pushTrail` is best-effort by contract — it never rethrows,
- * because a failed durable mirror must not take down the tick that already went out over gossip —
- * so its telemetry log is the only place a caller can observe that delivery is broken.
- */
+/** Capture what the service reports: its warnings are the only trace of a best-effort mirror. */
 const warnings: string[] = [];
 
 function captureTelemetry(): void {
@@ -305,147 +291,80 @@ describe('LocationSharingService — headless init', () => {
     expect(mockHolder.mod.calls.importDocTicket.sort()).toEqual(['doc-b', 'doc-c']);
   });
 
-  it('still skips gossip subscriptions in headless mode (nothing is listening)', async () => {
+  it('neither watches the replica nor imports profiles in headless mode (nothing is on screen)', async () => {
     const svc = makeService();
 
     await svc.init('@me', 'mothman', '', '', { mode: 'headless' });
 
-    expect(mockHolder.mod.calls.subscribe.map((s) => s.topic)).not.toContain('topic-bb22');
+    expect(mockHolder.mod.calls.watchReplica).toBe(0);
+    expect(mockHolder.mod.calls.importProfileTicket).toEqual([]);
   });
 
-  it('pushes the durable trail to the opted-in stash and to every pool member', async () => {
+  /**
+   * The native drain pushes every publish itself (`NodeSink::flush`), JS-free wakes included, to
+   * exactly the list mirrored here. So this list IS delivery: a friend missing from it is reached
+   * only if they happen to dial us, and a stash missing from it never holds a copy.
+   */
+  it('hands native the opted-in stash and every pool member as push targets', async () => {
     mockHolder.stashConfig = { baseUrl: 'https://stash.test', ticket: 'ticket-stash', psk: null };
     mockHolder.deliveryMode = 'stash';
     const svc = makeService(stashDeps());
+
     await svc.init('@me', 'mothman', '', '', { mode: 'headless' });
 
-    await svc.pushTrail();
-
-    expect(mockHolder.mod.calls.pushTrail).toEqual([
-      { peerTickets: ['ticket-stash', 'ticket-b', 'ticket-c'] },
+    expect(mockHolder.mod.calls.setDeliveryConfig).toEqual([
+      {
+        peerTickets: ['ticket-stash', 'ticket-b', 'ticket-c'],
+        stashBaseUrl: 'https://stash.test',
+        stashPsk: null,
+      },
     ]);
   });
 
   /**
-   * The whole point of the pool push: with the stash off there is no durable copy anywhere else,
-   * so if this regressed to a no-op a friend could only relay a fix it had never been sent — which
-   * is exactly the peer-relay gap `scripts/e2e/relay-e2e.sh` was chasing.
+   * With the stash off there is no durable copy anywhere but the pool, so if this regressed to an
+   * empty list a friend could only relay a fix it had never been sent — the peer-relay gap
+   * `scripts/e2e/relay-e2e.sh` was chasing.
    */
   it('still pushes to the pool when the stash is configured but not opted into', async () => {
     mockHolder.stashConfig = { baseUrl: 'https://stash.test', ticket: 'ticket-stash', psk: null };
     mockHolder.deliveryMode = 'mutual';
     const svc = makeService(stashDeps());
+
     await svc.init('@me', 'mothman', '', '', { mode: 'headless' });
 
-    await svc.pushTrail();
-
-    expect(mockHolder.mod.calls.pushTrail).toEqual([{ peerTickets: ['ticket-b', 'ticket-c'] }]);
-  });
-
-  it('uploads trail content to the stash when it is opted into', async () => {
-    mockHolder.stashConfig = { baseUrl: 'https://stash.test', ticket: 'ticket-stash', psk: null };
-    mockHolder.deliveryMode = 'stash';
-    const svc = makeService(stashDeps());
-    await svc.init('@me', 'mothman', '', '', { mode: 'headless' });
-
-    await svc.pushTrail();
-
-    expect(mockHolder.mod.calls.uploadTrailContent).toEqual([{ baseUrl: 'https://stash.test' }]);
+    expect(mockHolder.mod.calls.setDeliveryConfig).toEqual([
+      { peerTickets: ['ticket-b', 'ticket-c'], stashBaseUrl: null, stashPsk: null },
+    ]);
   });
 
   /**
    * `stashConfig` is build-time env; the opt-in is the user's answer. Gating the content upload on
    * the former would PUT sealed envelopes to the durable server for someone who switched it off —
-   * into a namespace `syncStashGrants` never registered, so it would fail on every tick too and
+   * into a namespace `syncStashGrants` never registered, so it would fail on every drain too and
    * bury real push failures in the noise.
    */
-  it('does not upload content to the stash when the user has opted out', async () => {
+  it('gives native no stash upload target when the user has opted out', async () => {
     mockHolder.stashConfig = { baseUrl: 'https://stash.test', ticket: 'ticket-stash', psk: null };
     mockHolder.deliveryMode = 'mutual';
     const svc = makeService(stashDeps());
+
     await svc.init('@me', 'mothman', '', '', { mode: 'headless' });
 
-    await svc.pushTrail();
-
-    expect(mockHolder.mod.calls.uploadTrailContent).toEqual([]);
-    expect(mockHolder.mod.calls.pushTrail).toEqual([{ peerTickets: ['ticket-b', 'ticket-c'] }]);
+    const [config] = mockHolder.mod.calls.setDeliveryConfig;
+    expect(config.stashBaseUrl).toBeNull();
+    expect(config.peerTickets).not.toContain('ticket-stash');
   });
 
-  /**
-   * Nothing to push to is not the same as a push that fails. `start_sync([])` still waits out the
-   * native push timeout, which on a headless wake is a multi-second hole in iOS's background
-   * budget for no work at all.
-   */
-  it('does not call into native at all when there is no stash and no pool', async () => {
+  /** An empty list is how native knows there is nothing to dial (`NoTargets`), not a skipped call. */
+  it('mirrors an empty target list when there is no stash and no pool', async () => {
     mockHolder.pool = { friends: {}, sharingWith: [] };
     const svc = makeService();
+
     await svc.init('@me', 'mothman', '', '', { mode: 'headless' });
 
-    await svc.pushTrail();
-
-    expect(mockHolder.mod.calls.pushTrail).toEqual([]);
-  });
-
-  it('lets a newer binary schedule repeater carriers without claiming a confirmed push', async () => {
-    mockHolder.pool = { friends: {}, sharingWith: [] };
-    const budgeted = jest.fn().mockResolvedValue([]);
-    (mockHolder.mod as unknown as { pushTrailBudgeted: typeof budgeted }).pushTrailBudgeted =
-      budgeted;
-    const svc = makeService();
-    await svc.init('@me', 'mothman', '', '', { mode: 'headless' });
-    const kv = (svc as unknown as { kv: PersistentKV }).kv;
-    await kv.set(WATERMARKS_KEY, '{}');
-
-    await svc.pushTrail();
-
-    expect(budgeted).toHaveBeenCalledWith([], null);
-    expect((await loadWatermarks(kv)).push).toBeUndefined();
-  });
-
-  it.each([
-    ['failed', false],
-    ['silent', false],
-    ['skipped', false],
-    ['finished', true],
-  ])('records a budgeted %s peer as a confirmed push: %s', async (outcome, confirmed) => {
-    mockHolder.pool = { friends: { [friendA.endpointId]: friendA }, sharingWith: [] };
-    const budgeted = jest.fn().mockResolvedValue([
-      {
-        peer: friendA.endpointId,
-        outcome,
-        latencyMs: outcome === 'skipped' || outcome === 'silent' ? null : 10,
-        entriesSent: 0,
-        budgetMs: 100,
-      },
+    expect(mockHolder.mod.calls.setDeliveryConfig).toEqual([
+      { peerTickets: [], stashBaseUrl: null, stashPsk: null },
     ]);
-    (mockHolder.mod as unknown as { pushTrailBudgeted: typeof budgeted }).pushTrailBudgeted =
-      budgeted;
-    const svc = makeService();
-    await svc.init('@me', 'mothman', '', '', { mode: 'headless' });
-    const kv = (svc as unknown as { kv: PersistentKV }).kv;
-    await kv.set(WATERMARKS_KEY, '{}');
-
-    await svc.pushTrail();
-
-    expect(typeof (await loadWatermarks(kv)).push === 'number').toBe(confirmed);
-  });
-
-  /**
-   * Not a supported configuration — an iOS dev client whose Swift bindings predate the export is
-   * a build that needs `just bindgen-ios`. Silently no-oping would strand every fix on the device
-   * and present as the exact delivery bug this call exists to prevent, so it has to be loud.
-   */
-  it('reports a binary whose bindings predate pushTrail rather than silently dropping fixes', async () => {
-    mockHolder.stashConfig = { baseUrl: 'https://stash.test', ticket: 'ticket-stash', psk: null };
-    mockHolder.deliveryMode = 'stash';
-    // Assigned on the INSTANCE: `pushTrail` is a prototype method, so `delete` on the instance
-    // silently does nothing and the test would pass without ever exercising the guard.
-    (mockHolder.mod as unknown as Record<string, unknown>).pushTrail = undefined;
-    const svc = makeService(stashDeps());
-    await svc.init('@me', 'mothman', '', '', { mode: 'headless' });
-
-    await svc.pushTrail();
-
-    expect(warnings.some((line) => /pushTrail is missing/.test(line))).toBe(true);
   });
 });

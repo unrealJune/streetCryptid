@@ -10,8 +10,8 @@ import type { PersistentKV } from './persistent-kv';
  * a second ago produce identical records, and telling them apart means reconstructing a timeline
  * from spans that may never have been exported.
  *
- * They all live in ONE KV row, deliberately: they are stamped on the hot path (a live-mode publish
- * runs every few seconds) and separate writes would be a SQLite statement each, per fix. The
+ * They all live in ONE KV row, deliberately: they are stamped on the hot path (every fix) and
+ * separate writes would be a SQLite statement each, per fix. The
  * row is small and last-write-wins — losing a stamp costs a slightly stale age, never correctness,
  * so nothing here is worth a transaction.
  *

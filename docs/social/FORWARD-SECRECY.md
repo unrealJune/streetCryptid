@@ -2,10 +2,10 @@
 
 > Status: **design of record; built and wired.** The schedule, store, session seam, and
 > envelope v3 live in `modules/iroh-location/rust`, and every **fix** lane now uses them:
-> durable, null, and live/gossip. Sessions are bootstrapped by the SAS bump itself
+> the fix and null docs slots (and, until 2026-11 removed it, the app gossip lane). Sessions are bootstrapped by the SAS bump itself
 > (`pairing.rs`), so there is no manual seam and no JS-callable way to root one from
 > anything weaker; the native drain drives §4.6 recovery (`recover_sessions`). Still v2 by
-> construction, deliberately: the control lane, the restart control record (it is what
+> construction, deliberately: the (since retired) live-mode control lane, the restart control record (it is what
 > re-establishes a ratchet, so it cannot depend on one), the BLE mesh path (§8.1), and the web/WASM build,
 > which has no durable store to keep sequential state in. This document
 > supersedes the forward-secrecy line in [`ARCHITECTURE.md`](./ARCHITECTURE.md) §11
@@ -275,19 +275,22 @@ a UX obligation, not a protocol one — the link-pair flow must tell the user to
 figure somewhere other than where the link came from, or the SAS gate is decorative for
 exactly the users most likely to use it.
 
-**Do not trigger the DH ratchet on `NeighborUp`.** The gossip topic is per _author_
-(`lib.rs:202`), so its neighbours are the whole pool; a neighbour coming up may be C, not
-B. The trigger is a signed envelope from B carrying a new ratchet pub. `NeighborUp` is
-only a hint that publishing is worthwhile.
+**Do not trigger the DH ratchet on a sync event.** The docs live-sync swarm is per _author
+namespace_, so its members are the whole pool; a neighbour coming up or an `InsertRemote`
+from some peer may be C, not B. The trigger is a signed envelope from B carrying a new
+ratchet pub. A sync event is only a hint that reading is worthwhile.
 
 ### 4.3 Regimes
 
-The transport split already exists (`ARCHITECTURE.md:139`): gossip for live, docs for
-durable.
+The schedule was designed for two regimes. Only the cold one exists now: the app gossip
+lane and the on-demand live mode that drove the hot one were both retired in 2026-11, so
+every envelope travels the docs slot (`ARCHITECTURE.md` §5). The hot column is kept because
+the schedule still covers it — a future real-time mode would ride the docs live engine
+under the same ratchet (`ARCHITECTURE.md` §9c).
 
 |                  | Cold                                               | Hot                      |
 | ---------------- | -------------------------------------------------- | ------------------------ |
-| Transport        | docs / stash, LWW                                  | gossip, peer connected   |
+| Transport        | docs / stash, LWW                                  | (retired) peer connected |
 | Cadence          | 5 min (`sampling-policy.ts:41`)                    | 4 s floor                |
 | Ratchet material | header on every envelope (null fixes for watchers) | header on every envelope |
 | DH epoch advance | ~each publish interval (peer's next envelope)      | continuous               |
@@ -336,8 +339,7 @@ envelope, N wraps, unchanged in shape.
 
 Product consequence, stated plainly: a friend whose device has not run the app in T_lapse
 stops receiving until it does, and should be visibly "hasn't checked in" — distinct from
-revoked, distinct from merely stale. Live mode remains the escape hatch for "current,
-now."
+revoked, distinct from merely stale.
 
 ### 4.6 Desync detection and recovery
 
@@ -485,7 +487,7 @@ Changes from v2 (`crypto.rs`):
 - **The acceptance window is sized by reader absence, not cadence** (`2^17` positions).
   A sender's chain resets only when the reader answers, the reader answers only by
   _opening_ something (on iOS, only while the app is mounted), and every tick spends two
-  positions (the live and durable lanes each seal). The original 512 assumed a reply every
+  positions while a gossip lane and the docs lane each sealed (one position since 2026-11). The original 512 assumed a reply every
   interval; it ran out after ~21 h of a friend not opening the app, and on 2026-10-09 left
   an iPhone unable to open anything from its friend until a §4.6 restart. The window bounds
   work only — no skipped key is stored, and anyone holding a chain key can walk it as far

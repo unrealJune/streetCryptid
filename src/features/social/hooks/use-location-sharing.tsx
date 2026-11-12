@@ -26,7 +26,7 @@ import {
   presenceSyncIntervalMs,
   type FriendPresence,
 } from '@/features/social/core/presence';
-import type { IncomingFix, LocationFix } from '@/features/social/core/types';
+import type { LocationFix } from '@/features/social/core/types';
 import { type TrailPoint } from '@/features/social/net/background/trail-store';
 import { INIT_WATCHDOG_MS } from '@/features/social/net/background/init-watchdog';
 import { isServiceReady, type ServiceLifecycle } from '@/features/social/core/service-lifecycle';
@@ -113,8 +113,6 @@ interface LocationSharingContextValue {
   refreshPairing(): Promise<void>;
   refreshTransportDiagnostics(): Promise<void>;
   toggleShare(endpointId: string, on: boolean): Promise<void>;
-  /** Ask a friend for real-time location, or withdraw the ask (ARCHITECTURE §9c). */
-  /** End a friend's live window on us immediately. */
   removeFriend(endpointId: string): Promise<void>;
   retryLocation(): Promise<void>;
   /** Choose how sealed envelopes leave this phone: direct, via mutuals, or via the stash. */
@@ -337,10 +335,9 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
       if (!active) return;
       setLiveSelfFix((current) => (!current || fix.ts >= current.ts ? fix : current));
     });
+    // Every friend fix reaches the app through a replica read, and every replica read that stores
+    // one announces it here — there is no second, live delivery path to listen to.
     const offTrail = service.onTrailChange(() => {
-      if (active) void refreshTrail(service);
-    });
-    const offFix = service.onFix((_fix: IncomingFix) => {
       if (active) void refreshTrail(service);
     });
     const offError = service.onError((message) => {
@@ -448,7 +445,6 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
       offSnapshot();
       offLocalFix();
       offTrail();
-      offFix();
       offError();
     };
   }, [initialProfile, refreshTrail, startLocation, initAttempt]);
@@ -874,9 +870,9 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
   // The cadence class changes only when someone starts or stops moving.
   const syncIntervalMs = useMemo(() => presenceSyncIntervalMs(friends), [friends]);
   /**
-   * Keep an open map current, on the two occasions the live path does not.
+   * Keep an open map current, on the two occasions live sync does not.
    *
-   * Live gossip already delivers a friend's fix the moment it is published, but only while the two
+   * Docs live sync already delivers a friend's fix the moment it is written, but only while the two
    * nodes are actually connected — and on the measured fleet they usually are not: a friend's phone
    * publishes from a headless wake into the stash and nobody dials us. Until now the only pulls were
    * at service init and on the service's own foreground handler, which is installed inside

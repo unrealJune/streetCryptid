@@ -30,7 +30,6 @@ const mockHeartbeatNativeFix = jest.fn(async () => {
   calls.push('drain');
   return 1;
 });
-const mockPushTrail = jest.fn(async () => {});
 const mockServiceCtor = jest.fn();
 /** Call order across the service, so we can assert drain-before-sync/push. */
 
@@ -42,7 +41,6 @@ jest.mock('../../location-sharing', () => ({
       syncTrail: mockSyncTrail,
       ingestNativeFix: mockIngestNativeFix,
       heartbeatNativeFix: mockHeartbeatNativeFix,
-      pushTrail: mockPushTrail,
       flushDevTelemetry: mockFlushDevTelemetry,
       shutdownAsync: mockShutdownAsync,
     };
@@ -129,9 +127,6 @@ describe('headless-runtime', () => {
     mockSyncTrail.mockImplementation(async () => {
       calls.push('syncTrail');
     });
-    mockPushTrail.mockImplementation(async () => {
-      calls.push('pushTrail');
-    });
     mockShutdownAsync.mockImplementation(async () => {});
     mockSaveWatermark.mockClear();
     mockClearWatermark.mockClear();
@@ -204,8 +199,6 @@ describe('headless-runtime', () => {
       expect(mockServiceCtor).not.toHaveBeenCalled();
     });
 
-    // publishFix broadcasts live and writes the LOCAL docs replica only. Without the push the
-    // envelopes never leave the phone, so an offline friend has nothing to reconcile from.
     // The regression test for the silent-death bug. iOS reports 'inactive' — NOT 'active' — during a
     // cold launch into the foreground and for as long as a system permission alert is up ("Allow
     // While Using / Always"). The old guard only refused on 'active', so a restored location task
@@ -274,7 +267,7 @@ describe('headless-runtime', () => {
       expect(mockServiceCtor).toHaveBeenCalledTimes(1);
     });
 
-    it('pushes the durable trail to the stash after draining, before the node shuts down', async () => {
+    it('drains every fix through the native pipeline before the node shuts down', async () => {
       setAppState('background');
       const parent = { traceId: 'a'.repeat(32), spanId: 'b'.repeat(16) };
 
@@ -282,26 +275,13 @@ describe('headless-runtime', () => {
 
       expect(published).toBe(3);
       expect(mockIngestNativeFix).toHaveBeenCalledTimes(3);
-      expect(mockPushTrail).toHaveBeenCalledWith(parent);
-      // One ingest per fix now, not one batched drain: the native outbox is the queue, so the
-      // batch is handed down a fix at a time. The property under test is unchanged — every one of
-      // them lands before the push, or the envelopes never leave the phone.
-      expect(calls).toEqual(['drain', 'drain', 'drain', 'pushTrail']);
-      // The node must still be alive for the push — shutdown is the session's `finally`.
-      expect(mockPushTrail.mock.invocationCallOrder[0]).toBeLessThan(
+      // The native drain pushes on its own (`NodeSink::flush`); a JS push on top of it was a
+      // second cold dial per member out of iOS's background budget.
+      expect(calls).toEqual(['drain', 'drain', 'drain']);
+      // The node must still be alive for every drain — shutdown is the session's `finally`.
+      expect(mockIngestNativeFix.mock.invocationCallOrder[2]).toBeLessThan(
         mockShutdownAsync.mock.invocationCallOrder[0]
       );
-    });
-
-    it('skips the push when nothing was published', async () => {
-      setAppState('background');
-      // The gate absorbed it — an accepted fix inside an already-covered slot. Real, and the
-      // commonest outcome by far, since fixes arrive far faster than the publish interval.
-      mockIngestNativeFix.mockImplementationOnce(async () => 0);
-
-      await ingestFixesHeadless(fixes(1));
-
-      expect(mockPushTrail).not.toHaveBeenCalled();
     });
   });
 

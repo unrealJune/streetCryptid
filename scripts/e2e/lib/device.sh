@@ -356,7 +356,7 @@ device_dump_event_log() {
     FROM event_log
     WHERE timestamp >= $2
       AND action IN ('bg.wake', 'bg.dispatch', 'engine.ingest', 'outbox.drain', 'publish.fix',
-                     'trail.push.app', 'dev.command',
+                     'dev.command',
                      -- The silent-path spans. These are the rows that explain an EMPTY pipeline:
                      -- storage running in memory, an unreadable outbox, a cadence the OS refused,
                      -- an engine stuck in error. Without them a broken device dumps nothing and

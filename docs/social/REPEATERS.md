@@ -1,12 +1,15 @@
 # streetCryptid — Repeaters (self-hosted, ciphertext-blind replicas)
 
-> Status: **design; phases 0 and 1 built in `unrealJune/trail-stash`.** Written 2026-11-07.
+> Status: **phases 0-2 built.** Written 2026-11-07; the repeater moved into this repository on
+> 2026-11-11 ([`docs/MONOREPO.md`](../MONOREPO.md)).
 >
-> - Phase 0 (PR #7): the stash daemon on disk, reconciling with sibling repeaters.
-> - Phase 1 (`phase1/roster`): the roster, claiming, and the `streetcryptid/repeater/1` protocol,
->   with integration tests against real iroh endpoints.
+> - Phases 0 and 1: the daemon on disk with siblings, the roster, claiming and the
+>   `streetcryptid/repeater/1` protocol, in [`repeater/server`](../../repeater/server) (crate
+>   `trail-stash`) and [`repeater/protocol`](../../repeater/protocol), which carry the history of the
+>   former `unrealJune/trail-stash` repository.
+> - Phase 2: the phone's half (§9), and the Windows repeater in [`repeater/windows`](../../repeater/windows).
 >
-> Nothing in the app changes yet. Read [`ARCHITECTURE.md`](./ARCHITECTURE.md) §6 and §10 and
+> Read [`ARCHITECTURE.md`](./ARCHITECTURE.md) §6 and §10 and
 > [`FORWARD-SECRECY.md`](./FORWARD-SECRECY.md) §4.1 first.
 >
 > **Vocabulary.** There are no "pools" of repeaters. A person **owns repeaters**, and their
@@ -41,7 +44,7 @@ It is **ciphertext-blind**, exactly like the stash:
 - Seizing one yields what the stash operator already sees (§8), and every friend's per-pair
   location keys stay exactly where they are.
 
-In MLS terms (`trail-stash/src/mls.rs`) it is another untrusted Delivery Service.
+In MLS terms (`repeater/server/src/mls.rs`) it is another untrusted Delivery Service.
 
 ## 2. Two grants, kept apart
 
@@ -201,18 +204,20 @@ share that trap.
 ### 3.4 One crate, both sides
 
 The roster, the cert, the grant proof and the `streetcryptid/repeater/1` wire are one crate,
-`streetcryptid-repeater` (`trail-stash/rust/repeater`). Both the daemon and the app's core
-(`modules/iroh-location/rust/src/repeater.rs`, a git dependency pinned to a trail-stash release tag, v0.3.0 first) are built on it, so
-a phone signs ops with exactly the code that judges them on the repeater.
+`streetcryptid-repeater` (`repeater/protocol`). The daemon, the Windows host and the app's core
+(`modules/iroh-location/rust/src/repeater.rs`) all link it by path from the same tree, so a phone
+signs ops with exactly the code that judges them on the repeater. Phones in the field lag the
+repeaters, so the crate's golden vectors (`repeater/protocol/tests/fixtures/`) pin every released
+encoding: append-only, end-only, like the location wire.
 
 The boundary is drawn so the crate holds only what both sides must agree on byte for byte:
 
-| in `streetcryptid-repeater`  | trail-stash only                       | app core only                     |
+| in `streetcryptid-repeater`  | repeater (`repeater/server`) only      | app core only                     |
 | ---------------------------- | -------------------------------------- | --------------------------------- |
 | roster ops, rules, state     | console claim window                   | the roster book (`repeaters.bin`) |
 | `RepeaterCert`               | namespace book, release                | claim flow + cert check           |
 | requests, responses, framing | protocol handler, sibling/carrier sync | grant plan, enrol/withdraw        |
-| grant proof, claim link      | persistent node                        | `RepeaterCard` (to come)          |
+| grant proof, claim link      | persistent node                        | `RepeaterCard`                    |
 
 It has no iroh, tokio or I/O. Each side brings its own iroh (the daemon is on 1.0, the app on
 1.4), and identities cross the boundary as raw 32-byte ed25519 keys, which is what endpoint ids
@@ -467,8 +472,8 @@ carried by A's repeater and by B's. That needs no new mechanism:
 
 Everything between repeaters is iroh: roster ops over `streetcryptid/repeater/1` on the node's own
 endpoint, and trails over plain iroh-docs sync. There is no HTTP between repeaters, or between a
-phone and a repeater. trail-stash's `repeaters_in_different_rosters_converge_on_a_trail_they_both_carry`
-tests it end to end.
+phone and a repeater. `repeaters_in_different_rosters_converge_on_a_trail_they_both_carry`
+(`repeater/server/src/repeater_tests.rs`) tests it end to end.
 
 ## 7. Service accounts (out of scope, but decided now)
 
@@ -514,8 +519,8 @@ needs plaintext, so it must be in the wrap set. What the protocol already implie
 
 ## 9. Phases
 
-All of the trail-stash work is one PR (trail-stash#8, with the spike folded in); all of the app's
-is this one.
+The repeater work landed as trail-stash#8 and #9 before that repository moved into this one
+(`repeater/server`, with its history); the app's is #187.
 
 0. **Spike: the stash on disk, with siblings.** Built and green.
    - `Storage::Persistent` (no longer what a repeater runs: see `Storage::MemoryRepeater`, §1).

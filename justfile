@@ -6,6 +6,11 @@
 default:
     @just --list
 
+# The repeater products have their own recipes: `just server::test`, `just server::run`,
+# `just windows::build x64`, `just windows::package x64 <version>` (`just --list server`).
+mod server 'repeater/server'
+mod windows 'repeater/windows'
+
 # --- Setup -------------------------------------------------------------------
 
 # Install dependencies from the lockfile.
@@ -207,8 +212,8 @@ e2e-soak devices="auto" scenarios="background-walking" hours="2":
 
 # Start/reuse (default), check, or stop the local trail-stash used by network-chaos scenarios
 # (scripts/e2e/scenarios/chaos-*.yaml — see run-matrix.sh's `require_local_stash` handling and
-# lib/netchaos.sh). Needs a local github.com/unrealJune/trail-stash checkout (default: ~/trail-stash,
-# override with TRAIL_STASH_REPO). Prints the .env.local lines + rebuild reminder needed to point
+# lib/netchaos.sh). Builds the stash from repeater/server in this tree. Prints the .env.local lines
+# + rebuild reminder needed to point
 # a dev-client build at it — run-matrix.sh does NOT rebuild the app for you.
 # Example: `just e2e-local-stash` / `just e2e-local-stash status` / `just e2e-local-stash stop`
 e2e-local-stash cmd="start":
@@ -315,7 +320,7 @@ release-telemetry-check:
     node scripts/check-release-telemetry.mjs
 
 # Full gate including the native iroh-location Rust crate and generated bindings.
-check-all: check test-rust check-bindings
+check-all: check test-rust check-bindings server::test
 
 # Expo project health check.
 doctor:
@@ -370,8 +375,15 @@ check-bindings:
 
 # Needs wasm-pack + the wasm32-unknown-unknown target; web/ is a git-ignored build output (README §5).
 # Build the browser WASM bundle (relay-only iroh + in-memory docs) into modules/iroh-location/web/.
+# The workspace's `release` profile is the phone's (thin LTO); the browser bundle was always built
+# with fat LTO, one codegen unit and panic = "abort", which Cargo now takes only from the root, so
+# they are applied here rather than in rust-wasm/Cargo.toml (see /Cargo.toml).
 build-wasm:
-    cd modules/iroh-location/rust-wasm && wasm-pack build --target web --release --out-dir ../web
+    cd modules/iroh-location/rust-wasm && \
+      CARGO_PROFILE_RELEASE_LTO=fat \
+      CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1 \
+      CARGO_PROFILE_RELEASE_PANIC=abort \
+      wasm-pack build --target web --release --out-dir ../web
 
 # Needs the Android NDK + cargo-ndk. Run after changing the Rust UniFFI surface (see README §3).
 # Regenerate Android jniLibs + Kotlin UniFFI bindings.
@@ -438,14 +450,16 @@ bindgen-ios:
     cp ../ios/generated/iroh_locationFFI.h ../ios/headers/
     cp ../ios/generated/iroh_locationFFI.modulemap ../ios/headers/module.modulemap
     rm -rf ../ios/IrohLocationFFI.xcframework
-    mkdir -p target/ios-simulator/release
+    # The root Cargo workspace's target directory, unless the caller pinned one.
+    target="${CARGO_TARGET_DIR:-../../../target}"
+    mkdir -p "$target/ios-simulator/release"
     lipo -create \
-      target/aarch64-apple-ios-sim/release/libiroh_location.a \
-      target/x86_64-apple-ios/release/libiroh_location.a \
-      -output target/ios-simulator/release/libiroh_location.a
+      "$target/aarch64-apple-ios-sim/release/libiroh_location.a" \
+      "$target/x86_64-apple-ios/release/libiroh_location.a" \
+      -output "$target/ios-simulator/release/libiroh_location.a"
     xcodebuild -create-xcframework \
-      -library target/aarch64-apple-ios/release/libiroh_location.a -headers ../ios/headers \
-      -library target/ios-simulator/release/libiroh_location.a -headers ../ios/headers \
+      -library "$target/aarch64-apple-ios/release/libiroh_location.a" -headers ../ios/headers \
+      -library "$target/ios-simulator/release/libiroh_location.a" -headers ../ios/headers \
       -output ../ios/IrohLocationFFI.xcframework
 
 # --- EAS: cloud build / submit / update --------------------------------------
@@ -518,6 +532,11 @@ update message="update":
 next-version:
     bash scripts/next-version.sh
 
+# The same for a repeater (`server` or `windows`): the tag the next push to main would cut
+# (.github/workflows/release-repeater-{server,windows}.yml), and why.
+next-repeater-version product="server":
+    bash scripts/next-repeater-version.sh {{product}}
+
 # Write a version into app.json + package.json (what the release workflow commits).
 set-version version:
     bash scripts/apply-version.sh {{version}}
@@ -529,6 +548,7 @@ test-release:
     bash scripts/test-build-profile-isolation.sh
     bash scripts/test-native-cache.sh
     bash scripts/test-next-version.sh
+    bash scripts/test-next-repeater-version.sh
 
 # --- Housekeeping ------------------------------------------------------------
 
@@ -537,10 +557,10 @@ clean:
     rm -rf .expo dist web-build node_modules/.cache
 
 # Remove native caches: the generated ios/ and android/ projects, the
-# iroh-location cargo target dir, and this project's Xcode DerivedData.
+# Cargo workspace's target dir, and this project's Xcode DerivedData.
 clean-native: clean
     rm -rf ios android
-    rm -rf modules/iroh-location/rust/target
+    rm -rf target
     rm -rf ~/Library/Developer/Xcode/DerivedData/streetCryptid-*
 
 # Print key tool versions.
@@ -593,7 +613,7 @@ ios-dev-install device="":
       fi
     fi
     echo "Installing to device $dev"
-    export CARGO_TARGET_DIR="$root/modules/iroh-location/rust/target"
+    export CARGO_TARGET_DIR="$root/target"
     export EXPO_NO_TELEMETRY=1
     bunx eas-cli build \
       --local \

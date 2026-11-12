@@ -1,0 +1,98 @@
+# One Cargo workspace for every Rust crate in the repository (docs/MONOREPO.md): one Cargo.lock and
+# one [patch.crates-io], so the phone, the hosted stash and the repeaters build the same iroh and
+# the same patched noq. Before this, `[patch.crates-io]` reached only the phone's build.
+#
+# Rules that come with it:
+# - Build with `-p`, never `--workspace` with features. Resolver 2 unifies features across every
+#   package in one invocation, so a workspace-wide build would test the server's pure core with
+#   iroh compiled in.
+# - Profiles live here and only here; Cargo ignores them in a member manifest. `release` is the
+#   phone's, because EAS and `just bindgen-*` build with `--release`. The server and the wasm
+#   bridge each reproduce what they had before (below, and `just build-wasm`).
+[workspace]
+resolver = "2"
+members = [
+  "modules/iroh-location/rust",
+  "modules/iroh-location/rust-wasm",
+  "repeater/protocol",
+  "repeater/server",
+  "repeater/windows/host",
+]
+# Vendored for the phone alone, with their own SimRadio test workspace (`just test-ble-transport`).
+exclude = [
+  "modules/iroh-location/rust/third_party/iroh-ble-transport",
+  "modules/iroh-location/rust/third_party/blew",
+]
+# A bare `cargo test` at the root stays the stash's fast pure-core run, and never builds the
+# mobile crate on a laptop by accident.
+default-members = ["repeater/protocol", "repeater/server"]
+
+# noq 1.4.0 with one fix, vendored (MIT OR Apache-2.0; third_party/noq/NOTICE): `read_to_end` on a
+# stream already read to its end failed with `ClosedStream`, which iroh-docs hits at the end of
+# every sync, so most syncs reported failure while their data had arrived. Drop the patch once a
+# noq release fixes it.
+[patch.crates-io]
+noq = { path = "third_party/noq" }
+
+# --- the phone (modules/iroh-location/rust): EAS, `just bindgen-*` -----------------------------
+[profile.release]
+opt-level = "z"
+# Thin, not fat. `lto = true` is FAT LTO: one serial whole-program optimization pass over iroh,
+# iroh-docs, iroh-blobs, tokio and rustls, run on EVERY build no matter how warm the Cargo cache
+# is, and on Android once per ABI. It was the single largest recurring cost in CI. Thin LTO
+# parallelizes across codegen units and still optimizes across crates.
+#
+# The trade is binary size, which for a mobile app is a real cost rather than a rounding error --
+# so check it rather than assuming. `scripts/build-report.sh` reports the `cargo-build` phase in
+# the job summary, and `just bindgen-android-arm64` then `ls -l` on the .so gives the size delta
+# locally. If size regresses more than a percent or two, `lto = "fat"` restores the old behaviour.
+lto = "thin"
+strip = true
+
+# --- the hosted stash and the Linux repeater (repeater/server): the Dockerfile ------------------
+# What `cargo build --release` gave it as its own workspace: Cargo's default release profile.
+[profile.server-release]
+inherits = "release"
+opt-level = 3
+lto = false
+strip = "none"
+
+# --- the Windows repeater's host (repeater/windows/host): scripts/build.ps1 ----------------------
+# What its own manifest asked for as a separate workspace: optimized for speed, thin LTO, stripped.
+[profile.desktop-release]
+inherits = "release"
+opt-level = 3
+lto = "thin"
+strip = true
+
+# --- the browser bridge (modules/iroh-location/rust-wasm) ---------------------------------------
+# wasm-pack only knows `--release`, so `just build-wasm` turns the phone's release profile into
+# the wasm one with CARGO_PROFILE_RELEASE_LTO=fat, _CODEGEN_UNITS=1 and _PANIC=abort (opt-level
+# "z" and stripped symbols are already shared).
+
+# Optimize dependencies in test builds only; workspace crates stay at opt-level 0 so they keep
+# fast rebuilds and full debuggability. The phone's suite is CPU-bound in dependency code it cannot
+# avoid -- x25519/ed25519, ChaCha, BLAKE3 and redb, all unoptimized by default -- and on CI
+# `cargo test` spent ~5 minutes running against ~80 s compiling (2026-10-31: restart_protocol
+# 150 s, ratchet_conditions 69 s, pairing_integration 57 s; 104 s for the whole suite at
+# opt-level 2). `test`, not `dev`: the dev profile also builds the host library UniFFI generates
+# bindings from in every EAS build, and optimizing its dependencies there made a cold build of
+# it take 8 minutes instead of 4 for no benefit.
+[profile.test.package."*"]
+opt-level = 2
+# No debug info for dependencies: twenty test binaries each linking every dependency's DWARF
+# made the link the largest disk and memory consumer of the job (one run's `ld` died of SIGBUS),
+# and a backtrace through a dependency needs no line numbers to be read. Workspace crates keep it.
+debug = false
+
+# --- the repeaters' tests (repeater/server, repeater/windows/host): CI and `just server::test` ----
+# The test profile above is tuned for the phone's CPU-bound crypto suite. The repeaters' tests
+# spend their time on network round trips, not in dependency code, so optimizing every dependency
+# only makes them compile slower: they ran at opt-level 0 before the workspace existed, and this
+# keeps them there. Use with `cargo test --profile repeater-test`.
+[profile.repeater-test]
+inherits = "test"
+
+[profile.repeater-test.package."*"]
+opt-level = 0
+debug = false

@@ -33,7 +33,7 @@ describe('HttpStashClient.registerNamespace', () => {
     expect(JSON.parse(init.body as string)).toEqual({ read_ticket: 'doc-ticket-xyz' });
   });
 
-  // The privacy property the whole live-mode design rests on (ARCHITECTURE.md §10): a device
+  // The privacy property the stash registration rests on (ARCHITECTURE.md §10): a device
   // push token is the one identifier here resolvable to a real person, and pairing it with a
   // namespace let the stash operator work out which namespace was ours. Nothing may reintroduce
   // it — not even as an optional field a caller could set.

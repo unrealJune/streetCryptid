@@ -7,11 +7,11 @@
  * **Device push tokens are deliberately never sent** (ARCHITECTURE.md §10). The stash's wake API
  * still exists server-side, but registering a token against namespaces let the operator identify
  * which namespace was ours — under bilateral pairing your token appeared against every friend's
- * namespace and never your own, so the gap named you. Live mode polls for requests instead (§9c),
- * so no wake is needed. Registration is now a read-ticket and nothing else.
+ * namespace and never your own, so the gap named you. Registration is now a read-ticket and
+ * nothing else.
  *
- * All calls are best-effort — a failure only means offline delivery is degraded, never that the
- * live path or peer-only reconciliation breaks. Mirrors the pairing-mailbox client conventions.
+ * All calls are best-effort — a failure only means offline delivery is degraded, never that live
+ * sync or peer-only reconciliation breaks. Mirrors the pairing-mailbox client conventions.
  */
 
 import { getStashConfig, type StashConfig } from 'iroh-location';

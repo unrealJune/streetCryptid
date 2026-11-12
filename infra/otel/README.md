@@ -53,8 +53,8 @@ Point the components at it (use the machine's **LAN IP**, not `localhost` — ph
 ## The correlation model
 
 Location payloads are E2E-encrypted and the stash is ciphertext-blind, so **no single W3C trace
-context can ride a ping end-to-end** — the pipe itself (gossip broadcast + iroh-docs set
-reconciliation) carries no headers, and the stash couldn't read one anyway.
+context can ride a ping end-to-end** — the pipe itself (iroh-docs set reconciliation and the
+live engine's broadcast of each insert) carries no headers, and the stash couldn't read one anyway.
 
 Instead, every party stamps its spans with **join attributes** it can legitimately observe:
 
@@ -72,8 +72,9 @@ Real parent/child trace context flows only where a real channel exists:
   backfill under one root span (Hermes has no reliable `AsyncLocalStorage`, so this is deliberately
   passed through each async boundary).
 - **app → native core**: Android and iOS pass `traceparent` over the Expo/UniFFI bridge, so
-  `gossip.publish`, `docs.write`, and `trail.sync` remain in the app operation's trace while retaining
-  their own `streetcryptid-core` service identity.
+  `trail.sync` remains in the app operation's trace while retaining its own `streetcryptid-core`
+  service identity. Publishing is native end to end (`engine.ingest` → `publish.fix` →
+  `docs.write`, then `trail.push` from the same drain), so it roots its own trace.
 - **app → stash control API**: the app sends `traceparent`; the stash's `http.request` span
   parents on it (one trace covers register/unsubscribe round-trips).
 - **stash → woken phone**: the silent push payload carries the `stash.wake.push` span's
@@ -97,41 +98,41 @@ bg.refresh         (the OS-scheduled periodic wake; bg.refresh.expired if iOS cu
     └ outbox.enqueue (coalesced / overflow?)
     └ outbox.drain   (published/retained, publish.failed reason)
       └ publish.fix        (sc.seq)
-        ├ gossip.publish*  (sc.entry_hash)  ─ live path ───────►  gossip.receive (sc.entry_hash, sc.via_peer, outcome)
-        │                   ├ peer.contact (send, per recipient neighbour)          └ peer.contact (recv, from_author?)
-        └ docs.write*      (sc.entry_hash, sc.envelope, dropped, sc.drop_reason?, dropped_peers?)  ─ LOCAL replica only
-      └ session.recover*   (desynced, primed, restarted, requested, withdrawn, await_prekey, no_key, control_written)  ─ §4.6, once per drain
-    └ trail.push.app                        ─ durable path ─►  stash.entry.received (sc.entry_hash)
-      └ trail.push*        (entries_sent, finished)
+        └ docs.write       (sc.entry_hash, sc.envelope, dropped, sc.drop_reason?, dropped_peers?)  ─ LOCAL replica; live engine broadcasts it
+      └ session.recover    (desynced, primed, restarted, requested, withdrawn, await_prekey, no_key, control_written)  ─ §4.6, once per drain
+      └ trail.push         (entries_sent, finished)  ─ reconciliation ─►  stash.entry.received (sc.entry_hash)
+        ├ trail.push.live       (waiting on the node lock)
+        ├ trail.push.open       (doc handle + event subscription)
+        ├ trail.push.start_sync (peers)
+        ├ trail.push.wait       (budget_ms, ended, events, pending)  ─ the only phase the 30 s deadline bounds
+        ├ trail.push.roles      (recipient/delivery store reads for peer.role)
+        ├ trail.push.report     (peers; per-peer path labels)
+        ├ trail.push.peer  (sc.peer, peer.outcome)
+        ├ peer.contact     (send, per peer that finished)
+        └ trail.content.upload (stash blob PUT; stash opted in only)
+                                                        replica watch: peer.contact (recv, from_author?)
                                                                   └ trail.sync.app (recovered)
-                                                                    └ fix.received.app (sc.seq, transport_peer?, drop?)
+                                                                    └ fix.received.app (sc.seq, transport_path, transport_peer?)
 ```
 
-`docs.write` does **not** reach the stash on its own — it writes the local replica, and iroh-docs
-broadcasts a local insert only for namespaces `start_sync` has marked as syncing. `trail.push`
-(after a drain) or `trail.sync` is what actually moves the envelope. A `publish.fix` with no
-`trail.push.app` after it in the same wake is a fix that never left the phone.
+There is one location transport: the author's iroh-docs namespace. `docs.write` puts the sealed
+envelope in the local replica, and iroh-docs' live engine broadcasts that insert to every peer
+syncing the namespace at that moment (every namespace is put into the live engine at node start).
+`trail.push` — a reconciliation the drain opens with the stash and the pool after each publish — is
+what carries it to anyone who was not. A `publish.fix` with no `trail.push` after it from the same
+device is a fix that only reached peers that happened to be connected.
 
-`*` Native spans are direct children of `publish.fix` on Android and iOS.
+A friend's entry lands in our replica three ways — their push, the live broadcast, or our pull
+(`trail.sync`, `friend.pull`) — and the replica watch reports each delivery exactly once, as one
+`peer.contact{dir=recv}` per serving peer. The app then reads the replica, and `fix.received.app`
+says what it surfaced: `transport_path` is `docs` when a named peer delivered the slot since the
+last read (`transport_peer` is that peer) and `sync` when the slot was already in the replica.
 
-**`publish.fix` is emitted by whichever path published — read it as "this device put an envelope on
-the wire", not "JS published".** That is true as of 2026-09-05 and was not before: the span existed
-only in `location-sharing.ts`, so the native drain reached the wire without ever opening one. Over a
-48-hour window that read:
-
-| author       | `publish.fix` | `gossip.publish` |
-| ------------ | ------------: | ---------------: |
-| `6942d8b97f` |             0 |              474 |
-| `84f86b144a` |             0 |              148 |
-| `e19f0a9735` |           186 |              494 |
-
-Two of three devices published hundreds of envelopes and emitted no `publish.fix` at all, because
-the span fired only when a JS context happened to be alive — on iOS, roughly "while moving with the
-app up". So the dashboard that answers _is this device publishing_ went blank in precisely the
-conditions worth watching, and every query below silently under-counted. `SubscriptionSink::publish`
-now opens it (`lane = "native"`; the JS path has no `lane`), so **counts before and after that date
-are not comparable** — a step change in `publish.fix` volume on 2026-09-05 is this, not a fleet that
-suddenly started working.
+**`publish.fix` is emitted only by the native drain.** Before 2026-09-05 it was a JS span, so the
+native drain reached the wire without ever opening one and two of three devices showed none for
+48 hours while publishing hundreds of envelopes; counts across that date are not comparable. Since
+the docs-only transport (2026-11) there is no JS publish path at all, so the span is complete by
+construction. Native spans carry no `device.id`: key queries on `service_instance_id`.
 
 `publish.fix` also carries the envelope's own account of itself: `fix_state` (1 live, 2 parked,
 3 no-fix — `FIX_STATE_*`, 0 when the sender predates the field), `published_delta_s` (seconds
@@ -252,7 +253,6 @@ runtime's claim backoff — none of which a host binary emits.
 | `node.host.release` | a lease returned: `outcome` is `still-held`, `shut-down`, `shutdown-failed`, `shutdown-timed-out`, `released` (no node left) or `not-held`; `waited_ms` is the shutdown's wait                |
 | `node.host.restart` | a settings change rebuilt the node in place, keeping every lease; `shutdown` is how the old one went                                                                                          |
 | `node.host.heal`    | an isolated phone with no app holding the node rebuilt it from the stored settings (`outcome` = `healed` / `declined` / `failed`) — see [below](#is-this-phone-reaching-anyone-nodeisolation) |
-| `subscribe.own`     | a caller asked for the own-topic subscription: `outcome` is `created`, `adopted` (joined its peers, and took its events if `listener=true`) or `recreated` (the old loop had ended)           |
 
 Every one carries `generation`, `app_leases` and `background` after the change. `device.health`
 carries the same under `node.host.*`, plus counters since process start; `builds` outrunning
@@ -346,6 +346,16 @@ network, or the wake ended too early):
 { name = "trail.push" && span.entries_sent > 0 }
 ```
 
+A push longer than its 30 s budget spent the difference outside `trail.push.wait`; the sibling
+phase spans say where. `trail.push.wait{ended}` is `all-reported` (every dialled peer answered),
+`deadline` (someone stayed silent — the usual case while a friend is asleep), `stream-ended` or
+`stream-error`:
+
+```traceql
+{ name = "trail.push" && duration > 35s } >> { name =~ "trail.push.(live|open|start_sync|wait|roles|report)" }
+{ name = "trail.push.wait" } | select(span.ended, span.pending)
+```
+
 **`stash.grant`** (`streetcryptid-core`, Rust) — the node registering our trail namespace and every
 friend's with the stash (`POST /v1/namespaces`, read ticket only). The stash keeps that list in
 memory and forgets it on restart, after which every sync with it ends `NotFound` and every content
@@ -364,7 +374,7 @@ forgotten us; floored at 10 min), `app` (JS asked). `registered`/`failed` count 
 A stash restart is visible from the stash's own log (`stash up`), and should be followed within a
 few minutes by a `stash.grant{reason="untracked"}` or `{reason="start"}` from every active phone.
 
-**`sc.envelope`** on `docs.write` / `gossip.publish` is the sealed envelope's version: `4` while a
+**`sc.envelope`** on `docs.write` is the sealed envelope's version: `4` while a
 leader's unanswered restart header rides along (FORWARD-SECRECY.md §4.7), `3` otherwise. It was a
 constant `3` until 2026-10-06, so a restart could not be seen leaving the phone.
 
@@ -375,11 +385,12 @@ Stash-side activity for one namespace (arrivals and the pushes they triggered):
 { name = "stash.wake.push" && span.sc.namespace = "0f1e2d3c4b" }
 ```
 
-Receives that arrived but could not be decrypted / were gated by the app:
+Entries that reached the replica but could not be opened (no wrap for us, a ratchet miss, a
+payload that would not decode) are logged by the replica read, not spanned — one per slot per
+read, so a span would repeat for as long as the slot stays put:
 
-```traceql
-{ name = "gossip.receive" && span.outcome != "delivered" }
-{ name = "fix.received.app" && span.sc.drop_reason != "" }
+```logql
+{service_name="streetcryptid-core"} |= "ratcheted envelope not opened"
 ```
 
 Arms that left no tripwire. On iOS the fence is the only mechanism that can bring a _terminated_
@@ -392,37 +403,28 @@ geofence registers, the OS has no handler to deliver to, and the call site canno
 { name = "revive.arm" && span.outcome = "task-undefined" }
 ```
 
-Live mode (ARCHITECTURE §9c) — a request's whole journey, and why one was refused:
+**Does docs live sync actually deliver phone-to-phone?** With two devices in the foreground, both
+sharing, a fix should reach the watcher through the docs live engine (or the author's own push)
+rather than waiting for a stash reconciliation. Compare the author's `publish.fix` count against
+the watcher's receive contacts from that author:
 
 ```traceql
-{ name = "live.request.sent" }
-{ name = "live.armed" }
-{ name = "live.cancelled" }
-{ name = "live.request.ignored" && span.sc.drop_reason != "" }
+{ name = "publish.fix" && resource.service.instance.id = "6942d8b97f" }
+{ name = "peer.contact" && span.contact.dir = "recv" && span.sc.peer = "6942d8b97f" && span.contact.from_author = true }
 ```
 
-**Does gossip actually deliver phone-to-phone?** Live mode is only worth anything if a ~4s fix
-reaches the watcher over gossip rather than waiting for a stash reconciliation. Put two devices in
-the foreground, both sharing, and compare the counts — plus `gossip neighbor up` in Loki for how
-long after bind a neighbour appears:
+If contacts badly trail publishes, fixes are arriving at stash-sync granularity and the live
+engine is not doing its job.
+
+**Who is actually carrying whose fixes.** `transport_peer` on `fix.received.app` (and `sc.peer` on
+the receive-side `peer.contact`) is the short id of the peer that delivered the slot, which is only
+sometimes the author. It answers "is this pool relaying at all, or is every device talking to
+exactly one peer" — and, when a phone's own pushes are landing nowhere, whether its fixes are still
+reaching people second-hand:
 
 ```traceql
-{ name = "gossip.publish" }
-{ name = "gossip.receive" }
-```
-
-If receives badly trail publishes, live fixes are arriving at stash-sync granularity and "live" is
-not live. Worth checking before building anything further on top of it.
-
-**Who is actually carrying whose fixes.** `sc.via_peer` on `gossip.receive` (and `transport_peer`
-on `fix.received.app`, the app-side echo) is the short id of the neighbour that handed the envelope
-over, which is only sometimes the author. It answers "is this pool relaying at all, or is every
-device talking to exactly one peer" — and, when a phone's own publishes are landing nowhere, whether
-its fixes are still reaching people second-hand:
-
-```traceql
-{ name = "gossip.receive" && span.sc.via_peer != span.sc.author }
-{ name = "fix.received.app" && span.transport_peer != "" }
+{ name = "fix.received.app" && span.transport_peer != "" && span.transport_peer != span.sc.author }
+{ name = "peer.contact" && span.contact.dir = "recv" && span.contact.from_author = false }
 ```
 
 Logs (Grafana → Explore → Loki). iroh's relay / net_report / magicsock diagnostics from the
@@ -449,14 +451,15 @@ and connected at the same moment and handed it over themselves. Those three look
 map and in `fix.received.app`.
 
 `peer.contact` (`streetcryptid-core`, Rust — so it fires on JS-free wakes too) is emitted once per
-exchange with a specific peer, at the four places a peer is named while data crosses:
+exchange with a specific peer, at the two places a peer is named while data crosses:
 
-| `contact.dir` / `contact.lane` | Fires when                                                                                              |
-| ------------------------------ | ------------------------------------------------------------------------------------------------------- |
-| `send` / `gossip`              | a publish was broadcast while a recipient was a **gossip neighbour** (one span per such recipient)      |
-| `recv` / `gossip`              | a gossip envelope addressed to us was delivered by a neighbour                                          |
-| `send` / `docs`                | a `trail.push` peer **finished** reconciling (the same peer as its `trail.push.peer{outcome=finished}`) |
-| `recv` / `docs`                | a `trail.sync` peer **delivered** at least one entry — one span per peer per pass, `entries` = how many |
+| `contact.dir` | Fires when                                                                                                                                                                                                         |
+| ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `send`        | a `trail.push` peer **finished** reconciling (the same peer as its `trail.push.peer{peer.outcome=finished}`)                                                                                                       |
+| `recv`        | a peer **delivered** friend entries into our replica — the replica watch, which sees the author's push, the live engine's broadcast and our own pull alike, so each delivery is counted once; `entries` = how many |
+
+Until 2026-11 there was also a `contact.lane` dimension (`gossip` / `docs`), from the separate gossip
+location lane the docs-only transport removed; series before that date carry it.
 
 Attributes, all spanmetrics dimensions (so they keep for 90 days, not 7):
 
@@ -467,18 +470,17 @@ Attributes, all spanmetrics dimensions (so they keep for 90 days, not 7):
   be filed as anything else.
 - `contact.from_author` (receive only) — the peer handed over **its own** envelope. `friend` +
   `from_author=true` is the strongest statement there is: the author's phone was on the other end.
-- `contact.path` — `ble` | `lan` | `direct` | `relay` | `live`, the closest open path to that peer
-  (same labelling, and the same caveat, as `fix.received.app`'s `via`).
+- `contact.path` — `ble` | `lan` | `direct` | `relay` | `unknown`, the closest open path to that
+  peer at the moment of the contact — the path that WAS open, not one the bytes provably took.
 - `sc.peer` — the other device's short endpoint id, the same 10-hex form as `service.instance.id`,
   so `service_instance_id` x `sc_peer` is a device pair.
 
-`gossip.publish` also gains `neighbors` and `recipients_direct`, and `trail.sync` gains
-`sync.peers_delivered`, so a single trace shows how many of its recipients a wake actually reached.
+`trail.push` carries `peers_finished` / `peers_failed` / `peers_silent`, and `trail.sync` carries
+`sync.peers_delivered`, so a single trace shows how many of its peers a wake actually reached.
 
 **What it does not claim.** A pull from a peer that had nothing new is not a contact — it is
 indistinguishable here from one that never answered, and counting it would make the tile lie. A
-gossip neighbour that receives an envelope it cannot open (dropped from the seal) is not a contact
-either. Contacts are counted from each side independently, so a healthy pair shows a `send` on one
+push to a peer that never reported is not a contact either (`trail.push.peer{peer.outcome=silent}`). Contacts are counted from each side independently, so a healthy pair shows a `send` on one
 phone and a `recv` on the other; seeing only one half is itself a finding.
 
 The **phone-to-phone contact** row of the device-health dashboard reads these. Native spans carry no
@@ -502,23 +504,23 @@ working against this file's dev collector. Keep the two lists in step.
 
 `peer.contact` counts exchanges per peer. `fix.provenance` (Rust, `contact.rs`) counts **fixes**:
 one span for every friend's fix that reached this phone, at the moment it arrived, saying who
-handed it over. It fires on the gossip receive (one per delivered envelope) and on every docs pull
-(one per author slot a peer delivered), so JS-free background pulls are counted too.
+handed it over. It fires from the replica watch beside the receive-side `peer.contact` (one per
+author a peer delivered), whichever pass carried it — a live broadcast, a pull, or a sync a peer
+opened to us — so JS-free background pulls are counted too, and none twice.
 
 | attribute                   | values                                                                                         |
 | --------------------------- | ---------------------------------------------------------------------------------------------- |
-| `fix.lane`                  | `gossip` (live) \| `docs` (trail reconciliation)                                               |
 | `fix.source`                | `author` (their own phone), `friend` (another friend relayed it), `stash`, `repeater`, `other` |
-| `fix.path`                  | `ble` \| `lan` \| `direct` \| `relay` \| `live`, as on `peer.contact`                          |
+| `fix.path`                  | `ble` \| `lan` \| `direct` \| `relay` \| `unknown`, as on `peer.contact`                       |
 | `fix.repeater_owner`        | short id of the roster owner, when `fix.source = repeater` (span attribute, not a metric)      |
 | `sc.author` / `sc.via_peer` | whose fix, and who handed it over                                                              |
 
-`fix.lane`, `fix.source` and `fix.path` are spanmetrics dimensions. A slot that was already in the
+`fix.source` and `fix.path` are spanmetrics dimensions. A slot that was already in the
 replica produces nothing: this is delivery, never presence.
 
 ```promql
 # Where this phone's friends' fixes come from, per hour.
-sum by (fix_source, fix_lane) (
+sum by (fix_source) (
   rate(traces_span_metrics_calls_total{span_name="fix.provenance"}[1h])) * 3600
 ```
 
@@ -531,8 +533,8 @@ sum by (fix_source, fix_lane) (
 # Every direct handover between two phones (swap in real short ids).
 { name = "peer.contact" && resource.service.instance.id = "6942d8b97f" && span.sc.peer = "84f86b144a" }
 
-# Publishes that reached no recipient phone-to-phone — the stash is the only way out.
-{ name = "gossip.publish" && span.recipients_direct = 0 }
+# Pushes no peer finished: this drain reached only whoever was syncing live at that moment.
+{ name = "trail.push" && span.peers_finished = 0 }
 ```
 
 ## Is Core Location delivering? (`location.runtime`)
@@ -769,55 +771,33 @@ previous record.
 { name = "net.health" && span.relay.foreign_errors > 0 } | select(resource.service.instance.id, span.relay.error_classes)
 ```
 
-## Tuning the per-peer dial budget
+## Who answers a push (`trail.push.peer`)
 
-Every durable push now grants each peer its **own** deadline, predicted by
-`src/features/social/core/peer-reachability.ts`. These spans exist so the prediction can be scored
-against what actually happened and the priors refitted; they are the reason the model is not
-permanently a guess.
+Every push dials the stash and every friend with a durable ticket under ONE deadline,
+`docs::PUSH_TIMEOUT_SECS` (30 s), and ends early once every dialled peer has reported. A silent
+peer costs the full deadline and is still handed the data later: the namespace stays live, so it
+reconciles whenever that peer next wakes. (Until 2026-11 the app predicted a per-peer budget from
+presence — `peer-reachability.ts`, `trail.push.peer.app`, `peer.budget_ms`, `skipped` — and the
+push carried those; pushing is native-only now and none of them exist.)
 
-Two spans per peer per push, and you need both — they carry different halves of the row:
-
-- **`trail.push.peer`** (`streetcryptid-core`, Rust) — what the peer DID.
-  `peer.outcome` (`finished` | `failed` | `silent` | `skipped`), `peer.latency_ms`,
-  `peer.budget_ms`, `peer.answered`, `entries_sent`, `sc.peer`.
-- **`trail.push.peer.app`** (`streetcryptid-app`, JS) — what we BELIEVED, plus the conditioning
-  variable Rust cannot see. `peer.presence` (the `PresenceState` the budget was chosen from),
-  `peer.kind`, `peer.predicted_answer_rate`, `peer.samples`, and the same outcome fields.
-
-`peer.presence` is the column the whole model turns on: "parked" means a live process on an Android
-phone behind the location foreground service and no process at all on a suspended iPhone, so the
-answer rate has to be read per state, never pooled.
+- **`trail.push`** — `sync.peers_requested` / `sync.peers_dialed`, `entries_sent`,
+  `peers_finished`, `peers_failed`, `peers_silent`, `finished`.
+- **`trail.push.peer`** — one per dialled peer: `peer.outcome` (`finished` | `failed` | `silent`),
+  `peer.role` (`stash` | `friend` | `other`), `peer.latency_ms`, `peer.answered`, `entries_sent`,
+  `sc.peer`. Its own duration is meaningless (opened after the fact); `peer.latency_ms` is the
+  measurement.
 
 ```traceql
-# Who actually answers, by presence state — the table the priors should be fitted to.
-{ name = "trail.push.peer.app" && span.peer.presence = "parked" }
-{ name = "trail.push.peer.app" && span.peer.presence = "parked" && span.peer.outcome = "finished" }
+# Who actually answers. `silent` is the peer's doing; `failed` is the dial or the protocol.
+{ name = "trail.push.peer" && span.peer.role = "friend" && span.peer.outcome = "finished" }
+{ name = "trail.push.peer" && span.peer.outcome = "silent" }
 
-# Silence vs refusal. `silent` is the peer's doing; `skipped` is ours.
-{ name = "trail.push.peer.app" && span.peer.outcome = "silent" }
-{ name = "trail.push.peer.app" && span.peer.outcome = "skipped" }
+# Answered, but only just inside the deadline. If this is common, PUSH_TIMEOUT_SECS is too tight.
+{ name = "trail.push.peer" && span.peer.answered = true && span.peer.latency_ms > 20000 }
 
-# Was the model WRONG to wait? High predicted rate, nothing back.
-{ name = "trail.push.peer.app" && span.peer.predicted_answer_rate > 0.6 && span.peer.outcome = "silent" }
-
-# Was the model wrong to give up? A peer we skipped that a later push found reachable.
-{ name = "trail.push.peer.app" && span.peer.outcome = "skipped" }
-
-# Budget truncation: answered, but only just inside its deadline. If this is common the ceiling
-# (MAX_DIAL_BUDGET_MS) is too tight.
-{ name = "trail.push.peer" && span.peer.answered = true && span.peer.latency_ms > 10000 }
-
-# What each push cost overall, and how many peers it declined to wait for.
-{ name = "trail.push.app" } | select(span.push.budget_max_ms, span.push.peers_skipped)
-{ name = "trail.push" } | select(span.peers_finished, span.peers_silent, span.peers_skipped)
+# What each push reached.
+{ name = "trail.push" } | select(span.peers_finished, span.peers_silent, span.peers_failed)
 ```
-
-**Reading it.** Group `trail.push.peer.app` by `peer.presence` and compare the share of
-`finished` against `peer.predicted_answer_rate`: where they diverge, `PRESENCE_PRIOR` in
-`peer-reachability.ts` is wrong and should be moved towards the observed rate. Latency percentiles
-over `peer.latency_ms` (answered rows only — a timeout says nothing about how slow a peer is) set
-`MAX_DIAL_BUDGET_MS`.
 
 **A caution about `durationMs`.** Tempo's `/api/search` returns the duration of the **trace**, not
 of the span you matched. Reading it as the span's duration attributes the whole `bg.refresh` wake
@@ -833,13 +813,12 @@ to whatever child you searched for — which is exactly how an early pass at thi
    `wake.wakes` counts the Core Location wakes in the interval, `location.wake_reason` says what
    last ran it, and `last_wake_age_ms` says how long ago. All zero or absent → the OS never
    delivered fixes (check battery saver / permission attributes on the last record it _did_ send).
-2. **Did the policy gate it?** The wake's `engine.ingest` child says `decision.active=false` +
-   `sc.drop_reason=sampling-suspended` when battery/motion suppressed publishing.
-3. **Did it die in the outbox?** `outbox.enqueue` shows `coalesced` / `outbox-overflow`;
-   `outbox.drain` shows `publish.failed` with the thrown reason (`node not ready`, …) and
-   `retained > 0`.
-4. **Did it reach the wire?** `publish.fix` → `gossip.publish` + `docs.write` give you the
-   `sc.entry_hash`. From here, one `{ span.sc.entry_hash = … }` query shows every other party
+2. **Did the policy gate it?** The native `engine.ingest` / `engine.heartbeat` span says
+   `suspended=true` + `sc.drop_reason=sampling-suspended` when battery/motion suppressed
+   publishing. (Absorbed fixes emit no span: most deliveries are absorbed and are not an outcome.)
+3. **Did it die in the outbox?** The same span carries `enqueued`, `pending`, `overflow_dropped`
+   and `slots_skipped`, and `published` / `reached` once the drain ran.
+4. **Did it reach the replica?** `publish.fix` → `docs.write` gives you the `sc.entry_hash`. From here, one `{ span.sc.entry_hash = … }` query shows every other party
    that ever saw the envelope.
    4a. **Could anyone open it?** `docs.write` carries `dropped` next to `recipients`. When they are
    equal nothing was written at all — the envelope reached nobody. `sc.drop_reason` says why
@@ -863,9 +842,9 @@ belongs to us"` — is what revision 3's two-sided resync produced (2026-10-02, 
    `session.recover` and the Loki lines `restarted the session as leader` / `adopted the leader's
 restarted session` / `asked the leader to restart our session` (`sc_restart` label). Re-reads
    open as `Replayed` (`envelope already seen`) and never count as misses.
-   4b. **Did it get OFF the phone?** `docs.write` is local-only. Look for `trail.push.app` /
-   `trail.push` in the same wake: absent means nothing pushed it, `finished=false` means the
-   stash was unreachable. Hour-long gaps in a friend's trail with healthy `publish.fix` spans
+   4b. **Did it get OFF the phone?** `docs.write` reaches only peers syncing the namespace live at
+   that moment. Look for `trail.push` from the same drain: absent means nothing pushed it (no
+   durable peer tickets), `finished=false` or no `finished` `trail.push.peer` means nobody answered. Hour-long gaps in a friend's trail with healthy `publish.fix` spans
    are the signature of a publish path that never pushes.
 5. **Did the stash see it?** `stash.entry.received` with the same hash. Note `wake_targets` will be
    **0** and there will be no child `stash.wake.push`: the app no longer uploads a device push
@@ -873,9 +852,11 @@ restarted session` / `asked the leader to restart our session` (`sc_restart` lab
 6. **Did device B recover it?** B pulls on its own schedule now — the periodic `bg.refresh`
    (~15 min requested, throttled further) or the 5-min live-request poll — rather than being
    woken. Follow
-   `trail.sync.app` (`recovered` count) → `trail.backfill` log with the hash → `fix.received.app`,
-   where `sc.drop_reason=unknown-or-removing-author` is the last gate that can silently eat a fix.
-   A gap of up to a backfill interval between steps 5 and 6 is now normal.
+   `trail.sync` / `friend.pull` (`sync.entries`) → a `peer.contact{dir=recv}` from the serving
+   peer → `trail.sync.app` (`recovered`) → `fix.received.app`. An entry that landed but never
+   surfaced is either unopenable (`ratcheted envelope not opened` in Loki) or from an author B no
+   longer counts as a friend, which the replica read skips without a span. A gap of up to a pull
+   interval between steps 5 and 6 is normal.
 
 ## Which build is this phone running?
 

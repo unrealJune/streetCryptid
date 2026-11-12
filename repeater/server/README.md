@@ -1,0 +1,231 @@
+# trail-stash
+
+An always-on, **ciphertext-blind**, **stateless**, **fully in-memory** iroh-docs
+replica. It exists so two phones that are rarely online at the same time can still
+exchange their encrypted location trails: the stash is a headless member of every
+**opted-in** sharing pool, replicates the encrypted trail 24/7, and nudges
+backgrounded phones to sync via a silent push.
+
+See `PLAN.md` for the full design of record. (`PLAN.md`'s `§N` references point at
+the streetCryptid **app** repo's internal `docs/social/ARCHITECTURE.md`, which is not
+shipped in this standalone repo.)
+
+## Threat model: this service is blind
+
+- The stash is **never a recipient**, so it is **never wrapped for** (ARCHITECTURE
+  §4). It holds only opaque, sealed envelope bytes, has **no keys**, and performs
+  **no crypto**. Revocation carries over unchanged: a dropped friend keeps
+  replicating ciphertext it can no longer decrypt.
+- It sees only relay-grade **metadata**: which namespaces it replicates, entry
+  timing/sizes, and — to send wake-ups — a `(namespace → push token)` map. It
+  never sees a location. Self-hosting is the mitigation for the metadata.
+- **Stateless & fully in-memory.** No disk, no database. The docs replica
+  (`Docs::memory()`), the blobs store (`MemStore`), and the subscription registry
+  live in RAM only. A restart clears everything; devices re-register on their next
+  opted-in sync. Nothing user-derived is ever at rest here.
+- **Opt-in.** Nothing is replicated until a device presents a read-ticket. No
+  grant → no data.
+- All tracing output centrally redacts IP addresses and identity-like values. Push
+  tokens are logged only as their platform plus `[REDACTED]`, with no correlatable suffix.
+
+The stash provides no confidentiality on its own; envelopes are already E2E
+encrypted per-recipient on-device before they ever reach it.
+
+## MLS
+
+In MLS (RFC 9420) terms the stash is an untrusted **Delivery Service**. The
+`DeliveryService` trait (`src/mls.rs`) is the seam; the shipped `PassthroughDelivery`
+admits every envelope as opaque bytes (today's behavior). A future MLS-aware
+delivery service drops in there without touching the replica plumbing. See
+`PLAN.md` → "MLS seam".
+
+## Control API
+
+Opt-in and wake registration. Presenting a read-ticket **is** the grant. When
+`TRAIL_STASH_PSK` is set, `/v1/*` requires `Authorization: Bearer <psk>`
+(anti-abuse gate, mirrors the relay token; `/healthz` is always open).
+
+### `POST /v1/namespaces` — grant + (optionally) subscribe
+
+- Body: `{ "read_ticket": "<iroh-docs read ticket>", "push_token"?: "<token>", "platform"?: "apns"|"fcm" }`
+  - `push_token` and `platform` must be supplied together, or both omitted.
+  - Unknown JSON fields are rejected.
+- **201 Created** on success (imports the namespace capability, records the opt-in + optional
+  wake subscription; idempotent per namespace). Registration joins the namespace without dialing
+  the ticket's bootstrap nodes; the phone drives reconciliation against the stash endpoint.
+- **400 Bad Request** for a malformed ticket, partial push fields, bad platform,
+  or an over-long/empty token.
+- **502 Bad Gateway** if importing the ticket fails transiently.
+
+### `DELETE /v1/namespaces/{namespaceId}/subscription` — stop being woken
+
+- `{namespaceId}` is 64 lowercase hex chars.
+- Body: `{ "push_token": "<token>", "platform": "apns"|"fcm" }`.
+- **204 No Content** whether or not the subscription existed (idempotent, does not
+  leak presence). The namespace stays replicated.
+
+### `GET /v1/namespaces/{namespaceId}/content/{hash}` — fetch retained ciphertext
+
+- Returns the opaque `application/octet-stream` bytes only when that namespace still references
+  the hash and the stash has completed its content transfer.
+- **404 Not Found** covers unknown namespaces, released hashes, and content still in flight without
+  revealing which case applies.
+- This is the authenticated delivery receipt/fallback for clients that reconciled entry metadata
+  but could not complete iroh-blobs transfer before a mobile background deadline.
+
+`PUT` to the same path uploads the opaque bytes from the writer. The stash verifies the BLAKE3
+content address before retaining them and returns **204 No Content**. This explicit handoff lets a
+headless mobile task sleep immediately after the request completes.
+
+### `GET /healthz`
+
+- **200 OK**, for liveness/readiness checks, with a JSON body:
+
+```json
+{ "status": "ok", "content_missing": 0, "content_tracked": 128 }
+```
+
+- `content_tracked` — replicated entries whose ciphertext the stash is responsible for.
+- `content_missing` — how many of those it does **not** actually hold the bytes for.
+
+`content_missing` is the number to alert on. iroh-docs replicates entry _records_; the
+bytes they name are a separate transfer, so a stash can hold a full trail it cannot serve
+a single fix from — readers just get `Unable to download <hash>` while every other signal
+looks perfectly healthy. It spikes as entries arrive and should fall back to ~0 within
+seconds. **Persistently non-zero means offline delivery is broken.**
+
+## Environment variables
+
+| Variable                         | Default                  | Description                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| -------------------------------- | ------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `TRAIL_STASH_SECRET_KEY`         | —                        | **Required.** 64 hex chars (32-byte ed25519 seed) giving the stash a stable dialable identity so its ticket survives restarts. A key, not user data — inject from a secret manager. Generate: `openssl rand -hex 32`.                                                                                                                                                                                                            |
+| `PORT`                           | `8787`                   | Control-API port.                                                                                                                                                                                                                                                                                                                                                                                                                |
+| `TRAIL_STASH_RETENTION_HOURS`    | `48`                     | Backstop for each author's latest fix (clamped 1–336). Superseded fixes are released on the next prune regardless of age; this window only decides how long to keep the final dot from an author who goes silent.                                                                                                                                                                                                                |
+| `TRAIL_STASH_PRUNE_INTERVAL_MIN` | `15`                     | How often the retention sweep runs (clamped 1–1440).                                                                                                                                                                                                                                                                                                                                                                             |
+| `TRAIL_STASH_RELAY_URLS`         | —                        | Comma-separated custom iroh relay URLs. Unset uses the built-in n0 relay map. Use the same URLs as the app's `EXPO_PUBLIC_IROH_RELAY_URLS`.                                                                                                                                                                                                                                                                                      |
+| `TRAIL_STASH_RELAY_TOKEN`        | —                        | Optional bearer token sent to every configured custom relay.                                                                                                                                                                                                                                                                                                                                                                     |
+| `TRAIL_STASH_PSK`                | —                        | Control-API pre-shared key. When set, `/v1/*` requires `Authorization: Bearer <psk>`. Must match the app's `EXPO_PUBLIC_TRAIL_STASH_PSK`. Unset ⇒ gate disabled (warned at startup).                                                                                                                                                                                                                                             |
+| `APNS_BUNDLE_ID` / `APNS_HOST`   | — / `api.push.apple.com` | Enables the APNs push route.                                                                                                                                                                                                                                                                                                                                                                                                     |
+| `FCM_PROJECT_ID`                 | —                        | Enables the FCM push route.                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `APNS_BEARER` / `FCM_BEARER`     | —                        | **Placeholder** static push credentials (`EnvCredentials`) until real APNs-JWT / FCM-OAuth minting lands.                                                                                                                                                                                                                                                                                                                        |
+| `OTEL_EXPORTER_OTLP_ENDPOINT`    | —                        | Developer telemetry (`otel` builds, which the published image is): OTLP/HTTP collector base URL (e.g. `http://otel-collector:4318`; see the streetCryptid repo's `infra/otel/`). Unset ⇒ telemetry fully dormant. Exports traces + logs; log bodies pass the same redaction as console output, but span/log _attributes_ from dependencies do not — point it only at a developer-controlled collector, never a hosted log store. |
+| `OTEL_SERVICE_NAME`              | `trail-stash`            | Telemetry service name.                                                                                                                                                                                                                                                                                                                                                                                                          |
+
+Retention releases **content**, not entry records. The stash holds a _read_ capability, so
+it cannot delete another author's entries — retiring those is the author's job, and their
+tombstones replicate here like any other write. The ciphertext is what actually occupies
+this RAM-only process, and dropping our reference to it (after which the blob GC sweep
+reclaims it) is a bound the stash can enforce on its own.
+
+The stash now keeps only the latest location-fix ciphertext per key-encoded author in each
+namespace. Older `hex(author)/{seq:020}` fixes are released as soon as a newer sequence for that
+author exists, because the app renders friends as a single latest dot and no longer needs their
+back-catalogue. `TRAIL_STASH_RETENTION_HOURS` remains as a stale-author backstop for that one
+latest fix.
+
+`ctl/hex(author)` control entries are never treated as _superseded_ — they are one
+overwritten-in-place slot per author carrying current live-mode requests, not history — but they
+are still subject to the retention window, and so is any key the stash cannot parse. Nothing is
+exempt from the window: in a RAM-only process, declining to release what you do not understand is
+not caution, it is unbounded memory growth.
+
+The waker builds correct silent-push payloads (tested) and sends them when a push
+route is configured; the credential-minting is the remaining piece. With no push
+env set, the waker is a no-op and offline catch-up still works via reconciliation.
+
+## Build & run — from source
+
+The default build is the **pure core** (config, retention, subscription registry,
+MLS seam, waker seam, control-API validation) with no iroh deps — fast, host-portable,
+and fully unit-tested:
+
+```powershell
+cd infra\trail-stash\rust
+cargo test
+```
+
+The live node + HTTP server is behind the `live` feature (pulls in iroh + tokio +
+axum). It targets iroh-docs `0.101` / iroh-blobs `0.103` and **compiles cleanly**
+against them (`cargo check --features live`); it is not yet runtime-tested
+end-to-end (no two-node integration test of import → reconcile → wake):
+
+```powershell
+cd infra\trail-stash\rust
+$env:TRAIL_STASH_SECRET_KEY = (openssl rand -hex 32)
+cargo run --features live
+```
+
+## Deploy
+
+### Container image
+
+Published to GHCR by CI (see `.github/workflows/publish.yml`):
+
+```bash
+docker pull ghcr.io/<owner>/trail-stash:latest        # or a :sha-xxxx / :X.Y.Z tag
+docker run -d --name trail-stash -p 8787:8787 \
+  -e TRAIL_STASH_SECRET_KEY="$(openssl rand -hex 32)" \
+  -e TRAIL_STASH_PSK="$(openssl rand -hex 32)" \
+  -e TRAIL_STASH_RELAY_URLS="https://relay.example.com" \
+  ghcr.io/<owner>/trail-stash:latest
+```
+
+### Kubernetes (Helm)
+
+The chart is published to GHCR as an OCI artifact. Create the identity/PSK secret once
+(keep it out of Helm history), then install:
+
+```bash
+kubectl create namespace trail-stash
+kubectl -n trail-stash create secret generic trail-stash \
+  --from-literal=TRAIL_STASH_SECRET_KEY="$(openssl rand -hex 32)" \
+  --from-literal=TRAIL_STASH_PSK="$(openssl rand -hex 32)"
+
+helm install trail-stash oci://ghcr.io/<owner>/charts/trail-stash \
+  --namespace trail-stash \
+  --set secret.existingSecret=trail-stash \
+  --set image.tag=<sha-or-semver>
+
+```
+
+It runs as a single, stateless, in-memory pod (identity is pinned by the secret, so
+`replicas` stays 1). Front the control API with your own TLS proxy — see `INSTALL.md`
+for the full runbook and `charts/trail-stash/README.md` for every value.
+
+The service does not emit or persist its dial ticket. Provision
+`EXPO_PUBLIC_TRAIL_STASH_TICKET` to clients out of band.
+
+## Crate layout
+
+```
+src/
+  lib.rs           module wiring + security posture
+  config.rs        env → StashConfig (clamped)                [pure, tested]
+  retention.rs     RetentionPolicy + latest-fix release rules  [pure, tested]
+  content.rs       ContentIndex — which ciphertext we hold    [pure, tested]
+  subscriptions.rs in-memory NamespaceRegistry                [pure, tested]
+  mls.rs           DeliveryService seam + PassthroughDelivery [pure, tested]
+  waker.rs         Waker seam + NoopWaker                     [pure, tested]
+  api.rs           control-API request types + validation     [pure, tested]
+  node.rs          in-memory replica + HTTP API               [live feature]
+  bin/trail-stash.rs  main                                     [live feature]
+```
+
+## License
+
+Copyright (C) 2026 June Philip.
+
+trail-stash is licensed under the **GNU Affero General Public License v3.0 or
+later** (`AGPL-3.0-or-later`). The full text is in [LICENSE](./LICENSE); the
+copyright and warranty notice is in [NOTICE](./NOTICE).
+
+Section 13 is the operative clause for this project: because trail-stash is
+software you interact with over a network, anyone running a modified version as
+a service must offer its users the corresponding source of that modified
+version. That is deliberate. The server is ciphertext-blind by construction —
+it holds envelopes it cannot read — and a claim like that is only worth
+something if the code answering the network can be checked against the code
+published here.
+
+Self-hosting a stock, unmodified build imposes no obligation beyond keeping
+these notices intact.

@@ -1,0 +1,165 @@
+name: Release / repeater windows
+
+# Cuts the Windows repeater's releases: installers for x64 and ARM64 and the `repeater-preview`
+# Velopack update feed.
+#
+# A push to main that touches what the host is built from resolves the next
+# `windows-vX.Y.Z-preview.1` with scripts/next-repeater-version.sh windows (the app's Conventional
+# Commit rules, scripts/lib/conventional-commits.sh). When there is one, the same build gates CI
+# runs build that exact commit, and only then is the tag created, together with its GitHub
+# release, and the feed updated. A push with nothing releasable builds nothing here: CI's Windows
+# lane already tested it.
+#
+# A `windows-v*-preview.N` tag pushed by hand publishes that version on its own, and the workflow's
+# dispatch can force a bump. The tag this workflow creates does not start it again: GITHUB_TOKEN
+# pushes never trigger workflows.
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - repeater/windows/**
+      - repeater/server/src/**
+      - repeater/server/Cargo.toml
+      - repeater/protocol/**
+      - Cargo.toml
+      - Cargo.lock
+      - rust-toolchain.toml
+      - third_party/**
+      - assets/images/mothman-logo*.svg
+      - .github/workflows/ci-repeater-windows.yml
+      - .github/workflows/release-repeater-windows.yml
+    tags:
+      - windows-v*
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: Release to cut. `auto` follows the Conventional Commits since the last Windows tag.
+        type: choice
+        options:
+          - auto
+          - patch
+          - minor
+          - major
+        default: auto
+
+permissions:
+  contents: read
+
+concurrency:
+  # A release creates a tag and rewrites the update feed; never overlap, never drop a queued one.
+  group: release-repeater-windows
+  cancel-in-progress: false
+
+jobs:
+  version:
+    name: Resolve the release
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      release: ${{ steps.ver.outputs.release }}
+      version: ${{ steps.ver.outputs.version }}
+      tag: ${{ steps.ver.outputs.tag }}
+      create_tag: ${{ steps.ver.outputs.create_tag }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Resolve the release
+        id: ver
+        env:
+          BUMP: ${{ inputs.bump || 'auto' }}
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            version="${GITHUB_REF_NAME#windows-v}"
+            if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+-preview\.[0-9]+$ ]]; then
+              echo 'Only windows-vMAJOR.MINOR.PATCH-preview.N tags may publish unsigned builds.' >&2
+              exit 1
+            fi
+            release=true
+            tag="$GITHUB_REF_NAME"
+            create_tag=false
+          else
+            out="$(bash scripts/next-repeater-version.sh windows --force "$BUMP")"
+            echo "$out"
+            release="$(sed -n 's/^release=//p' <<<"$out")"
+            version="$(sed -n 's/^version=//p' <<<"$out")"
+            tag="$(sed -n 's/^tag=//p' <<<"$out")"
+            # Releases are cut from main only.
+            if [[ "$GITHUB_REF" != "refs/heads/main" ]]; then
+              release=false
+            fi
+            create_tag="$release"
+          fi
+          {
+            echo "release=${release}"
+            echo "version=${version}"
+            echo "tag=${tag}"
+            echo "create_tag=${create_tag}"
+          } >> "$GITHUB_OUTPUT"
+          {
+            echo "### Windows repeater"
+            if [[ "$release" == "true" ]]; then
+              echo "Release **${tag}** at \`${GITHUB_SHA::7}\`."
+            else
+              echo "No release: nothing since the last Windows tag that ships."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  build:
+    needs: version
+    if: needs.version.outputs.release == 'true'
+    uses: ./.github/workflows/ci-repeater-windows.yml
+    with:
+      version: ${{ needs.version.outputs.version }}
+    secrets:
+      sign-params: ${{ secrets.REPEATER_SIGN_PARAMS }}
+
+  publish:
+    name: Publish
+    needs:
+      - version
+      - build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          pattern: repeater-win-*
+          path: releases
+          merge-multiple: true
+      - name: Publish tested commit and update feed
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ needs.version.outputs.tag }}
+          VERSION: ${{ needs.version.outputs.version }}
+          CREATE_TAG: ${{ needs.version.outputs.create_tag }}
+          COMMIT: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          # An automatic release creates its tag here, on the commit the builds just passed; a
+          # hand-pushed tag must already exist.
+          if [[ "$CREATE_TAG" == "true" ]]; then
+            target=(--target "$COMMIT")
+          else
+            target=(--verify-tag)
+          fi
+          gh release create "$TAG" releases/* "${target[@]}" --prerelease --latest=false \
+            --title "streetCryptid Windows repeater $VERSION" \
+            --notes "Unsigned Windows preview. x64 and ARM64 artifacts built and tested from $COMMIT. Identity and ownership remain outside the installation directory."
+          if ! gh release view repeater-preview >/dev/null 2>&1; then
+            gh release create repeater-preview --target "$COMMIT" --prerelease --latest=false \
+              --title 'streetCryptid repeater update feed' \
+              --notes 'Unsigned preview update feed. Versioned repeater releases retain source provenance.'
+          fi
+          # Publish packages before the manifests that make clients request them.
+          find releases -type f ! -name '*.json' -print0 | xargs -0 gh release upload repeater-preview --clobber
+          find releases -type f -name '*.json' -print0 | xargs -0 gh release upload repeater-preview --clobber

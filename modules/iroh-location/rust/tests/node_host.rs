@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use iroh_location::host::{NodeHolder, NodeHost, ReleaseOutcome};
 use iroh_location::transport::TransportConfig;
-use iroh_location::{derive_topic, DeviceSecrets, FixListener, LocationFix, LocationNode};
+use iroh_location::{DeviceSecrets, LocationFix, LocationNode, ReplicaListener};
 
 /// A fresh pair of storage roots per test. Not cleaned up: the OS temp dir is.
 struct Roots {
@@ -94,39 +94,30 @@ impl DeviceSecrets for Keystore {
     }
 }
 
-/// Records every event it is handed, so a test can say which listener heard what.
+/// Records every replica announcement it is handed, so a test can say which listener heard what.
 #[derive(Default)]
 struct Recorder {
-    statuses: Mutex<Vec<String>>,
+    authors: Mutex<Vec<Vec<u8>>>,
 }
 
 impl Recorder {
-    fn heard(&self, status: &str) -> bool {
-        self.statuses.lock().unwrap().iter().any(|s| s == status)
+    fn heard(&self, author: &[u8]) -> bool {
+        self.authors.lock().unwrap().iter().any(|a| a == author)
+    }
+
+    fn heard_anything(&self) -> bool {
+        !self.authors.lock().unwrap().is_empty()
     }
 }
 
-impl FixListener for Recorder {
-    fn on_fix(
-        &self,
-        _author: Vec<u8>,
-        _seq: u64,
-        _fix: LocationFix,
-        _backfill: bool,
-        _via: String,
-        _via_peer: Option<String>,
-    ) {
-    }
-
-    fn on_opaque(&self, _author: Vec<u8>, _seq: u64) {}
-
-    fn on_status(&self, status: String) {
-        self.statuses.lock().unwrap().push(status);
+impl ReplicaListener for Recorder {
+    fn on_friend_entries(&self, authors: Vec<Vec<u8>>) {
+        self.authors.lock().unwrap().extend(authors);
     }
 }
 
 async fn eventually(what: &str, mut check: impl FnMut() -> bool) {
-    for _ in 0..200 {
+    for _ in 0..600 {
         if check() {
             return;
         }
@@ -414,121 +405,86 @@ async fn a_different_identity_replaces_the_node_and_its_claims() {
     assert_eq!(host.snapshot().replacements, 1);
 }
 
-// ── The own-topic subscription ───────────────────────────────────────────────────────────────────
+// ── The replica listener ─────────────────────────────────────────────────────────────────────────
 
-#[tokio::test]
-async fn the_own_topic_has_one_subscription_however_many_callers_ask() {
-    let roots = roots("own-sub");
-    let host = NodeHost::isolated();
-    let node = host
-        .acquire_app(None, None, roots.data.clone(), roots.state.clone())
-        .await
-        .unwrap();
-    start(&node, offline()).await;
-    let own = derive_topic(node.endpoint_id());
-
-    let app = node
-        .clone()
-        .subscribe(own.clone(), vec![], Arc::new(Recorder::default()))
-        .await
-        .unwrap();
-    let again = node
-        .clone()
-        .subscribe(own.clone(), vec![], Arc::new(Recorder::default()))
-        .await
-        .unwrap();
-    let background = node.clone().own_subscription(vec![], None).await.unwrap();
-    assert!(Arc::ptr_eq(&app, &again), "a second subscribe adopts");
-    assert!(
-        Arc::ptr_eq(&app, &background),
-        "the background runtime adopts too"
-    );
-
-    // Every OTHER topic keeps its old behaviour: one subscription per call.
-    let friend_topic = derive_topic(vec![7; 32]);
-    let first = node
-        .clone()
-        .subscribe(friend_topic.clone(), vec![], Arc::new(Recorder::default()))
-        .await
-        .unwrap();
-    let second = node
-        .clone()
-        .subscribe(friend_topic, vec![], Arc::new(Recorder::default()))
-        .await
-        .unwrap();
-    assert!(!Arc::ptr_eq(&first, &second));
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-#[tokio::test]
-async fn the_own_subscription_outlives_a_dropped_handle_and_dies_with_the_node() {
-    let roots = roots("own-sub-life");
-    let host = NodeHost::isolated();
-    let node = host
-        .acquire_app(None, None, roots.data.clone(), roots.state.clone())
-        .await
-        .unwrap();
-    start(&node, offline()).await;
-    let own = derive_topic(node.endpoint_id());
-
-    let first = node
-        .clone()
-        .subscribe(own.clone(), vec![], Arc::new(Recorder::default()))
-        .await
-        .unwrap();
-    let first_ptr = Arc::as_ptr(&first);
-    // Held only to pin the allocation: once the old node frees its subscription, the allocator may
-    // hand the restarted node's the very same address, and comparing pointers would then fail on a
-    // test that is right (it did, in CI, under nextest's fresh process per test). A weak reference
-    // keeps the memory reserved without keeping the subscription alive.
-    let pinned = Arc::downgrade(&first);
-    // JS `unsubscribe` destroys its handle. The background runtime is still publishing through it.
-    drop(first);
-    let second = node.clone().own_subscription(vec![], None).await.unwrap();
-    assert_eq!(
-        Arc::as_ptr(&second),
-        first_ptr,
-        "still the same subscription"
-    );
-    drop(second);
-
-    host.restart(offline(), BUDGET_MS).await.unwrap();
-    let restarted = host.current().unwrap();
-    let after = restarted
-        .clone()
-        .own_subscription(vec![], None)
-        .await
-        .unwrap();
-    assert_ne!(
-        Arc::as_ptr(&after),
-        first_ptr,
-        "a new node has its own subscription"
-    );
-    drop(pinned);
+fn fix_at(ts: u64) -> LocationFix {
+    LocationFix {
+        lat: 47.6062,
+        lon: -122.3321,
+        accuracy_m: 4.0,
+        heading_deg: 90.0,
+        ts,
+        state: None,
+        published_delta_s: None,
+    }
 }
 
-/// Two nodes on loopback: `peer` joins `node`'s own topic, which raises `peer-up` on whichever
-/// listener `node`'s own subscription is delivering to at that moment.
-async fn peer_joins(node: &Arc<LocationNode>, name: &str) -> Arc<LocationNode> {
-    let peer_roots = roots(name);
-    let peer = LocationNode::new_at_dirs(None, None, peer_roots.data, peer_roots.state).unwrap();
-    start(&peer, offline()).await;
-    let ticket = node.ticket().await.unwrap();
-    // Held for the life of the peer: dropping the handle would leave the topic.
-    let sub = peer
-        .clone()
-        .subscribe(
-            derive_topic(node.endpoint_id()),
-            vec![ticket],
-            Arc::new(Recorder::default()),
+/// A friend of `node` on loopback, paired (sessions bootstrapped in-process) and able to publish to
+/// it at once. A fresh session's responder cannot send until the initiator has, and the initiator
+/// is the lower endpoint id (`initiator_by_endpoint`), so friends are minted until one sorts first.
+///
+/// Ids are uniformly random, so N tries all land above the node with probability 1/(N+1) averaged
+/// over where the node's own id falls: 64 failed about one call in 65, and with three callers that
+/// was a red CI run in twenty (2026-11-12, twice in a row). A rejected friend costs a key and two
+/// empty directories, and the common case needs one or two, so the cap only matters when the node
+/// itself sorts near the bottom.
+const FRIEND_ATTEMPTS: usize = 4096;
+
+async fn friend_publishing_to(node: &Arc<LocationNode>, name: &str) -> Arc<LocationNode> {
+    for attempt in 0..FRIEND_ATTEMPTS {
+        let friend_roots = roots(&format!("{name}-{attempt}"));
+        let friend =
+            LocationNode::new_at_dirs(None, None, friend_roots.data, friend_roots.state).unwrap();
+        if friend.endpoint_id() > node.endpoint_id() {
+            continue;
+        }
+        start(&friend, offline()).await;
+        let node_id = hex(&node.endpoint_id());
+        let friend_id = hex(&friend.endpoint_id());
+        let friend_eph = friend.begin_session(node_id.clone()).await.unwrap();
+        let node_eph = node.begin_session(friend_id.clone()).await.unwrap();
+        friend.complete_session(node_id, node_eph).await.unwrap();
+        node.complete_session(friend_id, friend_eph).await.unwrap();
+        return friend;
+    }
+    panic!("no friend sorted below the node in {FRIEND_ATTEMPTS} tries");
+}
+
+async fn publish(friend: &LocationNode, to: &LocationNode, seq: u64) {
+    let dropped = friend
+        .docs_write_ratcheted(
+            seq,
+            fix_at(1_780_000_000_000 + seq),
+            vec![hex(&to.endpoint_id())],
         )
         .await
-        .unwrap();
-    std::mem::forget(sub);
-    peer
+        .expect("friend publishes");
+    assert!(dropped.is_empty(), "no recipient dropped: {dropped:?}");
 }
 
-#[tokio::test]
-async fn adopting_the_own_subscription_with_a_listener_takes_over_its_events() {
+/// Wait until `node`'s replica holds `author`'s fix at `seq` or later, content included.
+async fn replica_holds(node: &LocationNode, author: &[u8], seq: u64) {
+    for _ in 0..600 {
+        let held = node
+            .trail_replica_status()
+            .await
+            .unwrap()
+            .iter()
+            .any(|slot| slot.author == author && slot.seq >= seq && slot.has_content);
+        if held {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!("the replica never held seq {seq}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_newest_replica_listener_hears_a_friend_and_a_replaced_one_does_not() {
     let roots = roots("listener-swap");
     let host = NodeHost::isolated();
     let node = host
@@ -536,34 +492,31 @@ async fn adopting_the_own_subscription_with_a_listener_takes_over_its_events() {
         .await
         .unwrap();
     start(&node, offline()).await;
-    let own = derive_topic(node.endpoint_id());
-
     let old = Arc::new(Recorder::default());
     let new = Arc::new(Recorder::default());
-    let _a = node
-        .clone()
-        .subscribe(own.clone(), vec![], old.clone())
-        .await
-        .unwrap();
-    // A new JS context subscribes: the events are now its, not the old one's.
-    let _b = node
-        .clone()
-        .subscribe(own, vec![], new.clone())
-        .await
-        .unwrap();
-    // The background runtime adopting with `None` must NOT silence the app.
-    let _c = node.clone().own_subscription(vec![], None).await.unwrap();
+    node.watch_replica(old.clone());
+    // A new JS context attaches: the announcements are now its, not the old one's.
+    node.watch_replica(new.clone());
 
-    let _peer = peer_joins(&node, "listener-swap-peer").await;
-    eventually("peer-up on the newest listener", || new.heard("peer-up")).await;
+    let friend = friend_publishing_to(&node, "listener-swap-friend").await;
+    publish(&friend, &node, 1).await;
+    node.import_doc_ticket(friend.doc_ticket().await.unwrap())
+        .await
+        .unwrap();
+
+    let author = friend.endpoint_id();
+    eventually("the newest listener hears the friend", || {
+        new.heard(&author)
+    })
+    .await;
     assert!(
-        !old.heard("peer-up"),
+        !old.heard_anything(),
         "a replaced listener must hear nothing more"
     );
 }
 
-#[tokio::test]
-async fn the_app_leaving_silences_its_listener_but_not_the_subscription() {
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_app_leaving_silences_its_listener_but_not_the_replica() {
     let roots = roots("detach");
     let previous = previous_launch(&roots).await;
     let host = NodeHost::isolated();
@@ -581,29 +534,57 @@ async fn the_app_leaving_silences_its_listener_but_not_the_subscription() {
         .await
         .unwrap();
     let app_listener = Arc::new(Recorder::default());
-    let own = node
-        .clone()
-        .subscribe(
-            derive_topic(node.endpoint_id()),
-            vec![],
-            app_listener.clone(),
-        )
+    node.watch_replica(app_listener.clone());
+
+    host.release(NodeHolder::App, BUDGET_MS).await;
+    let friend = friend_publishing_to(&node, "detach-friend").await;
+    publish(&friend, &node, 1).await;
+    node.import_doc_ticket(friend.doc_ticket().await.unwrap())
         .await
         .unwrap();
 
-    host.release(NodeHolder::App, BUDGET_MS).await;
-    let _peer = peer_joins(&node, "detach-peer").await;
-    // Give the join every chance to be delivered, then check it was delivered to nobody.
-    tokio::time::sleep(Duration::from_secs(3)).await;
+    // Replication carries on for the background runtime: the entry lands all the same.
+    replica_holds(&node, &friend.endpoint_id(), 1).await;
+    // Give the announcement every chance to be delivered, then check it went to nobody.
+    tokio::time::sleep(Duration::from_secs(1)).await;
     assert!(
-        !app_listener.heard("peer-up"),
-        "events must not flow into a JS context that has gone"
+        !app_listener.heard_anything(),
+        "announcements must not flow into a JS context that has gone"
     );
-    let still = node.clone().own_subscription(vec![], None).await.unwrap();
-    assert!(
-        Arc::ptr_eq(&own, &still),
-        "the background runtime's subscription is untouched"
-    );
+}
+
+/// The 2026-11 docs-only cut's load-bearing claim about restarts: a rebuilt node reopens every
+/// friend namespace from the book, puts it straight back into the live engine, and watches it — so
+/// a friend's next write reaches it with nobody calling a pull.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_rebuilt_node_hears_a_reopened_friend_without_a_pull() {
+    let roots = roots("reopen-live");
+    let host = NodeHost::isolated();
+    let node = host
+        .acquire_app(None, None, roots.data.clone(), roots.state.clone())
+        .await
+        .unwrap();
+    start(&node, offline()).await;
+    let friend = friend_publishing_to(&node, "reopen-live-friend").await;
+    publish(&friend, &node, 1).await;
+    node.import_doc_ticket(friend.doc_ticket().await.unwrap())
+        .await
+        .unwrap();
+    let author = friend.endpoint_id();
+    replica_holds(&node, &author, 1).await;
+
+    host.restart(offline(), BUDGET_MS).await.unwrap();
+    let rebuilt = host.current().unwrap();
+    assert!(!Arc::ptr_eq(&node, &rebuilt), "a restart builds a new node");
+    let listener = Arc::new(Recorder::default());
+    rebuilt.watch_replica(listener.clone());
+
+    publish(&friend, &rebuilt, 2).await;
+    eventually("the rebuilt node hears the friend's next fix", || {
+        listener.heard(&author)
+    })
+    .await;
+    replica_holds(&rebuilt, &author, 2).await;
 }
 
 // ── Two holders driving one node ─────────────────────────────────────────────────────────────────
@@ -633,13 +614,7 @@ async fn drains_from_both_holders_on_one_node_serialize_and_all_finish() {
         .await
         .unwrap()
         .unwrap();
-    let app_sub = node.clone().own_subscription(vec![], None).await.unwrap();
-    let background_sub = background
-        .clone()
-        .own_subscription(vec![], None)
-        .await
-        .unwrap();
-    assert!(Arc::ptr_eq(&app_sub, &background_sub));
+    assert!(Arc::ptr_eq(&node, &background));
 
     let battery = BatteryState {
         level: 1.0,
@@ -649,7 +624,7 @@ async fn drains_from_both_holders_on_one_node_serialize_and_all_finish() {
     let base = 1_780_000_000_000u64;
     let mut drains = Vec::new();
     for i in 0..6u64 {
-        let ingest = app_sub.clone();
+        let ingest = node.clone();
         drains.push(tokio::spawn(async move {
             let ts = base + i * 60_000;
             let fix = LocationFix {
@@ -662,15 +637,15 @@ async fn drains_from_both_holders_on_one_node_serialize_and_all_finish() {
                 published_delta_s: None,
             };
             ingest
-                .ingest_fix("app".into(), fix, battery, 60_000, ts)
+                .ingest_fix(fix, battery, 60_000, ts)
                 .await
                 .map(|_| ())
         }));
-        let heartbeat = background_sub.clone();
+        let heartbeat = background.clone();
         drains.push(tokio::spawn(async move {
             let ts = base + i * 60_000 + 30_000;
             heartbeat
-                .heartbeat_fix("background".into(), battery, 60_000, ts, None)
+                .heartbeat_fix(battery, 60_000, ts, None)
                 .await
                 .map(|_| ())
         }));

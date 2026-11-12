@@ -68,7 +68,7 @@ function parkedPresence() {
           publishedDeltaS: 11 * 60,
         },
         receivedAt: NOW,
-        via: 'stash',
+        via: 'sync',
       },
     ],
     selfFix,

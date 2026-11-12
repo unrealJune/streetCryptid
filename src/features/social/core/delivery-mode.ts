@@ -6,8 +6,8 @@
  * resilience, and the stash adds a blind server on top of that for reach.
  *
  * There is deliberately no "direct only" route. Confining delivery to the intended recipient is
- * not a setting this app can express: a friend subscribes to your gossip topic, so a live
- * envelope reaches the swarm whether or not you pushed your namespace at them. Offering the
+ * not a setting this app can express: every friend replicates your namespace and joins its
+ * live-sync swarm, so an entry reaches that swarm whether or not you pushed it at them. Offering the
  * choice would have meant showing people a narrower picture of where their location goes than
  * what actually happens.
  *
@@ -33,7 +33,7 @@ export type DeliveryMode = (typeof DELIVERY_MODES)[number];
  * `mutual`, because that is what the app already does.
  *
  * Every publish live-syncs the author's namespace to every pool member (`durablePeerTickets`),
- * and every pool member bootstraps every other member's topic, so any friend with the app open
+ * and every pool member live-syncs every other member's namespace, so any friend with the app open
  * holds your entries as they are written and can hand them on once you go dark. That is peer
  * relay, it is the only behaviour that ships, and it is gated by two deterministic Rust tests
  * plus `scripts/e2e/relay-e2e.sh` on three devices. See `scripts/e2e/PEER-RELAY-STATUS.md`.

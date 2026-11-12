@@ -7,13 +7,14 @@
 //! on the map and in `fix.received.app`, and they mean very different things about whether two
 //! sleeping phones' wakes ever line up.
 //!
-//! So each of the four places a peer is named at the moment data crosses — gossip send, gossip
-//! receive, trail push, trail pull — emits one of these, with:
+//! So each of the two places a peer is named at the moment data crosses emits one of these: a trail
+//! push a peer FINISHED (send), and friend entries a peer delivered into the replica (receive — the
+//! replica watch in `lib.rs`, which sees a live broadcast, a pull and a sync a peer opened to us
+//! alike, so each delivery is counted once whichever pass carried it). With:
 //!
 //! - `contact.dir` — `send` | `recv`
-//! - `contact.lane` — `gossip` (the live path) | `docs` (trail reconciliation)
 //! - `contact.role` — `friend` | `stash` | `repeater` | `other`, from [`PeerRoles`]
-//! - `contact.path` — `ble` | `lan` | `direct` | `relay` | `live` (see `delivery_label`)
+//! - `contact.path` — `ble` | `lan` | `direct` | `relay` | `unknown` (see `delivery_label`)
 //! - `contact.from_author` — receive only: the peer handed over ITS OWN envelope, i.e. the
 //!   author's phone was on the other end, not a mirror of it
 //! - `sc.peer` — short endpoint id, so a pair of devices is one filter
@@ -40,24 +41,6 @@ impl Dir {
         match self {
             Self::Send => "send",
             Self::Recv => "recv",
-        }
-    }
-}
-
-/// Which pipe carried it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Lane {
-    /// The live path: an envelope broadcast to, or received from, a gossip neighbour.
-    Gossip,
-    /// Trail reconciliation: a push that a peer finished, or entries a peer delivered on a pull.
-    Docs,
-}
-
-impl Lane {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Gossip => "gossip",
-            Self::Docs => "docs",
         }
     }
 }
@@ -136,22 +119,18 @@ impl PeerRoles {
     }
 }
 
-/// Emit `fix.provenance`: one fix reached this phone, from whom and how. Dimensions
-/// (`collector-config.yaml`) are `fix.lane`, `fix.source` and `fix.path`, so "where do my fixes
+/// Emit `fix.provenance`: one friend's fix reached this phone, from whom and over which path.
+/// Dimensions (`collector-config.yaml`) are `fix.source` and `fix.path`, so "where do my fixes
 /// come from" is a spanmetrics query over weeks. `fix.repeater_owner` names whose repeater it was,
 /// and is a span attribute only (bounded by rosters, but not worth a series each).
-pub fn record_provenance(
-    roles: &PeerRoles,
-    lane: Lane,
-    author: &[u8; 32],
-    peer: &[u8; 32],
-    path: &str,
-) {
+///
+/// Emitted beside the receive-side `peer.contact`, from the replica watch: one per author whose
+/// entries a peer delivered, whichever pass carried them.
+pub fn record_provenance(roles: &PeerRoles, author: &[u8; 32], peer: &[u8; 32], path: &str) {
     let span = tracing::info_span!(
         "fix.provenance",
         sc.author = %crate::telemetry::short_hex(author),
         sc.via_peer = %crate::telemetry::short_hex(peer),
-        fix.lane = lane.as_str(),
         fix.source = roles.source(author, peer),
         fix.path = path,
         fix.repeater_owner = tracing::field::Empty,
@@ -168,13 +147,12 @@ pub fn record_provenance(
 /// One exchange with one peer. See the module docs for what each field means.
 pub struct Contact<'a> {
     pub dir: Dir,
-    pub lane: Lane,
     pub peer: &'a [u8; 32],
     pub role: &'static str,
     pub path: &'a str,
     /// `Some` on receive only.
     pub from_author: Option<bool>,
-    /// Envelopes (gossip: always 1) or entries (docs) that crossed in this contact.
+    /// Entries that crossed in this contact.
     pub entries: u64,
 }
 
@@ -184,7 +162,6 @@ pub fn record(contact: Contact<'_>) {
         "peer.contact",
         sc.peer = %crate::telemetry::short_hex(contact.peer),
         contact.dir = contact.dir.as_str(),
-        contact.lane = contact.lane.as_str(),
         contact.role = contact.role,
         contact.path = contact.path,
         contact.from_author = tracing::field::Empty,
@@ -301,7 +278,5 @@ mod tests {
         // Dashboards and spanmetrics series match on these strings.
         assert_eq!(Dir::Send.as_str(), "send");
         assert_eq!(Dir::Recv.as_str(), "recv");
-        assert_eq!(Lane::Gossip.as_str(), "gossip");
-        assert_eq!(Lane::Docs.as_str(), "docs");
     }
 }

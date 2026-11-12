@@ -1,0 +1,30 @@
+[package]
+name = "streetcryptid-repeater-host"
+version = "0.1.0"
+edition = "2021"
+publish = false
+license = "AGPL-3.0-or-later"
+
+[dependencies]
+anyhow = "1"
+fs2 = "0.4"
+iroh = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "registry"] }
+# `otel` compiles the stash's OTLP exporter in; it stays dormant unless this build was given an
+# endpoint (SC_REPEATER_OTEL_ENDPOINT) AND the person running it left diagnostics on.
+trail-stash = { path = "../../server", features = ["live", "otel"] }
+streetcryptid-repeater = { path = "../../protocol" }
+
+[dev-dependencies]
+ed25519-dalek = "2"
+tempfile = "3"
+iroh-docs = "0.101"
+iroh-blobs = "0.103"
+iroh-gossip = "0.101"
+
+# Its release profile (`desktop-release`) and the patched noq come from the workspace root
+# (/Cargo.toml): Cargo reads neither in a member manifest.

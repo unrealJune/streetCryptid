@@ -10,9 +10,9 @@
  * - `handOverNativeBackground` existed on iOS and not on Android, so on 2026-10-03 a Pixel 10's
  *   background runtime kept the store claim, the app's `init()` rejected, and pairing showed
  *   "NOTHING FOUND" for 13.7 hours.
- * - `publishIntroduction` and `pushTrailBudgeted` were declared here and called (guarded) by JS for
- *   their whole lives, and exported by NEITHER platform: every new friend waited for the next slot
- *   for their first dot, and every push paid the flat 30 s budget. This test found both.
+ * - `publishIntroduction` was declared here and called (guarded) by JS for its whole life, and
+ *   exported by NEITHER platform: every new friend waited for the next slot for their first dot.
+ *   This test found it.
  *
  * So the surface is read straight from the three sources and compared. Platform-specific exports
  * are allowed, but only by name in the lists below, each with its reason — and a list entry that

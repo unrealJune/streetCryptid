@@ -25,11 +25,14 @@
 #   previous_tag           the tag the commit range started from (empty on the first release)
 #   tag=v<x.y.z>
 #
-# Requires the full git history and tags (actions/checkout with fetch-depth: 0).
+# Requires the full git history and tags (actions/checkout with fetch-depth: 0). Only `v*` tags are
+# app releases; the imported trail-stash tags were renamed to `server-v*` so `--match` skips them.
 
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=scripts/lib/conventional-commits.sh
+source "$repo_root/scripts/lib/conventional-commits.sh"
 force='auto'
 
 while (($#)); do
@@ -108,28 +111,23 @@ if [[ -z "$previous_tag" ]]; then
   exit 0
 fi
 
-# Merge commits carry the branch name, not a Conventional Commit subject, so they never decide a
-# bump. Squash-merged pull requests keep their subject and do.
-subjects="$(git -C "$repo_root" log --no-merges --format='%s' "$previous_tag..HEAD")"
-bodies="$(git -C "$repo_root" log --no-merges --format='%B' "$previous_tag..HEAD")"
+# The repeater server and the Windows repeater release under their own tags (`server-v*`,
+# `windows-v*`), so a commit confined to them must not cut a store release. `repeater/protocol/`
+# still counts: the phone links it. Which commits count, and how far they bump, is shared with the
+# repeaters' releases (scripts/lib/conventional-commits.sh).
+#
+# Nor does a commit confined to what never ships in the app: CI and release workflows, docs, the
+# justfile and the repository's ignore/attribute files. `apps/repeater` is the Windows client's
+# home before it moved to repeater/windows -- a path filter does not follow a rename, and its
+# history arrived in one merge (#192).
+app_commits=()
+while IFS= read -r commit; do
+  app_commits+=("$commit")
+done < <(release_commits "$repo_root" "$previous_tag" . \
+  ':!repeater/server' ':!repeater/windows' ':!apps/repeater' \
+  ':!.github' ':!docs' ':!justfile' ':!.gitattributes' ':!.prettierignore')
 
-# Most of this repository's history predates Conventional Commits, so an unrecognized subject is
-# treated as a shipping change and earns a patch. Only commits that are explicitly housekeeping
-# are ignored, and a push made up entirely of them releases nothing.
-housekeeping='^(docs|chore|ci|test|style|build|refactor)(\([^)]*\))?:'
-
-level='none'
-if [[ -n "$subjects" ]] && grep -Evq "$housekeeping" <<<"$subjects"; then
-  level='patch'
-fi
-if [[ "$level" != 'none' ]] && grep -Eq '^feat(\([^)]*\))?:' <<<"$subjects"; then
-  level='minor'
-fi
-if [[ -n "$subjects" ]] &&
-  { grep -Eq '^[a-zA-Z]+(\([^)]*\))?!:' <<<"$subjects" ||
-    grep -Eq '^BREAKING[ -]CHANGE:' <<<"$bodies"; }; then
-  level='major'
-fi
+level="$(bump_level "$repo_root" ${app_commits[@]+"${app_commits[@]}"})"
 
 if [[ "$level" == 'none' ]]; then
   emit false none "$current"

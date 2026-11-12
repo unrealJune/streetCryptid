@@ -16,6 +16,7 @@ function harness(
     batchSize?: number;
     maxBatches?: number;
     nowStart?: number;
+    exportEnabled?: () => Promise<boolean>;
   } = {}
 ) {
   const sent: Capture[] = [];
@@ -26,6 +27,7 @@ function harness(
     now: () => nowMs,
     batchSize: options.batchSize ?? 250,
     maxBatches: options.maxBatches ?? 3,
+    exportEnabled: options.exportEnabled,
     transport: async (url, body) => {
       if (options.fail?.()) throw new Error('collector unreachable');
       sent.push({ url, body: JSON.parse(body) });
@@ -44,6 +46,53 @@ function logsOf(capture: Capture): any[] {
 
 describe('journal shipper', () => {
   beforeEach(() => resetEventLogForTesting());
+
+  describe('with sending switched off', () => {
+    it('sends nothing, and never sends what was recorded while off', async () => {
+      let allowed = false;
+      const { shipper, sent } = harness({ exportEnabled: async () => allowed });
+      const telemetry = createTelemetry({ now: () => 5_000 });
+      telemetry.startSpan('bg.wake').end();
+
+      await shipper.drain();
+      expect(sent).toEqual([]);
+      expect(await unshippedCount()).toBe(0);
+
+      allowed = true;
+      await shipper.drain();
+      expect(sent).toEqual([]);
+
+      telemetry.startSpan('publish.fix').end();
+      await shipper.drain();
+      expect(sent).toHaveLength(1);
+      expect(spansOf(sent[0]).map((span: any) => span.name)).toEqual(['publish.fix']);
+    });
+
+    it('reports a push as disabled rather than unreachable', async () => {
+      const { shipper, sent } = harness({ exportEnabled: async () => false });
+      createTelemetry({ now: () => 5_000 })
+        .startSpan('bg.wake')
+        .end();
+      expect(await shipper.pushNow()).toEqual({
+        sent: 0,
+        reachable: true,
+        remaining: 0,
+        disabled: true,
+      });
+      expect(sent).toEqual([]);
+    });
+
+    it('treats a consent read that fails as no', async () => {
+      const { shipper, sent } = harness({
+        exportEnabled: () => Promise.reject(new Error('sqlite')),
+      });
+      createTelemetry({ now: () => 5_000 })
+        .startSpan('bg.wake')
+        .end();
+      await shipper.drain();
+      expect(sent).toEqual([]);
+    });
+  });
 
   it('ships nothing when the journal is empty', async () => {
     const { shipper, sent } = harness();

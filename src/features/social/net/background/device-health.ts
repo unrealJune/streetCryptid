@@ -9,13 +9,7 @@ import {
   type SpanContext,
 } from '@/features/dev/telemetry';
 import { tryGetIrohLocation } from 'iroh-location';
-import {
-  createPersistentKV,
-  loadPool,
-  loadRatchetDrops,
-  loadSharingEnabled,
-  type RatchetDropCounts,
-} from '../persistence';
+import { createPersistentKV, loadPool, loadSharingEnabled } from '../persistence';
 import { getStorageBackend, getStorageDegradationCount } from '../storage-health';
 import { BACKGROUND_REFRESH_TASK } from './refresh-task';
 import { loadReviveFenceArmedAt, REVIVE_FENCE_TASK } from './revive-task';
@@ -50,10 +44,20 @@ async function nativeWatermarks(): Promise<Watermarks> {
   }
 }
 
+/** How many recipients the last seal left out, by reason (FORWARD-SECRECY §4.5). */
+interface RatchetDropCounts {
+  /** Recipients left out of the most recent publish, for any reason. */
+  total: number;
+  /** …of which had gone quiet past `T_lapse`. */
+  lapsed: number;
+  /** …of which have no session at all, which only an in-person re-pair fixes. */
+  noSession: number;
+}
+
 /**
- * What the latest native seal left out, in the shape of the JS drop row. `null` when the binary
- * predates the export, no node is running, or nothing has been sealed yet — all of which fall back
- * to the JS row rather than reporting zero, which would read as "all fine".
+ * What the latest native seal left out. `null` when the binary predates the export, no node is
+ * running, or nothing has been sealed yet — all of which omit the attributes rather than reporting
+ * zero, which would read as "all fine".
  */
 async function nativeSealDrops(): Promise<RatchetDropCounts | null> {
   try {
@@ -357,10 +361,8 @@ async function intentAttributes(): Promise<Attributes> {
     // `sharing.recipients`, this is the difference between "publishing to two friends" and
     // "publishing to nobody, twice" — states that are otherwise identical in every other span the
     // device emits, and which stayed indistinguishable through a day-long mutual lapse.
-    // Native first: the drain is the only publish path now, and the JS row below is written only
-    // by the JS path it replaced — through the 2026-09-29 week-long mutual lapse it was simply
-    // absent. The row stays as the fallback for a binary that predates the export.
-    const drops = (await nativeSealDrops()) ?? (await loadRatchetDrops(kv));
+    // The native drain is the only publish path, so its last seal report is the only source.
+    const drops = await nativeSealDrops();
     if (drops) {
       attrs['ratchet.dropped'] = drops.total;
       attrs['ratchet.dropped_lapsed'] = drops.lapsed;

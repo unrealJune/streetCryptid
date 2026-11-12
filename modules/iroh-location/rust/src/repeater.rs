@@ -416,24 +416,21 @@ pub fn carriers(states: &[RosterState], me: &EndpointId) -> BTreeSet<EndpointId>
         .collect()
 }
 
-/// Schedule our carriers without extending a push's wait or replacing an explicit peer's budget.
-pub(crate) fn append_push_targets(
-    peers: &mut Vec<(EndpointAddr, Duration)>,
+/// Our carriers as push targets: every repeater in a roster that carries us, minus anyone the
+/// push already dials explicitly. `TrailDocs::push` hands them to the live engine without waiting
+/// on them, so a carrier asleep never extends a push.
+pub(crate) fn push_carriers(
     states: &[RosterState],
     me: &EndpointId,
-) -> usize {
-    let mut seen: BTreeSet<_> = peers.iter().map(|(addr, _)| *addr.id.as_bytes()).collect();
-    let mut added = 0;
-    for carrier in carriers(states, me) {
-        if carrier == *me || !seen.insert(carrier) {
-            continue;
-        }
-        if let Ok(id) = iroh::EndpointId::from_bytes(&carrier) {
-            peers.push((EndpointAddr::new(id), Duration::ZERO));
-            added += 1;
-        }
-    }
-    added
+    explicit: &[EndpointAddr],
+) -> Vec<EndpointAddr> {
+    let dialled: BTreeSet<_> = explicit.iter().map(|addr| *addr.id.as_bytes()).collect();
+    carriers(states, me)
+        .into_iter()
+        .filter(|carrier| carrier != me && !dialled.contains(carrier))
+        .filter_map(|carrier| iroh::EndpointId::from_bytes(&carrier).ok())
+        .map(EndpointAddr::new)
+        .collect()
 }
 
 /// Match a remembered trail ticket to a known friend only when its address is unambiguous.
@@ -941,19 +938,21 @@ mod tests {
     }
 
     #[test]
-    fn push_adds_only_my_carriers_without_waiting_or_duplicating_explicit_peers() {
+    fn push_adds_only_my_carriers_without_duplicating_explicit_peers() {
         let book = RosterBook::open(&scratch("push-plan")).unwrap();
         roster_with(&book, 1, &[10, 11], &[2]);
         roster_with(&book, 3, &[20], &[4]);
         let explicit = iroh::EndpointId::from_bytes(&id(10)).unwrap();
-        let mut peers = vec![(EndpointAddr::new(explicit), Duration::from_secs(5))];
+        let peers = vec![EndpointAddr::new(explicit)];
 
-        assert_eq!(append_push_targets(&mut peers, &book.states(), &id(2)), 1);
-        assert_eq!(peers.len(), 2);
-        assert_eq!(peers[0].1, Duration::from_secs(5));
-        assert_eq!(*peers[1].0.id.as_bytes(), id(11));
-        assert_eq!(peers[1].1, Duration::ZERO);
-        assert_eq!(append_push_targets(&mut peers, &book.states(), &id(2)), 0);
+        let carriers = push_carriers(&book.states(), &id(2), &peers);
+        assert_eq!(
+            carriers.len(),
+            1,
+            "10 is dialled already; 20 does not carry us"
+        );
+        assert_eq!(*carriers[0].id.as_bytes(), id(11));
+        assert!(push_carriers(&book.states(), &id(9), &[]).is_empty());
     }
 
     #[tokio::test]
@@ -991,7 +990,9 @@ mod tests {
             .spawn();
 
         let live = phone.live().await?;
-        live.memory.add_endpoint_info(endpoint.addr());
+        live.endpoint
+            .address_lookup()?
+            .add(iroh::address_lookup::memory::MemoryLookup::from_endpoint_info([endpoint.addr()]));
         let book = phone.roster_book().await?;
         roster_with(&book, 21, &[22], &[21]);
         let namespace = live.trail.own_namespace();
@@ -1002,12 +1003,9 @@ mod tests {
             .write(namespace, &phone.author, b"sealed fix".to_vec())
             .await?;
 
-        let reports = tokio::time::timeout(
-            Duration::from_secs(3),
-            phone.push_trail_budgeted(Vec::new(), None),
-        )
-        .await??;
-        assert!(reports.is_empty(), "a scheduled carrier is not a receipt");
+        // With no stash and no friend there is nothing to wait for: the carrier is scheduled and
+        // the push returns at once.
+        tokio::time::timeout(Duration::from_secs(3), phone.push_trail(Vec::new())).await??;
 
         let key = crate::docs::encode_key(&phone.author);
         tokio::time::timeout(Duration::from_secs(15), async {
@@ -1082,7 +1080,9 @@ mod tests {
             .await?
             .set(&[crate::encode_hex(live.endpoint.id().as_bytes())])?;
         let reader_live = reader.live().await?;
-        reader_live.memory.add_endpoint_info(live.endpoint.addr());
+        reader_live.endpoint.address_lookup()?.add(
+            iroh::address_lookup::memory::MemoryLookup::from_endpoint_info([live.endpoint.addr()]),
+        );
         let writer_id = *live.endpoint.id().as_bytes();
         let matched = friend_namespaces(
             &reader_live.trail.friend_tickets(),

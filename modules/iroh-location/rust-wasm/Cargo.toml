@@ -11,7 +11,6 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 anyhow = "1"
-async-channel = "2"
 blake3 = "1"
 chacha20poly1305 = "0.10"
 console_error_panic_hook = "0.1"
@@ -37,10 +36,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-subscriber-wasm = "0.1"
 wasm-bindgen = "=0.2.122"
 wasm-bindgen-futures = "0.4"
-wasm-streams = "0.5"
 # Shared with the mobile crate by `#[path]` (src/lib.rs): the Double Ratchet schedule the v3
-# envelope wraps under. Same versions/features as modules/iroh-location/rust/Cargo.toml — the two
-# crates must produce byte-identical envelopes or a web peer cannot talk to a phone.
+# envelope wraps under, compiled because `docs.rs` names the envelope code. Same versions/features
+# as modules/iroh-location/rust/Cargo.toml.
 x25519-dalek = { version = "2", default-features = false, features = [
     "alloc",
     "precomputed-tables",
@@ -52,10 +50,6 @@ zeroize = { version = "1", features = ["derive"] }
 [package.metadata.wasm-pack.profile.release]
 wasm-opt = ["--enable-nontrapping-float-to-int", "--enable-bulk-memory"]
 
-[profile.release]
-codegen-units = 1
-strip = "symbols"
-debug = false
-lto = true
-opt-level = "z"
-panic = "abort"
+# Its release settings differ from the phone's (fat LTO, one codegen unit, panic = "abort"); Cargo
+# reads profiles only at the workspace root, so `just build-wasm` applies them through
+# CARGO_PROFILE_RELEASE_* (see /Cargo.toml).

@@ -48,10 +48,9 @@ connectors:
       - name: service.version
       - name: sc.drop_reason
       - name: trigger
-      # `peer.contact` — did two phones actually exchange data, over which lane and path, and was
-      # it the author's phone itself? See `modules/iroh-location/rust/src/contact.rs`.
+      # `peer.contact` — did two phones actually exchange data, over which path, and was it the
+      # author's phone itself? See `modules/iroh-location/rust/src/contact.rs`.
       - name: contact.dir
-      - name: contact.lane
       - name: contact.role
       - name: contact.path
       - name: contact.from_author
@@ -70,10 +69,9 @@ connectors:
       - name: pull.outcome
       - name: pull.trigger
       - name: pull.app_state
-      # `fix.provenance` — where each fix this phone received came from: which lane, who handed it
-      # over (`author` / `friend` / `stash` / `repeater` / `other`), over which path. Closed
+      # `fix.provenance` — where each fix this phone received came from: who handed it over
+      # (`author` / `friend` / `stash` / `repeater` / `other`), over which path. Closed
       # vocabularies (`contact.rs`).
-      - name: fix.lane
       - name: fix.source
       - name: fix.path
     # Deliberately NOT `sc.author`, `sc.seq` or `sc.entry_hash`: those are per-envelope and would

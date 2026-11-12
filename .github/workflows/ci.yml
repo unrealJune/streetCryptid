@@ -1,5 +1,10 @@
 name: CI
 
+# One entry point, a lane per product (docs/MONOREPO.md, "CI"). A path-filtered workflow that does
+# not run leaves a required check pending forever, and `release.yml`'s `workflow_run` keys on the
+# name `CI`, so this workflow always runs, asks `scripts/ci-changes.sh` which lanes the change
+# needs, and calls only those. `Required` passes a lane that was skipped and fails one that broke.
+
 on:
   pull_request:
   push:
@@ -13,320 +18,80 @@ concurrency:
   group: ci-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
-env:
-  CI: '1'
-  EXPO_NO_TELEMETRY: '1'
-
 jobs:
-  quality:
-    name: Quality / ${{ matrix.name }}
+  changes:
+    name: Changes
     runs-on: ubuntu-latest
-    timeout-minutes: 15
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: Lint
-            script: lint
-          - name: Format
-            script: format:check
-          # Guards the one invariant a comment could not: a store build ships no developer
-          # telemetry. See scripts/check-release-telemetry.mjs.
-          - name: Release telemetry
-            script: check:release-telemetry
-          - name: Jest
-            script: test
+    timeout-minutes: 5
+    outputs:
+      app: ${{ steps.lanes.outputs.app }}
+      server: ${{ steps.lanes.outputs.server }}
+      windows: ${{ steps.lanes.outputs.windows }}
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Install Bun
-        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
-          bun-version: 1.3.14
+          fetch-depth: 0
+          persist-credentials: false
 
-      # One matrix job saves the shared Bun cache on main, so the four do not race to reserve it.
-      - name: Install project dependencies
-        uses: ./.github/actions/bun-install
-        with:
-          save: ${{ matrix.script == 'test' && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+      - name: Test lane selection
+        run: bash scripts/test-ci-changes.sh
 
-      # Jest's transform cache, without which the first test of every suite pays for transforming
-      # its whole graph (see testTimeout in jest.config.js). Jest keys each entry by file content and
-      # config, so a hit on a changed source file is a miss, never a stale transform. What its key
-      # cannot see is a new babel preset behind the same path, so bun.lock is in ours, and there is
-      # deliberately no restore-key: a lockfile change starts empty instead of carrying every old
-      # entry forward forever. Saved on main only, for the scoping reason in bun-install.
-      - name: Restore the Jest transform cache
-        if: matrix.script == 'test' && !(github.event_name == 'push' && github.ref == 'refs/heads/main')
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ${{ runner.temp }}/jest-cache
-          key: jest-transform-${{ runner.os }}-${{ hashFiles('bun.lock', 'jest.config.js') }}
-
-      - name: Restore and save the Jest transform cache
-        if: matrix.script == 'test' && github.event_name == 'push' && github.ref == 'refs/heads/main'
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ${{ runner.temp }}/jest-cache
-          key: jest-transform-${{ runner.os }}-${{ hashFiles('bun.lock', 'jest.config.js') }}
-
-      - name: Run ${{ matrix.name }}
+      - name: Select lanes
+        id: lanes
         env:
-          JEST_CACHE_DIRECTORY: ${{ runner.temp }}/jest-cache
-        run: bun run "${{ matrix.script }}"
-
-  typecheck:
-    name: Typecheck
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Restore generated WASM bindings
-        id: wasm-bindings
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: modules/iroh-location/web
-          # Must stay byte-identical to the key in copilot-setup-steps.yml so the two workflows
-          # share one entry instead of each rebuilding the bindings.
-          key: wasm-output-${{ runner.os }}-rust-1.97.0-wasm-pack-0.15.0-binaryen-117-${{ hashFiles('modules/iroh-location/rust-wasm/Cargo.lock', 'modules/iroh-location/rust-wasm/Cargo.toml', 'modules/iroh-location/rust-wasm/src/**/*.rs', 'modules/iroh-location/rust/Cargo.lock', 'modules/iroh-location/rust/Cargo.toml', 'modules/iroh-location/rust/src/**/*.rs', 'justfile') }}
-
-      - name: Install Linux build dependencies
-        if: steps.wasm-bindings.outputs.cache-hit != 'true'
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
         run: |
-          sudo apt-get update
-          sudo apt-get install --yes build-essential clang cmake libssl-dev perl pkg-config
+          set -euo pipefail
+          bash scripts/ci-changes.sh "$BASE_SHA" HEAD | tee -a "$GITHUB_OUTPUT"
 
-      - name: Install Rust and WASM build tools
-        if: steps.wasm-bindings.outputs.cache-hit != 'true'
-        uses: taiki-e/install-action@a6b2e2dcd845ddd7f509ce4f3ed3d922b80cc5d9 # v2.84.0
-        with:
-          tool: |
-            rust@1.97.0+wasm32-unknown-unknown
-            just@1.57.0
-            wasm-pack@0.15.0
-          fallback: none
-
-      - name: Restore WASM compilation cache
-        if: steps.wasm-bindings.outputs.cache-hit != 'true'
-        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
-        with:
-          workspaces: modules/iroh-location/rust-wasm -> target
-          key: wasm
-          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-
-      - name: Install Binaryen
-        if: steps.wasm-bindings.outputs.cache-hit != 'true'
-        run: |
-          curl --fail --location --silent --show-error \
-            --output /tmp/binaryen.tar.gz \
-            https://github.com/WebAssembly/binaryen/releases/download/version_117/binaryen-version_117-x86_64-linux.tar.gz
-          echo "3dc677006555b355ea2da5e82602065a161d5e83eaefd3f759afa00b96e83212  /tmp/binaryen.tar.gz" |
-            sha256sum --check
-          tar --extract --gzip --file /tmp/binaryen.tar.gz --directory /tmp
-          sudo install --mode 0755 /tmp/binaryen-version_117/bin/wasm-opt /usr/local/bin/wasm-opt
-
-      - name: Build web bindings
-        if: steps.wasm-bindings.outputs.cache-hit != 'true'
-        run: just build-wasm
-
-      - name: Install Bun
-        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
-        with:
-          bun-version: 1.3.14
-
-      - name: Install project dependencies
-        uses: ./.github/actions/bun-install
-
-      - name: Generate Expo types
-        run: |
-          bunx expo customize tsconfig.json
-          git diff --exit-code -- .gitignore tsconfig.json
-
-      - name: Run Typecheck
-        run: bun run typecheck
-
-  native:
-    name: Native
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    # Write access so a Rust API change can push its own refreshed UniFFI bindings back to the
-    # pull request branch instead of failing and waiting for a manual `just bindgen-*`.
+  app:
+    name: App
+    needs: changes
+    if: needs.changes.outputs.app == 'true'
+    # `native` pushes refreshed UniFFI bindings back to the pull request branch.
     permissions:
       contents: write
-    steps:
-      # Checks out the PR head rather than the default merge commit: this job may commit on top
-      # of what it checked out, and a merge commit must never be pushed to the branch. Rust tests
-      # and binding generation depend only on the crate, so testing head instead of the merge
-      # result loses nothing here (the EAS build workflows already build head.sha too).
-      - name: Check out repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
-          persist-credentials: true
+    uses: ./.github/workflows/ci-app.yml
 
-      - name: Test EAS CI log isolation
-        run: bash scripts/test-eas-ci-log-isolation.sh
+  server:
+    name: Repeater server
+    needs: changes
+    if: needs.changes.outputs.server == 'true'
+    uses: ./.github/workflows/ci-repeater-server.yml
 
-      # The build profiler samples the process table while `eas build --local` runs, and that
-      # build's children carry signing credentials in their argument vectors. This proves it can
-      # publish nothing but its own vocabulary.
-      - name: Test build profile isolation
-        run: bash scripts/test-build-profile-isolation.sh
-
-      # A wrong artifact cache ships a stale .so, which installs and runs and then misbehaves on
-      # device -- the one failure in this pipeline a green build would hide.
-      - name: Test the native artifact cache
-        run: bash scripts/test-native-cache.sh
-
-      - name: Test release versioning
-        run: bash scripts/test-next-version.sh
-
-      - name: Install Linux build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes build-essential clang cmake libssl-dev perl pkg-config
-
-      - name: Install Rust build tools
-        uses: taiki-e/install-action@a6b2e2dcd845ddd7f509ce4f3ed3d922b80cc5d9 # v2.84.0
-        with:
-          tool: |
-            rust@1.97.0
-            just@1.57.0
-            cargo-nextest@0.9.140
-          fallback: none
-
-      - name: Restore Rust compilation cache
-        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
-        with:
-          workspaces: modules/iroh-location/rust -> target
-          key: native
-          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-
-      # nextest, not `cargo test`: cargo runs test binaries one after another, and three of them
-      # (restart_protocol, ratchet_conditions, pairing_integration) were ~280 s of that serially.
-      # nextest runs every test as its own process across all binaries at once. The crate has no
-      # doctests, which nextest would skip. `.config/nextest.toml` keeps the loopback-network
-      # scenarios serialized, as their own in-process lock did under `cargo test`.
-      - name: Run Rust tests
-        working-directory: modules/iroh-location/rust
-        run: cargo nextest run --profile ci
-
-      # A change to the Rust UniFFI surface leaves the tracked Kotlin/Swift bindings stale, which
-      # used to fail CI until someone ran `just bindgen-android` / `just bindgen-ios` by hand.
-      # Regenerate them here and push the result back instead. The generator is deterministic, so
-      # what lands on the branch is exactly what a re-run would produce — a GITHUB_TOKEN push not
-      # retriggering CI is therefore harmless. The EAS build workflows need no equivalent step:
-      # scripts/eas-build-pre-install.sh already regenerates both platforms before building.
-      - name: Regenerate UniFFI bindings
-        run: bash scripts/generate-uniffi-bindings.sh all
-
-      - name: Detect stale bindings
-        id: bindings
-        env:
-          BINDING_PATHS: >-
-            modules/iroh-location/android/src/main/java/uniffi
-            modules/iroh-location/ios/generated
-        run: |
-          set -euo pipefail
-          # Compare through the index, not the worktree: a new Rust type can make the generator
-          # emit a file that does not exist yet, and `git diff` alone would not see it.
-          git add --all -- $BINDING_PATHS
-          if git diff --cached --quiet -- $BINDING_PATHS; then
-            echo 'stale=false' >> "$GITHUB_OUTPUT"
-            echo 'Tracked UniFFI bindings match the Rust API.'
-          else
-            echo 'stale=true' >> "$GITHUB_OUTPUT"
-            git --no-pager diff --cached --stat -- $BINDING_PATHS
-          fi
-
-      - name: Push refreshed bindings
-        id: push-bindings
-        if: >-
-          steps.bindings.outputs.stale == 'true'
-          && github.event_name == 'pull_request'
-          && github.event.pull_request.head.repo.full_name == github.repository
-        env:
-          HEAD_REF: ${{ github.event.pull_request.head.ref }}
-        run: |
-          set -euo pipefail
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git commit \
-            --message 'chore(native): refresh generated UniFFI bindings' \
-            --message 'Regenerated by CI from the Rust UniFFI surface on this branch.'
-          # A non-fast-forward here means the branch already moved on, and the run for that newer
-          # commit regenerates from scratch — so failing loudly is the right outcome, not a retry.
-          git push origin "HEAD:refs/heads/$HEAD_REF"
-
-      # Fork pull requests get no write access, and main is never auto-committed to. Both keep the
-      # old behaviour: fail with the manual instruction. On main this should be unreachable,
-      # because the pull request that introduced the drift refreshed it before merging.
-      - name: Fail on stale bindings CI cannot refresh
-        if: steps.bindings.outputs.stale == 'true' && steps.push-bindings.outcome == 'skipped'
-        run: |
-          echo 'Tracked UniFFI bindings are stale, and CI cannot push a fix for this event.' >&2
-          echo "Run 'just bindgen-android' and 'just bindgen-ios' to refresh them." >&2
-          exit 1
-
-  # The vendored BLE transport's suite, including real iroh endpoints pairing over a simulated
-  # radio. Its own job because it compiles iroh a second time (the app crate leaves BLE out on
-  # Linux) and would not fit in `native`'s budget beside the app's tests.
-  ble-transport:
-    name: BLE transport
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      # `blew`'s Linux backend (bluer) links libdbus even though the tests never touch a radio.
-      - name: Install Linux build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes build-essential clang cmake libdbus-1-dev libssl-dev perl pkg-config
-
-      - name: Install Rust build tools
-        uses: taiki-e/install-action@a6b2e2dcd845ddd7f509ce4f3ed3d922b80cc5d9 # v2.84.0
-        with:
-          tool: |
-            rust@1.97.0
-            just@1.57.0
-          fallback: none
-
-      - name: Restore Rust compilation cache
-        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
-        with:
-          workspaces: modules/iroh-location/rust/third_party/iroh-ble-transport -> target
-          key: ble-transport
-          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-
-      - name: Run BLE transport tests
-        run: just test-ble-transport
+  windows:
+    name: Repeater windows
+    needs: changes
+    if: needs.changes.outputs.windows == 'true'
+    uses: ./.github/workflows/ci-repeater-windows.yml
 
   required:
     name: Required
     if: always()
     needs:
-      - quality
-      - typecheck
-      - native
-      - ble-transport
+      - changes
+      - app
+      - server
+      - windows
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: Verify required jobs
+      - name: Verify required lanes
         env:
-          QUALITY_RESULT: ${{ needs.quality.result }}
-          TYPECHECK_RESULT: ${{ needs.typecheck.result }}
-          NATIVE_RESULT: ${{ needs.native.result }}
-          BLE_TRANSPORT_RESULT: ${{ needs.ble-transport.result }}
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          APP_RESULT: ${{ needs.app.result }}
+          SERVER_RESULT: ${{ needs.server.result }}
+          WINDOWS_RESULT: ${{ needs.windows.result }}
         run: |
-          for result in "$QUALITY_RESULT" "$TYPECHECK_RESULT" "$NATIVE_RESULT" "$BLE_TRANSPORT_RESULT"; do
-            if [[ "$result" != "success" ]]; then
-              echo "A required CI job did not succeed." >&2
+          # Without a lane decision nothing below it means anything.
+          if [[ "$CHANGES_RESULT" != "success" ]]; then
+            echo "Lane selection did not succeed." >&2
+            exit 1
+          fi
+          for result in "$APP_RESULT" "$SERVER_RESULT" "$WINDOWS_RESULT"; do
+            if [[ "$result" != "success" && "$result" != "skipped" ]]; then
+              echo "A required CI lane did not succeed." >&2
               exit 1
             fi
           done

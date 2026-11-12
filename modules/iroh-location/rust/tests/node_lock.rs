@@ -4,8 +4,8 @@
 //! guard held across an `await` does not slow one call down — it stops the phone, because the
 //! pairing poll that opens the SAS gate, the BLE reads, the publish path and the inbound
 //! `PairProtocol` handler all queue behind whatever the holder is waiting for. When that await is
-//! a docs import or a gossip subscribe aimed at an unreachable peer, nothing releases it and only
-//! a force-quit clears it.
+//! a docs import or (before 2026-11) a gossip subscribe aimed at an unreachable peer, nothing
+//! releases it and only a force-quit clears it.
 //!
 //! This has been fixed three times: `import_profile_ticket` and `read_profile` on 2026-09-10 after
 //! `pairing.poll` spans of 47-131 s, and the whole remaining sweep on 2026-09-17 after ACKNOWLEDGE

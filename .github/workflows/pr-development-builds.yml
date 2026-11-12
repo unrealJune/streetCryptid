@@ -23,10 +23,37 @@ env:
   TS_TAILNET: ${{ secrets.TS_TAILNET }}
 
 jobs:
+  # A pull request confined to the repeater server or the Windows repeater builds no IPA or APK.
+  # Same lane rules as `ci.yml` (scripts/ci-changes.sh).
+  changes:
+    name: Changes
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      app: ${{ steps.lanes.outputs.app }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Select lanes
+        id: lanes
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          bash scripts/ci-changes.sh "$BASE_SHA" HEAD | tee -a "$GITHUB_OUTPUT"
+
   build_ios:
     name: Build and upload iOS Release
+    needs: changes
     if: >-
-      ${{github.event.pull_request.head.repo.full_name == github.repository}}
+      ${{
+        needs.changes.outputs.app == 'true' &&
+        github.event.pull_request.head.repo.full_name == github.repository
+      }}
     runs-on: xcode-27
     timeout-minutes: 90
     environment: development-builds
@@ -277,8 +304,12 @@ jobs:
 
   build_android:
     name: Build and upload Android Release
+    needs: changes
     if: >-
-      ${{github.event.pull_request.head.repo.full_name == github.repository}}
+      ${{
+        needs.changes.outputs.app == 'true' &&
+        github.event.pull_request.head.repo.full_name == github.repository
+      }}
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     environment: development-builds
@@ -544,9 +575,11 @@ jobs:
     if: >-
       ${{
         always() &&
+        needs.changes.outputs.app == 'true' &&
         github.event.pull_request.head.repo.full_name == github.repository
       }}
     needs:
+      - changes
       - build_ios
       - build_android
     runs-on: ubuntu-24.04

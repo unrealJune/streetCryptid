@@ -23,17 +23,16 @@ See "Later phases".
 
 ## 2. Building blocks (iroh, July 2026)
 
-| Layer        | Crate / tech                                                          | Role                                                                           |
-| ------------ | --------------------------------------------------------------------- | ------------------------------------------------------------------------------ |
-| Transport    | **iroh 1.0** (QUIC via `noq`)                                         | E2E-encrypted, relay-blind connections; identity = ed25519 `EndpointId`        |
-| Live path    | **iroh-gossip 0.101**                                                 | best-effort epidemic broadcast of the newest fix (low latency, **no history**) |
-| Durable path | **iroh-docs 0.101** (+ **iroh-blobs 0.103**)                          | replicated log with **range-based set reconciliation** → offline catch-up      |
-| App crypto   | `chacha20poly1305`, `hpke`, `x25519-dalek`, `ed25519-dalek`, `blake3` | the per-recipient envelope (below)                                             |
+| Layer      | Crate / tech                                                          | Role                                                                      |
+| ---------- | --------------------------------------------------------------------- | ------------------------------------------------------------------------- |
+| Transport  | **iroh 1.0** (QUIC via `noq`)                                         | E2E-encrypted, relay-blind connections; identity = ed25519 `EndpointId`   |
+| Location   | **iroh-docs** (+ **iroh-blobs**; iroh-gossip only inside docs)        | one LWW slot per author, live-synced + **range-based set reconciliation** |
+| App crypto | `chacha20poly1305`, `hpke`, `x25519-dalek`, `ed25519-dalek`, `blake3` | the per-recipient envelope (below)                                        |
 
 > **Constraint that shapes everything:** the official `iroh-ffi` 1.0 bindings expose
 > **only iroh core** (endpoint/QUIC/tickets/relays). gossip/docs/blobs are **not**
 > exposed. We therefore ship our **own** Rust crate (`modules/iroh-location/rust`)
-> wrapping iroh + gossip + docs + the crypto, and generate our **own** UniFFI
+> wrapping iroh + docs + the crypto, and generate our **own** UniFFI
 > (Swift/Kotlin) bindings, surfaced to React Native via an Expo Module.
 
 ## 3. Identities & keys (device-based)
@@ -98,18 +97,25 @@ Wrap.kid = first 8 bytes of blake3(recipient.recvPub)  // which wrap is "mine"
 - **Efficiency:** payload encrypted once; each `Wrap` is tiny (HPKE enc + tag). N
   recipients ⇒ 1 payload + N small wraps.
 
-## 5. Channels: live + durable
+## 5. One channel: the docs namespace
 
-Each user owns **one location namespace** (they are the sole writer of their own trail):
-
-- `namespaceId` = the iroh-docs `NamespaceId` (public key of the doc's keypair).
-- `topicId` = `blake3("streetcryptid.loc" ‖ namespaceId)` → the gossip `TopicId`.
-
-Per fix, A:
+Each user owns **one location namespace** (they are the sole writer of their own trail), and
+location travels over iroh-docs alone. Per fix, A's native drain:
 
 1. builds the Envelope for its **current active recipient set**,
-2. **broadcasts** it on `topicId` (gossip) → live update for online friends, and
-3. **writes** it to the docs namespace under key `author/seq` → durable, replicated.
+2. **writes** it to A's namespace under the single key `hex(A)/fix` (`docs.write`) — one
+   last-write-wins slot per author; `seq` lives inside the signed envelope, not in the key — and
+3. **pushes** the namespace to the stash and every friend it holds a ticket for (`trail.push`).
+
+Every namespace a node holds — its own and each imported friend's — joins the iroh-docs **live
+engine** at start (`start_sync`). A write is therefore broadcast to whoever is syncing that
+namespace at that moment (iroh-docs uses gossip internally for this, keyed by namespace id), and a
+device that was asleep **reconciles** the newest slot from any peer that holds it: the author, the
+stash or another friend. Live delivery and offline catch-up are the same mechanism.
+
+Until 2026-11 a separate app-level gossip topic (`blake3("streetcryptid.loc" ‖ id)`) carried each
+fix a second time, sealed separately, for lower latency. It is gone: it had no history, it was a
+second ratchet consumer, and everything it delivered the live engine already delivers.
 
 **Retention:** asymmetric, and deliberately so.
 
@@ -118,10 +124,9 @@ Per fix, A:
 - **A friend's trail is not retained.** Only their newest fix is kept — in the local cache, and on
   the stash. A received fix supersedes the previous one instead of appending to it.
 
-The publisher also prunes its own docs namespace down to its newest entry after each write, so a
-peer catching up reconciles one entry rather than a back-catalogue. The key format stays
-`author/seq` for compatibility with peers on older builds; they simply find one entry where they
-used to find many.
+Because the key is one overwritten slot, a peer catching up reconciles one entry per author rather
+than a back-catalogue. (Pre-LWW `hex(author)/{seq}` keys an older build left in a replica are
+skipped by every reader.)
 
 Each retained fix keeps a `via` label recording how it reached this device, and a `viaPeer`
 recording **who** performed that hop (see `modules/iroh-location/README.md`). Since a friend's
@@ -130,8 +135,8 @@ rather than per row of a timeline; the row opens to name the deliverer. The two 
 merged as one record, because a label from one delivery beside a peer from another would read as a
 fact and be a fiction.
 
-Only endpoints in this device's own pool are named. A fix can be forwarded by any recipient of the
-author's topic, and that neighbourhood is the author's rather than ours, so a deliverer we have not
+Only endpoints in this device's own pool are named. A fix can be served by anyone replicating the
+author's namespace, and that set is the author's rather than ours, so a deliverer we have not
 paired with is shown as a truncated endpoint id and nothing else.
 
 This is a privacy decision first — nobody needs a searchable movement history of their friends —
@@ -145,8 +150,8 @@ the JS thread, stalled tile loading, and drained the battery. See
 
 **Granting to B** is two independent grants:
 
-1. **Join the swarm** — A gives B the docs **read-ticket** + bootstrap (A's
-   `endpointTicket`) so B can replicate the trail and subscribe to the topic.
+1. **Join the namespace** — A gives B the docs **read-ticket** + bootstrap (A's
+   `endpointTicket`) so B can replicate A's namespace live.
 2. **Decrypt access** — A registers B's `recvPub` so every future envelope includes
    B's `Wrap`.
 
@@ -154,30 +159,28 @@ the JS thread, stalled tile loading, and drained the battery. See
 pool member; a rejoining B runs range-based reconciliation against C/D/A, pulls the
 envelopes it missed, and decrypts its own wraps.
 
-**That replication is A's job, on publish.** A's namespace is live-synced (`push_trail` →
-`start_sync`) to the trail stash **and to every pool member**, not to the stash alone — so C holds
-A's envelope as A publishes it, and can serve it to B the moment A goes dark. It has to work this
-way round: a pool member holds a READ ticket and cannot write to A's namespace, so an envelope that
-reached C over live gossip lands in C's app storage and never in the replica C would serve from.
-When A pushed only to the stash, C could relay a fix solely if C happened to reconcile with A while
-A was still up — recovery "against C/D/A" was true of the reader and false of the writer, and with
-the stash off there was no durable copy anywhere.
+**That replication is A's job, on publish.** A pushes its namespace (`trail.push`) to the trail
+stash **and to every pool member**, not to the stash alone — so C holds A's envelope as A publishes
+it, and can serve it to B the moment A goes dark. When A pushed only to the stash, C could relay a
+fix solely if C happened to reconcile with A while A was still up — recovery "against C/D/A" was
+true of the reader and false of the writer, and with the stash off there was no durable copy
+anywhere.
 
 **Revocation works** because access is the `Wrap`, not swarm membership: to unshare with
 C, A simply **stops emitting C's `Wrap`**. Since every fix uses a **fresh random `K`**,
 "no wrap ⇒ no key ⇒ ciphertext is useless to C," even if C keeps replicating the doc.
-(You cannot force-eject a peer from a gossip/doc swarm, and you don't need to.)
+(You cannot force-eject a peer from a doc's replica set, and you don't need to.)
 `epoch` is reserved if we ever want an explicit forced rotation for UX/audit.
 
 ```
-                 ┌──────────── A (writer) ────────────┐
-   GPS fix ─▶ build Envelope(active recipients) ─▶ sign ─┬─▶ gossip.broadcast(topic)   (live)
-                                                         └─▶ docs.set(author/seq, bytes) (durable)
-                                                                     │  push_trail: live-sync A's namespace
-                                                                     │  to the stash AND every pool member
-                                                                     │  replicate (range reconciliation)
-                      B online: gossip Received ─▶ verify sig ─▶ unwrap(myWrap) ─▶ decrypt ─▶ dot
-                      B rejoins: docs sync missed ─▶ (same) ─▶ backfill trail
+                 ┌──────────── A (writer, native drain) ────────────┐
+   GPS fix ─▶ build Envelope(active recipients) ─▶ sign ─▶ docs.write(hex(A)/fix)   (one LWW slot)
+                                                               │  live engine: broadcast to peers
+                                                               │  syncing A's namespace right now
+                                                               │  trail.push: stash + every friend
+                                                               ▼
+                      B online: InsertRemote ─▶ ReplicaListener ─▶ app reads replica ─▶ unwrap ─▶ dot
+                      B rejoins: reconcile with A / stash / C ─▶ (same)
                       C revoked: replicates bytes but has no wrap ─▶ cannot decrypt
 ```
 
@@ -196,7 +199,7 @@ configuration. Deployment credentials and infrastructure stay outside this repos
 React Native JS  ──JSI TurboModule (auto via Expo Modules API)──▶
   iOS Swift ExpoModule / Android Kotlin ExpoModule
      ──▶ UniFFI-generated Swift/Kotlin bindings
-        ──▶ Rust crate `iroh-location`  (iroh + gossip + docs + crypto)
+        ──▶ Rust crate `iroh-location`  (iroh + docs/blobs + crypto)
 ```
 
 - Local Expo module: `modules/iroh-location/` (`rust/`, `ios/`, `android/`, `src/` TS,
@@ -214,40 +217,36 @@ React Native JS  ──JSI TurboModule (auto via Expo Modules API)──▶
 
 ## 9. Background execution & durable trails (implemented)
 
-The **phone background service** samples GPS foreground + background and pushes each fix into
-both the live (gossip) and durable (docs) paths. Design of the JS layer lives under
-`src/features/social/net/background/`; the durable path is native iroh-docs (`modules/iroh-location/rust/src/docs.rs`).
+The **phone background service** samples GPS foreground + background and publishes each fix
+into the docs namespace (§5). Capture, the slot gate, the outbox and the drain all run in Rust
+(`gate.rs`, `outbox.rs`, `publish.rs`) so a JS-free OS wake can publish; a mounted app still runs
+the sampling policy and hands its captures to the same `ingestFix` on the same node. The JS layer
+lives under `src/features/social/net/background/`, the docs path in
+`modules/iroh-location/rust/src/docs.rs`; AGENTS.md records the background rules learned from the
+field.
 
 ```
-GPS (OS, fore+background) ─▶ LocationEngine ─▶ FixOutbox ─▶ LocationSharingService.publishFix
-   expo-location            │ slot gate +      │ durable queue,   ├─▶ gossip.broadcast   (live)
-   + TaskManager            │ SamplingPolicy   │ survives resume  └─▶ docs.write(a/seq)  (durable)
-   + Android FG service     │ (slot cadence)   ▼                        │ range reconciliation
-   ▲                        │        ▲    TrailStore (local, history) ◀─ backfill onFix (sync)
-   └── CadenceController ◀──┘   BatterySource
-       re-arms OS on decision change   (expo-battery)
+GPS (iOS BackgroundLocationRuntime / Android service, or the mounted app's LocationEngine)
+   │ ingestFix / heartbeatFix
+   ▼
+Rust DrainEngine: slot gate ─▶ durable outbox ─▶ seal ─▶ docs.write(hex(A)/fix) ─▶ trail.push
+                                                                                (stash + friends)
+friends' slots ─▶ live engine / reconcile ─▶ InsertRemote ─▶ ReplicaListener ─▶ app reads replica
 ```
 
 - **The slot grid bounds publication; the OS wake cadence is movement-driven.** Envelopes are
   E2E-encrypted, but their arrival timing is visible. A perfectly fixed wire cadence hid motion at
   the cost of effectively continuous Core Location on iOS, because iOS ignores `timeInterval`.
   Ambient sharing now accepts that movement timing is observable, as it is in Life360-class
-  products, and prioritizes sustainable battery use. Live mode remains explicit and bounded.
+  products, and prioritizes sustainable battery use.
 - **Sampling** (`sampling-policy.ts`): one fix per `intervalMs` — user-selectable 1/5/15 min,
   default 5 — at balanced (~100m) accuracy, tuned as an _ambient_ sharer (Life360 / Find-My class),
   not a navigator. Battery moves **accuracy only** (→ `low` under ≤20% or Low-Power Mode, cancelled
   by charging) and, below 5% unplugged, suspends outright — a hard stop that reads as "the phone
   died" rather than a slow-down that would encode the charge level in the cadence. There is
   uses a 100 m distance filter, background deferral up to the chosen interval, and iOS automatic
-  pausing so a stationary phone does not keep GPS and JS hot. A bounded, on-demand **live mode**
-  (`SamplingInputs.live` → `LocationEngine.setLiveMode` → `LocationSharingService.setLiveTracking`)
-  swaps in a real-time ~4s/high cadence for the "a friend is actively watching" case. It is the one
-  sanctioned exception and it _is_ visible on the wire as such. Authorisation is **the sharing grant
-  itself**: a friend already in `sharingWith` can arm it with no prompt, no notification and no
-  per-friend toggle — the same as Life360 / Find My. That is deliberate. Sharing is an explicit grant
-  the user made on top of an SAS-verified bilateral pairing, and live mode discloses nothing new,
-  only the same stream more often. What bounds it is the TTL and the ability to stop at any moment,
-  not a confirmation dialog. Its network trigger is §9c.
+  pausing so a stationary phone does not keep GPS and JS hot. (The on-demand live mode that once
+  swapped in a ~4 s cadence is retired; see §9c.)
 - **Confidence gate** (`fix-quality.ts`): Android's fused provider periodically reports fixes that
   are simply wrong — kilometre-radius tower/Wi-Fi trilateration when GPS has no sky, a cached fix
   replayed long after it was taken, or a lone sample that teleports and comes back. A fix is refused
@@ -295,40 +294,35 @@ GPS (OS, fore+background) ─▶ LocationEngine ─▶ FixOutbox ─▶ Location
   not reliably resume, which stops background sharing until the app is reopened — and which would
   also silence a stationary iPhone); Android carries a branded foreground-service notification color.
   Re-arms are serialized latest-wins so two `startLocationUpdatesAsync` calls never race the task.
-- **Outbox** (`fix-outbox.ts`): durable, serialized queue so captures survive the node being unbound
-  (offline / process death). A mounted runtime publishes TaskManager batches immediately; a fresh
-  headless context restores the persisted profile, keys, sharing pool, and minimal iroh publisher
-  before draining the queue.
-- **Push is explicit, and it addresses the whole pool** (`pushTrail` → native `trail.push`):
-  `docsWrite` writes only the LOCAL replica. iroh-docs broadcasts a `LocalInsert` **only** for
-  namespaces its live engine has marked as syncing, which happens on `start_sync` and nowhere else
-  — so a context that publishes without calling `pushTrail`/`syncTrail` strands every envelope on
-  the device. The peer list is the stash **and every pool member**, mirroring `syncTrail`'s: an
+- **Outbox** (`rust/src/outbox.rs`): durable, so captures survive the node being unbound (offline /
+  process death) and are drained by whichever holder of the node wakes next.
+- **Push is explicit, and it addresses the whole pool** (native `trail.push`): `docs.write`
+  reaches only peers syncing the namespace live at that moment, so the drain pushes after it
+  writes, to the stash **and every pool member** under one `docs::PUSH_TIMEOUT_SECS` deadline. An
   earlier revision pushed only to the stash, so a friend held the author's entries solely if it
   happened to dial the author during a reconciliation window, and with the stash off nothing
-  durable existed anywhere (§6). Publish paths must therefore **drain, then push**
-  (`LocationEngine.flush`, `flushBackgroundOutboxHeadless`). Ordering is load-bearing: syncing
-  _before_ the drain leaves that wake's fixes for the next OS wake, which is what produced
-  hour-long gaps in friends' trails while both phones looked healthy.
-- **Headless must re-open friend namespaces** (`restorePool` → `importFriendTrails`): native
-  `syncTrail` reconciles the namespaces in its handle cache, and a fresh node starts with only our
-  own in it. Without re-importing each friend's `docTicket`, a background backfill runs, reports
-  success, and recovers nothing.
-- **Reconnect-on-resume** (`lifecycle.ts`): on foreground → drain outbox + `syncTrail`;
-  monotonic `seq` persisted (`state-store.ts`) so `author/seq` keys never collide across restarts.
-- **Periodic backfill** (`backfill-task.ts` + `headless-runtime.ts`): the SEND task only fires on
+  durable existed anywhere (§6). Ordering is load-bearing: pushing _before_ the drain leaves that
+  wake's fixes for the next OS wake, which is what produced hour-long gaps in friends' trails while
+  both phones looked healthy.
+- **A node re-opens every namespace from disk** (`rust/src/ns_book.rs`): its own and each imported
+  friend's, and all of them join the live engine at start. A node started by the native runtime
+  with no JS alive therefore reconciles friends exactly as a mounted app does.
+- **Reconnect-on-resume** (`lifecycle.ts`): on foreground → `syncTrail`. The envelope `seq` is
+  counted natively and seeded at start from the keychain reservation (`seedSeq`, retried before a
+  publish if the seed failed), so a reinstall never reuses a sequence number.
+- **Periodic refresh** (`refresh-task.ts` + `headless-runtime.ts`; natively `NativeRefreshTask` on
+  iOS): the SEND task only fires on
   movement and only publishes, so a backgrounded phone never pulls peers' fixes. An
   `expo-background-task` (iOS `BGTaskScheduler` / Android `WorkManager`, ~15 min, OS-scheduled)
-  periodically wakes a short-lived headless node to drain any queued outbox and then `syncTrail`
-  (bidirectional: one call both pushes what we just published and pulls what friends left at the
-  stash). Scheduled while background sharing is on.
+  periodically wakes to heartbeat, drain any queued outbox and pull what friends left at the stash
+  and on each other. Scheduled while background sharing is on.
 - **There is no push-wake anywhere, by design.** The stash's control API still accepts a device
   push token and the server can still send a silent `trail-sync` push, but the app **never uploads
   one** (`stash-client.ts` sends a read-ticket and nothing else). See §10: an APNs/FCM token is the
   only identifier in this system a third party can resolve to a real person, and registering it
   against namespaces let the stash operator work out which namespace was ours. The cost is
-  accepted and real: a friend's fixes now land on our next poll or periodic backfill rather than
-  seconds after they publish. Live mode's request channel polls for the same reason (§9c).
+  accepted and real: unless both phones are syncing live at once, a friend's fixes land on our next
+  pull or periodic refresh rather than seconds after they publish.
 - **The revive tripwire** (`background/revive-task.ts`) is a single 200 m exit-only geofence that
   re-centers on the user as they move. Core Location's standard location service keeps a _suspended_
   app awake but never relaunches a _terminated_ one; region monitoring is the only mechanism
@@ -372,8 +366,9 @@ GPS (OS, fore+background) ─▶ LocationEngine ─▶ FixOutbox ─▶ Location
 - **Config**: iOS `UIBackgroundModes: [location, processing]` + `NSLocationAlwaysAndWhenInUse…`; Android
   `ACCESS_BACKGROUND_LOCATION` + `FOREGROUND_SERVICE_LOCATION` + `POST_NOTIFICATIONS`
   (`app.json` / expo-location config plugin).
-- **web**: relay-only iroh WASM implements the same interface, including an **in-memory**
-  iroh-docs replica (ephemeral across reloads, interoperable with native's persistent replica).
+- **web**: relay-only iroh WASM implements the same interface as a **reader**: an **in-memory**
+  iroh-docs replica (ephemeral across reloads, interoperable with native's persistent replica)
+  that pulls and reads friends' slots. It does not publish (`web-no-publish`).
 - Friends render as a **single dot** at their last known position, in their chosen profile color —
   there is no friend trail to draw, and selecting one shows only that point. Only **your own**
   retained fixes are connected into a sampled polyline. Amber stays "YOU" only, and contact-green
@@ -532,64 +527,13 @@ Bluetooth or request permission.
 - Configure the app with `EXPO_PUBLIC_PAIR_MAILBOX_URL`. The service is replaceable through the
   `PairingMailbox` interface.
 
-## 9c. Live mode: the request channel (implemented)
+## 9c. Live mode (retired)
 
-Live mode (§9) needs a way for a watcher to ask. The obvious mechanism — a silent push through the
-stash, which already held device tokens — is **deliberately rejected**; see §10. Instead the request
-rides the durable trail the two devices already replicate, and the subject **polls** for it.
-
-```
-B (watcher)                                     A (subject)
-  build ControlMsg{kind: LiveRequest, ts, ttl, nonce}
-  seal for A only  ─────────────────────────────────────────────┐
-  docs_write_control → OWN namespace, key `ctl/hex(B)`          │  replicates B's namespace already
-  push_trail → stash + pool  ──────────────────────────────────▶│
-                                                    every 5 min: syncTrail → read_control(B)
-                                                    evaluate: sharing? fresh? new nonce?
-                                                    → setLiveTracking(true, ttl)
-                                             A publishes at ~4s on its own topic; B is subscribed
-```
-
-- **No new transport, no new server surface.** A user is the sole writer of their own namespace, and
-  the recipient already replicates it, so a control entry needs no extra grant. The stash replicates
-  it blindly like any other entry.
-- **Key space** (`docs.rs`): control entries live at `ctl/hex(author)` — one slot per author,
-  latest-wins, so a cancel genuinely supersedes the request it withdraws and the replica never
-  accumulates a row per request. The `ctl/` lead means `author_prefix` range queries cannot reach
-  them and `decode_key` rejects them, so every fix reader skips them unchanged.
-- **Same envelope, different payload.** `crypto::seal` is reused as-is (it is payload-agnostic); the
-  payload is a postcard `ControlMsg` rather than a `LocationFix`. No envelope version bump, no
-  re-pairing. Wrapped for one recipient, so nobody else — including the stash — can tell a request
-  was sent, let alone to whom.
-- **Authorisation is `sharingWith`, and nothing more** (`live-requests.ts`). No prompt, no
-  notification, no per-friend toggle; see §9. A revoked friend can still write a request and it does
-  nothing.
-- **Replay defence is load-bearing.** Because the slot is overwritten in place, a replica can
-  withhold an update and keep serving an old entry — so a received message proves only "the author
-  wrote this at some point", never "the author wants this now". Receivers enforce a 10-min freshness
-  window, refuse a far-future `ts` (which would never go stale), and dedupe by `nonce`. The handled
-  nonces are **persisted**: without that, a restart would re-arm from the sender's still-current
-  entry. A `stale` or `not-sharing` verdict deliberately does NOT burn the nonce, so a later
-  legitimate re-send stays actionable.
-- **Latency is minutes, not seconds** (`LIVE_REQUEST_POLL_INTERVAL_MS`, 5 min). Fixed rather than
-  following the user's share interval: riding it would make requests 15-min-slow on the long cadence
-  and needlessly chatty on the short one, and it keeps this read traffic decoupled from the publish
-  cadence (a security property, §9). A constant-rate poll reveals nothing about movement. This is
-  what makes the feature "ask to watch", not "watch now" — the UI says so.
-- **Better with the stash, but no longer dependent on it.** `pushTrail` addresses every pool member,
-  so a request reaches the subject directly whenever both phones are reachable at some point before
-  the next poll; the stash is what removes the "at some point" — it is always up, so delivery never
-  waits on a moment when both devices happen to be online.
-- **Polling runs only while background sharing is on**, since there is otherwise nothing to make
-  live. A request to someone with sharing off fails visibly rather than hanging.
-- **iOS**: `docsWriteControl` / `readControl` are optional on `IrohLocationApi` and guarded at
-  every call site. CI regenerates the Swift bindings on every PR, so the exports are no longer
-  gated on a Mac — but a device can still be running a binary older than the JS bundle, which is
-  the reason the guards stay.
-
-Open risk: this all assumes the ~4s fixes actually reach the watcher once both phones are up. That
-is the gossip path, and the delivery story in `infra/otel/README.md` is stash-mediated — measure
-`gossip.receive` against `gossip.publish` on two live devices before trusting it.
+An on-demand live mode once let a watcher ask a subject to publish every ~4 s: the request was a
+sealed `ctl/hex(author)` entry in the watcher's own namespace, polled by the subject, and the fast
+fixes rode the app-level gossip topic. Both are gone. Readers still skip `ctl/` keys an older build
+left in a replica (`docs::decode_key`). Real-time sharing, if it returns, should ride the live
+engine (§5) — two phones syncing the same namespace already exchange each write as it lands.
 
 ## 9d. Later phases
 
@@ -624,7 +568,7 @@ is the gossip path, and the delivery story in `infra/otel/README.md` is stash-me
   yours_ even though we never registered a token against it: under bilateral pairing your token
   appeared against every friend's namespace and never your own, so the operator recovered
   `token → your namespace` by set complement. `stash-client.ts` now sends a read-ticket and nothing
-  else, and live mode polls instead of being woken (§9c). Rows uploaded by older app versions remain
+  else. Rows uploaded by older app versions remain
   server-side until purged; the server's push API is dead code the app never calls.
 - **Nearby attacker:** BLE proximity and motion are not trusted. Pairing messages remain bound to
   authenticated iroh endpoint identities, and friendship remains blocked on the mandatory mutual
