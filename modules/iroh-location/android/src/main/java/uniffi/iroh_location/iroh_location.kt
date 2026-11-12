@@ -859,6 +859,8 @@ external fun uniffi_iroh_location_checksum_method_locationnode_recv_public(
 ): Int
 external fun uniffi_iroh_location_checksum_method_locationnode_recv_secret(
 ): Int
+external fun uniffi_iroh_location_checksum_method_locationnode_refresh_repeater_names(
+): Int
 external fun uniffi_iroh_location_checksum_method_locationnode_remove_repeater(
 ): Int
 external fun uniffi_iroh_location_checksum_method_locationnode_remove_repeater_member(
@@ -1109,6 +1111,8 @@ external fun uniffi_iroh_location_fn_method_locationnode_recv_public(`ptr`: Long
 ): RustBuffer.ByValue
 external fun uniffi_iroh_location_fn_method_locationnode_recv_secret(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
+external fun uniffi_iroh_location_fn_method_locationnode_refresh_repeater_names(`ptr`: Long,
+): Long
 external fun uniffi_iroh_location_fn_method_locationnode_remove_repeater(`ptr`: Long,`rosterId`: RustBuffer.ByValue,`repeaterId`: RustBuffer.ByValue,
 ): Long
 external fun uniffi_iroh_location_fn_method_locationnode_remove_repeater_member(`ptr`: Long,`rosterId`: RustBuffer.ByValue,`member`: RustBuffer.ByValue,
@@ -1631,6 +1635,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_iroh_location_checksum_method_locationnode_recv_secret() != 13424) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_iroh_location_checksum_method_locationnode_refresh_repeater_names() != 65088) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_iroh_location_checksum_method_locationnode_remove_repeater() != 54199) {
@@ -3130,6 +3137,13 @@ public interface LocationNodeInterface {
      * The X25519 receiving secret — persist in the OS secure store.
      */
     fun `recvSecret`(): kotlin.ByteArray
+    
+    /**
+     * Pick up names this phone's own machines were given at their consoles since they were
+     * listed (see [`repeater::refresh_names`]). Dials each machine, so only for a screen someone
+     * is looking at. Resolves how many were re-listed under a new name.
+     */
+    suspend fun `refreshRepeaterNames`(): kotlin.UInt
     
     /**
      * Take a machine out of the roster this phone owns. It is told too, so it stops serving it.
@@ -4930,6 +4944,32 @@ open class LocationNode: Disposable, AutoCloseable, LocationNodeInterface
     )
     }
     
+
+    
+    /**
+     * Pick up names this phone's own machines were given at their consoles since they were
+     * listed (see [`repeater::refresh_names`]). Dials each machine, so only for a screen someone
+     * is looking at. Resolves how many were re-listed under a new name.
+     */
+    @Throws(LocationException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `refreshRepeaterNames`() : kotlin.UInt {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_iroh_location_fn_method_locationnode_refresh_repeater_names(
+                uniffiHandle,
+                
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_u32(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_iroh_location_rust_future_complete_u32(future, continuation) },
+        { future -> UniffiLib.ffi_iroh_location_rust_future_free_u32(future) },
+        // lift function
+        { FfiConverterUInt.lift(it) },
+        // Error FFI converter
+        LocationException.ErrorHandler,
+    )
+    }
 
     
     /**
@@ -9532,6 +9572,12 @@ data class RepeaterRoster (
     var `repeaters`: List<kotlin.String>
     , 
     /**
+     * What each machine in `repeaters` is called, in the same order: the name it signed into
+     * the cert the roster holds, or `""` for one with no name (REPEATERS.md §4.1).
+     */
+    var `repeaterNames`: List<kotlin.String>
+    , 
+    /**
      * How many people's trails it carries.
      */
     var `carried`: kotlin.UInt
@@ -9589,6 +9635,7 @@ public object FfiConverterTypeRepeaterRoster: FfiConverterRustBuffer<RepeaterRos
             FfiConverterBoolean.read(buf),
             FfiConverterBoolean.read(buf),
             FfiConverterSequenceString.read(buf),
+            FfiConverterSequenceString.read(buf),
             FfiConverterUInt.read(buf),
             FfiConverterSequenceString.read(buf),
             FfiConverterSequenceString.read(buf),
@@ -9606,6 +9653,7 @@ public object FfiConverterTypeRepeaterRoster: FfiConverterRustBuffer<RepeaterRos
             FfiConverterBoolean.allocationSize(value.`open`) +
             FfiConverterBoolean.allocationSize(value.`carriesMe`) +
             FfiConverterSequenceString.allocationSize(value.`repeaters`) +
+            FfiConverterSequenceString.allocationSize(value.`repeaterNames`) +
             FfiConverterUInt.allocationSize(value.`carried`) +
             FfiConverterSequenceString.allocationSize(value.`members`) +
             FfiConverterSequenceString.allocationSize(value.`vouchers`) +
@@ -9622,6 +9670,7 @@ public object FfiConverterTypeRepeaterRoster: FfiConverterRustBuffer<RepeaterRos
             FfiConverterBoolean.write(value.`open`, buf)
             FfiConverterBoolean.write(value.`carriesMe`, buf)
             FfiConverterSequenceString.write(value.`repeaters`, buf)
+            FfiConverterSequenceString.write(value.`repeaterNames`, buf)
             FfiConverterUInt.write(value.`carried`, buf)
             FfiConverterSequenceString.write(value.`members`, buf)
             FfiConverterSequenceString.write(value.`vouchers`, buf)

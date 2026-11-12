@@ -1298,6 +1298,13 @@ public protocol LocationNodeProtocol: AnyObject, Sendable {
     func recvSecret()  -> Data
     
     /**
+     * Pick up names this phone's own machines were given at their consoles since they were
+     * listed (see [`repeater::refresh_names`]). Dials each machine, so only for a screen someone
+     * is looking at. Resolves how many were re-listed under a new name.
+     */
+    func refreshRepeaterNames() async throws  -> UInt32
+    
+    /**
      * Take a machine out of the roster this phone owns. It is told too, so it stops serving it.
      */
     func removeRepeater(rosterId: String, repeaterId: String) async throws 
@@ -2884,6 +2891,28 @@ open func recvSecret() -> Data  {
             self.uniffiCloneHandle(),$0
     )
 })
+}
+    
+    /**
+     * Pick up names this phone's own machines were given at their consoles since they were
+     * listed (see [`repeater::refresh_names`]). Dials each machine, so only for a screen someone
+     * is looking at. Resolves how many were re-listed under a new name.
+     */
+open func refreshRepeaterNames()async throws  -> UInt32  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_iroh_location_fn_method_locationnode_refresh_repeater_names(
+                    self.uniffiCloneHandle()
+                    
+                )
+            },
+            pollFunc: ffi_iroh_location_rust_future_poll_u32,
+            completeFunc: ffi_iroh_location_rust_future_complete_u32,
+            freeFunc: ffi_iroh_location_rust_future_free_u32,
+            liftFunc: FfiConverterUInt32.lift,
+            errorHandler: FfiConverterTypeLocationError_lift
+        )
 }
     
     /**
@@ -7643,6 +7672,11 @@ public struct RepeaterRoster: Equatable, Hashable {
     public var carriesMe: Bool
     public var repeaters: [String]
     /**
+     * What each machine in `repeaters` is called, in the same order: the name it signed into
+     * the cert the roster holds, or `""` for one with no name (REPEATERS.md §4.1).
+     */
+    public var repeaterNames: [String]
+    /**
      * How many people's trails it carries.
      */
     public var carried: UInt32
@@ -7686,6 +7720,10 @@ public struct RepeaterRoster: Equatable, Hashable {
          * It carries this phone's own trail: the one opt-in there is.
          */carriesMe: Bool, repeaters: [String], 
         /**
+         * What each machine in `repeaters` is called, in the same order: the name it signed into
+         * the cert the roster holds, or `""` for one with no name (REPEATERS.md §4.1).
+         */repeaterNames: [String], 
+        /**
          * How many people's trails it carries.
          */carried: UInt32, 
         /**
@@ -7714,6 +7752,7 @@ public struct RepeaterRoster: Equatable, Hashable {
         self.`open` = `open`
         self.carriesMe = carriesMe
         self.repeaters = repeaters
+        self.repeaterNames = repeaterNames
         self.carried = carried
         self.members = members
         self.vouchers = vouchers
@@ -7745,6 +7784,7 @@ public struct FfiConverterTypeRepeaterRoster: FfiConverterRustBuffer {
                 open: FfiConverterBool.read(from: &buf), 
                 carriesMe: FfiConverterBool.read(from: &buf), 
                 repeaters: FfiConverterSequenceString.read(from: &buf), 
+                repeaterNames: FfiConverterSequenceString.read(from: &buf), 
                 carried: FfiConverterUInt32.read(from: &buf), 
                 members: FfiConverterSequenceString.read(from: &buf), 
                 vouchers: FfiConverterSequenceString.read(from: &buf), 
@@ -7762,6 +7802,7 @@ public struct FfiConverterTypeRepeaterRoster: FfiConverterRustBuffer {
         FfiConverterBool.write(value.`open`, into: &buf)
         FfiConverterBool.write(value.carriesMe, into: &buf)
         FfiConverterSequenceString.write(value.repeaters, into: &buf)
+        FfiConverterSequenceString.write(value.repeaterNames, into: &buf)
         FfiConverterUInt32.write(value.carried, into: &buf)
         FfiConverterSequenceString.write(value.members, into: &buf)
         FfiConverterSequenceString.write(value.vouchers, into: &buf)
@@ -10844,6 +10885,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_method_locationnode_recv_secret() != 13424) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_iroh_location_checksum_method_locationnode_refresh_repeater_names() != 65088) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_method_locationnode_remove_repeater() != 54199) {
