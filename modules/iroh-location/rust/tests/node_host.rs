@@ -426,8 +426,16 @@ fn fix_at(ts: u64) -> LocationFix {
 /// A friend of `node` on loopback, paired (sessions bootstrapped in-process) and able to publish to
 /// it at once. A fresh session's responder cannot send until the initiator has, and the initiator
 /// is the lower endpoint id (`initiator_by_endpoint`), so friends are minted until one sorts first.
+///
+/// Ids are uniformly random, so N tries all land above the node with probability 1/(N+1) averaged
+/// over where the node's own id falls: 64 failed about one call in 65, and with three callers that
+/// was a red CI run in twenty (2026-11-12, twice in a row). A rejected friend costs a key and two
+/// empty directories, and the common case needs one or two, so the cap only matters when the node
+/// itself sorts near the bottom.
+const FRIEND_ATTEMPTS: usize = 4096;
+
 async fn friend_publishing_to(node: &Arc<LocationNode>, name: &str) -> Arc<LocationNode> {
-    for attempt in 0..64 {
+    for attempt in 0..FRIEND_ATTEMPTS {
         let friend_roots = roots(&format!("{name}-{attempt}"));
         let friend =
             LocationNode::new_at_dirs(None, None, friend_roots.data, friend_roots.state).unwrap();
@@ -443,7 +451,7 @@ async fn friend_publishing_to(node: &Arc<LocationNode>, name: &str) -> Arc<Locat
         node.complete_session(friend_id, friend_eph).await.unwrap();
         return friend;
     }
-    panic!("no friend sorted below the node in 64 tries");
+    panic!("no friend sorted below the node in {FRIEND_ATTEMPTS} tries");
 }
 
 async fn publish(friend: &LocationNode, to: &LocationNode, seq: u64) {
