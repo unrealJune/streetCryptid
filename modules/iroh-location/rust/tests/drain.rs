@@ -1206,7 +1206,10 @@ async fn a_parked_declaration_is_sealed_even_when_its_push_is_deferred() {
         .await
         .unwrap();
 
-    assert_eq!(out.published, 1, "the change to parked goes out off the grid");
+    assert_eq!(
+        out.published, 1,
+        "the change to parked goes out off the grid"
+    );
     assert!(out.push_deferred);
     let stamps = h.sink.stamps.lock().unwrap();
     assert_eq!(
@@ -1237,7 +1240,11 @@ async fn a_drain_that_sealed_nothing_owes_no_push() {
 
     assert_eq!(out.published, 0);
     assert!(!out.push_deferred);
-    assert_eq!(*h.sink.flushes.lock().unwrap(), flushes, "no flush was asked for");
+    assert_eq!(
+        *h.sink.flushes.lock().unwrap(),
+        flushes,
+        "no flush was asked for"
+    );
 }
 
 // ---------------------------------------------------------------------------

@@ -141,7 +141,7 @@ async fn start_node() -> Arc<LocationNode> {
         "test-token".into(),
         true,
         true,
-        true,
+        false, // BLE off: on a Mac it attaches CoreBluetooth and TCC aborts a bare test binary
     )
     .await
     .expect("start node");
@@ -296,7 +296,7 @@ async fn restart(node: Arc<LocationNode>) -> Arc<LocationNode> {
             "test-token".into(),
             true,
             true,
-            true,
+            false,
         )
         .await
         .expect("restart");
@@ -461,7 +461,7 @@ async fn stop_start_in_one_process_does_not_strand_the_writer_claim() {
         "test-token".into(),
         true,
         true,
-        true,
+        false,
     )
     .await
     .expect("restarting in the same process must reclaim the session store");
@@ -504,7 +504,7 @@ async fn a_second_node_can_claim_the_store_after_the_first_shuts_down() {
             "test-token".into(),
             true,
             true,
-            true,
+            false,
         )
         .await
         .expect("foreground claims the store");
@@ -521,7 +521,7 @@ async fn a_second_node_can_claim_the_store_after_the_first_shuts_down() {
             "test-token".into(),
             true,
             true,
-            true,
+            false,
         )
         .await
         .expect("the headless context must be able to claim the store the foreground released");
