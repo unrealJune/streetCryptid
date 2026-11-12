@@ -84,3 +84,15 @@ opt-level = 2
 # made the link the largest disk and memory consumer of the job (one run's `ld` died of SIGBUS),
 # and a backtrace through a dependency needs no line numbers to be read. Workspace crates keep it.
 debug = false
+
+# --- the repeaters' tests (repeater/server, repeater/windows/host): CI and `just server::test` ----
+# The test profile above is tuned for the phone's CPU-bound crypto suite. The repeaters' tests
+# spend their time on network round trips, not in dependency code, so optimizing every dependency
+# only makes them compile slower: they ran at opt-level 0 before the workspace existed, and this
+# keeps them there. Use with `cargo test --profile repeater-test`.
+[profile.repeater-test]
+inherits = "test"
+
+[profile.repeater-test.package."*"]
+opt-level = 0
+debug = false

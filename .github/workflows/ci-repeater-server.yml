@@ -47,13 +47,15 @@ jobs:
         run: cargo fmt --all --check
 
       # The default build is the pure core: no iroh, no tokio. It is what the release gates on.
+      # `repeater-test` (/Cargo.toml) keeps dependencies unoptimized: these tests wait on the
+      # network, and the workspace test profile is tuned for the phone's crypto suite.
       - name: cargo test (pure core)
-        run: cargo test --locked -p streetcryptid-repeater -p trail-stash
+        run: cargo test --locked --profile repeater-test -p streetcryptid-repeater -p trail-stash
 
       # `-p`, never `--workspace`, with features: resolver 2 unifies features across everything in
       # one invocation, so a workspace-wide build would test the pure core with iroh compiled in.
       - name: cargo test (live node + repeater)
-        run: cargo test --locked -p trail-stash --features live -- --test-threads=4
+        run: cargo test --locked --profile repeater-test -p trail-stash --features live -- --test-threads=4
 
   helm:
     name: Helm lint

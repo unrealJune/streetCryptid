@@ -89,7 +89,7 @@ jobs:
 
       # `-p`, never `--workspace`: the workspace also holds the phone's crates.
       - name: cargo test (pure core)
-        run: cargo test --locked -p streetcryptid-repeater -p trail-stash
+        run: cargo test --locked --profile repeater-test -p streetcryptid-repeater -p trail-stash
 
   # ---- what this run publishes ------------------------------------------------
   version:
