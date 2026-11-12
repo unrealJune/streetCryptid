@@ -529,6 +529,21 @@ sum by (fix_source) (
 { name = "fix.provenance" && span.fix.source = "repeater" } | select(span.fix.repeater_owner, span.sc.author)
 ```
 
+**Repeaters from the phone's side** (`docs/social/REPEATERS.md` §4.4, §5). `repeater.grant`
+(Rust, every start) carries `delivered` (repeaters that took a roster op they were owed),
+`refreshed` (rosters fetched), `granted` and `failed`. `repeater.receipt` follows a push that
+reached repeaters alone (no stash, no awake friend): it asks them `Have` for up to 8 s, and
+`confirmed=true` with `sc.peer` is the only evidence such a phone has that a fix landed anywhere;
+it is what turns the flush into `Pushed` rather than `Scheduled`. `device.health` reports
+`repeaters.enrolled` (rosters carrying this phone), `repeaters.carriers` (machines across them)
+and `repeaters.last_contact_age_ms`, which is per process and absent until a repeater answers
+after a relaunch.
+
+```traceql
+# Phones relying on repeaters alone whose pushes no repeater confirmed.
+{ name = "repeater.receipt" && span.confirmed = false } | select(span.carriers, span.sc.author)
+```
+
 ```traceql
 # Every direct handover between two phones (swap in real short ids).
 { name = "peer.contact" && resource.service.instance.id = "6942d8b97f" && span.sc.peer = "84f86b144a" }
