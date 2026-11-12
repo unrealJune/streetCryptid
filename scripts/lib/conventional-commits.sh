@@ -1,7 +1,7 @@
 # shellcheck shell=bash
 
 # What counts toward a release, and how far it bumps. Shared by scripts/next-version.sh (the app,
-# `v*` tags) and scripts/next-server-version.sh (the repeater server, `server-v*` tags), so every
+# `v*` tags) and scripts/next-repeater-version.sh (the repeater server and the Windows repeater), so every
 # product in the repository releases by the same rules.
 
 # release_commits <repo> <previous_tag> <pathspec>...

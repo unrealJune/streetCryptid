@@ -45,3 +45,10 @@ modules/iroh-location/android/src/main/java/uniffi/
 # not YAML until rendered, and stay ignored after that.
 repeater/server/
 repeater/protocol/
+
+# Windows repeater build outputs and NuGet-generated lockfiles
+repeater/windows/**/bin/
+repeater/windows/**/obj/
+repeater/windows/artifacts/
+repeater/windows/.tools/
+repeater/windows/**/packages.lock.json

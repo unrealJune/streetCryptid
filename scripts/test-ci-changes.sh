@@ -29,6 +29,7 @@ expect "mobile crate" "$(lanes true false false)" "$(paths modules/iroh-location
 expect "docs still format-checked" "$(lanes true false false)" "$(paths docs/MONOREPO.md)"
 expect "server only" "$(lanes false true false)" "$(paths repeater/server/src/lib.rs repeater/server/charts/trail-stash/values.yaml)"
 expect "the image's ignore file" "$(lanes false true false)" "$(paths .dockerignore)"
+expect "the Windows icon's source" "$(lanes true false true)" "$(paths assets/images/mothman-logo.svg)"
 expect "windows only" "$(lanes false false true)" "$(paths repeater/windows/app/App.xaml.cs)"
 expect "server and windows" "$(lanes false true true)" "$(paths repeater/server/Dockerfile repeater/windows/justfile)"
 expect "protocol" "$(lanes true true true)" "$(paths repeater/protocol/src/roster.rs)"

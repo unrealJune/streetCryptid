@@ -1,7 +1,8 @@
 //! The live repeater: the `streetcryptid/repeater/1` handler, the roster it keeps on disk, and the
 //! client calls phones and sibling repeaters make. **Behind the `live` feature.**
 //!
-//! A [`Repeater`] exists only for a persistent node (`Storage::Persistent`). It belongs to at most
+//! A [`Repeater`] exists only for a node with a directory (`Storage::MemoryRepeater`, or
+//! `Storage::Persistent`). It belongs to at most
 //! one roster, owned by the phone that claimed it, and it keeps that roster in `roster.bin` next
 //! to the grant book. What it enforces is **carrying**: whose namespaces it holds and accepts
 //! pushes for. Reading stays open — iroh-docs serves any peer that names a namespace, and that is

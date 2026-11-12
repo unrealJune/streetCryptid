@@ -16,6 +16,7 @@ members = [
   "modules/iroh-location/rust-wasm",
   "repeater/protocol",
   "repeater/server",
+  "repeater/windows/host",
 ]
 # Vendored for the phone alone, with their own SimRadio test workspace (`just test-ble-transport`).
 exclude = [
@@ -56,6 +57,14 @@ opt-level = 3
 lto = false
 strip = "none"
 
+# --- the Windows repeater's host (repeater/windows/host): scripts/build.ps1 ----------------------
+# What its own manifest asked for as a separate workspace: optimized for speed, thin LTO, stripped.
+[profile.desktop-release]
+inherits = "release"
+opt-level = 3
+lto = "thin"
+strip = true
+
 # --- the browser bridge (modules/iroh-location/rust-wasm) ---------------------------------------
 # wasm-pack only knows `--release`, so `just build-wasm` turns the phone's release profile into
 # the wasm one with CARGO_PROFILE_RELEASE_LTO=fat, _CODEGEN_UNITS=1 and _PANIC=abort (opt-level
@@ -74,4 +83,16 @@ opt-level = 2
 # No debug info for dependencies: twenty test binaries each linking every dependency's DWARF
 # made the link the largest disk and memory consumer of the job (one run's `ld` died of SIGBUS),
 # and a backtrace through a dependency needs no line numbers to be read. Workspace crates keep it.
+debug = false
+
+# --- the repeaters' tests (repeater/server, repeater/windows/host): CI and `just server::test` ----
+# The test profile above is tuned for the phone's CPU-bound crypto suite. The repeaters' tests
+# spend their time on network round trips, not in dependency code, so optimizing every dependency
+# only makes them compile slower: they ran at opt-level 0 before the workspace existed, and this
+# keeps them there. Use with `cargo test --profile repeater-test`.
+[profile.repeater-test]
+inherits = "test"
+
+[profile.repeater-test.package."*"]
+opt-level = 0
 debug = false

@@ -8,7 +8,7 @@ name: Release / repeater server
 #   - image :latest + :sha-<short>, chart 0.0.0-<short> (appVersion sha-<short>). Production
 #     tracks exactly this: the HelmRelease pins the chart to 0.0.0-<sha> and the pod follows :latest
 #     by digest. `<short>` is a commit of this repository.
-#   - and when scripts/next-server-version.sh finds a releasable Conventional Commit since the last
+#   - and when scripts/next-repeater-version.sh server finds a releasable Conventional Commit since the last
 #     `server-v*` tag (the app's rules, scripts/lib/conventional-commits.sh): image :x.y.z + :x.y,
 #     chart x.y.z, then the tag `server-vx.y.z` on that commit. The tag is pushed LAST, so a failed
 #     publish never leaves a release behind that has nothing in it.
@@ -19,7 +19,7 @@ name: Release / repeater server
 # The path filter is what keeps an app commit from rolling the stash pod. It names the server, the
 # protocol it links, what the root Cargo workspace feeds every build (manifest, lockfile, toolchain,
 # the patched crates in third_party/), the build context's ignore file and this workflow -- the
-# same inputs scripts/next-server-version.sh counts.
+# same inputs scripts/next-repeater-version.sh server counts.
 #
 # The image and chart packages were created by the trail-stash repository. Each needs this
 # repository granted write under its "Manage Actions access", or the push fails with a 403.
@@ -89,7 +89,7 @@ jobs:
 
       # `-p`, never `--workspace`: the workspace also holds the phone's crates.
       - name: cargo test (pure core)
-        run: cargo test --locked -p streetcryptid-repeater -p trail-stash
+        run: cargo test --locked --profile repeater-test -p streetcryptid-repeater -p trail-stash
 
   # ---- what this run publishes ------------------------------------------------
   version:
@@ -129,7 +129,7 @@ jobs:
             push_tag=false
             rolling=false
           else
-            out="$(bash scripts/next-server-version.sh --force "$BUMP")"
+            out="$(bash scripts/next-repeater-version.sh server --force "$BUMP")"
             echo "$out"
             release="$(sed -n 's/^release=//p' <<<"$out")"
             version="$(sed -n 's/^version=//p' <<<"$out")"

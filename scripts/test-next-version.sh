@@ -178,6 +178,19 @@ git -C "$work" tag v1.7.0
 commit_in repeater/protocol/src/lib.rs "fix(protocol): built on the imported crate"
 assert_bump "work on imported code after the import counts" true patch 1.0.1
 
+# What never ships in the app does not release it, whatever the commit type: workflows, docs,
+# the justfile, the ignore/attribute files, and the Windows client at its old path.
+git -C "$work" tag v1.8.0
+commit_in .github/workflows/release.yml "feat(ci): a new release job"
+commit_in docs/PLAN.md "feat(docs): a plan"
+commit_in justfile "feat(just): a recipe"
+commit_in .gitattributes "fix: line endings"
+commit_in .prettierignore "fix: ignore a directory"
+commit_in apps/repeater/windows/App.cs "feat(repeater): the Windows client before its move"
+assert_bump "tooling, docs and the old Windows path" false none 1.0.0
+commit_in src/screen.ts "fix(app): what ships"
+assert_bump "the app still counts" true patch 1.0.1
+
 # Version bookkeeping is only trustworthy when both manifests agree.
 write_manifests 1.0.0
 sed -i.bak 's/"version": "1.0.0"/"version": "1.4.0"/' "$work/package.json"

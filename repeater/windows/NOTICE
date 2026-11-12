@@ -1,0 +1,15 @@
+streetCryptid Windows repeater
+
+The app, the Windows service and the Rust host are part of the streetCryptid repository, licensed
+under AGPL-3.0-or-later (LICENSE). The host is built on the repeater server crate (trail-stash)
+and the roster/wire crate it shares with the phone, both in the same repository:
+
+https://github.com/unrealJune/streetCryptid/tree/main/repeater
+
+The host is built against noq 1.4.0 with one fix (MIT OR Apache-2.0), from third_party/noq in that
+repository; its NOTICE lists the modification.
+
+Rajdhani and IBM Plex Mono font license notices are bundled in Assets.
+The animated lattice is adapted from this project's onboarding splash design.
+The icon is the streetCryptid mothman sigil (assets/images/mothman-logo.svg),
+rendered by scripts/make-icons.py.

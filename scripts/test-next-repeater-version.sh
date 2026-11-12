@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 
-# Exercise scripts/next-server-version.sh against a throwaway repository shaped like this one: an
-# app history, the repeater server's history merged in beside it, and commits to both afterwards.
+# Exercise scripts/next-repeater-version.sh against a throwaway repository shaped like this one: an
+# app history, the repeater server's history merged in beside it, and commits to every product
+# afterwards. The server half runs first; the Windows half reuses the same history.
 
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-test_root="$(mktemp -d "${TMPDIR:-/tmp}/streetcryptid-server-version-test.XXXXXX")"
+test_root="$(mktemp -d "${TMPDIR:-/tmp}/streetcryptid-repeater-version-test.XXXXXX")"
 trap 'rm -rf "$test_root"' EXIT
 
 new_repo() {
@@ -19,7 +20,7 @@ new_repo() {
 work="$test_root/repo"
 new_repo "$work"
 mkdir -p "$work/scripts/lib"
-cp "$repo_root/scripts/next-server-version.sh" "$work/scripts/"
+cp "$repo_root/scripts/next-repeater-version.sh" "$work/scripts/"
 cp "$repo_root/scripts/lib/conventional-commits.sh" "$work/scripts/lib/"
 
 commit_in() {
@@ -43,7 +44,7 @@ expect() {
 }
 
 next() {
-  (cd "$work" && bash scripts/next-server-version.sh "$@")
+  (cd "$work" && bash scripts/next-repeater-version.sh server "$@")
 }
 
 assert_bump() {
@@ -113,4 +114,49 @@ fi
 git -C "$work" tag v9.9.9
 expect "previous tag ignores app tags" server-v0.4.1 "$(field previous_tag "$(next)")"
 
-echo "Repeater server versioning resolved every release scenario."
+# --- Windows --------------------------------------------------------------------------------
+
+next_windows() {
+  (cd "$work" && bash scripts/next-repeater-version.sh windows "$@")
+}
+
+assert_windows() {
+  local label="$1" release="$2" bump="$3" version="$4"
+  shift 4
+  local output
+  output="$(next_windows "$@")"
+  expect "windows $label release" "$release" "$(field release "$output")"
+  expect "windows $label bump" "$bump" "$(field bump "$output")"
+  expect "windows $label version" "$version" "$(field version "$output")"
+  expect "windows $label tag" "windows-v$version" "$(field tag "$output")"
+}
+
+assert_windows "no windows tag yet" true initial 0.1.0-preview.1
+git -C "$work" tag windows-v0.1.0-preview.3
+assert_windows "nothing since the tag" false none 0.1.0-preview.3
+
+commit_in "$work" src/app.ts "feat: an app feature"
+commit_in "$work" repeater/server/charts/trail-stash/values.yaml "fix(chart): only the image ships this"
+commit_in "$work" .dockerignore "fix(build): only the image reads this"
+assert_windows "app, chart and image-only commits" false none 0.1.0-preview.3
+
+commit_in "$work" repeater/windows/app/MainWindow.xaml.cs "fix(windows): a desktop fix"
+assert_windows "a desktop fix" true patch 0.1.1-preview.1
+
+git -C "$work" tag windows-v0.1.1-preview.1
+commit_in "$work" repeater/server/src/node.rs "feat(server): the host links this"
+assert_windows "the server crate is linked" true minor 0.2.0-preview.1
+
+git -C "$work" tag windows-v0.2.0-preview.1
+commit_in "$work" assets/images/mothman-logo.svg "fix: the sigil the icon is drawn from"
+assert_windows "the icon's source" true patch 0.2.1-preview.1
+
+assert_windows "forced minor" true forced-minor 0.3.0-preview.1 --force minor
+expect "windows previous tag" windows-v0.2.0-preview.1 "$(field previous_tag "$(next_windows)")"
+
+if (cd "$work" && bash scripts/next-repeater-version.sh desktop >/dev/null 2>&1); then
+  echo "An unknown product was accepted." >&2
+  exit 1
+fi
+
+echo "Repeater versioning resolved every release scenario, for the server and for Windows."

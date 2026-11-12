@@ -44,8 +44,12 @@ fn scratch(name: &str) -> PathBuf {
 }
 
 async fn spawn_repeater(dir: &std::path::Path, seed: u8) -> Result<Arc<StashNode>> {
+    spawn_stored(Storage::MemoryRepeater(dir.to_path_buf()), seed).await
+}
+
+async fn spawn_stored(storage: Storage, seed: u8) -> Result<Arc<StashNode>> {
     StashNode::spawn_with(
-        Storage::Persistent(dir.to_path_buf()),
+        storage,
         SecretKey::from_bytes(&[seed; 32]),
         RetentionPolicy::from_hours(48),
         &[],
@@ -56,12 +60,284 @@ async fn spawn_repeater(dir: &std::path::Path, seed: u8) -> Result<Arc<StashNode
     .await
 }
 
+#[tokio::test]
+async fn desktop_activity_requires_new_fix_content() -> Result<()> {
+    StashNode::test_activity_transitions().await
+}
+
+#[tokio::test]
+async fn desktop_activity_requires_admission_even_when_content_is_already_present() -> Result<()> {
+    struct RejectTagged;
+    impl DeliveryService for RejectTagged {
+        fn admit(&self, envelope: &EnvelopeRef<'_>) -> Admission {
+            if envelope.bytes == b"rejected-ciphertext" {
+                Admission::Reject("test rejection".into())
+            } else {
+                Admission::Accept
+            }
+        }
+    }
+
+    struct CountWakes(std::sync::atomic::AtomicUsize);
+    impl Waker for CountWakes {
+        fn wake(&self, _ns: &NsBytes, _targets: &[PushSubscription]) {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    let wakes = Arc::new(CountWakes(std::sync::atomic::AtomicUsize::new(0)));
+    let node = StashNode::spawn(
+        SecretKey::from_bytes(&[181; 32]),
+        RetentionPolicy::from_hours(48),
+        &[],
+        None,
+        Arc::new(RejectTagged),
+        wakes.clone(),
+    )
+    .await?;
+    let phone = Phone::spawn(182, b"rejected-ciphertext").await?;
+    let _rejected = node
+        .blobs
+        .blobs()
+        .add_bytes(Bytes::from_static(b"rejected-ciphertext"))
+        .await?;
+    node.register(
+        &phone.ticket,
+        Some(PushSubscription {
+            platform: crate::subscriptions::Platform::Fcm,
+            token: "test".into(),
+        }),
+    )
+    .await?;
+    let mut arrivals = node.subscribe_arrivals();
+    phone.doc.start_sync(vec![node.endpoint_addr()]).await?;
+    wait_servable(&node, 1, "rejected cached content").await;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(500), arrivals.recv())
+            .await
+            .is_err()
+    );
+    assert_eq!(wakes.0.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+    let _accepted = node
+        .blobs
+        .blobs()
+        .add_bytes(Bytes::from_static(b"accepted-ciphertext"))
+        .await?;
+    phone.write_fix(b"accepted-ciphertext").await?;
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(5), arrivals.recv()).await??,
+        1
+    );
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while wakes.0.load(std::sync::atomic::Ordering::SeqCst) != 1 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await?;
+    phone.vanish().await;
+    node.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn desktop_repeater_keeps_its_roster_and_grants_but_never_content_across_restart(
+) -> Result<()> {
+    let dir = scratch("desktop-memory");
+    let node = spawn_repeater(&dir, 151).await?;
+    let (owner, mut roster) = claim(&node, 152, None, Policy::Open).await?;
+    let phone = Phone::spawn(153, b"desktop-memory-ciphertext").await?;
+    let member = *phone.endpoint.id().as_bytes();
+    let enroll = sign_onto(&mut roster, 153, Action::Enroll { invite: None });
+    call(
+        &phone.endpoint,
+        node.endpoint_addr(),
+        &Request::Publish { ops: vec![enroll] },
+    )
+    .await?;
+    let granted = call(
+        &phone.endpoint,
+        node.endpoint_addr(),
+        &Request::Grant {
+            ticket: phone.ticket.clone(),
+            proof: sign_grant(
+                &phone.ns_secret,
+                node.endpoint_addr().id.as_bytes(),
+                &member,
+            ),
+            carriers: vec![],
+        },
+    )
+    .await?;
+    let Response::Granted { namespace } = granted else {
+        return Err(anyhow!("expected a grant"));
+    };
+    let mut arrivals = node.subscribe_arrivals();
+    phone.doc.start_sync(vec![node.endpoint_addr()]).await?;
+    wait_servable(&node, 1, "desktop memory content").await;
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(5), arrivals.recv()).await??,
+        1
+    );
+    phone.doc.start_sync(vec![node.endpoint_addr()]).await?;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(750), arrivals.recv())
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        read_through(154, &phone.ticket, node.endpoint_addr()).await?,
+        b"desktop-memory-ciphertext"
+    );
+    phone
+        .doc
+        .set_bytes(
+            phone.author,
+            b"control/shared".to_vec(),
+            b"desktop-memory-ciphertext".to_vec(),
+        )
+        .await?;
+    phone.write_fix(b"second-ciphertext").await?;
+    wait_servable(&node, 2, "the replacement and shared content").await;
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(5), arrivals.recv()).await??,
+        2
+    );
+    assert_eq!(
+        node.prune_once(now_ms()).await?,
+        0,
+        "a control entry still references the first ciphertext"
+    );
+    phone.write_fix(b"third-ciphertext").await?;
+    wait_servable(&node, 3, "the next replacement").await;
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(5), arrivals.recv()).await??,
+        3
+    );
+    assert_eq!(
+        node.prune_once(now_ms()).await?,
+        1,
+        "the overwritten second ciphertext must no longer be protected"
+    );
+    assert_eq!(node.content_stats(), (0, 2));
+    assert!(
+        tokio::time::timeout(Duration::from_millis(750), arrivals.recv())
+            .await
+            .is_err(),
+        "a control entry and repeated sync must not create fix activity"
+    );
+    assert!(
+        !dir.join("docs").exists(),
+        "a repeater keeps no replica on disk"
+    );
+    assert!(
+        !dir.join("blobs").exists(),
+        "a repeater keeps no ciphertext on disk"
+    );
+    node.shutdown().await;
+    drop(node);
+    // The same repeater comes back — claimed, carrying the same namespace — holding nothing.
+    let reopened = reopen_repeater(&dir, 151).await?;
+    assert!(reopened.repeater().unwrap().claim_secret().is_none());
+    assert!(reopened.handle(namespace).await.is_some());
+    assert_eq!(reopened.content_stats(), (0, 0));
+    // Until the writer syncs again, and then without a second grant.
+    let mut arrivals = reopened.subscribe_arrivals();
+    phone.doc.start_sync(vec![reopened.endpoint_addr()]).await?;
+    wait_servable(
+        &reopened,
+        2,
+        "the writer's newest fix and control entry after the restart",
+    )
+    .await;
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(5), arrivals.recv()).await??,
+        1
+    );
+    phone.vanish().await;
+    let remove = sign_onto(&mut roster, 152, Action::Remove { member });
+    call(
+        &owner,
+        reopened.endpoint_addr(),
+        &Request::Publish { ops: vec![remove] },
+    )
+    .await?;
+    assert!(reopened.handle(namespace).await.is_none());
+    assert_eq!(reopened.content_stats(), (0, 0));
+    owner.close().await;
+    reopened.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
+    Ok(())
+}
+
+#[tokio::test]
+async fn desktop_fix_activity_is_not_hidden_by_a_control_entry_with_the_same_bytes() -> Result<()> {
+    let dir = scratch("desktop-shared-activity");
+    let node = spawn_repeater(&dir, 171).await?;
+    let (owner, mut roster) = claim(&node, 172, None, Policy::Open).await?;
+    let phone = Phone::spawn(173, b"first-fix").await?;
+    let member = *phone.endpoint.id().as_bytes();
+    let enroll = sign_onto(&mut roster, 173, Action::Enroll { invite: None });
+    call(
+        &phone.endpoint,
+        node.endpoint_addr(),
+        &Request::Publish { ops: vec![enroll] },
+    )
+    .await?;
+    call(
+        &phone.endpoint,
+        node.endpoint_addr(),
+        &Request::Grant {
+            ticket: phone.ticket.clone(),
+            proof: sign_grant(
+                &phone.ns_secret,
+                node.endpoint_addr().id.as_bytes(),
+                &member,
+            ),
+            carriers: vec![],
+        },
+    )
+    .await?;
+    phone
+        .doc
+        .set_bytes(phone.author, b"control/shared".to_vec(), b"shared".to_vec())
+        .await?;
+    let mut arrivals = node.subscribe_arrivals();
+    phone.doc.start_sync(vec![node.endpoint_addr()]).await?;
+    wait_servable(&node, 2, "initial fix and shared control").await;
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(5), arrivals.recv()).await??,
+        1
+    );
+
+    phone.write_fix(b"shared").await?;
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(5), arrivals.recv()).await??,
+        2,
+        "a new fix still pings when its content hash was first seen on a control key"
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(750), arrivals.recv())
+            .await
+            .is_err()
+    );
+    phone.vanish().await;
+    owner.close().await;
+    node.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
+    Ok(())
+}
+
 /// Reopen a repeater's directory. The previous instance's stores close asynchronously after its
 /// router shuts down, so a reopen in the same process may briefly find them still held.
 async fn reopen_repeater(dir: &std::path::Path, seed: u8) -> Result<Arc<StashNode>> {
+    reopen(Storage::MemoryRepeater(dir.to_path_buf()), seed).await
+}
+
+async fn reopen(storage: Storage, seed: u8) -> Result<Arc<StashNode>> {
     let mut last = None;
     for _ in 0..40 {
-        match spawn_repeater(dir, seed).await {
+        match spawn_stored(storage.clone(), seed).await {
             Ok(node) => return Ok(node),
             Err(e) => last = Some(e),
         }
@@ -74,6 +350,8 @@ async fn reopen_repeater(dir: &std::path::Path, seed: u8) -> Result<Arc<StashNod
 struct Phone {
     ticket: String,
     doc: Doc,
+    author: iroh_docs::AuthorId,
+    fix_key: Vec<u8>,
     endpoint: Endpoint,
     router: Router,
     /// The namespace's write key — what proves this phone owns the trail it grants.
@@ -104,12 +382,9 @@ impl Phone {
             .iter()
             .map(|b| format!("{b:02x}"))
             .collect();
-        doc.set_bytes(
-            author,
-            format!("{author_hex}/{:020}", 1u64).into_bytes(),
-            payload.to_vec(),
-        )
-        .await?;
+        let fix_key = format!("{author_hex}/fix").into_bytes();
+        doc.set_bytes(author, fix_key.clone(), payload.to_vec())
+            .await?;
         let ticket = doc
             .share(ShareMode::Read, AddrInfoOptions::RelayAndAddresses)
             .await?
@@ -124,10 +399,19 @@ impl Phone {
         Ok(Self {
             ticket,
             doc,
+            author,
+            fix_key,
             endpoint,
             router,
             ns_secret,
         })
+    }
+
+    async fn write_fix(&self, payload: &[u8]) -> Result<()> {
+        self.doc
+            .set_bytes(self.author, self.fix_key.clone(), payload.to_vec())
+            .await?;
+        Ok(())
     }
 
     /// The phone goes away for good: nothing it held can be fetched from it after this.
@@ -191,6 +475,52 @@ async fn read_through(seed: u8, ticket: &str, from: iroh::EndpointAddr) -> Resul
     })
 }
 
+#[tokio::test]
+async fn desktop_multiple_writers_forward_to_multiple_readers_after_all_writers_go_offline(
+) -> Result<()> {
+    let dir = scratch("desktop-multi-offline");
+    let node = spawn_repeater(&dir, 201).await?;
+    let (owner, mut roster) = claim(&node, 202, None, Policy::Open).await?;
+    let mut tickets = Vec::new();
+    let mut phones = Vec::new();
+    for seed in 203..206 {
+        let payload = vec![seed; 8192];
+        let phone = Phone::spawn(seed, &payload).await?;
+        enrol_and_grant(&node, &mut roster, &phone, seed, vec![]).await?;
+        tickets.push((phone.ticket.clone(), payload));
+        phone.doc.start_sync(vec![node.endpoint_addr()]).await?;
+        phones.push(phone);
+    }
+    wait_servable(&node, 3, "three concurrent senders").await;
+    assert_eq!(node.arrival_count(), 3);
+    // The source endpoints are actually closed, not just omitted from the readers' ticket.
+    for phone in phones {
+        phone.vanish().await;
+    }
+    owner.close().await;
+    let before = node.endpoint().metrics().socket.send_ipv4.get()
+        + node.endpoint().metrics().socket.send_ipv6.get()
+        + node.endpoint().metrics().socket.send_relay.get();
+    for (index, (ticket, payload)) in tickets.iter().enumerate() {
+        let (first, second) = tokio::join!(
+            read_through(210 + index as u8 * 2, ticket, node.endpoint_addr()),
+            read_through(211 + index as u8 * 2, ticket, node.endpoint_addr())
+        );
+        assert_eq!(&first?, payload);
+        assert_eq!(&second?, payload);
+    }
+    let after = node.endpoint().metrics().socket.send_ipv4.get()
+        + node.endpoint().metrics().socket.send_ipv6.get()
+        + node.endpoint().metrics().socket.send_relay.get();
+    assert!(
+        after > before,
+        "serving cached content must count outbound traffic"
+    );
+    node.shutdown().await;
+    let _ = std::fs::remove_dir_all(dir);
+    Ok(())
+}
+
 /// Poll until the node holds `tracked` entries and every one of them has its bytes.
 async fn wait_servable(node: &StashNode, tracked: usize, what: &str) {
     for _ in 0..300 {
@@ -206,11 +536,12 @@ async fn wait_servable(node: &StashNode, tracked: usize, what: &str) {
 }
 
 #[tokio::test]
-async fn a_repeater_serves_a_trail_after_restarting_with_the_writer_gone() -> Result<()> {
+async fn a_persistent_node_serves_a_trail_after_restarting_with_the_writer_gone() -> Result<()> {
+    // Repeaters keep content in RAM now; `Storage::Persistent` still promises this.
     let dir = scratch("restart");
     let payload = b"sealed-envelope-held-across-a-restart";
 
-    let repeater = spawn_repeater(&dir, 51).await?;
+    let repeater = spawn_stored(Storage::Persistent(dir.clone()), 51).await?;
     let phone = Phone::spawn(52, payload).await?;
     repeater.register(&phone.ticket, None).await?;
     // Production topology: the phone dials the repeater, never the other way round.
@@ -223,7 +554,7 @@ async fn a_repeater_serves_a_trail_after_restarting_with_the_writer_gone() -> Re
     drop(repeater);
 
     // Same directory, same identity — a laptop that rebooted. No phone grants anything again.
-    let repeater = reopen_repeater(&dir, 51).await?;
+    let repeater = reopen(Storage::Persistent(dir.clone()), 51).await?;
     assert_eq!(
         repeater.content_stats(),
         (0, 1),

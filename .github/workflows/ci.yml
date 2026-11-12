@@ -60,6 +60,12 @@ jobs:
     if: needs.changes.outputs.server == 'true'
     uses: ./.github/workflows/ci-repeater-server.yml
 
+  windows:
+    name: Repeater windows
+    needs: changes
+    if: needs.changes.outputs.windows == 'true'
+    uses: ./.github/workflows/ci-repeater-windows.yml
+
   required:
     name: Required
     if: always()
@@ -67,6 +73,7 @@ jobs:
       - changes
       - app
       - server
+      - windows
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -75,13 +82,14 @@ jobs:
           CHANGES_RESULT: ${{ needs.changes.result }}
           APP_RESULT: ${{ needs.app.result }}
           SERVER_RESULT: ${{ needs.server.result }}
+          WINDOWS_RESULT: ${{ needs.windows.result }}
         run: |
           # Without a lane decision nothing below it means anything.
           if [[ "$CHANGES_RESULT" != "success" ]]; then
             echo "Lane selection did not succeed." >&2
             exit 1
           fi
-          for result in "$APP_RESULT" "$SERVER_RESULT"; do
+          for result in "$APP_RESULT" "$SERVER_RESULT" "$WINDOWS_RESULT"; do
             if [[ "$result" != "success" && "$result" != "skipped" ]]; then
               echo "A required CI lane did not succeed." >&2
               exit 1
