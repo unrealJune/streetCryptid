@@ -10693,7 +10693,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_iroh_location_checksum_method_locationnode_cancel_pair() != 17903) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_iroh_location_checksum_method_locationnode_claim_repeater() != 9863) {
+    if (uniffi_iroh_location_checksum_method_locationnode_claim_repeater() != 54587) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_method_locationnode_clear_outbox() != 61861) {
@@ -10768,7 +10768,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_iroh_location_checksum_method_locationnode_invite_friend_to_repeaters() != 45606) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_iroh_location_checksum_method_locationnode_invite_to_repeater() != 44022) {
+    if (uniffi_iroh_location_checksum_method_locationnode_invite_to_repeater() != 26208) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_method_locationnode_is_desynced() != 17624) {
@@ -10849,7 +10849,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_iroh_location_checksum_method_locationnode_remove_repeater() != 54199) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_iroh_location_checksum_method_locationnode_remove_repeater_member() != 58081) {
+    if (uniffi_iroh_location_checksum_method_locationnode_remove_repeater_member() != 31577) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_method_locationnode_repeater_auto_invite() != 10935) {
@@ -10894,7 +10894,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_iroh_location_checksum_method_locationnode_set_repeater_inviter() != 36154) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_iroh_location_checksum_method_locationnode_set_repeater_policy() != 42971) {
+    if (uniffi_iroh_location_checksum_method_locationnode_set_repeater_policy() != 53777) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_method_locationnode_set_sharing_recipients() != 14453) {
