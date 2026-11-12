@@ -2,14 +2,19 @@ import type { NativeRepeaterRoster } from 'iroh-location';
 
 import {
   checkClaimLink,
+  claimLinkMachineId,
+  enrollFacts,
   inviteCandidates,
+  offeredCount,
   isWebClaimLink,
   pairingOffers,
   repeaterErrorCopy,
   repeatersSummary,
   retentionWords,
+  rosterLine,
   rosterSections,
 } from '../repeaters';
+import { layoutRosterGraph, MAX_GRAPH_MACHINES } from '../roster-graph';
 
 const SECRET = 'ab'.repeat(32);
 const ME = '11'.repeat(32);
@@ -133,7 +138,7 @@ describe('pairingOffers', () => {
     );
     const offers = pairingOffers(sections, SAM.toUpperCase());
     expect(offers.enroll.map((r) => r.rosterId)).toEqual(['sams']);
-    expect(offers.canInvite).toBe(true);
+    expect(offers.invite.map((r) => r.rosterId)).toEqual(['mine']);
   });
 
   it('offers nothing to invite them to once they are in it or invited, or if it is open', () => {
@@ -141,13 +146,115 @@ describe('pairingOffers', () => {
       [roster({ rosterId: 'mine', mine: true, canInvite: true, invited: [SAM] })],
       []
     );
-    expect(pairingOffers(invited, SAM).canInvite).toBe(false);
+    expect(pairingOffers(invited, SAM).invite).toEqual([]);
     const open = rosterSections(
       [roster({ rosterId: 'mine', mine: true, open: true, canInvite: true })],
       []
     );
-    expect(pairingOffers(open, SAM).canInvite).toBe(false);
-    expect(pairingOffers(rosterSections([], []), SAM)).toEqual({ enroll: [], canInvite: false });
+    expect(pairingOffers(open, SAM).invite).toEqual([]);
+    expect(pairingOffers(rosterSections([], []), SAM)).toEqual({ enroll: [], invite: [] });
+  });
+
+  it('offers each invite-only roster I may invite to, not only my own', () => {
+    const sections = rosterSections(
+      [
+        roster({ rosterId: 'mine', mine: true, canInvite: true }),
+        roster({ rosterId: 'kits', owner: STRANGER, carriesMe: true, canInvite: true }),
+        roster({ rosterId: 'nope', owner: STRANGER, carriesMe: true, canInvite: false }),
+      ],
+      [],
+      ME
+    );
+    expect(pairingOffers(sections, SAM).invite.map((r) => r.rosterId)).toEqual(['mine', 'kits']);
+  });
+});
+
+describe('claimLinkMachineId', () => {
+  // iroh-tickets 1.0's own golden vector (`test_ticket_base32`): variant 0, then the endpoint id.
+  const TICKET =
+    'endpointacxfr74igmsbvsbnn73wcecg5vt3kbzncqwfrdiampuufwnhkublmaqacbuhi5dqhixs6zdfojyc43lffyxqcad7aaaadaai';
+
+  it('reads the machine a claim link names, without dialling', () => {
+    expect(claimLinkMachineId(`streetcryptid-repeater:${TICKET}#${SECRET}`)).toBe(
+      'ae58ff8833241ac82d6ff7611046ed67b5072d142c588d0063e942d9a75502b6'
+    );
+  });
+
+  it('says nothing about a link it cannot read', () => {
+    expect(claimLinkMachineId(`streetcryptid-repeater:endpointabc#${SECRET}`)).toBeNull();
+    expect(claimLinkMachineId(`streetcryptid-repeater:blobabc#${SECRET}`)).toBeNull();
+    expect(claimLinkMachineId('https://streetcrypt.id/repeater')).toBeNull();
+  });
+});
+
+describe('enrollFacts', () => {
+  it('says what enrolling gives, what it never does, and who will see it', () => {
+    const [sections] = [
+      rosterSections(
+        [roster({ rosterId: 'sams', owner: SAM, carried: 6, vouchers: [SAM], canEnroll: true })],
+        [{ endpointId: SAM, handle: '@sam' }],
+        ME
+      ),
+    ];
+    const facts = enrollFacts(sections.throughFriends[0]);
+    expect(facts.map((f) => f.good)).toEqual([true, true, false]);
+    expect(facts[2].text).toBe('The 6 people it carries can see you’re carried. sam can remove you.');
+    expect(rosterLine(sections.throughFriends[0])).toBe('0 machines · invite only · carrying 6 people');
+    expect(offeredCount(sections)).toBe(1);
+  });
+});
+
+describe('layoutRosterGraph', () => {
+  const sections = rosterSections(
+    [
+      roster({ rosterId: 'mine', mine: true, repeaters: ['a1'.repeat(32), 'a2'.repeat(32)] }),
+      roster({ rosterId: 'sams', owner: SAM, carriesMe: true, repeaters: ['b1'.repeat(32)] }),
+      roster({
+        rosterId: 'kits',
+        owner: STRANGER,
+        vouchers: [STRANGER],
+        canEnroll: true,
+        repeaters: ['c1'.repeat(32), 'c2'.repeat(32), 'c3'.repeat(32)],
+      }),
+    ],
+    [{ endpointId: SAM, handle: '@sam' }],
+    ME
+  );
+
+  it('puts my machines below the divide and everyone else’s above it', () => {
+    const { nodes } = layoutRosterGraph(sections);
+    expect(nodes).toHaveLength(6);
+    for (const n of nodes) {
+      if (n.side === 'mine') expect(n.fy).toBeGreaterThan(0.5);
+      else expect(n.fy).toBeLessThan(0.5);
+      expect(n.fx).toBeGreaterThan(0);
+      expect(n.fx).toBeLessThan(1);
+    }
+  });
+
+  it('ties me to my machines and to what carries me, never to what is only offered', () => {
+    const { links } = layoutRosterGraph(sections);
+    const toMe = links.filter((l) => l.a === 'you').map((l) => l.b.slice(0, 2));
+    expect(toMe.sort()).toEqual(['a1', 'a2', 'b1']);
+    expect(links.filter((l) => l.kind === 'avail')).toHaveLength(3);
+  });
+
+  it('lands in the same places every time', () => {
+    expect(layoutRosterGraph(sections)).toEqual(layoutRosterGraph(sections));
+  });
+
+  it('stops adding machines past what reads', () => {
+    const many = rosterSections(
+      [
+        roster({
+          rosterId: 'mine',
+          mine: true,
+          repeaters: Array.from({ length: 40 }, (_, i) => i.toString(16).padStart(64, '0')),
+        }),
+      ],
+      []
+    );
+    expect(layoutRosterGraph(many).nodes).toHaveLength(MAX_GRAPH_MACHINES);
   });
 });
 

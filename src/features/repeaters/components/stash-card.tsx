@@ -41,7 +41,7 @@ export function StashCard({
       </View>
       <View style={[styles.option, { borderTopColor: theme.backgroundSelected }]}>
         <View style={styles.copy}>
-          <ThemedText type="small">Carry my trail</ThemedText>
+          <ThemedText type="small">Carry my location</ThemedText>
           <ThemedText type="small" themeColor="textSecondary">
             {carriesMe
               ? 'Friends who were offline catch up from it. It can never read what it holds.'
@@ -50,7 +50,7 @@ export function StashCard({
         </View>
         <Switch
           accessibilityRole="switch"
-          accessibilityLabel="Carry my trail on the streetCryptid stash"
+          accessibilityLabel="Carry my location on the streetCryptid stash"
           disabled={busy || !available}
           value={carriesMe && available}
           onValueChange={onCarryChange}

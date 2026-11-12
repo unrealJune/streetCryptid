@@ -127,6 +127,9 @@ describe('SettingsScreen', () => {
     expect(rows().find((row) => row.href === '/settings/repeaters')?.value).toBe(
       '2 machines · carried by 2 · 1 offered by friends'
     );
+    // A roster a friend offers is waiting on the person, so it is counted on the row too.
+    act(() => renderer.unmount());
+    expect(rows().find((row) => row.href === '/settings/repeaters')?.badge).toBe(1);
 
     act(() => renderer.unmount());
     repeaters.status = 'unsupported';

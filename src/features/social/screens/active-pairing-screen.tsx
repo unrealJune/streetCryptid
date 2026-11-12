@@ -34,9 +34,11 @@ import {
 } from '@/features/social/core/active-pairing-state';
 import { patternHaptic, successHaptic, tapHaptic, warningHaptic } from '@/features/haptics/haptics';
 import {
-  PairingRepeaterOfferView,
+  PairingEnrollQuestion,
+  PairingInviteOfferView,
   usePairingRepeaterOffer,
 } from '@/features/repeaters/components/pairing-repeater-offer';
+import type { RosterView } from '@/features/repeaters/core/repeaters';
 import { PERSONA_RESOLVE } from '@/features/social/core/pairing-experience';
 import { pairingSearchProgress, secondsRemaining } from '@/features/social/core/pairing-countdown';
 import { useArmedBump } from '@/features/social/hooks/use-armed-bump';
@@ -276,8 +278,23 @@ export default function ActivePairingScreen() {
     void patternHaptic(PERSONA_RESOLVE);
   }, []);
   const friend = pairing?.discoveredFriend ?? null;
-  const signal = friend ? resolveSignalColor(friend.color, chrome.green) : chrome.green;
-  // The repeater question at pairing (REPEATERS.md §4.4), carried out after ACKNOWLEDGE.
+  /**
+   * The repeater question after ACKNOWLEDGE (REPEATERS.md §4.4): "Replicate your location on
+   * their repeaters?", asked once the friend is kept, about the rosters of theirs this phone may
+   * enroll in. The friend is already acknowledged and the radio already stood down by then
+   * (`stopPairing`), so the reveal is held from this copy, not from the pairing snapshot.
+   */
+  const [enrollPrompt, setEnrollPrompt] = useState<{
+    readonly friend: NonNullable<typeof friend>;
+    readonly rosters: readonly RosterView[];
+    readonly chosen: ReadonlySet<string>;
+  } | null>(null);
+  const shownFriend = friend ?? enrollPrompt?.friend ?? null;
+  const signal = shownFriend
+    ? resolveSignalColor(shownFriend.color, chrome.green)
+    : chrome.green;
+  // The repeater questions at pairing (REPEATERS.md §4.4): invites above ACKNOWLEDGE, carried out
+  // after it; the enroll question after it.
   const repeaterOffer = usePairingRepeaterOffer(friend);
 
   const stage: ActivePairingStage = deriveActivePairingStage({
@@ -752,13 +769,17 @@ export default function ActivePairingScreen() {
    * had completed. An iPhone did exactly that on 2026-10-05 (`pool.friend_added` at 22:18:17,
    * then 300 ms `pairing.poll`s on a screen the user had acknowledged). Replace onto the map.
    */
-  const close = useCallback((): void => {
+  const stopPairing = useCallback((): void => {
     routeActive.current = false;
     setLeaving(true);
     void standDown();
+  }, [standDown]);
+
+  const close = useCallback((): void => {
+    stopPairing();
     if (router.canGoBack()) router.back();
     else router.replace('/');
-  }, [router, standDown]);
+  }, [router, stopPairing]);
 
   const decideFriend = useCallback(
     async (accept: boolean): Promise<void> => {
@@ -774,6 +795,17 @@ export default function ActivePairingScreen() {
           await acknowledgeDiscoveredFriend();
           // Never awaited: the friend is kept whatever a repeater does.
           repeaterOffer.apply();
+          const enroll = repeaterOffer.offers.enroll;
+          if (enroll.length > 0) {
+            // Latch the radio off exactly as leaving would (see `close`), but stay to ask.
+            stopPairing();
+            setEnrollPrompt({
+              friend,
+              rosters: enroll,
+              chosen: new Set(enroll.map((roster) => roster.rosterId)),
+            });
+            return;
+          }
         } else await rejectDiscoveredFriend();
         close();
       } catch (error: unknown) {
@@ -792,6 +824,7 @@ export default function ActivePairingScreen() {
       rejectedDiscovery,
       rejectDiscoveredFriend,
       repeaterOffer,
+      stopPairing,
     ]
   );
 
@@ -805,7 +838,7 @@ export default function ActivePairingScreen() {
         setScanning(false);
       } else if (verification) {
         verify.cancel();
-      } else if (friend) {
+      } else if (friend && !enrollPrompt) {
         void decideFriend(false);
       } else {
         close();
@@ -813,17 +846,17 @@ export default function ActivePairingScreen() {
       return true;
     });
     return () => subscription.remove();
-  }, [close, decideFriend, friend, scanning, verification, verify]);
+  }, [close, decideFriend, enrollPrompt, friend, scanning, verification, verify]);
 
   const showPasteRow =
-    !friend &&
+    !shownFriend &&
     !verification &&
     !activeSession &&
     !['link-live', 'link-creating', 'redeeming', 'pair-failed'].includes(stage);
 
   // One key per distinct thing the stage can show. Changing it crossfades the stage; leaving it
   // alone (a countdown tick, a rising peer count) lets the existing content update in place.
-  const stageKey = friend
+  const stageKey = shownFriend
     ? 'discovered'
     : verification
       ? `verify:${verify.mode}`
@@ -849,7 +882,8 @@ export default function ActivePairingScreen() {
           accessibilityRole="button"
           disabled={working === 'accept-friend' || working === 'reject-friend'}
           onPress={() => {
-            if (friend) void decideFriend(false);
+            // Once acknowledged, leaving is NOT NOW to the repeater question, never a rejection.
+            if (friend && !enrollPrompt) void decideFriend(false);
             else close();
           }}
           pressScale={0.9}
@@ -867,13 +901,13 @@ export default function ActivePairingScreen() {
             exiting={reducedMotion ? undefined : FadeOut.duration(SWAP_OUT_MS)}
             style={styles.stageContent}
           >
-            {friend ? (
+            {shownFriend ? (
               <PersonaReveal
                 // Keyed by friend so a second pairing gets a fresh reveal rather than a component
                 // trying to unwind the last one's state.
-                key={friend.endpointId}
+                key={shownFriend.endpointId}
                 accent={signal}
-                friend={friend}
+                friend={shownFriend}
                 neutral={chrome.steel}
                 onResolved={personaResolved}
               />
@@ -924,7 +958,7 @@ export default function ActivePairingScreen() {
             },
           ]}
         >
-          {!friend ? (
+          {!shownFriend ? (
             <View style={styles.statusRow}>
               <Animated.View
                 key={presentation.status}
@@ -1047,11 +1081,25 @@ export default function ActivePairingScreen() {
             </View>
           ) : null}
 
-          {friend ? (
-            <PairingRepeaterOfferView
+          {enrollPrompt ? (
+            <PairingEnrollQuestion
+              rosters={enrollPrompt.rosters}
+              chosen={enrollPrompt.chosen}
+              chrome={chrome}
+              onToggle={(rosterId, on) =>
+                setEnrollPrompt((was) => {
+                  if (!was) return was;
+                  const chosen = new Set(was.chosen);
+                  if (on) chosen.add(rosterId);
+                  else chosen.delete(rosterId);
+                  return { ...was, chosen };
+                })
+              }
+            />
+          ) : friend ? (
+            <PairingInviteOfferView
               offer={repeaterOffer}
-              friendHandle={friend.handle}
-              accent={signal}
+              chrome={chrome}
               disabled={Boolean(working)}
             />
           ) : null}
@@ -1063,7 +1111,23 @@ export default function ActivePairingScreen() {
           ) : null}
 
           <View style={styles.actions}>
-            {friend ? (
+            {enrollPrompt ? (
+              <>
+                <Action color={chrome.steel} label="NOT NOW" onPress={close} outline />
+                <Action
+                  color={signal}
+                  label="ENROLL"
+                  testID="pairing-enroll-repeaters"
+                  disabled={enrollPrompt.chosen.size === 0}
+                  onPress={() => {
+                    // Never awaited, like the invites: `setRepeaterCarried` queues the Enroll in
+                    // the core and the grant pass offers it until a repeater answers.
+                    repeaterOffer.enroll(enrollPrompt.chosen);
+                    close();
+                  }}
+                />
+              </>
+            ) : friend ? (
               <>
                 <Action
                   color={chrome.steel}

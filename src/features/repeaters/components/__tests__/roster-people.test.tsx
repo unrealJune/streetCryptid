@@ -1,8 +1,7 @@
 import { act, create, type ReactTestRenderer } from 'react-test-renderer';
-import { Switch } from 'react-native';
 
 import type { RosterView } from '../../core/repeaters';
-import { RosterCard } from '../roster-card';
+import { RosterPeople } from '../roster-people';
 
 jest.mock('@/global.css', () => ({}));
 
@@ -26,30 +25,19 @@ const ROSTER: RosterView = {
   invited: [],
 };
 
-describe('RosterCard', () => {
+describe('RosterPeople', () => {
   let renderer: ReactTestRenderer;
-  const owner = {
-    onPolicyChange: jest.fn(),
-    onRemoveMember: jest.fn(),
-    onRemoveMachine: jest.fn(),
-  };
+  const owner = { onRemoveMember: jest.fn() };
 
   afterEach(() => {
     act(() => renderer?.unmount());
     jest.clearAllMocks();
   });
 
-  function render(props: Partial<Parameters<typeof RosterCard>[0]> = {}) {
+  function render(props: Partial<Parameters<typeof RosterPeople>[0]> = {}) {
     act(() => {
       renderer = create(
-        <RosterCard
-          roster={ROSTER}
-          accent="#0f0"
-          warning="#fa0"
-          busy={false}
-          onCarryChange={jest.fn()}
-          {...props}
-        />
+        <RosterPeople roster={ROSTER} accent="#0f0" warning="#fa0" busy={false} {...props} />
       );
     });
   }
@@ -68,36 +56,16 @@ describe('RosterCard', () => {
 
   it('lets a confirmation be cancelled', () => {
     render({ owner });
-    act(() => pressable('Remove machine aaaaaa').props.onPress());
+    act(() => pressable('Remove @sam').props.onPress());
     act(() => pressable('Cancel').props.onPress());
-    act(() => pressable('Remove machine aaaaaa').props.onPress());
-    expect(owner.onRemoveMachine).not.toHaveBeenCalled();
+    act(() => pressable('Remove @sam').props.onPress());
+    expect(owner.onRemoveMember).not.toHaveBeenCalled();
   });
 
-  it('shows someone else’s roster with only the carry switch', () => {
+  it('shows a member who else is carried, without the owner’s actions', () => {
     render({ roster: { ...ROSTER, mine: false, ownerLabel: '@sam’s repeaters' } });
-    expect(renderer.root.findAllByType(Switch).map((s) => s.props.accessibilityLabel)).toEqual([
-      'Carry my trail on @sam’s repeaters',
-    ]);
     expect(renderer.root.findAllByProps({ accessibilityLabel: 'Remove @sam' })).toHaveLength(0);
-  });
-
-  it('offers no switch for an invite-only roster nobody invited me to, and names who vouched', () => {
-    render({
-      roster: {
-        ...ROSTER,
-        mine: false,
-        carriesMe: false,
-        canEnroll: false,
-        open: false,
-        ownerLabel: '@sam’s repeaters',
-        vouchers: [{ id: '22'.repeat(32), label: '@sam', isMe: false }],
-      },
-    });
-    expect(renderer.root.findAllByType(Switch)).toHaveLength(0);
-    const text = JSON.stringify(renderer.toJSON());
-    expect(text).toContain('Vouched for by @sam');
-    expect(text).toContain('nobody has invited you yet');
+    expect(JSON.stringify(renderer.toJSON())).toContain('@sam');
   });
 
   it('invites a friend in one tap, and lets the owner make a member an inviter', () => {

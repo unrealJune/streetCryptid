@@ -107,8 +107,8 @@ describe('native dev-command intent rewriting', () => {
   });
 
   // A repeater's console QR code: the camera opens it as a Universal Link / App Link, and it lands
-  // on Settings → Repeaters with the link filled in (never claimed without a tap).
-  it('routes a scanned repeater claim to the repeater settings, filled in', () => {
+  // on the claim screen with the machine scanned (never claimed without a tap).
+  it('routes a scanned repeater claim to the claim screen, filled in', () => {
     const secret = 'ab'.repeat(32);
     expect(
       redirectSystemPath({
@@ -116,11 +116,11 @@ describe('native dev-command intent rewriting', () => {
         initial: true,
       })
     ).toBe(
-      `/settings/repeaters?claim=${encodeURIComponent(`streetcryptid-repeater:endpointabc#${secret}`)}`
+      `/settings/repeaters/claim?claim=${encodeURIComponent(`streetcryptid-repeater:endpointabc#${secret}`)}`
     );
     expect(
       redirectSystemPath({ path: 'https://streetcrypt.id/repeater#t=cut', initial: true })
-    ).toBe('/settings/repeaters');
+    ).toBe('/settings/repeaters/claim');
     // The fallback page's custom-scheme hand-off lands in the same place.
     expect(
       redirectSystemPath({
@@ -128,7 +128,7 @@ describe('native dev-command intent rewriting', () => {
         initial: false,
       })
     ).toBe(
-      `/settings/repeaters?claim=${encodeURIComponent(`streetcryptid-repeater:endpointabc#${secret}`)}`
+      `/settings/repeaters/claim?claim=${encodeURIComponent(`streetcryptid-repeater:endpointabc#${secret}`)}`
     );
   });
 });

@@ -79,6 +79,41 @@ function safeDecode(s: string): string {
   }
 }
 
+const BASE32 = 'abcdefghijklmnopqrstuvwxyz234567';
+
+/**
+ * The machine a claim link names, as lowercase hex, read without dialling: the link's endpoint
+ * ticket is `endpoint` + base32 (no padding) of postcard bytes whose first is the wire variant and
+ * whose next 32 are the endpoint id (`iroh-tickets` 1.0, `EndpointTicket`). It is what the
+ * console prints beside the code, so the person can see they scanned the machine in front of
+ * them. Only a label: the core checks the signed cert against the machine that actually answers,
+ * so a wrong answer here can mislabel a screen and never add a machine. `null` when unreadable.
+ */
+export function claimLinkMachineId(link: string): string | null {
+  const ticket = link.startsWith(CLAIM_SCHEME) ? link.slice(CLAIM_SCHEME.length).split('#')[0] : '';
+  if (!ticket.startsWith('endpoint')) return null;
+  const body = ticket.slice('endpoint'.length).toLowerCase();
+  const bytes: number[] = [];
+  let bits = 0;
+  let value = 0;
+  for (const ch of body) {
+    const digit = BASE32.indexOf(ch);
+    if (digit < 0) return null;
+    value = (value << 5) | digit;
+    bits += 5;
+    if (bits >= 8) {
+      bits -= 8;
+      bytes.push((value >> bits) & 0xff);
+      if (bytes.length === 33) break;
+    }
+  }
+  if (bytes.length < 33 || bytes[0] !== 0) return null;
+  return bytes
+    .slice(1)
+    .map((b) => b.toString(16).padStart(2, '0'))
+    .join('');
+}
+
 export interface RosterPerson {
   readonly id: string;
   /** "You", a friend's handle, or a short id for someone this phone does not know. */
@@ -207,12 +242,12 @@ export function inviteCandidates(
 export interface PairingOffers {
   /** Their rosters (owned or vouched for by them) that I may enroll in and am not carried by. */
   readonly enroll: readonly RosterView[];
-  /** I may invite them to at least one invite-only roster they are not in or invited to. */
-  readonly canInvite: boolean;
+  /** Invite-only rosters I may invite them to, that they are not in or invited to. */
+  readonly invite: readonly RosterView[];
 }
 
 /**
- * The Enroll question and the "also invite them" choice for `friendId`, from rosters this phone
+ * The Enroll question and the "also invite them" choices for `friendId`, from rosters this phone
  * already knows. Their card may not have arrived yet; then there is nothing to ask here, and the
  * roster turns up under Available through friends once it does.
  */
@@ -234,7 +269,7 @@ export function pairingOffers(sections: RosterSections, friendId: string): Pairi
         (r.owner.toLowerCase() === friend || r.vouchers.some(isFriend))
     ),
     // Open rosters need no invite to join; offering one there would only add an op.
-    canInvite: all.some(
+    invite: all.filter(
       (r) =>
         r.canInvite &&
         !r.open &&
@@ -245,6 +280,11 @@ export function pairingOffers(sections: RosterSections, friendId: string): Pairi
   };
 }
 
+/** Rosters friends offer that I could enroll in now: what the Settings menu's badge counts. */
+export function offeredCount(sections: RosterSections): number {
+  return sections.throughFriends.filter((r) => r.canEnroll).length;
+}
+
 /** The Settings menu's one-line answer to "what do repeaters do for me right now". */
 export function repeatersSummary(sections: RosterSections): string {
   const carriers = (sections.mine?.carriesMe ? 1 : 0) + sections.carryingMe.length;
@@ -252,9 +292,64 @@ export function repeatersSummary(sections: RosterSections): string {
   const parts: string[] = [];
   if (machines > 0) parts.push(`${machines} ${machines === 1 ? 'machine' : 'machines'}`);
   if (carriers > 0) parts.push(`carried by ${carriers}`);
-  const offered = sections.throughFriends.filter((r) => r.canEnroll).length;
+  const offered = offeredCount(sections);
   if (offered > 0) parts.push(`${offered} offered by friends`);
   return parts.length > 0 ? parts.join(' · ') : 'None';
+}
+
+function count(n: number, one: string, many: string): string {
+  return `${n} ${n === 1 ? one : many}`;
+}
+
+/** "2 machines · invite only · carrying 6 people": a roster in one line. */
+export function rosterLine(roster: RosterView): string {
+  return [
+    count(roster.machines.length, 'machine', 'machines'),
+    roster.open ? 'open to anyone' : 'invite only',
+    `carrying ${count(roster.carried, 'person', 'people')}`,
+  ].join(' · ');
+}
+
+/** "Vouched for by Sam, quietmoth", or null when nobody did. */
+export function vouchLine(roster: RosterView): string | null {
+  return roster.vouchers.length > 0
+    ? `Vouched for by ${roster.vouchers.map((v) => v.label).join(', ')}`
+    : null;
+}
+
+/** The owner's name alone ("lunarhare", "a41f9c"), for sentences: never "Your". */
+export function ownerName(roster: RosterView): string {
+  return roster.ownerLabel.replace(/’s repeaters$/, '').replace(/^@/, '');
+}
+
+export interface EnrollFact {
+  /** A benefit (`true`) or a cost the person should know (`false`). */
+  readonly good: boolean;
+  readonly text: string;
+}
+
+/**
+ * What enrolling means, said before the person agrees (REPEATERS.md §1, §3.3). Every line is a
+ * property of the protocol, not a promise about a machine: ciphertext-blind, memory-only, and a
+ * roster that lists its members to each other. Leaving is cooperative (§2.2), so nothing here
+ * says a repeater "can no longer" do anything.
+ */
+export function enrollFacts(roster: RosterView): EnrollFact[] {
+  const others = roster.carried;
+  return [
+    {
+      good: true,
+      text: 'Friends pick up your sealed location from them while your phone sleeps.',
+    },
+    { good: true, text: 'They can never read it. Kept in memory, never on their disk.' },
+    {
+      good: false,
+      text:
+        others > 0
+          ? `The ${count(others, 'person', 'people')} it carries can see you’re carried. ${ownerName(roster)} can remove you.`
+          : `Anyone it carries later can see you’re carried. ${ownerName(roster)} can remove you.`,
+    },
+  ];
 }
 
 /** A retention window in words: "48 hours", "30 minutes", "1 hour". */

@@ -230,12 +230,12 @@ Granting `inviter` is how an `invite` roster grows without the owner approving e
 Auto-invite is a per-inviter setting: it decides whether _my_ new friends are invited, at pairing
 time, to the repeaters I can invite people to.
 
-**How it is built.** The owner invites from Settings → Repeaters (a friend list under INVITE on
-the roster) and grants or revokes `inviter` on a carried member's row (LET INVITE / NO INVITES);
-an inviter sees the same INVITE list on the owner's roster. An invite is also how a member the
+**How it is built.** The owner invites from Settings → Repeaters → People (a friend list under
+INVITE) and grants or revokes `inviter` on a carried member's row (LET INVITE / NO INVITES); an
+inviter reaches the same INVITE list from the owner's roster (Invite friends). An invite is also how a member the
 owner removed comes back, in either policy, so the owner can invite in an `open` roster too.
-"Invite new friends" in the same screen is auto-invite: it pre-checks "Also invite them to my
-repeaters" at pairing (§4.4). The core is `repeater::invite`, `invite_targets` and
+"Invite new friends" on the same page is auto-invite: it pre-checks "Also invite them" at
+pairing (§4.4). The core is `repeater::invite`, `invite_targets` and
 `pending_invites`; which invite stands is `Roster::standing_invite`, the same rule an `Enroll`
 is judged by (an invite made before a `Remove` of that person does not).
 
@@ -549,34 +549,50 @@ What follows from that shape:
 The same question, _"Replicate your trail on June's repeaters?"_ (Enroll / Not now), appears in two
 places.
 
-**At pairing.** When a pair completes, the pairing result screen (above ACKNOWLEDGE / REJECT)
-looks at the rosters this phone knows and offers every one of the new friend's it may enroll in:
+**At pairing.** The two questions are asked at two moments, because one is about the friend and
+the other about your location.
 
-- an `open` one;
-- an `invite` one where the other side has invited me.
+- **Above ACKNOWLEDGE / REJECT**, the inviting side sees _"Also invite them to my repeaters"_:
+  one switch per `invite` roster I may invite to and they are not in, each pre-checked when my
+  auto-invite is on. Acknowledging signs those invites (`inviteToRepeater`, per roster), not
+  awaited, like everything else at ACKNOWLEDGE (`connectNewFriend`); the grant pass offers them
+  to the repeaters (§4.4).
+- **After ACKNOWLEDGE**, if this phone knows rosters of the new friend's it may enroll in (an
+  `open` one, or an `invite` one where they invited me), the screen stays to ask _"Replicate your
+  location on their repeaters?"_, with what that gives, what it never does and who will see it
+  (`enrollFacts`), then ENROLL / NOT NOW. The radio is stood down first exactly as leaving would
+  (`stopPairing`), and ENROLL goes through `setRepeaterCarried`, not awaited.
 
-On the inviting side, the same screen shows _"Also invite them to my repeaters"_ when I may invite
-to an `invite` roster they are not in. It is pre-checked when my auto-invite is on, and covers
-every such roster (`inviteFriendToRepeaters`). Acknowledging carries out both choices, and like
-everything else at ACKNOWLEDGE it is not awaited (`connectNewFriend`): enrolling goes through
-`setRepeaterCarried`, inviting signs the ops at once and the grant pass that follows offers them
-to the repeaters (§4.4). Built: `usePairingRepeaterOffer` and `pairingOffers`
-(`src/features/repeaters`).
+Built: `usePairingRepeaterOffer` and `pairingOffers` (`src/features/repeaters`).
 
 The cards arrive with the pair: the v4 `Accept` carries the profile record, and the cards follow on
 the profile namespace. If they arrive in time the question is on the pairing result screen.
 Otherwise the roster turns up under Available through friends, and the Settings menu's repeater
-line counts it ("1 offered by friends").
+line counts it ("1 offered by friends") with a badge.
 
 **In the repeater menu** (Settings → Repeaters), at any time:
 
-- **Carrying my trail.** Whose repeaters I am enrolled with. Each shows its machines and when each
-  was last in contact, with a Withdraw action.
-- **Available through friends.** Every roster on a friend's card that I may enroll in: `open` ones,
-  and `invite` ones with an invite waiting for me. This is how repeaters a friend sets up later
-  reach people who paired long before they existed.
-- **My repeaters.** Claim a machine, set the policy, grant `inviter`, remove members, and toggle
-  auto-invite.
+- **Stash**, then **My repeaters**: your roster, opening the roster map and its People page, or
+  _Add a repeater_.
+- **Carrying my location.** Whose repeaters I am enrolled with, with their machines; switching it
+  off is a Withdraw. Per-machine last contact is not shown: nothing records it per machine.
+- **Available through friends.** Every roster on a friend's card: `open` ones and `invite` ones
+  with an invite waiting for me get a switch, which asks first in a sheet with the same facts as
+  at pairing; an invite-only one nobody invited me to says so. This is how repeaters a friend
+  sets up later reach people who paired long before they existed.
+
+Behind it (`src/app/settings/repeaters/`):
+
+- **Add** (`claim`): the claim in the pairing screen's shape. ADD takes a pasted link (there is no
+  in-app camera: the console's QR code is a Universal Link / App Link the phone's own camera
+  opens, landing here on SCANNED); SCANNED names the machine read from the link's endpoint ticket
+  (`claimLinkMachineId`) and asks the policy (first machine only) and whether it carries me;
+  REACHING is the claim in flight, bounded at 20 s, so it has no cancel; CLAIMED or REFUSED.
+- **Roster map** (`roster`): my machines below a divide, rosters carrying me above it, offered
+  ones floating unconnected (`layoutRosterGraph`). A machine opens a panel: the policy, carry and
+  REMOVE on mine; STOP CARRYING (never "remove": §2.2) on a carrier; ENROLL / NOT NOW on an
+  offered one. There is no "deny": nothing refuses an offer.
+- **People** (`people`): members, inviters, invites, and auto-invite.
 
 No pairing-wire change is needed, and none should be made: `PairMsg` is signed over a re-encode,
 so appending to it means bumping `PAIR_ALPN` (see `AGENTS.md`).
@@ -874,10 +890,11 @@ The repeater work landed as trail-stash#8 and #9 before that repository moved in
      phone.
    - A `repeaters` collection outside `friends`, with the invariant test.
    - `RepeaterCard` on the profile namespace, with cross-friend vouching.
-   - Built (UI): Settings → Repeaters (`src/features/repeaters`). My repeaters (claim by a
-     scanned QR code or a pasted link, carry my trail, the policy, and removing members and
-     machines, each confirmed once), Carrying my trail, and rosters this phone knows; the Settings
-     menu summarises them. A build without the calls hides the entry.
+   - Built (UI): Settings → Repeaters (`src/features/repeaters`, §4.5): the list, a full-screen
+     claim (by the camera's QR code or a pasted link), the roster map (policy, carrying, removing
+     machines, each removal confirmed once), and a People page (removing members, inviters,
+     invites); the Settings menu summarises them and badges offers. A build without the calls
+     hides the entry.
    - Built: `RepeaterCard` (whole signed logs, vouching checked against the log), Available
      through friends in Settings → Repeaters, enrolling with a cited invite, and
      `fix.provenance` / `contact.role = repeater` telemetry (`infra/otel/README.md`).

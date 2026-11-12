@@ -32,10 +32,15 @@ jest.mock('../../components/pairing-figure-view', () => ({
   PairingFigureChoices: () => null,
 }));
 jest.mock('../../components/persona-reveal', () => ({ PersonaReveal: () => null }));
-const mockRepeaterOffer = { apply: jest.fn() };
+const mockRepeaterOffer: {
+  apply: jest.Mock;
+  enroll: jest.Mock;
+  offers: { enroll: { rosterId: string }[]; invite: unknown[] };
+} = { apply: jest.fn(), enroll: jest.fn(), offers: { enroll: [], invite: [] } };
 jest.mock('@/features/repeaters/components/pairing-repeater-offer', () => ({
   usePairingRepeaterOffer: () => mockRepeaterOffer,
-  PairingRepeaterOfferView: () => null,
+  PairingInviteOfferView: () => null,
+  PairingEnrollQuestion: () => null,
 }));
 jest.mock('@/features/social/net/bluetooth-settings', () => ({ openBluetoothSettings: jest.fn() }));
 jest.mock('@/features/social/net/location-sharing', () => ({
@@ -141,6 +146,7 @@ describe('ActivePairingScreen', () => {
     mockSharing.createPairInvite.mockResolvedValue(LINK);
     mockSharing.acknowledgeDiscoveredFriend.mockResolvedValue(undefined);
     mockSharing.rejectDiscoveredFriend.mockResolvedValue(undefined);
+    mockRepeaterOffer.offers = { enroll: [], invite: [] };
     jest
       .spyOn(Share, 'share')
       .mockResolvedValue({ action: Share.sharedAction, activityType: undefined });
@@ -254,6 +260,29 @@ describe('ActivePairingScreen', () => {
     // completed ids are held back here, and `standDownPairing` re-reads whatever does go through.
     expect(mockSharing.cancelPair).not.toHaveBeenCalled();
     expect(mockSharing.standDownPairing).toHaveBeenCalledWith([]);
+    expect(mockRouter.back).toHaveBeenCalledTimes(1);
+  });
+
+  it('asks about their repeaters after acknowledging, with the radio already stood down', async () => {
+    mockRepeaterOffer.offers = { enroll: [{ rosterId: 'theirs' }], invite: [] };
+    await renderDiscovery();
+    await act(async () => action('acknowledge').props.onPress());
+    expect(mockSharing.acknowledgeDiscoveredFriend).toHaveBeenCalledTimes(1);
+    expect(mockRepeaterOffer.apply).toHaveBeenCalledTimes(1);
+    // Kept, and the radio latched off exactly as leaving would, but still on screen to ask.
+    expect(mockSharing.standDownPairing).toHaveBeenCalled();
+    expect(mockRouter.back).not.toHaveBeenCalled();
+    await act(async () => action('enroll').props.onPress());
+    expect(mockRepeaterOffer.enroll).toHaveBeenCalledWith(new Set(['theirs']));
+    expect(mockRouter.back).toHaveBeenCalledTimes(1);
+  });
+
+  it('leaves without enrolling on NOT NOW', async () => {
+    mockRepeaterOffer.offers = { enroll: [{ rosterId: 'theirs' }], invite: [] };
+    await renderDiscovery();
+    await act(async () => action('acknowledge').props.onPress());
+    await act(async () => action('not now').props.onPress());
+    expect(mockRepeaterOffer.enroll).not.toHaveBeenCalled();
     expect(mockRouter.back).toHaveBeenCalledTimes(1);
   });
 

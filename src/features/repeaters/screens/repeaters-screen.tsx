@@ -1,57 +1,64 @@
 import { useState } from 'react';
-import { StyleSheet, Switch, View } from 'react-native';
-import { useLocalSearchParams } from 'expo-router';
+import { type Href, useRouter } from 'expo-router';
 
 import { ThemedText } from '@/components/themed-text';
-import { CryptidThemes, Spacing } from '@/constants/theme';
 import { SettingsPage, SettingsSection } from '@/features/settings/components/settings-page';
 import { STASH_RETENTION_MS } from '@/features/social/core/delivery-mode';
 import { useLocationSharing } from '@/features/social/hooks/use-location-sharing';
-import { useColorScheme } from '@/hooks/use-color-scheme';
 
-import { ClaimRepeaterForm } from '../components/claim-repeater-form';
-import { RosterCard } from '../components/roster-card';
+import { EnrollSheet } from '../components/enroll-sheet';
+import { RepeaterCard } from '../components/repeater-card';
+import { useRepeaterChrome } from '../components/repeater-chrome';
 import { StashCard } from '../components/stash-card';
-import {
-  checkClaimLink,
-  inviteCandidates,
-  retentionWords,
-  type RosterView,
-} from '../core/repeaters';
+import { retentionWords, rosterLine, vouchLine, type RosterView } from '../core/repeaters';
 import { useRepeaters } from '../hooks/use-repeaters';
 
 /**
- * Settings → Repeaters (REPEATERS.md §4.4): the machines you own, whose repeaters carry your
- * trail, and the rosters this phone knows of that do not. A repeater is a computer that keeps
- * sealed trails it cannot read, so friends get yours while your phone sleeps.
+ * Settings → Repeaters (REPEATERS.md §4.4): everything that may keep your sealed location for
+ * friends while your phone sleeps, in the order a person decides about them.
  *
- * A scanned claim QR code lands here as `?claim=` (see `+native-intent.tsx`), filled into the
- * form but not claimed: the claim is where the roster's policy is chosen.
+ * - STASH: the hosted one, owned by nobody (§5.1). Its switch is the delivery mode, so this page
+ *   and Settings → Delivery are one setting.
+ * - MY REPEATERS: your roster, opening the roster map (machines, policy) and its people; or a way
+ *   to add your first machine.
+ * - CARRYING MY LOCATION: other people's rosters you are enrolled in. Off is a Withdraw.
+ * - AVAILABLE THROUGH FRIENDS: rosters on friends' cards (§4.2). On asks first, in a sheet that
+ *   says what enrolling means; an invite-only roster nobody invited you to says so instead.
  *
- * "Available through friends" is every roster a friend's repeater card vouches for (REPEATERS.md
- * §4.2): friends publish the rosters they own or are carried by, and reading the settings reads
- * their cards. Turning carrying on there is enrolling, the same switch as everywhere else.
- *
- * The hosted stash sits at the top, as the carve-out it is: ownerless, rosterless, forgetting on a
- * clock. Its switch is the delivery mode, so this page and Settings → Delivery are one setting.
+ * Nothing here gates reading: any phone may pull from any repeater (§2.1). What you opt into is
+ * carrying. A scanned claim link no longer lands here — it opens the claim screen.
  */
 export default function RepeatersScreen() {
-  const scheme = useColorScheme();
-  const chrome = CryptidThemes[scheme === 'dark' ? 'deepsea' : 'daybreak'].chrome;
+  const { chrome } = useRepeaterChrome();
+  const router = useRouter();
   const repeaters = useRepeaters();
   const { status, sections, error, busyRoster } = repeaters;
   const [actionError, setActionError] = useState<string | null>(null);
   const { snapshot, setDeliveryMode } = useLocationSharing();
   const [stashBusy, setStashBusy] = useState(false);
-  const { claim } = useLocalSearchParams<{ claim?: string }>();
-  const scanned = typeof claim === 'string' ? checkClaimLink(claim) : null;
-  const initialLink = scanned?.ok ? scanned.link : undefined;
+  const [asking, setAsking] = useState<RosterView | null>(null);
+  const [askError, setAskError] = useState<string | null>(null);
+  const [justEnrolled, setJustEnrolled] = useState<string | null>(null);
 
   async function run(outcome: Promise<string | null>) {
     setActionError(null);
     const failure = await outcome;
     if (failure) setActionError(failure);
   }
+
+  async function enroll(roster: RosterView) {
+    setAskError(null);
+    const failure = await repeaters.setCarried(roster.rosterId, true);
+    if (failure) {
+      setAskError(failure);
+      return;
+    }
+    setAsking(null);
+    setJustEnrolled(roster.rosterId);
+  }
+
+  const people = (rosterId: string) =>
+    router.push(`/settings/repeaters/people?roster=${encodeURIComponent(rosterId)}` as Href);
 
   const stash = snapshot?.delivery.stashConfigured ? (
     <SettingsSection label="STASH">
@@ -73,39 +80,63 @@ export default function RepeatersScreen() {
     </SettingsSection>
   ) : null;
 
-  const card = (roster: RosterView) => (
-    <RosterCard
-      key={roster.rosterId}
-      roster={roster}
+  const machineLine = (r: RosterView) => r.machines.map((m) => m.short).join('  ');
+
+  const carryingCard = (r: RosterView) => (
+    <RepeaterCard
+      key={r.rosterId}
+      title={r.ownerLabel}
+      lines={[rosterLine(r), machineLine(r)]}
       accent={chrome.green}
-      warning={chrome.amber}
-      busy={busyRoster === roster.rosterId}
-      onCarryChange={(carry) => void run(repeaters.setCarried(roster.rosterId, carry))}
-      owner={
-        roster.mine && repeaters.ownerControls
-          ? {
-              onPolicyChange: (open) => void run(repeaters.setPolicy(roster.rosterId, open)),
-              onRemoveMember: (member) => void run(repeaters.removeMember(roster.rosterId, member)),
-              onRemoveMachine: (machine) =>
-                void run(repeaters.removeMachine(roster.rosterId, machine)),
-              onSetInviter: repeaters.inviteControls
-                ? (member, inviter) =>
-                    void run(repeaters.setInviter(roster.rosterId, member, inviter))
-                : undefined,
-            }
+      highlighted={justEnrolled === r.rosterId}
+      link={
+        r.canInvite && repeaters.inviteControls
+          ? { label: 'Invite friends', onPress: () => people(r.rosterId) }
           : undefined
       }
-      invite={
-        roster.canInvite && repeaters.inviteControls
+      carry={{
+        value: true,
+        text: 'Kept on these machines, sealed, for friends to pick up while your phone sleeps.',
+        disabled: busyRoster === r.rosterId,
+        accessibilityLabel: `Carry my location on ${r.ownerLabel}`,
+        onChange: (on) => {
+          if (!on) void run(repeaters.setCarried(r.rosterId, false));
+        },
+      }}
+    />
+  );
+
+  const offeredCard = (r: RosterView) => (
+    <RepeaterCard
+      key={r.rosterId}
+      title={r.ownerLabel}
+      lines={[rosterLine(r), vouchLine(r), machineLine(r)].filter((l): l is string => !!l)}
+      accent={chrome.green}
+      highlighted={asking?.rosterId === r.rosterId}
+      carry={
+        r.canEnroll
           ? {
-              candidates: inviteCandidates(roster, repeaters.friends),
-              onInvite: (member) => void run(repeaters.invite(roster.rosterId, member)),
+              value: false,
+              text: 'Off. These machines do not keep your location.',
+              disabled: busyRoster === r.rosterId,
+              accessibilityLabel: `Carry my location on ${r.ownerLabel}`,
+              onChange: (on) => {
+                if (on) {
+                  setAskError(null);
+                  setAsking(r);
+                }
+              },
             }
-          : undefined
+          : {
+              value: false,
+              locked: true,
+              text: 'Invite only, and nobody has invited you yet.',
+              accessibilityLabel: `Carry my location on ${r.ownerLabel}`,
+              onChange: () => undefined,
+            }
       }
     />
   );
-  const mayInvite = [sections.mine, ...sections.carryingMe].some((r) => r?.canInvite && !r.open);
 
   if (status === 'unsupported') {
     return (
@@ -118,10 +149,11 @@ export default function RepeatersScreen() {
     );
   }
 
+  const mine = sections.mine;
   return (
     <SettingsPage
       title="Repeaters"
-      subtitle="Computers that keep your sealed trail for friends while your phone sleeps. They can never read it."
+      subtitle="Computers that keep your sealed location for friends while your phone sleeps. They can never read it."
     >
       {error || actionError ? (
         <ThemedText accessibilityRole="alert" type="small" style={{ color: chrome.amber }}>
@@ -132,64 +164,64 @@ export default function RepeatersScreen() {
       {stash}
 
       <SettingsSection label="MY REPEATERS">
-        {sections.mine ? card(sections.mine) : null}
-        <ClaimRepeaterForm
-          // A second scan while the page is open replaces what the first one filled in.
-          key={initialLink ?? 'none'}
-          accent={chrome.green}
-          warning={chrome.amber}
-          firstRepeater={sections.mine === null}
-          initialLink={initialLink}
-          onClaim={repeaters.claim}
-        />
+        {mine ? (
+          <RepeaterCard
+            title="Your repeaters"
+            lines={[
+              `${rosterLine(mine)}${mine.carriesMe ? '' : ' · not carrying you'}`,
+              machineLine(mine),
+            ]}
+            accent={chrome.green}
+            onOpen={() => router.push('/settings/repeaters/roster' as Href)}
+            openLabel="Open your roster"
+            link={{ label: 'People', onPress: () => people(mine.rosterId) }}
+          />
+        ) : (
+          <RepeaterCard
+            title="Add a repeater"
+            lines={[
+              'Run trail-stash on a computer that stays on, then scan the code it shows.',
+            ]}
+            accent={chrome.green}
+            onOpen={() => router.push('/settings/repeaters/claim' as Href)}
+            openLabel="Add a repeater"
+            link={
+              sections.carryingMe.length + sections.throughFriends.length > 0
+                ? {
+                    label: 'See the roster map',
+                    onPress: () => router.push('/settings/repeaters/roster' as Href),
+                  }
+                : undefined
+            }
+          />
+        )}
       </SettingsSection>
 
-      {mayInvite && repeaters.autoInvite !== null ? (
-        <SettingsSection label="NEW FRIENDS">
-          <View style={styles.option}>
-            <View style={styles.copy}>
-              <ThemedText type="small">Invite new friends</ThemedText>
-              <ThemedText type="small" themeColor="textSecondary">
-                When you pair, offer to invite them to the invite-only repeaters you can invite to.
-                They still choose whether their trail is carried.
-              </ThemedText>
-            </View>
-            <Switch
-              accessibilityRole="switch"
-              accessibilityLabel="Invite new friends to my repeaters"
-              value={repeaters.autoInvite}
-              onValueChange={(on) => void run(repeaters.setAutoInvite(on))}
-              trackColor={{ true: chrome.green, false: chrome.steel }}
-            />
-          </View>
-        </SettingsSection>
-      ) : null}
-
       {sections.carryingMe.length > 0 ? (
-        <SettingsSection label="CARRYING MY TRAIL">{sections.carryingMe.map(card)}</SettingsSection>
+        <SettingsSection label="CARRYING MY LOCATION">
+          {sections.carryingMe.map(carryingCard)}
+        </SettingsSection>
       ) : null}
 
       {sections.throughFriends.length > 0 ? (
         <SettingsSection label="AVAILABLE THROUGH FRIENDS">
-          {sections.throughFriends.map(card)}
+          {sections.throughFriends.map(offeredCard)}
         </SettingsSection>
       ) : null}
 
       {sections.others.length > 0 ? (
-        <SettingsSection label="KNOWN TO THIS PHONE">{sections.others.map(card)}</SettingsSection>
+        <SettingsSection label="KNOWN TO THIS PHONE">
+          {sections.others.map(offeredCard)}
+        </SettingsSection>
       ) : null}
+
+      <EnrollSheet
+        roster={asking}
+        busy={asking !== null && busyRoster === asking.rosterId}
+        error={askError}
+        onEnroll={() => asking && void enroll(asking)}
+        onDismiss={() => setAsking(null)}
+      />
     </SettingsPage>
   );
 }
-
-const styles = StyleSheet.create({
-  option: {
-    alignItems: 'center',
-    flexDirection: 'row',
-    gap: Spacing.three,
-  },
-  copy: {
-    flex: 1,
-    gap: Spacing.one,
-  },
-});

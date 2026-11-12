@@ -6,7 +6,7 @@ import { CryptidThemes } from '@/constants/theme';
 import { DELIVERY_MODE_COPY } from '@/features/social/core/delivery-mode';
 import { useMapColorScheme } from '@/features/map/hooks/use-map-color-scheme';
 import { useLocationSharing } from '@/features/social/hooks/use-location-sharing';
-import { repeatersSummary } from '@/features/repeaters/core/repeaters';
+import { offeredCount, repeatersSummary } from '@/features/repeaters/core/repeaters';
 import { useRepeaters } from '@/features/repeaters/hooks/use-repeaters';
 
 import { getAppProvenance } from '../core/app-provenance';
@@ -100,6 +100,8 @@ export default function SettingsScreen() {
             href={'/settings/repeaters' as Href}
             label="Repeaters"
             value={repeatersSummary(repeaters.sections)}
+            badge={offeredCount(repeaters.sections)}
+            badgeColor={chrome.green}
           />
         )}
       </SettingsSection>
