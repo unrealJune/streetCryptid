@@ -1262,10 +1262,12 @@ impl LocationNode {
         Ok(())
     }
 
-    /// Bring our rosters up to date from their repeaters, then ask every repeater that carries us
-    /// to carry our trail and our profile (span `repeater.grant`). Like the stash grant: spawned,
-    /// best-effort, and run on every start, because a repeater asked while it slept was never
-    /// asked. A phone in no roster dials nothing.
+    /// Offer our repeaters every roster op they have not acknowledged, bring our rosters up to
+    /// date from them, then ask every repeater that carries us to carry our trail and our profile
+    /// (span `repeater.grant`). Like the stash grant: spawned, best-effort, and run on every
+    /// start, because a repeater asked while it slept was never asked. A phone that has signed
+    /// nothing in any roster dials nothing: a roster only seen on a friend's card is not ours to
+    /// contact (REPEATERS.md §11, G1 and G7).
     async fn grant_repeaters(&self, reason: &'static str) {
         use tracing::Instrument;
         let Some(live) = self.live_opt().await else {
@@ -1274,11 +1276,11 @@ impl LocationNode {
         let Ok(book) = self.roster_book().await else {
             return;
         };
-        let rosters = book.states().len();
+        let me = self.roster_key().verifying_key().to_bytes();
+        let rosters = book.involved(&me).len();
         if rosters == 0 {
             return;
         }
-        let me = self.roster_key().verifying_key().to_bytes();
         let mut namespaces = Vec::new();
         let trail = (
             live.trail.read_ticket(live.trail.own_namespace()).await,
@@ -1300,6 +1302,7 @@ impl LocationNode {
             reason,
             rosters,
             namespaces = namespaces.len(),
+            delivered = tracing::field::Empty,
             refreshed = tracing::field::Empty,
             granted = tracing::field::Empty,
             failed = tracing::field::Empty,
@@ -1309,12 +1312,17 @@ impl LocationNode {
         let key = self.roster_key();
         tokio::spawn(
             async move {
-                let refreshed = repeater::refresh(&endpoint, &book).await;
+                // Publish before fetching: what we owe a repeater (an `Enroll` it never heard,
+                // a `Withdraw`, an owner's `Remove`) is what decides its answer to the fetch and
+                // to the grants below.
+                let delivered = repeater::deliver(&endpoint, &me, &book).await;
+                let refreshed = repeater::refresh(&endpoint, &me, &book).await;
                 // After the refresh, so the card says what the repeaters say: a roster that has
                 // removed us drops off it.
                 publish_repeater_card(&profile, &key, &book).await;
                 let report = repeater::grant(&endpoint, &me, &book, &namespaces).await;
                 let current = tracing::Span::current();
+                current.record("delivered", delivered);
                 current.record("refreshed", refreshed);
                 current.record("granted", report.granted);
                 current.record("failed", report.failed);

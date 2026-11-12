@@ -146,7 +146,7 @@ export function RosterCard({
                     warning={warning}
                     busy={busy}
                     removeLabel={`Remove ${member.label}`}
-                    confirmCopy="Stop carrying their trail? Only a new invite lets them back."
+                    confirmCopy="Stop carrying their trail? They won't be able to rejoin this roster."
                     onRemove={() => owner.onRemoveMember(member.id)}
                   />
                 ))}

@@ -42,6 +42,12 @@ use streetcryptid_repeater::wire::{
 /// The roster book's file in `state_dir`.
 pub const BOOK_FILE: &str = "repeaters.bin";
 const BOOK_V: u32 = 1;
+/// Which of our rosters each repeater has acknowledged, beside the book (REPEATERS.md §4.4).
+/// A separate file, not a field of [`BookState`]: postcard cannot read an appended field from an
+/// older file, and this one may be lost without harm — losing it only means offering every
+/// roster once more.
+pub const DELIVERED_FILE: &str = "repeaters-delivered.bin";
+const DELIVERED_V: u32 = 1;
 
 /// How long one request may take, dial included. Nothing a user waits on is bounded by this
 /// except a claim, which they started at a repeater's console and are watching.
@@ -87,11 +93,35 @@ struct BookState {
 pub struct RosterBook {
     path: PathBuf,
     rosters: Mutex<BTreeMap<RosterId, Roster>>,
+    delivered_path: PathBuf,
+    /// For each (roster, repeater), our heads when that repeater last answered a `Publish` of
+    /// it. A roster whose heads have moved since is owed to that repeater ([`deliver`]).
+    delivered: Mutex<BTreeMap<(RosterId, EndpointId), Vec<OpId>>>,
+}
+
+#[derive(Default, Serialize, Deserialize)]
+struct DeliveredState {
+    v: u32,
+    entries: Vec<(RosterId, EndpointId, Vec<OpId>)>,
 }
 
 impl RosterBook {
     pub fn open(dir: &Path) -> anyhow::Result<Self> {
         std::fs::create_dir_all(dir)?;
+        let delivered_path = dir.join(DELIVERED_FILE);
+        // Unreadable means "offer everything again", which is always safe.
+        let delivered: BTreeMap<(RosterId, EndpointId), Vec<OpId>> = std::fs::read(&delivered_path)
+            .ok()
+            .and_then(|raw| postcard::from_bytes::<DeliveredState>(&raw).ok())
+            .filter(|state| state.v == DELIVERED_V)
+            .map(|state| {
+                state
+                    .entries
+                    .into_iter()
+                    .map(|(roster, repeater, heads)| ((roster, repeater), heads))
+                    .collect()
+            })
+            .unwrap_or_default();
         let path = dir.join(BOOK_FILE);
         let mut rosters = BTreeMap::new();
         match std::fs::read(&path) {
@@ -117,7 +147,93 @@ impl RosterBook {
         Ok(Self {
             path,
             rosters: Mutex::new(rosters),
+            delivered_path,
+            delivered: Mutex::new(delivered),
         })
+    }
+
+    /// The rosters this phone has signed an op in: the one it owns, and every one it enrolled
+    /// in or withdrew from. These are the rosters it has something to say to — a `Withdraw` is
+    /// owed as much as an `Enroll` — and the only ones it dials (§11, G7). A roster merely seen
+    /// on a friend's card is not one of them.
+    pub fn involved(&self, me: &EndpointId) -> Vec<RosterId> {
+        self.lock()
+            .values()
+            .filter(|roster| roster.export().iter().any(|op| op.signer == *me))
+            .map(Roster::id)
+            .collect()
+    }
+
+    /// Every repeater `roster` has ever listed, removed ones included: a machine the owner took
+    /// out must still hear that it was, or it carries on (§11, G2).
+    fn ever_listed(roster: &Roster) -> BTreeSet<EndpointId> {
+        roster
+            .export()
+            .iter()
+            .filter_map(|op| match op.verify().ok()?.action {
+                Action::AddRepeater { cert } => cert.verify().ok().map(|body| body.repeater),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// What is owed: each (roster, repeater) among the rosters `me` is involved in where that
+    /// repeater has not acknowledged our current heads.
+    pub fn undelivered(&self, me: &EndpointId) -> Vec<(RosterId, EndpointId)> {
+        let rosters = self.lock();
+        let delivered = self.delivered.lock().unwrap_or_else(|p| p.into_inner());
+        let mut owed = Vec::new();
+        for roster in rosters.values() {
+            if !roster.export().iter().any(|op| op.signer == *me) {
+                continue;
+            }
+            let heads = roster.heads();
+            for repeater in Self::ever_listed(roster) {
+                if delivered.get(&(roster.id(), repeater)) != Some(&heads) {
+                    owed.push((roster.id(), repeater));
+                }
+            }
+        }
+        owed
+    }
+
+    /// Record that `repeater` took our copy of `roster` as it stood at `heads`.
+    pub fn mark_delivered(
+        &self,
+        roster: &RosterId,
+        repeater: &EndpointId,
+        heads: Vec<OpId>,
+    ) -> anyhow::Result<()> {
+        use std::io::Write;
+        let mut delivered = self.delivered.lock().unwrap_or_else(|p| p.into_inner());
+        if delivered.get(&(*roster, *repeater)) == Some(&heads) {
+            return Ok(());
+        }
+        delivered.insert((*roster, *repeater), heads);
+        let state = DeliveredState {
+            v: DELIVERED_V,
+            entries: delivered
+                .iter()
+                .map(|((roster, repeater), heads)| (*roster, *repeater, heads.clone()))
+                .collect(),
+        };
+        let bytes = postcard::to_allocvec(&state)?;
+        let tmp = self.delivered_path.with_extension("tmp");
+        {
+            let mut file = std::fs::File::create(&tmp)?;
+            file.write_all(&bytes)?;
+            file.sync_all()?;
+        }
+        std::fs::rename(&tmp, &self.delivered_path)?;
+        Ok(())
+    }
+
+    /// Our heads for `roster` and its ops, read together so a delivery is recorded against
+    /// exactly what was sent.
+    fn snapshot(&self, roster: &RosterId) -> Option<(Vec<OpId>, Vec<SignedOp>)> {
+        self.lock()
+            .get(roster)
+            .map(|held| (held.heads(), held.export()))
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, BTreeMap<RosterId, Roster>> {
@@ -699,7 +815,7 @@ pub fn sign_owner_change(
 
 /// [`sign_owner_change`], then hand the roster to every repeater it names. A removal takes effect
 /// on each repeater the moment the op reaches it (the daemon releases a removed member's grants
-/// then); one asleep hears it from a sibling, or from us on the next grant pass.
+/// then); one asleep hears it from a sibling, or from us on a later grant pass ([`deliver`]).
 pub async fn change_roster(
     endpoint: &Endpoint,
     key: &SigningKey,
@@ -712,8 +828,9 @@ pub async fn change_roster(
     Ok(publish_to(endpoint, book, roster, &targets).await)
 }
 
-/// Hand our whole copy of `roster` to each of its repeaters. Best-effort: a repeater that is
-/// asleep catches up from its siblings, or from us next time.
+/// Hand our whole copy of `roster` to each of its repeaters. A repeater that is asleep catches
+/// up from its siblings, or from us on a later grant pass: a delivery is recorded only when the
+/// repeater answers, and [`deliver`] offers whatever is still owed.
 pub async fn publish_everywhere(
     endpoint: &Endpoint,
     book: &RosterBook,
@@ -732,17 +849,31 @@ async fn publish_to(
     roster: &RosterId,
     targets: &BTreeSet<EndpointId>,
 ) -> usize {
-    let Some(ops) = book.export(roster) else {
+    let Some((heads, ops)) = book.snapshot(roster) else {
         return 0;
     };
+    let request = Request::Publish { ops };
+    // In parallel: each call is bounded by `CALL_TIMEOUT`, and a sleeping laptop must not hold
+    // up the others (one dial at a time cost up to 20 s each).
+    let answers = n0_future::join_all(targets.iter().map(|repeater| {
+        let request = &request;
+        async move {
+            let addr = endpoint_addr(repeater).ok()?;
+            Some((*repeater, call(endpoint, addr, request).await))
+        }
+    }))
+    .await;
     let mut reached = 0;
-    for repeater in targets {
-        let Ok(addr) = endpoint_addr(repeater) else {
-            continue;
-        };
-        let request = Request::Publish { ops: ops.clone() };
-        match call(endpoint, addr, &request).await {
-            Ok(Response::Published { .. }) => reached += 1,
+    for (repeater, answer) in answers.into_iter().flatten() {
+        match answer {
+            // `Published` means the repeater judged every op we sent; one it refused would be
+            // refused again, so it is delivered either way.
+            Ok(Response::Published { .. }) => {
+                reached += 1;
+                if let Err(e) = book.mark_delivered(roster, &repeater, heads.clone()) {
+                    tracing::warn!(error = %e, "repeater: could not record a delivery");
+                }
+            }
             Ok(other) => tracing::warn!(response = ?other, "repeater: publish refused"),
             Err(e) => tracing::debug!(error = %e, "repeater: publish failed"),
         }
@@ -750,11 +881,35 @@ async fn publish_to(
     reached
 }
 
-/// Bring every roster we hold up to date from its repeaters. Only owners, carried members and
-/// siblings may fetch, so a roster we merely saw stays as we saw it.
-pub async fn refresh(endpoint: &Endpoint, book: &RosterBook) -> usize {
+/// Offer every roster op this phone still owes a repeater (REPEATERS.md §4.4): for each roster
+/// it has signed an op in, each repeater that roster has ever listed and that has not answered a
+/// `Publish` of our current copy. Runs at the start of every grant pass, before the refresh, so
+/// an `Enroll`, `Withdraw` or `Remove` made while a repeater slept reaches it the next time both
+/// are up — not only when this phone happens to change the same roster again. Returns how many
+/// repeaters took one.
+pub async fn deliver(endpoint: &Endpoint, me: &EndpointId, book: &RosterBook) -> usize {
+    let mut by_roster: BTreeMap<RosterId, BTreeSet<EndpointId>> = BTreeMap::new();
+    for (roster, repeater) in book.undelivered(me) {
+        by_roster.entry(roster).or_default().insert(repeater);
+    }
+    let mut reached = 0;
+    for (roster, targets) in by_roster {
+        reached += publish_to(endpoint, book, &roster, &targets).await;
+    }
+    reached
+}
+
+/// Bring the rosters we take part in up to date from their repeaters: the one we own and the ones
+/// that carry us, the only ones a repeater lets us `Fetch`. A roster we merely saw on a card, or
+/// withdrew from, is not dialled at all (§11, G7): it would be refused, and the dial alone tells
+/// that roster's machines our endpoint id and address before we opted into anything.
+pub async fn refresh(endpoint: &Endpoint, me: &EndpointId, book: &RosterBook) -> usize {
     let mut fetched = 0;
-    for state in book.states() {
+    let states = book
+        .states()
+        .into_iter()
+        .filter(|state| state.owner == *me || state.carried.contains(me));
+    for state in states {
         for repeater in state.repeaters.keys() {
             let Ok(addr) = endpoint_addr(repeater) else {
                 continue;
@@ -881,6 +1036,62 @@ mod tests {
 
         std::fs::write(dir.join(BOOK_FILE), b"torn").unwrap();
         assert!(RosterBook::open(&dir).is_err());
+    }
+
+    #[test]
+    fn an_op_is_owed_to_every_listed_repeater_until_it_answers() {
+        let dir = scratch("owed");
+        let book = RosterBook::open(&dir).unwrap();
+        // Mine (owner 1, repeaters 10 and 11), and a friend's I only saw (owner 5, repeater 12).
+        let mine = roster_with(&book, 1, &[10, 11], &[1]);
+        let seen = roster_with(&book, 5, &[12], &[5]);
+        assert_eq!(book.involved(&id(1)), vec![mine]);
+        let owed: BTreeSet<_> = book.undelivered(&id(1)).into_iter().collect();
+        assert_eq!(owed, BTreeSet::from([(mine, id(10)), (mine, id(11))]));
+        assert!(!owed.iter().any(|(roster, _)| *roster == seen));
+
+        // Repeater 10 answered; 11 was asleep. Only 11 is still owed, across a reopen.
+        let (heads, _) = book.snapshot(&mine).unwrap();
+        book.mark_delivered(&mine, &id(10), heads).unwrap();
+        drop(book);
+        let book = RosterBook::open(&dir).unwrap();
+        assert_eq!(book.undelivered(&id(1)), vec![(mine, id(11))]);
+
+        // A new op makes it owed to both again — and to a machine just removed, which must hear
+        // that it was.
+        book.sign(
+            &mine,
+            &key(1),
+            Action::RemoveRepeater { repeater: id(11) },
+            5,
+        )
+        .unwrap();
+        let owed: BTreeSet<_> = book.undelivered(&id(1)).into_iter().collect();
+        assert_eq!(owed, BTreeSet::from([(mine, id(10)), (mine, id(11))]));
+
+        // A lost or torn delivery record only means offering everything again.
+        std::fs::write(dir.join(DELIVERED_FILE), b"torn").unwrap();
+        drop(book);
+        let book = RosterBook::open(&dir).unwrap();
+        assert_eq!(book.undelivered(&id(1)).len(), 2);
+    }
+
+    #[test]
+    fn a_member_who_withdrew_still_owes_the_withdrawal() {
+        let book = RosterBook::open(&scratch("owed-withdraw")).unwrap();
+        let roster = roster_with(&book, 5, &[12], &[2]);
+        for repeater in [12] {
+            let (heads, _) = book.snapshot(&roster).unwrap();
+            book.mark_delivered(&roster, &id(repeater), heads).unwrap();
+        }
+        assert!(book.undelivered(&id(2)).is_empty());
+        book.sign(&roster, &key(2), Action::Withdraw, 6).unwrap();
+        assert!(!book.state(&roster).unwrap().carried.contains(&id(2)));
+        assert_eq!(book.involved(&id(2)), vec![roster]);
+        assert_eq!(book.undelivered(&id(2)), vec![(roster, id(12))]);
+        // Someone who never signed anything in it owes nothing and dials nothing.
+        assert!(book.involved(&id(3)).is_empty());
+        assert!(book.undelivered(&id(3)).is_empty());
     }
 
     #[test]

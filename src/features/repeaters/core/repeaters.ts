@@ -204,7 +204,7 @@ export function repeaterErrorCopy(error: unknown): string {
       /BadClaimSecret/,
       'That code has expired or was already used. Use the newest one the repeater printed.',
     ],
-    [/removed, and not invited again/, 'The owner removed you. Only a new invite lets you back.'],
+    [/removed, and not invited again/, "The owner removed you, so you can't rejoin this roster."],
     [/this roster is invite-only/, 'This roster is invite-only, and nobody has invited you to it.'],
     [/only the roster's owner/, 'Only the owner can change this roster.'],
     [/AlreadyClaimed/, 'Someone has already claimed this repeater.'],
