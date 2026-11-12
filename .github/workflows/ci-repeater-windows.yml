@@ -1,8 +1,17 @@
 name: CI / repeater windows
 
 # The Windows repeater (repeater/windows): the WinUI app, the native-AOT service and the Rust host,
-# built, tested and packaged for x64 and ARM64 on matching Windows runners, in parallel (~18 minutes with a warm Rust cache; 90 is the timeout). Called by
+# built, tested and packaged for x64 and ARM64 on matching Windows runners, in parallel (~18
+# minutes each with a warm Rust cache before the speedups below; 90 is the timeout). Called by
 # `ci.yml` as its Windows lane, and by `release-repeater-windows.yml` with the version to stamp.
+#
+# Three Windows-specific speedups, each a toggle (default on) so a run of the lane from the Actions
+# tab can measure it against the others:
+#   dev-drive           the checkout, and with it the Cargo target directory, on a trusted ReFS Dev
+#                       Drive (samypr100/setup-dev-drive), where Defender runs in performance mode
+#   defender-exclusion  no real-time scanning of the workspaces, the toolchains, NuGet and temp
+#   rust-lld            link Rust with rust-lld (lld-link) instead of link.exe; the MSVC developer
+#                       environment supplies the Windows SDK library paths link.exe finds itself
 
 on:
   workflow_call:
@@ -11,11 +20,37 @@ on:
         type: string
         required: false
         default: ''
+      dev-drive:
+        type: boolean
+        required: false
+        default: true
+      defender-exclusion:
+        type: boolean
+        required: false
+        default: true
+      rust-lld:
+        type: boolean
+        required: false
+        default: true
     secrets:
       # signtool parameters (`vpk pack --signParams`), e.g. Azure Trusted Signing's dlib and
       # metadata. Only a release passes it; every other build stays an unsigned preview.
       sign-params:
         required: false
+  workflow_dispatch:
+    inputs:
+      dev-drive:
+        description: Build on a trusted ReFS Dev Drive
+        type: boolean
+        default: true
+      defender-exclusion:
+        description: Exclude the build from Defender real-time scanning
+        type: boolean
+        default: true
+      rust-lld:
+        description: Link Rust with rust-lld instead of link.exe
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -31,8 +66,10 @@ jobs:
         include:
           - arch: x64
             runner: windows-2025-vs2026
+            triple: X86_64_PC_WINDOWS_MSVC
           - arch: arm64
             runner: windows-11-vs2026-arm
+            triple: AARCH64_PC_WINDOWS_MSVC
     defaults:
       run:
         shell: pwsh
@@ -49,6 +86,47 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      # Before anything writes to disk, so every file this job creates is spared the scan.
+      - name: Exclude the build from Defender real-time scanning
+        if: inputs.defender-exclusion
+        run: |
+          $paths = @(
+            $env:GITHUB_WORKSPACE, $env:RUNNER_TEMP, $env:RUNNER_TOOL_CACHE,
+            (Join-Path $env:USERPROFILE '.cargo'), (Join-Path $env:USERPROFILE '.rustup'),
+            (Join-Path $env:USERPROFILE '.nuget'), (Join-Path $env:USERPROFILE '.dotnet')
+          )
+          try {
+            Add-MpPreference -ExclusionPath $paths -ExclusionProcess 'cargo.exe', 'rustc.exe', 'link.exe', 'rust-lld.exe', 'dotnet.exe', 'ilc.exe'
+            "Excluded: $($paths -join ', ')"
+          } catch {
+            "Defender is not running on this image; nothing to exclude. ($_)"
+          }
+
+      # The checkout is copied onto the drive; every later step works in that copy.
+      - name: Create a Dev Drive
+        if: inputs.dev-drive
+        uses: samypr100/setup-dev-drive@562171fe8df7401fdf582d766cd3b6ab80d5b1a0 # v4.1.0
+        with:
+          # Dynamic: grows with use, up to this; the target directory is most of it.
+          drive-size: 20GB
+          drive-type: Dynamic
+          workspace-copy: true
+          trusted-dev-drive: true
+
+      - name: Choose the build directory
+        env:
+          DEV_DRIVE_ON: ${{ inputs.dev-drive }}
+          DEFENDER_EXCLUSION: ${{ inputs.defender-exclusion }}
+        run: |
+          $dir = if ($env:DEV_DRIVE_ON -eq 'true') { $env:DEV_DRIVE_WORKSPACE } else { $env:GITHUB_WORKSPACE }
+          if (!$dir) { throw 'No build directory: the Dev Drive did not export DEV_DRIVE_WORKSPACE.' }
+          if ($env:DEV_DRIVE_ON -eq 'true' -and $env:DEFENDER_EXCLUSION -eq 'true') {
+            Add-MpPreference -ExclusionPath $env:DEV_DRIVE -ErrorAction SilentlyContinue
+          }
+          "REPO_DIR=$dir" >> $env:GITHUB_ENV
+          "Building in $dir"
+
       # NuGet packages (and the vpk tool) restore from cache, keyed on the locked-mode lockfiles
       # every project restores against, so a hit is exactly the packages a cold restore would get.
       - uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
@@ -58,23 +136,42 @@ jobs:
           cache-dependency-path: |
             repeater/windows/**/packages.lock.json
             repeater/windows/.config/dotnet-tools.json
+
       # rust-toolchain.toml selects the version; this installs it with rustfmt.
       - name: Install pinned Rust toolchain
         run: rustup toolchain install 1.97.0 --profile minimal --component rustfmt
+
+      # lld-link does not search for the Windows SDK and MSVC libraries the way link.exe does; the
+      # developer environment puts them on LIB for every later step.
+      - name: Load the MSVC developer environment
+        if: inputs.rust-lld
+        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
+        with:
+          arch: ${{ matrix.arch == 'arm64' && 'arm64' || 'x64' }}
+
+      - name: Link Rust with rust-lld
+        if: inputs.rust-lld
+        run: |
+          "CARGO_TARGET_${{ matrix.triple }}_LINKER=rust-lld" >> $env:GITHUB_ENV
+
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
-          workspaces: . -> target
+          workspaces: ${{ env.REPO_DIR }} -> target
           key: repeater-windows-${{ matrix.arch }}
           save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+
       - name: Test, publish and package matching native binaries
+        working-directory: ${{ env.REPO_DIR }}
         run: |
           .\repeater\windows\scripts\build.ps1 -Architecture '${{ matrix.arch }}' `
             -Test -Package -Version $env:REPEATER_VERSION
       # The runner is disposable and elevated: install the real service, talk to it, remove it.
       - name: Install, exercise and remove the Windows service
+        working-directory: ${{ env.REPO_DIR }}
         run: .\repeater\windows\scripts\test-service.ps1 -AppDirectory '.\repeater\windows\artifacts\win-${{ matrix.arch }}\app'
       # Everything the host is built from, for the AGPL source offer that travels with a release.
       - name: Record source provenance
+        working-directory: ${{ env.REPO_DIR }}
         run: |
           $path = '.\repeater\windows\artifacts\win-${{ matrix.arch }}\releases'
           git archive --format=zip --output="$path\repeater-source-${{ matrix.arch }}.zip" HEAD `
@@ -84,6 +181,6 @@ jobs:
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: repeater-win-${{ matrix.arch }}
-          path: repeater/windows/artifacts/win-${{ matrix.arch }}/releases/
+          path: ${{ env.REPO_DIR }}/repeater/windows/artifacts/win-${{ matrix.arch }}/releases/
           if-no-files-found: error
           retention-days: 14
