@@ -3,7 +3,8 @@
 # node_modules, every target/ or the app.
 #
 # Cargo loads every workspace member's manifest -- and the phone's path dependencies -- even for
-# `-p trail-stash`, so the phone crates come along whole. They are a few MB of source and are
+# `-p trail-stash`, so the phone crates and the Windows host come along whole. They are a few MB
+# of source and are
 # never compiled here.
 *
 !Cargo.toml
@@ -14,4 +15,6 @@
 !repeater/server/src/
 !modules/iroh-location/rust/
 !modules/iroh-location/rust-wasm/
+!repeater/windows/host/Cargo.toml
+!repeater/windows/host/src/
 **/target/

@@ -1,7 +1,7 @@
 name: CI / repeater windows
 
 # The Windows repeater (repeater/windows): the WinUI app, the native-AOT service and the Rust host,
-# built, tested and packaged for x64 and ARM64 on matching Windows runners (~90 minutes). Called by
+# built, tested and packaged for x64 and ARM64 on matching Windows runners, in parallel (~18 minutes with a warm Rust cache; 90 is the timeout). Called by
 # `ci.yml` as its Windows lane, and by `release-repeater-windows.yml` with the version to stamp.
 
 on:
