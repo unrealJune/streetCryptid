@@ -832,11 +832,13 @@ needs plaintext, so it must be in the wrap set. What the protocol already implie
     the op, and its sender offers it again;
   - each signer other than the owner may have at most `MAX_OPS_PER_SIGNER` = 128 accepted ops;
   - of the `MAX_OPS` = 4096 lifetime ops, the last `OWNER_RESERVE` = 512 are the owner's alone.
+
   So the owner can always close the roster and remove people. What remains: in an `open` roster,
   throwaway keys can each `Enroll` until the non-owner share is spent, which stops new
   enrollments for good, since the log is never compacted (§10). A close that had not seen those
   enrollments ends them, but does not free their slots. Replicas that see ops in different
   orders can disagree at the cap, as they could before.
+
 - **A repeater that left, or was removed, was still a reader** (§2.2). It keeps the read
   capability for every namespace it ever carried.
 - **A compromised inviter** can invite anyone, but cannot make anyone enroll. The owner revokes the
