@@ -995,8 +995,9 @@ async fn a_repeater_its_owner_removed_releases_itself_and_waits_for_a_new_claim(
         ),
         carriers: vec![],
     };
+    // Unclaimed now, so it refuses as a machine that belongs to nobody, not as one carrying others.
     let refused_grant = call(&phone.endpoint, node.endpoint_addr(), &grant).await?;
-    assert_eq!(refused(&refused_grant), Some(&Refusal::NotCarried));
+    assert_eq!(refused(&refused_grant), Some(&Refusal::NotClaimed));
 
     // Listing it again is not enough: it is unclaimed, so a re-add is refused as `NotClaimed`
     // (which the owner's phone counts as delivered for a machine it removed). A new claim, with
