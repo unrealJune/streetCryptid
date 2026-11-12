@@ -423,8 +423,9 @@ impl StashNode {
             node.shutdown().await;
             return Err(e);
         }
-        // A roster that moved on while this node was down is applied once at start.
-        if let Some(state) = node.repeater.as_ref().and_then(|r| r.roster_state()) {
+        // A roster that moved on while this node was down is applied once at start, including a
+        // removal of this machine, which releases everything it carried.
+        if let Some(state) = node.repeater.as_ref().and_then(|r| r.carrying_state()) {
             node.enforce_roster(&state).await;
         }
         Ok(node)
@@ -721,8 +722,9 @@ impl StashNode {
     }
 
     /// Stop carrying a namespace: forget the grant, leave the doc so the live engine stops
-    /// syncing it, and drop its content from the ledger. What is on disk is not deleted here; it
-    /// is unreachable to the ledger and goes when disk GC lands (REPEATERS.md, phase 3).
+    /// syncing it, and drop its content from the ledger. A repeater (`Storage::MemoryRepeater`)
+    /// holds ciphertext in memory only, so what it already held stays there, unserved, until the
+    /// in-memory GC reclaims it or the process restarts (REPEATERS.md §1, §2.2).
     #[tracing::instrument(
         name = "repeater.release",
         skip_all,

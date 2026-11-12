@@ -76,9 +76,26 @@ const CERT_CTX: &[u8] = b"streetcryptid/repeater/cert/v1";
 /// Domain separation for op ids.
 const OP_ID_CTX: &str = "streetcryptid repeater roster op id v1";
 
-/// The most ops one roster holds, pending included. A roster is a handful of people and a few
-/// machines; this bounds what a hostile member of an open roster can make every repeater store.
+/// The most accepted ops one roster holds. A roster is a handful of people and a few machines;
+/// this bounds what a hostile member of an open roster can make every repeater store.
+///
+/// The last [`OWNER_RESERVE`] of them are the owner's alone, so a roster that strangers have
+/// filled can still be closed and cleaned by the one person entitled to: a flood of valid
+/// `Enroll`s from throwaway keys in an `open` roster stops further enrolments, never the owner's
+/// `SetPolicy` or `Remove`. Ops held aside for a missing parent are bounded separately
+/// ([`MAX_PENDING`]) and never count here, because they cost their sender nothing to mint.
 pub const MAX_OPS: usize = 4096;
+/// The share of [`MAX_OPS`] only the owner's ops may use.
+pub const OWNER_RESERVE: usize = 512;
+/// The most accepted ops any one signer other than the owner may have in a roster. A member
+/// enrols, withdraws and enrols again a handful of times in a lifetime; an inviter invites
+/// people. Without it one key could spend the whole non-owner share by itself.
+pub const MAX_OPS_PER_SIGNER: usize = 128;
+/// The most ops held aside for a missing parent, per class (the owner's, and everyone else's).
+/// Pending ops are in memory only and are dropped on a restart; a full queue refuses a new one,
+/// which its sender offers again later. The owner's class cannot be filled by anyone else,
+/// because only the owner's key signs an op the owner's queue will hold.
+pub const MAX_PENDING: usize = 256;
 /// The largest signed op body accepted.
 pub const MAX_OP_BYTES: usize = 1024;
 /// The most parents one op may name.
@@ -343,6 +360,8 @@ pub struct Roster {
     nodes: Vec<Node>,
     index: HashMap<OpId, usize>,
     pending: HashMap<OpId, (SignedOp, OpBody)>,
+    /// Accepted ops per signer, for [`MAX_OPS_PER_SIGNER`].
+    per_signer: HashMap<EndpointId, usize>,
 }
 
 impl Roster {
@@ -376,6 +395,7 @@ impl Roster {
             }],
             index,
             pending: HashMap::new(),
+            per_signer: HashMap::new(),
         })
     }
 
@@ -439,9 +459,8 @@ impl Roster {
         if self.index.contains_key(&id) || self.pending.contains_key(&id) {
             return Ok(Inserted::Known);
         }
-        if self.nodes.len() + self.pending.len() >= MAX_OPS {
-            return Err(RosterError::Full);
-        }
+        // The signature first: nothing unsigned may count toward any limit, or anyone could
+        // spend them with garbage.
         let body = op.verify()?;
         if body.roster != Some(self.id) {
             return Err(RosterError::WrongRoster);
@@ -457,6 +476,15 @@ impl Roster {
             return Err(RosterError::BadParents("duplicate parent"));
         }
         if body.parents.iter().any(|p| !self.index.contains_key(p)) {
+            let owners = op.signer == self.owner;
+            let held = self
+                .pending
+                .values()
+                .filter(|(held, _)| (held.signer == self.owner) == owners)
+                .count();
+            if held >= MAX_PENDING {
+                return Err(RosterError::Full);
+            }
             self.pending.insert(id, (op, body));
             return Ok(Inserted::Pending);
         }
@@ -465,7 +493,20 @@ impl Roster {
         Ok(Inserted::Accepted)
     }
 
+    /// Whether one more op by `signer` fits: [`MAX_OPS`] for the owner, the non-reserved share
+    /// and [`MAX_OPS_PER_SIGNER`] for everyone else.
+    fn has_room_for(&self, signer: &EndpointId) -> bool {
+        if *signer == self.owner {
+            return self.nodes.len() < MAX_OPS;
+        }
+        self.nodes.len() < MAX_OPS - OWNER_RESERVE
+            && self.per_signer.get(signer).copied().unwrap_or(0) < MAX_OPS_PER_SIGNER
+    }
+
     fn accept(&mut self, op: SignedOp, body: OpBody) -> Result<(), RosterError> {
+        if !self.has_room_for(&op.signer) {
+            return Err(RosterError::Full);
+        }
         let mut ancestors = Bits::default();
         for parent in &body.parents {
             let i = self.index[parent];
@@ -479,6 +520,7 @@ impl Roster {
         }
         let id = op.id();
         self.index.insert(id, self.nodes.len());
+        *self.per_signer.entry(op.signer).or_insert(0) += 1;
         self.nodes.push(Node {
             op,
             body,
@@ -807,6 +849,19 @@ impl Roster {
             inviters,
             repeaters,
         }
+    }
+
+    /// Whether `repeater` was listed by the owner and is no longer: an `AddRepeater` for it is in
+    /// the log and the derived state does not list it. A machine that was claimed but whose
+    /// `AddRepeater` has not arrived yet is *not* removed — that is the ordinary window between
+    /// `Claim` and the owner publishing the cert — so this, not "absent from the state", is what
+    /// a repeater stops serving on.
+    pub fn is_removed_repeater(&self, repeater: &EndpointId) -> bool {
+        let ever_added = self.nodes.iter().any(|node| {
+            matches!(&node.body.action, Action::AddRepeater { cert }
+                if cert.verify().is_ok_and(|body| body.repeater == *repeater))
+        });
+        ever_added && !self.state().repeaters.contains_key(repeater)
     }
 }
 
@@ -1428,6 +1483,151 @@ mod tests {
         f.roster.insert(readd).unwrap();
         f.roster.insert(remove).unwrap();
         assert!(f.roster.state().repeaters.is_empty());
+    }
+
+    #[test]
+    fn a_repeater_is_removed_only_once_it_was_listed() {
+        let mut f = Fixture::new(Policy::Open);
+        // Claimed, cert not yet published: absent from the state, and not removed.
+        assert!(!f.roster.is_removed_repeater(&member(REPEATER)));
+        let cert = f.cert(REPEATER, f.roster.id(), member(OWNER));
+        f.act(OWNER, Action::AddRepeater { cert }).unwrap();
+        assert!(!f.roster.is_removed_repeater(&member(REPEATER)));
+        f.act(
+            OWNER,
+            Action::RemoveRepeater {
+                repeater: member(REPEATER),
+            },
+        )
+        .unwrap();
+        assert!(f.roster.is_removed_repeater(&member(REPEATER)));
+        // A sibling that was never listed is not "removed" either.
+        assert!(!f.roster.is_removed_repeater(&member(10)));
+    }
+
+    // ---- limits ------------------------------------------------------------------------------
+
+    /// A throwaway key, distinct for each `n`.
+    fn stranger(n: u32) -> SigningKey {
+        let mut seed = [0xEE; 32];
+        seed[..4].copy_from_slice(&n.to_le_bytes());
+        SigningKey::from_bytes(&seed)
+    }
+
+    #[test]
+    fn unsigned_junk_never_counts_toward_a_limit() {
+        let mut f = Fixture::new(Policy::Open);
+        for n in 0..(MAX_PENDING as u32 + 10) {
+            let mut op = f.op_on(ALICE, vec![[n as u8; 32]], Action::Withdraw);
+            op.sig[0] ^= 1;
+            assert_eq!(f.roster.insert(op), Err(RosterError::BadSignature));
+        }
+        assert_eq!(f.roster.pending_len(), 0);
+        f.act(ALICE, Action::Enroll { invite: None }).unwrap();
+    }
+
+    #[test]
+    fn a_flood_of_orphans_cannot_block_the_owner_or_an_accepted_op() {
+        let mut f = Fixture::new(Policy::Open);
+        // Valid signatures on parents nobody has: they cost the sender nothing.
+        let mut n = 0u32;
+        loop {
+            let key = stranger(n);
+            let body = OpBody {
+                roster: Some(f.roster.id()),
+                parents: vec![blake3::hash(&n.to_le_bytes()).into()],
+                ts_ms: 2,
+                action: Action::Enroll { invite: None },
+            };
+            n += 1;
+            match f.roster.insert(SignedOp::sign(&key, &body)) {
+                Ok(Inserted::Pending) => {}
+                Err(RosterError::Full) => break,
+                other => panic!("unexpected {other:?}"),
+            }
+        }
+        assert_eq!(f.roster.pending_len(), MAX_PENDING);
+        // An op with its parents present is not held, so the queue being full does not touch it.
+        f.act(ALICE, Action::Enroll { invite: None }).unwrap();
+        // The owner's own held-aside ops have their own queue.
+        let early = f.op_on(
+            OWNER,
+            f.roster.heads(),
+            Action::SetPolicy {
+                policy: Policy::Invite,
+            },
+        );
+        let late = f.op_on(
+            OWNER,
+            vec![early.id()],
+            Action::Remove {
+                member: member(ALICE),
+            },
+        );
+        assert_eq!(f.roster.insert(late), Ok(Inserted::Pending));
+        assert_eq!(f.roster.insert(early), Ok(Inserted::Accepted));
+        assert!(!f.carried(ALICE));
+    }
+
+    #[test]
+    fn one_signer_cannot_spend_the_roster_alone() {
+        let mut f = Fixture::new(Policy::Open);
+        let mut accepted = 0;
+        loop {
+            let action = if accepted % 2 == 0 {
+                Action::Enroll { invite: None }
+            } else {
+                Action::Withdraw
+            };
+            match f.act(ALICE, action) {
+                Ok(_) => accepted += 1,
+                Err(RosterError::Full) => break,
+                Err(e) => panic!("unexpected {e:?}"),
+            }
+        }
+        assert_eq!(accepted, MAX_OPS_PER_SIGNER);
+        // Someone else still gets in.
+        f.act(BOB, Action::Enroll { invite: None }).unwrap();
+    }
+
+    #[test]
+    fn a_roster_full_of_strangers_still_takes_the_owners_ops() {
+        let mut f = Fixture::new(Policy::Open);
+        let mut n = 0u32;
+        loop {
+            let body = OpBody {
+                roster: Some(f.roster.id()),
+                parents: vec![f.roster.id()],
+                ts_ms: 2,
+                action: Action::Enroll { invite: None },
+            };
+            match f.roster.insert(SignedOp::sign(&stranger(n), &body)) {
+                Ok(Inserted::Accepted) => n += 1,
+                Err(RosterError::Full) => break,
+                other => panic!("unexpected {other:?}"),
+            }
+        }
+        assert_eq!(f.roster.len(), MAX_OPS - OWNER_RESERVE);
+        // Thousands of heads now; name the genesis alone so MAX_PARENTS is not what refuses.
+        let genesis = f.roster.id();
+        let late = f.op_on(ALICE, vec![genesis], Action::Enroll { invite: None });
+        assert_eq!(f.roster.insert(late), Err(RosterError::Full));
+        // The owner closes the roster and removes someone: both fit in the reserve.
+        let close = f.op_on(
+            OWNER,
+            vec![genesis],
+            Action::SetPolicy {
+                policy: Policy::Invite,
+            },
+        );
+        let close_id = close.id();
+        assert_eq!(f.roster.insert(close), Ok(Inserted::Accepted));
+        let first = id_of(&stranger(0));
+        let remove = f.op_on(OWNER, vec![close_id], Action::Remove { member: first });
+        assert_eq!(f.roster.insert(remove), Ok(Inserted::Accepted));
+        assert!(!f.roster.is_carried(&first));
+        // A close that had not seen the flood ends every uninvited enrolment in it (§3.3).
+        assert!(!f.roster.is_carried(&id_of(&stranger(1))));
     }
 
     // ---- replication -------------------------------------------------------------------------

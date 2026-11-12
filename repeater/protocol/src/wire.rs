@@ -6,13 +6,13 @@
 //! The caller's identity is the iroh endpoint that dialled (authenticated by the QUIC handshake),
 //! never a field in the request: every rule that asks "who is this?" reads the connection.
 //!
-//! | request   | who may                                     | does                                       |
-//! | --------- | ------------------------------------------- | ------------------------------------------ |
-//! | `Claim`   | whoever holds the console's one-time secret | binds the repeater to a roster and owner   |
-//! | `Publish` | anyone; each op stands on its signature     | adds roster ops                            |
-//! | `Fetch`   | the owner, carried members, sibling repeaters | returns the roster                       |
-//! | `Grant`   | a carried member who owns the namespace     | starts carrying one of their namespaces    |
-//! | `Have`    | anyone (reading is open)                    | says which content hashes are held         |
+//! | request   | who may                                                 | does                                     |
+//! | --------- | ------------------------------------------------------- | ---------------------------------------- |
+//! | `Claim`   | whoever holds the console's one-time secret             | binds the repeater to a roster and owner |
+//! | `Publish` | anyone; each op stands on its signature                 | adds roster ops                          |
+//! | `Fetch`   | the owner, carried members, inviters, sibling repeaters | returns the roster                       |
+//! | `Grant`   | a carried member who owns the namespace                 | starts carrying one of their namespaces  |
+//! | `Have`    | anyone (reading is open)                                | says which content hashes are held       |
 
 use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use serde::{Deserialize, Serialize};

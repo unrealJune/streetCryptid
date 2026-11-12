@@ -128,6 +128,25 @@ impl Repeater {
             .map(Roster::state)
     }
 
+    /// Whether the owner listed this machine and has since removed it
+    /// ([`Roster::is_removed_repeater`]). A removed repeater stops carrying: it releases every
+    /// namespace, refuses `Grant` and reconciles with nobody. It keeps its roster, still takes
+    /// `Publish`, and answers `Fetch`, so an owner who re-adds it (an `AddRepeater` made after
+    /// the removal) brings it straight back.
+    pub fn is_removed(&self) -> bool {
+        self.roster
+            .lock()
+            .expect("roster poisoned")
+            .as_ref()
+            .is_some_and(|roster| roster.is_removed_repeater(&self.id))
+    }
+
+    /// The state this machine enforces: the roster's, with nobody carried once it is removed.
+    pub fn carrying_state(&self) -> Option<RosterState> {
+        let guard = self.roster.lock().expect("roster poisoned");
+        guard.as_ref().map(|roster| carrying(roster, &self.id))
+    }
+
     /// Every op held, for a sibling or a test.
     pub fn roster_ops(&self) -> Vec<SignedOp> {
         self.roster
@@ -189,7 +208,7 @@ impl Repeater {
             }
             if (next.len(), next.pending_len()) != before {
                 self.persist(&next)?;
-                let state = next.state();
+                let state = carrying(&next, &self.id);
                 *guard = Some(next);
                 ((accepted, pending, refused), Some(state))
             } else {
@@ -329,7 +348,8 @@ impl Repeater {
         }
         let carried = match self.roster.lock().expect("roster poisoned").as_ref() {
             None => return refused(Refusal::NotClaimed),
-            Some(roster) => roster.is_carried(&remote),
+            // A machine its owner removed carries nobody (`is_removed`).
+            Some(roster) => !roster.is_removed_repeater(&self.id) && roster.is_carried(&remote),
         };
         if !carried {
             return refused(Refusal::NotCarried);
@@ -361,8 +381,12 @@ impl Repeater {
         }
     }
 
-    /// The other repeaters the roster lists.
+    /// The other repeaters the roster lists. None once this one is removed: it carries nothing,
+    /// so there is nothing to reconcile, and its old siblings would refuse its `Fetch` anyway.
     pub fn siblings(&self) -> Vec<EndpointId> {
+        if self.is_removed() {
+            return Vec::new();
+        }
         self.roster_state()
             .map(|state| {
                 state
@@ -424,7 +448,7 @@ pub async fn run_sibling_loop(node: Arc<StashNode>, extra: Vec<EndpointAddr>, in
                 }
             }
         }
-        if peers.is_empty() {
+        if peers.is_empty() || repeater.is_removed() {
             continue;
         }
         for peer in &peers {
@@ -435,6 +459,15 @@ pub async fn run_sibling_loop(node: Arc<StashNode>, extra: Vec<EndpointAddr>, in
         node.sync_peers(&peers).await;
         node.sync_carriers().await;
     }
+}
+
+/// `roster`'s state as `me` enforces it: nobody carried once the owner has removed `me`.
+fn carrying(roster: &Roster, me: &EndpointId) -> RosterState {
+    let mut state = roster.state();
+    if roster.is_removed_repeater(me) {
+        state.carried.clear();
+    }
+    state
 }
 
 // ---- wire ---------------------------------------------------------------------------------------

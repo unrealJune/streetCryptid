@@ -942,6 +942,77 @@ async fn only_a_carried_member_can_have_their_own_namespace_carried() -> Result<
 }
 
 #[tokio::test]
+async fn a_repeater_its_owner_removed_stops_carrying_and_a_re_add_brings_it_back() -> Result<()> {
+    let node = spawn_repeater(&scratch("removed"), 121).await?;
+    let (owner, mut roster) = claim(&node, 122, None, Policy::Open).await?;
+    let repeater = node.repeater().expect("persistent").clone();
+    let repeater_id = *node.endpoint_addr().id.as_bytes();
+    let phone = Phone::spawn(123, b"sealed-envelope-on-a-removed-repeater").await?;
+    enrol_and_grant(&node, &mut roster, &phone, 123, vec![]).await?;
+    let namespace = ticket_namespace(&phone.ticket)?;
+    assert!(node.handle(namespace).await.is_some());
+    assert!(!repeater.is_removed());
+
+    // The owner removes the machine. The member is still carried by the roster, but not here.
+    let cert_op = roster
+        .export()
+        .into_iter()
+        .find(|op| {
+            matches!(
+                op.verify().map(|b| b.action),
+                Ok(Action::AddRepeater { .. })
+            )
+        })
+        .expect("listed");
+    let Ok(Action::AddRepeater { cert }) = cert_op.verify().map(|b| b.action) else {
+        unreachable!()
+    };
+    let remove = sign_onto(
+        &mut roster,
+        122,
+        Action::RemoveRepeater {
+            repeater: repeater_id,
+        },
+    );
+    call(
+        &owner,
+        node.endpoint_addr(),
+        &Request::Publish { ops: vec![remove] },
+    )
+    .await?;
+    assert!(repeater.is_removed());
+    assert!(node.handle(namespace).await.is_none(), "still carried");
+    assert!(repeater.siblings().is_empty());
+    let grant = Request::Grant {
+        ticket: phone.ticket.clone(),
+        proof: sign_grant(
+            &phone.ns_secret,
+            &repeater_id,
+            phone.endpoint.id().as_bytes(),
+        ),
+        carriers: vec![],
+    };
+    let refused_grant = call(&phone.endpoint, node.endpoint_addr(), &grant).await?;
+    assert_eq!(refused(&refused_grant), Some(&Refusal::NotCarried));
+
+    // The owner lists it again (an AddRepeater that has seen the removal): it carries again.
+    let readd = sign_onto(&mut roster, 122, Action::AddRepeater { cert });
+    call(
+        &owner,
+        node.endpoint_addr(),
+        &Request::Publish { ops: vec![readd] },
+    )
+    .await?;
+    assert!(!repeater.is_removed());
+    let granted = call(&phone.endpoint, node.endpoint_addr(), &grant).await?;
+    assert!(matches!(granted, Response::Granted { .. }), "{granted:?}");
+
+    phone.vanish().await;
+    node.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test]
 async fn sibling_repeaters_share_the_roster() -> Result<()> {
     let first = spawn_repeater(&scratch("roster-a"), 101).await?;
     let second = spawn_repeater(&scratch("roster-b"), 102).await?;
