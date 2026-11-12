@@ -3684,6 +3684,7 @@ impl LocationNode {
             .collect();
         let dialed = peers.len();
         let dialed_ids: Vec<[u8; 32]> = peers.iter().map(|addr| *addr.id.as_bytes()).collect();
+        let dialed_endpoints: Vec<EndpointId> = peers.iter().map(|addr| addr.id).collect();
         let span = tracing::info_span!(
             "trail.sync",
             sc.author = %telemetry::short_hex(&self.author),
@@ -3702,6 +3703,11 @@ impl LocationNode {
             sync.ns_idle = tracing::field::Empty,
             sync.ns_no_answer = tracing::field::Empty,
             sync.ns_deadline = tracing::field::Empty,
+            // Friend slots whose newest entry had no local bytes, and how many this pass fetched
+            // (`docs::TrailDocs::settle_stranded`). Anything left stranded is a friend whose dot is
+            // frozen on this phone however healthy the sync looks.
+            sync.stranded = tracing::field::Empty,
+            sync.stranded_fetched = tracing::field::Empty,
         );
         if let Some(budget) = budget {
             span.record("sync.budget_ms", budget.as_millis() as u64);
@@ -3734,6 +3740,21 @@ impl LocationNode {
             current.record("sync.ns_idle", pass.ends.idle);
             current.record("sync.ns_no_answer", pass.ends.no_answer);
             current.record("sync.ns_deadline", pass.ends.deadline);
+
+            // The reconciliation brings records; the bytes behind a friend's record can still be
+            // missing, and nothing else will ever fetch them. Inside the same deadline.
+            match trail
+                .settle_stranded(&started.endpoint, &dialed_endpoints, deadline)
+                .await
+            {
+                Ok(settled) => {
+                    current.record("sync.stranded", settled.stranded);
+                    current.record("sync.stranded_fetched", settled.fetched);
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "trail sync: could not settle stranded friend slots");
+                }
+            }
 
             // Peers that delivered something. The `peer.contact` for each is NOT recorded here:
             // every entry a pull brings in also reaches the replica watch, which records one

@@ -615,7 +615,22 @@ clamped to what `backgroundTimeRemaining` leaves after a 5 s margin) and is reco
 `NativeBackgroundRuntime` records the same span, without the allowance). The network side of the
 same pass is its `trail.sync`, which now carries `sync.budget_ms`, `sync.entries` and how each
 namespace's wait ended (`sync.ns_content_ready` / `_idle` / `_no_answer` / `_deadline` /
-`_closed`).
+`_closed`), plus `sync.stranded` / `sync.stranded_fetched`: friend slots whose newest record had
+no local bytes when the reconciliation finished, and how many of those the pass then fetched
+(`TrailDocs::settle_stranded`).
+
+**`sync.stranded` that stays above zero is a friend whose dot is frozen on this phone**, however
+healthy the rest of the pass looks. A record and its bytes travel separately. The docs engine
+tries the download once, against whichever peer handed the record over, and never retries. When
+the bytes later reach that peer out-of-band (the stash's HTTP upload) no `ContentReady` follows.
+The replica read skips a slot with no bytes without a span, so before 2026-11-12 this state was
+invisible: one iPhone missed a friend for 31 h while the Pixel beside it read every envelope. Each
+fetch logs `fetched a stranded friend slot's bytes` (or `… still without bytes`) with `sc.author`,
+`sc.entry_hash` and `age_ms`, so a stuck author can be followed across pulls:
+
+```
+{ name = "trail.sync" && span.sync.stranded > 0 } | select(resource.service.instance.id, span.sync.stranded, span.sync.stranded_fetched)
+```
 
 | `pull.outcome` | Means                                                                                                                                    |
 | -------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
@@ -819,9 +834,10 @@ restarted session` / `asked the leader to restart our session` (`sc_restart` lab
    woken. Follow
    `trail.sync` / `friend.pull` (`sync.entries`) → a `peer.contact{dir=recv}` from the serving
    peer → `trail.sync.app` (`recovered`) → `fix.received.app`. An entry that landed but never
-   surfaced is either unopenable (`ratcheted envelope not opened` in Loki) or from an author B no
-   longer counts as a friend, which the replica read skips without a span. A gap of up to a pull
-   interval between steps 5 and 6 is normal.
+   surfaced is unopenable (`ratcheted envelope not opened` in Loki), from an author B no longer
+   counts as a friend (the replica read skips it without a span), or **stranded**: the record is
+   in B's replica but its bytes are not, which B's next `trail.sync` reports as `sync.stranded`
+   and tries to fetch. A gap of up to a pull interval between steps 5 and 6 is normal.
 
 ## Which build is this phone running?
 

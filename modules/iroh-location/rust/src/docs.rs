@@ -263,6 +263,94 @@ pub fn encode_rsy_key(author: &[u8]) -> Vec<u8> {
     key
 }
 
+/// Decode a key produced by [`encode_rsy_key`] back into the author bytes.
+///
+/// Only [`TrailDocs::stranded_slots`] needs it: a control record whose bytes never landed is a
+/// restart request (or prekey) the leader cannot read, which strands recovery exactly as a missing
+/// fix strands a dot.
+fn decode_rsy_key(key: &[u8]) -> Option<Vec<u8>> {
+    let pos = key.iter().position(|&b| b == KEY_SEP)?;
+    if &key[..pos] != RSY_TAG.as_bytes() {
+        return None;
+    }
+    let author_hex = std::str::from_utf8(&key[pos + 1..]).ok()?;
+    hex_decode(author_hex)
+}
+
+/// The envelope author a friend-lane slot key names (`fix`, `nul` or `rsy`), or `None` for any
+/// other key. The three lanes whose bytes a reader needs; see [`TrailDocs::stranded_slots`].
+fn decode_lane_author(key: &[u8]) -> Option<[u8; 32]> {
+    let author = decode_key(key)
+        .or_else(|| decode_nul_key(key))
+        .or_else(|| decode_rsy_key(key))?;
+    <[u8; 32]>::try_from(author.as_slice()).ok()
+}
+
+/// How long one attempt to fetch a stranded slot's bytes may take when the caller sets no tighter
+/// deadline. The stash's own settle loop uses the same figure (`FETCH_TIMEOUT_SECS`).
+#[cfg(not(target_arch = "wasm32"))]
+const STRANDED_FETCH_TIMEOUT_SECS: u64 = 20;
+
+/// A friend's slot whose newest entry is in the replica while the bytes it names are not.
+///
+/// The state a reader is left in when it reconciles an entry from a peer that does not hold the
+/// content yet — in practice the stash, which receives the record by reconciliation and the bytes
+/// moments later (the writer's HTTP upload, or its own settle loop). iroh-docs gives the reader's
+/// downloader one attempt, against the peer that delivered the record, and then waits for a gossip
+/// `ContentReady` that content landing on the stash out-of-band never produces. Until 2026-11-12
+/// nothing else asked again, and [`TrailDocs::read_latest_sealed`] skips such a slot without a
+/// word, so the friend simply stopped updating: see [`TrailDocs::settle_stranded`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StrandedSlot {
+    pub namespace: [u8; 32],
+    /// The envelope author the slot key names — an `EndpointId`, so also a place to ask.
+    pub author: [u8; 32],
+    pub hash: Hash,
+    /// The entry's record timestamp (iroh-docs microseconds), for the age on the telemetry.
+    pub written_us: u64,
+}
+
+/// What one [`TrailDocs::settle_stranded`] pass found and fixed.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SettleReport {
+    /// Friend slots whose newest entry had no local bytes when the pass began.
+    pub stranded: usize,
+    /// Of those, the ones whose bytes this pass fetched.
+    pub fetched: usize,
+    /// Authors that became readable, each once — what the replica observer was told.
+    pub readable: Vec<[u8; 32]>,
+}
+
+/// Who to ask for one stranded slot's bytes, most likely first, each once, never ourselves.
+///
+/// The pass's dialled peers come first because the stash is among them and it is the one peer
+/// that holds every friend's bytes and is always up. The author is next (the key is its
+/// `EndpointId`, so no address book is needed), then whoever last served that author's entry to
+/// us. Asking only the author would strand exactly the friend whose phone is asleep — the case
+/// the stash exists for. Pure, so the order and the self-exclusion are testable.
+#[cfg(not(target_arch = "wasm32"))]
+fn stranded_sources(
+    dialled: &[iroh::EndpointId],
+    author: [u8; 32],
+    served_by: Option<[u8; 32]>,
+    own: iroh::EndpointId,
+) -> Vec<iroh::EndpointId> {
+    let mut out: Vec<iroh::EndpointId> = Vec::new();
+    let candidates = dialled.iter().copied().chain(
+        [Some(author), served_by]
+            .into_iter()
+            .flatten()
+            .filter_map(|bytes| iroh::EndpointId::from_bytes(&bytes).ok()),
+    );
+    for id in candidates {
+        if id != own && !out.contains(&id) {
+            out.push(id);
+        }
+    }
+    out
+}
+
 /// Explicit-pruning selection: given `(key, entry_ts)` pairs, return the keys whose entry is
 /// **strictly older** than `older_than_ts` and should be pruned.
 pub fn keys_to_prune(entries: &[(Vec<u8>, u64)], older_than_ts: u64) -> Vec<Vec<u8>> {
@@ -990,11 +1078,180 @@ impl TrailDocs {
                 }
                 match self.blobs.blobs().get_bytes(entry.content_hash()).await {
                     Ok(bytes) => out.push(bytes.to_vec()),
-                    Err(_) => continue, // content not yet available locally
+                    // Content not local. Not counted here — this runs on every read, and a read
+                    // never dials — but it is not left to chance either: every pull settles
+                    // these (`settle_stranded`) and reports them on `trail.sync`.
+                    Err(_) => continue,
                 }
             }
         }
         Ok(out)
+    }
+
+    /// Every friend slot (`fix`, `nul`, `rsy`) whose newest entry is here without its bytes.
+    ///
+    /// Friend namespaces only: we write our own, so its bytes are always local. Presence is asked
+    /// of the blob store directly (`has`), which reads no content.
+    pub async fn stranded_slots(&self) -> Result<Vec<StrandedSlot>> {
+        let mut out = Vec::new();
+        for ns in self.namespaces().await {
+            if ns == self.own_ns {
+                continue;
+            }
+            let doc = self.doc_for(ns).await?;
+            let stream = doc.get_many(Query::single_latest_per_key().build()).await?;
+            tokio::pin!(stream);
+            while let Some(entry) = stream.next().await {
+                let entry = entry?;
+                if entry.content_len() == 0 {
+                    continue; // a tombstone names no bytes
+                }
+                let Some(author) = decode_lane_author(entry.key()) else {
+                    continue;
+                };
+                if self.blobs.blobs().has(entry.content_hash()).await? {
+                    continue;
+                }
+                out.push(StrandedSlot {
+                    namespace: ns.to_bytes(),
+                    author,
+                    hash: entry.content_hash(),
+                    written_us: entry.timestamp(),
+                });
+            }
+        }
+        Ok(out)
+    }
+
+    /// Fetch the bytes of every [stranded](StrandedSlot) friend slot, and announce the authors
+    /// that became readable.
+    ///
+    /// The reader-side twin of the stash's settle loop (`repeater/server` `settle_once`), for the
+    /// same reason: the docs engine's downloader gets one attempt, against whichever peer handed
+    /// the record over, and never retries. On 2026-11-10 an iPhone that kept every friend
+    /// namespace live received a friend's entries from the stash in the moment between the record
+    /// arriving there and its bytes being uploaded. The attempt failed, and the bytes then landed
+    /// on the stash by HTTP, which emits no `ContentReady`. Every later entry raced the same way,
+    /// so for 31 hours that friend's dot froze on one phone while another opened all of it, and
+    /// nothing anywhere recorded a failure: `read_latest_sealed` skips a slot with no bytes, and
+    /// a skipped slot is never offered to the ratchet, so not even a miss was counted.
+    ///
+    /// Sources per slot: `sources` (the peers this pass dialled — the stash among them), the
+    /// slot's author (its `EndpointId` is the key), and whoever last served that author to us.
+    /// Each fetch is bounded by `deadline` when there is one and by
+    /// [`STRANDED_FETCH_TIMEOUT_SECS`] regardless; a slot still stranded is simply tried again on
+    /// the next pull. Failures are expected (a sleeping author, a stash that has not received the
+    /// bytes either) and are reported, not raised.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn settle_stranded(
+        &self,
+        endpoint: &iroh::Endpoint,
+        sources: &[iroh::EndpointId],
+        deadline: Option<Instant>,
+    ) -> Result<SettleReport> {
+        let stranded = self.stranded_slots().await?;
+        let mut report = SettleReport {
+            stranded: stranded.len(),
+            ..SettleReport::default()
+        };
+        if stranded.is_empty() {
+            return Ok(report);
+        }
+        let wait = {
+            let cap = Duration::from_secs(STRANDED_FETCH_TIMEOUT_SECS);
+            match deadline {
+                Some(deadline) => deadline.saturating_duration_since(Instant::now()).min(cap),
+                None => cap,
+            }
+        };
+        let now_us = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_micros() as u64)
+            .unwrap_or(0);
+        if wait.is_zero() {
+            for slot in &stranded {
+                tracing::debug!(
+                    sc.author = %crate::telemetry::short_hex(&slot.author),
+                    sc.entry_hash = %crate::telemetry::short_hex(slot.hash.as_bytes()),
+                    age_ms = now_us.saturating_sub(slot.written_us) / 1000,
+                    "stranded friend slot left for the next pull: no time left in this one"
+                );
+            }
+            return Ok(report);
+        }
+
+        let mut served_by: HashMap<[u8; 32], [u8; 32]> = HashMap::new();
+        {
+            let peers = self.serving_peers.lock().await;
+            for slot in &stranded {
+                if let Some(peer) = peers.get(&slot.author) {
+                    served_by.insert(slot.author, peer.peer);
+                }
+            }
+        }
+        let own = endpoint.id();
+        let downloader = self.blobs.downloader(endpoint);
+        let attempts = stranded.iter().map(|slot| {
+            let providers = stranded_sources(
+                sources,
+                slot.author,
+                served_by.get(&slot.author).copied(),
+                own,
+            );
+            let downloader = downloader.clone();
+            async move {
+                if providers.is_empty() {
+                    return (slot, Err(anyhow!("no peer to ask")));
+                }
+                let fetch = timeout(
+                    wait,
+                    downloader.download(iroh_blobs::HashAndFormat::raw(slot.hash), providers),
+                )
+                .await;
+                let outcome = match fetch {
+                    Ok(Ok(())) => Ok(()),
+                    Ok(Err(error)) => Err(anyhow!("{error}")),
+                    Err(_) => Err(anyhow!("timed out after {} ms", wait.as_millis())),
+                };
+                (slot, outcome)
+            }
+        });
+        for (slot, outcome) in join_all(attempts).await {
+            match outcome {
+                Ok(()) if self.blobs.blobs().has(slot.hash).await.unwrap_or(false) => {
+                    report.fetched += 1;
+                    if !report.readable.contains(&slot.author) {
+                        report.readable.push(slot.author);
+                    }
+                    tracing::info!(
+                        sc.author = %crate::telemetry::short_hex(&slot.author),
+                        sc.entry_hash = %crate::telemetry::short_hex(slot.hash.as_bytes()),
+                        age_ms = now_us.saturating_sub(slot.written_us) / 1000,
+                        "fetched a stranded friend slot's bytes"
+                    );
+                }
+                Ok(()) => {
+                    tracing::debug!(
+                        sc.author = %crate::telemetry::short_hex(&slot.author),
+                        sc.entry_hash = %crate::telemetry::short_hex(slot.hash.as_bytes()),
+                        "stranded slot: download reported done but the bytes are not complete"
+                    );
+                }
+                Err(error) => {
+                    tracing::debug!(
+                        sc.author = %crate::telemetry::short_hex(&slot.author),
+                        sc.entry_hash = %crate::telemetry::short_hex(slot.hash.as_bytes()),
+                        age_ms = now_us.saturating_sub(slot.written_us) / 1000,
+                        %error,
+                        "stranded friend slot still without bytes; will retry next pull"
+                    );
+                }
+            }
+        }
+        if let (Some(observer), false) = (&self.observer, report.readable.is_empty()) {
+            observer.readable(report.readable.clone());
+        }
+        Ok(report)
     }
 
     /// Write a sealed **resync record** to `ns` under `rsy/hex(author)` (FORWARD-SECRECY §4.6).
@@ -2679,6 +2936,196 @@ pub(crate) mod tests {
         for dir in [a_dir, b_dir] {
             let _ = std::fs::remove_dir_all(&dir);
         }
+    }
+
+    /// The 2026-11-10 incident, end to end. A reader reconciles a friend's record from a peer
+    /// that does not hold the bytes yet — the stash, between the record reaching it and the
+    /// writer's upload — so the docs engine's single download attempt fails. The bytes then land
+    /// on that peer out-of-band (the stash's HTTP `PUT` imports straight into its blob store),
+    /// which sends no `ContentReady`. Nothing in iroh-docs asks again, so before `settle_stranded`
+    /// the reader never read that friend's slot. Two nodes reproduce it exactly: the author plays
+    /// the stash, writing a record whose bytes it does not have and adding them afterwards.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_slot_reconciled_before_its_bytes_is_fetched_once_they_land() {
+        let a_dir = scratch_dir("stranded-author");
+        let r_dir = scratch_dir("stranded-reader");
+        let author_node = live_replica(&a_dir, None, None).await;
+        let seen = Arc::new(Seen::default());
+        let reader = live_replica(&r_dir, None, Some(seen.clone())).await;
+        let ns = author_node.td.own_namespace();
+
+        // The record, without its bytes: what the stash holds before an upload lands.
+        let sealed = b"sealed: the fix that raced its own upload".to_vec();
+        let hash = Hash::new(&sealed);
+        let doc = author_node.td.doc_for(ns).await.unwrap();
+        doc.set_hash(
+            author_node.td.author,
+            encode_key(&MAYA),
+            hash,
+            sealed.len() as u64,
+        )
+        .await
+        .unwrap();
+
+        let ticket = author_node.td.read_ticket(ns).await.unwrap();
+        reader.td.import_ticket(&ticket).await.unwrap();
+        for _ in 0..600 {
+            if !reader.td.stranded_slots().await.unwrap().is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        let stranded = reader.td.stranded_slots().await.unwrap();
+        assert_eq!(stranded.len(), 1, "the record arrives without its bytes");
+        assert_eq!(stranded[0].author, MAYA);
+        assert_eq!(stranded[0].hash, hash);
+
+        // The bytes land on the serving peer out-of-band, as the stash's HTTP upload does.
+        author_node
+            .td
+            .blobs
+            .add_bytes(sealed.clone())
+            .await
+            .expect("add the uploaded bytes");
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        assert!(
+            reader.td.read_latest_sealed().await.unwrap().is_empty(),
+            "nothing in iroh-docs retries the download: this is the stranded state"
+        );
+        assert_eq!(seen.times_readable(MAYA), 0, "and the app was never told");
+
+        // A pull's settle step asks the peers it dialled.
+        let report = reader
+            .td
+            .settle_stranded(&reader.endpoint, &[author_node.endpoint.id()], None)
+            .await
+            .unwrap();
+        assert_eq!(report.stranded, 1);
+        assert_eq!(report.fetched, 1);
+        assert_eq!(report.readable, vec![MAYA]);
+        assert_eq!(
+            reader.td.read_latest_sealed().await.unwrap(),
+            vec![sealed],
+            "the friend's slot reads again"
+        );
+        assert_eq!(seen.times_readable(MAYA), 1, "the app is told once");
+        assert!(reader.td.stranded_slots().await.unwrap().is_empty());
+
+        // Nothing stranded is a cheap no-op, and says so.
+        let again = reader
+            .td
+            .settle_stranded(&reader.endpoint, &[author_node.endpoint.id()], None)
+            .await
+            .unwrap();
+        assert_eq!(again, SettleReport::default());
+        assert_eq!(seen.times_readable(MAYA), 1);
+
+        for dir in [a_dir, r_dir] {
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    /// A slot whose bytes nobody has yet stays stranded and is reported, not raised — and a pass
+    /// that has no time left does not dial at all.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_slot_nobody_can_serve_stays_stranded_without_failing_the_pass() {
+        let a_dir = scratch_dir("unservable-author");
+        let r_dir = scratch_dir("unservable-reader");
+        let author_node = live_replica(&a_dir, None, None).await;
+        let reader = live_replica(&r_dir, None, None).await;
+        let ns = author_node.td.own_namespace();
+        let sealed = b"sealed: bytes nobody holds".to_vec();
+        let doc = author_node.td.doc_for(ns).await.unwrap();
+        doc.set_hash(
+            author_node.td.author,
+            encode_nul_key(&JUNE),
+            Hash::new(&sealed),
+            sealed.len() as u64,
+        )
+        .await
+        .unwrap();
+        reader
+            .td
+            .import_ticket(&author_node.td.read_ticket(ns).await.unwrap())
+            .await
+            .unwrap();
+        for _ in 0..600 {
+            if !reader.td.stranded_slots().await.unwrap().is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let report = reader
+            .td
+            .settle_stranded(
+                &reader.endpoint,
+                &[author_node.endpoint.id()],
+                Some(deadline),
+            )
+            .await
+            .unwrap();
+        assert_eq!(report.stranded, 1, "the null lane counts too");
+        assert_eq!(report.fetched, 0);
+        assert!(report.readable.is_empty());
+
+        let spent = reader
+            .td
+            .settle_stranded(
+                &reader.endpoint,
+                &[author_node.endpoint.id()],
+                Some(Instant::now()),
+            )
+            .await
+            .unwrap();
+        assert_eq!((spent.stranded, spent.fetched), (1, 0));
+
+        for dir in [a_dir, r_dir] {
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    #[test]
+    fn stranded_sources_ask_the_dialled_peers_first_then_the_author_never_ourselves() {
+        let stash = SecretKey::generate().public();
+        let own = SecretKey::generate().public();
+        let author = SecretKey::generate().public();
+        let relay = SecretKey::generate().public();
+
+        assert_eq!(
+            stranded_sources(
+                &[stash, own],
+                *author.as_bytes(),
+                Some(*relay.as_bytes()),
+                own
+            ),
+            vec![stash, author, relay],
+        );
+        // The stash that served the record is also a dialled peer: asked once.
+        assert_eq!(
+            stranded_sources(&[stash], *author.as_bytes(), Some(*stash.as_bytes()), own),
+            vec![stash, author],
+        );
+        // An author key that is not a valid endpoint id is simply not a source.
+        let mut not_a_point = [0u8; 32];
+        for candidate in 0u8..=255 {
+            not_a_point = [candidate; 32];
+            if iroh::EndpointId::from_bytes(&not_a_point).is_err() {
+                break;
+            }
+        }
+        assert_eq!(stranded_sources(&[], not_a_point, None, own), Vec::new());
+    }
+
+    #[test]
+    fn every_friend_lane_names_its_author_and_nothing_else_does() {
+        assert_eq!(decode_lane_author(&encode_key(&MAYA)), Some(MAYA));
+        assert_eq!(decode_lane_author(&encode_nul_key(&MAYA)), Some(MAYA));
+        assert_eq!(decode_lane_author(&encode_rsy_key(&MAYA)), Some(MAYA));
+        assert_eq!(decode_lane_author(b"ctl/0202"), None);
+        assert_eq!(decode_lane_author(b"rsy/not-hex"), None);
+        assert_eq!(decode_lane_author(b"no-separator"), None);
     }
 
     /// `leave` alone already stops the namespace syncing; the watch is aborted as well so an entry
