@@ -157,6 +157,43 @@ impl Settings {
     }
 }
 
+const NAME_FILE: &str = "repeater-name.txt";
+
+/// The name the person at this machine gave it (REPEATERS.md §4.1), read at start. A missing or
+/// unusable file is "no name": a name is a label, never a reason to refuse to start.
+pub fn read_name(dir: &Path) -> Option<String> {
+    std::fs::read_to_string(dir.join(NAME_FILE))
+        .ok()
+        .and_then(|text| streetcryptid_repeater::roster::repeater_name(&text))
+}
+
+/// Save a name (or clear it with `None` / an empty one), returning what was kept. Refuses one
+/// [`repeater_name`](streetcryptid_repeater::roster::repeater_name) would not carry, so the app
+/// can say so instead of saving something the phone will never show.
+pub fn write_name(dir: &Path, name: Option<&str>) -> Result<Option<String>> {
+    let path = dir.join(NAME_FILE);
+    let wanted = name.map(str::trim).filter(|n| !n.is_empty());
+    let Some(wanted) = wanted else {
+        match std::fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
+        }
+        return Ok(None);
+    };
+    let Some(name) = streetcryptid_repeater::roster::repeater_name(wanted) else {
+        bail!("Not a usable name");
+    };
+    let tmp = path.with_extension("txt.tmp");
+    {
+        let mut file = File::create(&tmp)?;
+        file.write_all(name.as_bytes())?;
+        file.sync_all()?;
+    }
+    std::fs::rename(&tmp, &path)?;
+    Ok(Some(name))
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Snapshot {
@@ -164,6 +201,11 @@ pub struct Snapshot {
     pub version: &'static str,
     pub mode: &'static str,
     pub endpoint_id: String,
+    /// What this machine is called here, signed into the next cert it issues.
+    pub name: Option<String>,
+    /// The name in the cert its roster holds: what phones show now. Differs from `name` until
+    /// the owner's phone picks up a rename.
+    pub listed_name: Option<String>,
     pub claimed: bool,
     pub claim_url: Option<String>,
     pub owner: Option<String>,
@@ -203,6 +245,8 @@ pub fn snapshot(node: &StashNode, host: HostInfo) -> Snapshot {
         version: host.version,
         mode: host.mode,
         endpoint_id: hex(&repeater.id()),
+        name: repeater.name(),
+        listed_name: repeater.listed_name(),
         claimed: state.is_some(),
         claim_url,
         owner: state.as_ref().map(|s| hex(&s.owner)),
@@ -257,6 +301,23 @@ mod tests {
         std::fs::write(dir.path().join("roster.bin"), b"existing").unwrap();
         assert!(identity(dir.path()).is_err());
         assert!(!dir.path().join("secret.key").exists());
+    }
+
+    #[test]
+    fn a_name_is_kept_tidied_cleared_and_never_a_reason_to_fail() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(read_name(dir.path()), None);
+        assert_eq!(
+            write_name(dir.path(), Some("  Living   room PC ")).unwrap(),
+            Some("Living room PC".into())
+        );
+        assert_eq!(read_name(dir.path()), Some("Living room PC".into()));
+        assert!(write_name(dir.path(), Some(&"x".repeat(41))).is_err());
+        assert_eq!(read_name(dir.path()), Some("Living room PC".into()));
+        assert_eq!(write_name(dir.path(), Some("")).unwrap(), None);
+        assert_eq!(read_name(dir.path()), None);
+        std::fs::write(dir.path().join(NAME_FILE), b"bell\x07").unwrap();
+        assert_eq!(read_name(dir.path()), None);
     }
 
     #[test]

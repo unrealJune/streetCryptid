@@ -104,6 +104,34 @@ public class HostProtocolTests
         Assert.Throws<ArgumentException>(() => HostProtocol.ReleaseCommand(""));
     }
 
+    [Fact]
+    public void OnlyWellFormedNameCommandsPassTheService()
+    {
+        string name = HostProtocol.NameCommand("abc", "Living room PC");
+        Assert.Contains("\"kind\":\"name\"", name);
+        Assert.True(HostProtocol.IsHostCommand(name));
+        Assert.True(HostProtocol.IsHostCommand(HostProtocol.NameCommand("abc", "")));
+        Assert.False(HostProtocol.IsSettingsCommand(name));
+        // A name on any other command, a missing name, or a name that is not a string.
+        Assert.False(HostProtocol.IsHostCommand(
+            "{\"protocol\":2,\"kind\":\"release\",\"requestId\":\"a\",\"name\":\"x\"}"));
+        Assert.False(HostProtocol.IsHostCommand("{\"protocol\":2,\"kind\":\"name\",\"requestId\":\"a\"}"));
+        Assert.False(HostProtocol.IsHostCommand(
+            "{\"protocol\":2,\"kind\":\"name\",\"requestId\":\"a\",\"name\":7}"));
+        Assert.Throws<ArgumentException>(() => HostProtocol.NameCommand("abc", new string('x', 201)));
+    }
+
+    [Fact]
+    public void SnapshotsCarryTheNameAndWhatPhonesShow()
+    {
+        var message = HostProtocol.Parse(
+            "{\"protocol\":2,\"kind\":\"snapshot\",\"runId\":\"r\",\"snapshot\":{\"endpointId\":\"ab\"," +
+            "\"claimed\":true,\"members\":[],\"tracked\":0,\"missing\":0,\"received\":0," +
+            "\"name\":\"Attic PC\",\"listedName\":\"Old name\"}}");
+        Assert.Equal("Attic PC", message.Snapshot!.Name);
+        Assert.Equal("Old name", message.Snapshot.ListedName);
+    }
+
     [Theory]
     [InlineData("{\"protocol\":3,\"kind\":\"arrival\",\"runId\":\"test\",\"sequence\":1}")]
     [InlineData("{\"protocol\":2,\"kind\":\"arrival\",\"runId\":\"\"}")]

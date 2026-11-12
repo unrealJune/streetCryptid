@@ -12,7 +12,7 @@ const ROSTER: RosterView = {
   mine: true,
   open: true,
   carriesMe: true,
-  machines: [{ id: 'aa'.repeat(32), short: 'aaaaaa' }],
+  machines: [{ id: 'aa'.repeat(32), short: 'aaaaaa', name: null, label: 'aaaaaa' }],
   carried: 2,
   members: [
     { id: '11'.repeat(32), label: 'You', isMe: true },

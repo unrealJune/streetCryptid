@@ -37,6 +37,11 @@ export interface RepeaterClient {
   owner: RepeaterOwnerCalls | null;
   /** `null` on a binary that predates invites. */
   invites: RepeaterInviteCalls | null;
+  /**
+   * Pick up names this phone's own machines were given at their consoles; resolves how many
+   * changed. Dials each machine. `null` on a binary that predates repeater names.
+   */
+  refreshNames: (() => Promise<number>) | null;
 }
 
 export function getRepeaterClient(): RepeaterClient | null {
@@ -90,6 +95,10 @@ export function getRepeaterClient(): RepeaterClient | null {
     setCarried: (rosterId, carry) => setRepeaterCarried.call(mod, rosterId, carry),
     owner,
     invites,
+    refreshNames:
+      typeof mod.refreshRepeaterNames === 'function'
+        ? () => mod.refreshRepeaterNames!.call(mod)
+        : null,
   };
 }
 

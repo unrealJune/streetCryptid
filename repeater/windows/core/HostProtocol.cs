@@ -12,7 +12,8 @@ public sealed record HostSnapshot(
     ulong Connections = 0, ulong ConnectionsOpened = 0,
     ulong BytesReceived = 0, ulong BytesSent = 0,
     string? Version = null, string? Mode = null,
-    HostSettings? Settings = null, bool TelemetryAvailable = false);
+    HostSettings? Settings = null, bool TelemetryAvailable = false,
+    string? Name = null, string? ListedName = null);
 
 /// <summary>
 /// What the Windows service says about itself to a client, separately from the host it supervises:
@@ -92,13 +93,28 @@ public static class HostProtocol
         return JsonSerializer.Serialize(new { protocol = Version, kind = "release", requestId }, Options);
     }
 
+    /// <summary>The longest name a repeater carries, in characters (the protocol's <c>MAX_REPEATER_NAME</c>).</summary>
+    public const int MaxNameLength = 40;
+
     /// <summary>
-    /// Whether <paramref name="line"/> is one of the two things an app may ask of the host, in
-    /// exactly the shape <see cref="SettingsCommand"/> or <see cref="ReleaseCommand"/> writes. The
-    /// Windows service forwards nothing else, so a client that can reach its pipe still cannot
-    /// speak the host's protocol in general.
+    /// Name this repeater (empty clears it). The name is signed into the cert the machine gives
+    /// its owner's phone, so it shows in the app wherever the machine is.
     /// </summary>
-    public static bool IsHostCommand(string line) => IsCommand(line, "settings") || IsCommand(line, "release");
+    public static string NameCommand(string requestId, string name)
+    {
+        if (requestId.Length is 0 or > 64) throw new ArgumentException("Invalid request id.", nameof(requestId));
+        if (name.Length > 200) throw new ArgumentException("Name too long.", nameof(name));
+        return JsonSerializer.Serialize(new { protocol = Version, kind = "name", requestId, name }, Options);
+    }
+
+    /// <summary>
+    /// Whether <paramref name="line"/> is one of the things an app may ask of the host, in exactly
+    /// the shape <see cref="SettingsCommand"/>, <see cref="NameCommand"/> or
+    /// <see cref="ReleaseCommand"/> writes. The Windows service forwards nothing else, so a client
+    /// that can reach its pipe still cannot speak the host's protocol in general.
+    /// </summary>
+    public static bool IsHostCommand(string line) =>
+        IsCommand(line, "settings") || IsCommand(line, "name") || IsCommand(line, "release");
 
     /// <summary>A settings command, exactly as <see cref="SettingsCommand"/> writes it.</summary>
     public static bool IsSettingsCommand(string line) => IsCommand(line, "settings");
@@ -106,6 +122,7 @@ public static class HostProtocol
     private static bool IsCommand(string line, string kind)
     {
         bool settings = kind == "settings";
+        bool naming = kind == "name";
         try
         {
             using var document = JsonDocument.Parse(line);
@@ -124,11 +141,13 @@ public static class HostProtocol
                                    property.Value.GetString() is { Length: > 0 and <= 64 },
                     "telemetry" or "keepAwake" => settings &&
                         property.Value.ValueKind is JsonValueKind.True or JsonValueKind.False,
+                    "name" => naming && property.Value.ValueKind == JsonValueKind.String &&
+                              property.Value.GetString() is { Length: <= 200 },
                     _ => false,
                 };
                 if (!ok) return false;
             }
-            return seen.Count == (settings ? 5 : 3);
+            return seen.Count == (settings ? 5 : naming ? 4 : 3);
         }
         catch (JsonException) { return false; }
     }

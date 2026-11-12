@@ -1072,6 +1072,7 @@ class IrohLocationModule : Module() {
             "open" to r.open,
             "carriesMe" to r.carriesMe,
             "repeaters" to r.repeaters,
+            "repeaterNames" to r.repeaterNames,
             "carried" to r.carried.toLong(),
             "members" to r.members,
             "vouchers" to r.vouchers,
@@ -1156,6 +1157,15 @@ class IrohLocationModule : Module() {
       { rosterId: String, repeaterId: String ->
         val n = node ?: throw IllegalStateException("call createNode first")
         n.removeRepeater(rosterId, repeaterId)
+      }
+
+    /// Pick up names this phone's own machines were given at their consoles. Dials each
+    /// machine: only for Settings → Repeaters, never a background wake. Resolves how many were
+    /// re-listed.
+    AsyncFunction("refreshRepeaterNames") Coroutine
+      { ->
+        val n = node ?: throw IllegalStateException("call createNode first")
+        n.refreshRepeaterNames().toLong()
       }
 
     /// Ask every repeater that carries us to carry our namespaces now. Resolves at once; the

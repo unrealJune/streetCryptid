@@ -416,6 +416,10 @@ impl StashNode {
         });
         if let Some(repeater) = &node.repeater {
             repeater.attach(&node);
+            // Removed while a build that did not release on removal was running: release now.
+            if repeater.is_removed() {
+                repeater.release().await?;
+            }
         }
         let settle = tokio::spawn(node.clone().run_settle_loop());
         node.track_task(settle.abort_handle());

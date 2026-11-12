@@ -12,6 +12,10 @@
 //!   roster live on disk here and survive restarts, grants arrive over the
 //!   `streetcryptid/repeater/1` protocol, and the HTTP control API is not served. While unclaimed
 //!   it prints a claim link to stdout. Unset ⇒ the RAM-only hosted stash.
+//! * `TRAIL_STASH_NAME`                 — a repeater's name ("Attic Pi"), shown in the app wherever
+//!   the machine is. Signed into the cert it issues when claimed, so it reaches the roster at a
+//!   claim, or when the owner's phone next asks for a fresh cert after it changes. At most 40
+//!   characters; anyone who can read the roster sees it.
 //! * `TRAIL_STASH_PEERS`                — comma-separated endpoint tickets of extra sibling
 //!   repeaters; the roster's own repeaters are reconciled with regardless.
 //! * `TRAIL_STASH_PEER_SYNC_INTERVAL_MIN` — how often (default 5).
@@ -94,6 +98,15 @@ async fn main() -> Result<()> {
     .await
     .context("spawn stash node")?;
 
+    if let (Some(repeater), Ok(name)) = (node.repeater(), std::env::var("TRAIL_STASH_NAME")) {
+        repeater.set_name(Some(&name));
+        if repeater.name().is_none() && !name.trim().is_empty() {
+            tracing::warn!(
+                "TRAIL_STASH_NAME is not a usable name (40 characters at most); unnamed"
+            );
+        }
+    }
+
     tracing::info!(
         "stash up — latest-fix backstop {}h, prune every {}m",
         config.retention.retention_ms() / trail_stash::retention::MS_PER_HOUR,
@@ -158,7 +171,8 @@ fn release(data_dir: Option<&str>) -> Result<()> {
 }
 
 /// While the repeater is unclaimed, print its claim link to the console as a QR code and as text,
-/// and a fresh one each time the old one expires. Both are the https form
+/// and a fresh one each time the old one expires. It keeps watching once claimed: an owner who
+/// removes the machine releases it (`Repeater::merge`), and the next owner needs a code. Both are the https form
 /// ([`streetcryptid_repeater::wire::claim_url`]), so the phone's own camera opens streetCryptid on
 /// the code and the text pastes into it. Printed with `println!`, not through tracing: the log
 /// pipeline redacts identifier-length runs, and this link is meant for exactly one reader, at this
@@ -170,7 +184,7 @@ async fn print_claim_links(node: Arc<StashNode>) {
     let mut last = None;
     loop {
         match repeater.claim_secret() {
-            None => return,
+            None => last = None,
             Some(secret) if Some(secret) != last => {
                 let url = streetcryptid_repeater::wire::claim_url(&node.node_ticket(), &secret);
                 let qr = qrcode::QrCode::new(url.as_bytes())

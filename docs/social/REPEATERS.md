@@ -379,8 +379,21 @@ gone (§10), or someone wants to hand the machine to another owner. The daemon h
 releases everything it carried and prints a new claim link); the Windows app has RELEASE THIS
 REPEATER on its running page, which sends the host's one other command (`release`) and shows the
 new code at once. Either keeps the machine's identity. The roster's owner, if there still is one,
-sees the machine stop answering and can remove it. A machine the owner removed needs no release to
-stop carrying (§6.2); it needs one only to be claimed by someone else.
+sees the machine stop answering and can remove it. A machine the owner removed releases itself the
+moment the removal reaches it (§6.2), so it needs no trip to the machine either way.
+
+**Naming a machine.** The person at the machine can name it ("Living room PC"): the Windows app's
+Name field, or `TRAIL_STASH_NAME` for the daemon. The name is signed into the `RepeaterCert` the
+machine issues (`CertBody::name`), so it rides the roster to the owner and to everyone who reads
+it from a card, and nobody but the machine can set it. The cert's bytes are the four original
+fields and then `Some(name)` only when there is one: an unnamed cert is byte-identical to before,
+and older readers, which ignore trailing bytes, read a named one as the old fields. A name is at
+most 40 characters with no control characters (`repeater_name`); a cert carrying anything else does
+not verify. A rename reaches the roster when the owner's phone asks for a fresh cert: opening
+Settings → Repeaters sends each listed machine a repeated `Claim` (owner-only, no secret, changes
+nothing else) and lists any whose cert names it differently with a new `AddRepeater`, which wins
+as the newest cert for that machine (`refreshRepeaterNames`). It dials, so it never runs on a
+background wake.
 
 ### 4.2 Announcing repeaters, and confirming them through other friends
 
@@ -790,14 +803,15 @@ framing differs from ours and the switch is a new ALPN.**
   cheap fix is the missing piece of §3.4: put the client `call` in one place, behind a feature
   of the shared crate or in a small crate beside it.
 
-**A removed repeater stops carrying.** `Roster::is_removed_repeater` says whether a machine was
+**A removed repeater releases itself.** `Roster::is_removed_repeater` says whether a machine was
 listed by an `AddRepeater` and is no longer; one that was claimed but whose cert has not arrived
-yet is not removed. A removed repeater enforces a roster that carries nobody: it releases every
-namespace (on the op's arrival, and at start), refuses `Grant` with `NotCarried`, and runs no
-sibling or co-carrier sync. It keeps `roster.bin`, still takes `Publish` and answers `Fetch`,
-so an owner who lists it again (an `AddRepeater` made after the removal, with the same cert)
-brings it straight back. It is still claimed: handing it to a new owner takes a release at the
-machine (§4.1).
+yet is not removed. When a removal reaches the machine (`Repeater::merge`), or the machine starts
+holding one, it releases itself exactly as a release at its console does (§4.1): it lets go of
+every namespace, forgets the roster, and shows a new claim code under the same identity. The owner
+has said they are done with it, so it goes back to belonging to nobody, with no trip to the
+machine. Getting it back takes a new claim with that code; a re-added `AddRepeater` is refused as
+`NotClaimed`, which the owner's phone counts as delivered for a machine its roster removed, so it
+stops offering it ops.
 
 **A removed member reads its removal.** `Fetch` is open to anyone who has signed an op in the
 roster (`Roster::has_signed`), not only to who is carried now. A member the owner removed would

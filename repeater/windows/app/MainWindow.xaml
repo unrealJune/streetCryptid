@@ -75,6 +75,19 @@
                         <TextBlock x:Name="VersionText" FontSize="12" Opacity=".7" TextWrapping="Wrap"
                                    FontFamily="ms-appx:///Assets/Plex.ttf#IBM Plex Mono" />
                     </StackPanel>
+                    <StackPanel x:Name="NamePanel" Spacing="8" Visibility="Collapsed">
+                        <Grid ColumnSpacing="8">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <TextBox x:Name="NameBox" Header="Name" PlaceholderText="Living room PC"
+                                     MaxLength="40" KeyDown="NameKeyDown"
+                                     AutomationProperties.Name="Repeater name" />
+                            <Button x:Name="NameButton" Grid.Column="1" Content="SAVE" Click="NameClicked"
+                                    VerticalAlignment="Bottom" Style="{StaticResource CryptidButton}" />
+                        </Grid>
+                        <TextBlock x:Name="NameHelp" FontSize="12" TextWrapping="Wrap" Opacity=".7" />
+                    </StackPanel>
                     <StackPanel x:Name="ClaimPanel" Spacing="16" Visibility="Collapsed"
                                 HorizontalAlignment="Center">
                         <Viewbox MaxWidth="300" Stretch="Uniform">

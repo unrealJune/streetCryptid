@@ -255,6 +255,60 @@ public sealed partial class MainWindow : Window
         ShowMessage("The repeater did not confirm its new settings. They will be retried.");
     }
 
+    /// <summary>The name the host last reported, so a snapshot only rewrites the box when it changed.</summary>
+    private string? renderedName;
+
+    /// <summary>
+    /// The name box: what this machine is called in the app. The name is signed into the cert the
+    /// machine gives its owner's phone, so it reaches the app at a claim, or after a rename when
+    /// the owner next opens Repeaters on the phone. Never rewritten while someone is typing in it.
+    /// </summary>
+    private void RenderName(HostSnapshot? value, bool settingsOpen)
+    {
+        NamePanel.Visibility = !settingsOpen && value is not null ? Visibility.Visible : Visibility.Collapsed;
+        if (value is null) return;
+        if (value.Name != renderedName && NameBox.FocusState == FocusState.Unfocused)
+        {
+            renderedName = value.Name;
+            NameBox.Text = value.Name ?? "";
+        }
+        NameHelp.Text = !value.Claimed
+            ? "Shown in the app once a phone claims this repeater. Everyone the roster carries can see it."
+            : value.Name == value.ListedName
+                ? "Shown in the app wherever this repeater is. Everyone the roster carries can see it."
+                : "Saved. The owner's phone picks up the new name the next time it opens Repeaters.";
+    }
+
+    private void NameKeyDown(object sender, Microsoft.UI.Xaml.Input.KeyRoutedEventArgs args)
+    {
+        if (args.Key != Windows.System.VirtualKey.Enter) return;
+        args.Handled = true;
+        NameClicked(sender, new RoutedEventArgs());
+    }
+
+    private async void NameClicked(object sender, RoutedEventArgs args)
+    {
+        if (host is not { } link) return;
+        string name = string.Join(' ', NameBox.Text.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
+        if (name.Length > HostProtocol.MaxNameLength || name.Any(char.IsControl))
+        {
+            ShowMessage($"A name is at most {HostProtocol.MaxNameLength} characters.");
+            return;
+        }
+        NameButton.IsEnabled = false;
+        try
+        {
+            if (await link.SetNameAsync(name))
+            {
+                renderedName = name.Length == 0 ? null : name;
+                NameBox.Text = name;
+                ShowMessage(name.Length == 0 ? "Name cleared." : $"Named “{name}”.");
+            }
+            else ShowMessage("The repeater did not save the name. Try again.");
+        }
+        finally { NameButton.IsEnabled = true; }
+    }
+
     private void Render()
     {
         string page = editing ? "settings" : snapshot?.Claimed == true ? "running" : "claim";
@@ -269,6 +323,7 @@ public sealed partial class MainWindow : Window
         bool claimed = snapshot?.Claimed == true;
         ClaimPanel.Visibility = !editing && !claimed && snapshot?.ClaimUrl is not null ? Visibility.Visible : Visibility.Collapsed;
         RunningPanel.Visibility = !editing && claimed ? Visibility.Visible : Visibility.Collapsed;
+        RenderName(snapshot, editing);
         Qr.SetLink(!editing && !claimed ? snapshot?.ClaimUrl : null);
         SaveButton.Content = preferences.SetupComplete ? "SAVE" : "CONTINUE";
         SaveButton.IsEnabled = !settingsDamaged && !switching;

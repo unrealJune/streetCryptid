@@ -336,6 +336,9 @@ pub struct RepeaterRoster {
     /// It carries this phone's own trail: the one opt-in there is.
     pub carries_me: bool,
     pub repeaters: Vec<String>,
+    /// What each machine in `repeaters` is called, in the same order: the name it signed into
+    /// the cert the roster holds, or `""` for one with no name (REPEATERS.md §4.1).
+    pub repeater_names: Vec<String>,
     /// How many people's trails it carries.
     pub carried: u32,
     /// Whose trails it carries (endpoint ids), the owner included when enrolled.
@@ -3124,6 +3127,20 @@ impl LocationNode {
         })
     }
 
+    /// Pick up names this phone's own machines were given at their consoles since they were
+    /// listed (see [`repeater::refresh_names`]). Dials each machine, so only for a screen someone
+    /// is looking at. Resolves how many were re-listed under a new name.
+    pub async fn refresh_repeater_names(&self) -> Result<u32, LocationError> {
+        let live = self.live().await?;
+        let book = self.roster_book().await?;
+        let relisted =
+            repeater::refresh_names(&live.endpoint, &self.roster_key(), &book, now_ms()).await?;
+        if relisted > 0 {
+            self.republish_repeater_card().await;
+        }
+        Ok(relisted as u32)
+    }
+
     /// Every roster this phone knows, for the repeater settings.
     pub async fn repeater_rosters(&self) -> Result<Vec<RepeaterRoster>, LocationError> {
         let book = self.roster_book().await?;
@@ -3149,6 +3166,11 @@ impl LocationNode {
                     open,
                     carries_me,
                     repeaters: state.repeaters.keys().map(|id| encode_hex(id)).collect(),
+                    repeater_names: state
+                        .repeaters
+                        .values()
+                        .map(|cert| cert.name.clone().unwrap_or_default())
+                        .collect(),
                     carried: state.carried.len() as u32,
                     members: state.carried.iter().map(|id| encode_hex(id)).collect(),
                     vouchers: vouchers

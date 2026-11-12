@@ -104,6 +104,13 @@ public abstract class HostLink : IAsyncDisposable
         return SendCommandAsync(id, HostProtocol.SettingsCommand(id, settings));
     }
 
+    /// <summary>Name this repeater (empty clears it); true once the host has saved it.</summary>
+    public Task<bool> SetNameAsync(string name)
+    {
+        string id = Guid.NewGuid().ToString("N");
+        return SendCommandAsync(id, HostProtocol.NameCommand(id, name));
+    }
+
     /// <summary>Release this repeater from its roster; true once the host confirms.</summary>
     public Task<bool> ReleaseAsync()
     {

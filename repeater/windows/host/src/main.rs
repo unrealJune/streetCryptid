@@ -8,8 +8,8 @@ use anyhow::{bail, Result};
 use iroh::SecretKey;
 use serde::Deserialize;
 use streetcryptid_repeater_host::{
-    claim_directory, identity, snapshot, start, HostInfo, HostSettings, Settings, PROTOCOL,
-    SERVICE_MARKER,
+    claim_directory, identity, read_name, snapshot, start, write_name, HostInfo, HostSettings,
+    Settings, PROTOCOL, SERVICE_MARKER,
 };
 use trail_stash::config::{DEFAULT_PEER_SYNC_INTERVAL_MIN, DEFAULT_PRUNE_INTERVAL_MIN};
 
@@ -93,13 +93,16 @@ struct Command {
     request_id: String,
     telemetry: Option<bool>,
     keep_awake: Option<bool>,
+    /// For `name`: the new name, or `""` to clear it.
+    name: Option<String>,
 }
 
-/// What the app may ask of the host: its settings, or releasing the repeater from its roster
-/// (REPEATERS.md §4.1), which only the person at this machine can do.
+/// What the app may ask of the host: its settings, its name, or releasing the repeater from its
+/// roster (REPEATERS.md §4.1). Each is something only the person at this machine decides.
 #[derive(Debug, PartialEq)]
 enum Action {
     Settings(HostSettings),
+    Name(String),
     Release,
 }
 
@@ -108,12 +111,23 @@ impl Command {
         if self.protocol != PROTOCOL || self.request_id.is_empty() || self.request_id.len() > 64 {
             bail!("Invalid command");
         }
-        match (self.kind.as_str(), self.telemetry, self.keep_awake) {
-            ("settings", Some(telemetry), Some(keep_awake)) => Ok(Action::Settings(HostSettings {
-                telemetry,
-                keep_awake,
-            })),
-            ("release", None, None) => Ok(Action::Release),
+        match (
+            self.kind.as_str(),
+            self.telemetry,
+            self.keep_awake,
+            self.name.as_deref(),
+        ) {
+            ("settings", Some(telemetry), Some(keep_awake), None) => {
+                Ok(Action::Settings(HostSettings {
+                    telemetry,
+                    keep_awake,
+                }))
+            }
+            // Bounded here as well as by `repeater_name`: the line itself is at most 4 KiB.
+            ("name", None, None, Some(name)) if name.chars().count() <= 200 => {
+                Ok(Action::Name(name.to_string()))
+            }
+            ("release", None, None, None) => Ok(Action::Release),
             _ => bail!("Invalid command"),
         }
     }
@@ -236,6 +250,9 @@ async fn serve(args: Args, secret: SecretKey, settings: Arc<Settings>) -> Result
         result = start(&dir, secret) => result?,
         _ = stopped.recv() => return Ok(()),
     };
+    if let Some(repeater) = node.repeater() {
+        repeater.set_name(read_name(&dir).as_deref());
+    }
     let power = power::KeepAwake::spawn(settings.keep_awake_flag());
     // Spans, not events: Loki keeps an event's message and drops its fields.
     drop(tracing::info_span!(
@@ -268,6 +285,13 @@ async fn serve(args: Args, secret: SecretKey, settings: Arc<Settings>) -> Result
             Some(command) = requested.recv() => {
                 let ok = match command.action() {
                     Ok(Action::Settings(next)) => settings.set(next).is_ok(),
+                    Ok(Action::Name(name)) => match (write_name(&dir, Some(&name)), node.repeater()) {
+                        (Ok(kept), Some(repeater)) => {
+                            repeater.set_name(kept.as_deref());
+                            true
+                        }
+                        _ => false,
+                    },
                     Ok(Action::Release) => match node.repeater() {
                         Some(repeater) => repeater.release().await.is_ok(),
                         None => false,
@@ -505,6 +529,30 @@ mod tests {
         )
         .unwrap();
         assert!(odd.action().is_err());
+    }
+
+    #[test]
+    fn name_commands_carry_a_name_and_nothing_else() {
+        let name: Command = serde_json::from_str(
+            r#"{"protocol":2,"kind":"name","requestId":"n","name":"Living room PC"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            name.action().unwrap(),
+            Action::Name("Living room PC".into())
+        );
+        let clear: Command =
+            serde_json::from_str(r#"{"protocol":2,"kind":"name","requestId":"n","name":""}"#)
+                .unwrap();
+        assert_eq!(clear.action().unwrap(), Action::Name(String::new()));
+        let bare: Command =
+            serde_json::from_str(r#"{"protocol":2,"kind":"name","requestId":"n"}"#).unwrap();
+        assert!(bare.action().is_err());
+        let mixed: Command = serde_json::from_str(
+            r#"{"protocol":2,"kind":"settings","requestId":"n","telemetry":true,"keepAwake":false,"name":"x"}"#,
+        )
+        .unwrap();
+        assert!(mixed.action().is_err());
     }
 
     struct PausedOutput {

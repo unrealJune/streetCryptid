@@ -102,6 +102,9 @@ fn vectors() -> Vec<(&'static str, String, Vec<u8>)> {
             owner: owner_id,
             repeater: repeater_id,
             issued_ms: TS_MS,
+            // Unnamed, so the cert is byte-identical to v0.3.0's; a named one is
+            // `roster::tests::a_named_cert_*`.
+            name: None,
         },
     );
     let invite = op(

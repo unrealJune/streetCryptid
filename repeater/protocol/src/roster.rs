@@ -118,18 +118,99 @@ pub enum Role {
 }
 
 /// What a repeater attests about itself when it is claimed. Signed by the repeater.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// Its bytes are the four fields postcard-encoded in order, then, **only when the repeater has a
+/// name**, `Option<String>` (`Some(name)`). An unnamed cert is therefore byte-identical to one
+/// from before names existed, and older readers, which decode with `postcard::from_bytes` and
+/// ignore what follows, read a named cert as the same four fields. The signature covers the raw
+/// bytes, so verification never depends on how a reader decodes them. Append any later field the
+/// same way: after this one, and only when present.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CertBody {
     pub roster: RosterId,
     pub owner: EndpointId,
     pub repeater: EndpointId,
     pub issued_ms: u64,
+    /// What the person at the machine called it ("Living room PC"), shown in the app wherever
+    /// the machine is. Set by the machine and signed by it, so neither its owner nor anyone
+    /// relaying the roster can put words in its mouth. At most [`MAX_REPEATER_NAME`] characters,
+    /// with no control characters ([`repeater_name`]).
+    pub name: Option<String>,
+}
+
+/// The longest repeater name, in characters.
+pub const MAX_REPEATER_NAME: usize = 40;
+
+/// A name as a repeater may carry it: trimmed, inner whitespace collapsed to single spaces,
+/// control characters refused, at most [`MAX_REPEATER_NAME`] characters. `None` for an empty
+/// or unusable name, which means "no name".
+pub fn repeater_name(text: &str) -> Option<String> {
+    if text.chars().any(|c| c.is_control() && !c.is_whitespace()) {
+        return None;
+    }
+    let name = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let count = name.chars().count();
+    (count > 0 && count <= MAX_REPEATER_NAME).then_some(name)
+}
+
+/// The fields every cert has had since v0.3.0, exactly as they are encoded.
+#[derive(Serialize, Deserialize)]
+struct CertFields {
+    roster: RosterId,
+    owner: EndpointId,
+    repeater: EndpointId,
+    issued_ms: u64,
+}
+
+impl CertBody {
+    fn encode(&self) -> Vec<u8> {
+        let mut bytes = postcard::to_allocvec(&CertFields {
+            roster: self.roster,
+            owner: self.owner,
+            repeater: self.repeater,
+            issued_ms: self.issued_ms,
+        })
+        .expect("a cert body always serializes");
+        if let Some(name) = &self.name {
+            bytes.extend(
+                postcard::to_allocvec(&Some(name.as_str())).expect("a name always serializes"),
+            );
+        }
+        bytes
+    }
+
+    fn decode(bytes: &[u8]) -> Result<Self, RosterError> {
+        let malformed = RosterError::Malformed("cert body");
+        let (fields, rest): (CertFields, _) =
+            postcard::take_from_bytes(bytes).map_err(|_| malformed.clone())?;
+        // Nothing after the fields: a cert from before names, or an unnamed one. Something after
+        // them that is not a valid name is refused rather than shown: the machine signed it, but
+        // the app should never display what `repeater_name` would not have let it set.
+        let name = if rest.is_empty() {
+            None
+        } else {
+            let (name, _): (Option<String>, _) =
+                postcard::take_from_bytes(rest).map_err(|_| malformed.clone())?;
+            match name {
+                Some(name) if repeater_name(&name).as_deref() == Some(name.as_str()) => Some(name),
+                Some(_) => return Err(malformed),
+                None => None,
+            }
+        };
+        Ok(Self {
+            roster: fields.roster,
+            owner: fields.owner,
+            repeater: fields.repeater,
+            issued_ms: fields.issued_ms,
+            name,
+        })
+    }
 }
 
 /// A repeater's signed statement that it belongs to `roster`, claimed by `owner`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RepeaterCert {
-    /// `postcard(CertBody)`, exactly as signed.
+    /// [`CertBody`]'s bytes, exactly as signed.
     pub body: Vec<u8>,
     pub sig: Vec<u8>,
 }
@@ -137,7 +218,7 @@ pub struct RepeaterCert {
 impl RepeaterCert {
     /// Issue a certificate with the repeater's own key.
     pub fn issue(repeater_key: &SigningKey, body: &CertBody) -> Self {
-        let body = postcard::to_allocvec(body).expect("a cert body always serializes");
+        let body = body.encode();
         let sig = repeater_key.sign(&signing_input(CERT_CTX, &body));
         Self {
             body,
@@ -147,8 +228,7 @@ impl RepeaterCert {
 
     /// Check the signature against the repeater named inside, and return what it attests.
     pub fn verify(&self) -> Result<CertBody, RosterError> {
-        let body: CertBody =
-            postcard::from_bytes(&self.body).map_err(|_| RosterError::Malformed("cert body"))?;
+        let body = CertBody::decode(&self.body)?;
         verify_sig(&body.repeater, CERT_CTX, &self.body, &self.sig)?;
         Ok(body)
     }
@@ -902,6 +982,72 @@ mod tests {
         key.verifying_key().to_bytes()
     }
 
+    fn cert_fields() -> CertFields {
+        CertFields {
+            roster: [7; 32],
+            owner: id_of(&key(1)),
+            repeater: id_of(&key(9)),
+            issued_ms: 5,
+        }
+    }
+
+    fn cert_body(name: Option<&str>) -> CertBody {
+        CertBody {
+            roster: [7; 32],
+            owner: id_of(&key(1)),
+            repeater: id_of(&key(9)),
+            issued_ms: 5,
+            name: name.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn a_named_cert_carries_its_name_and_an_unnamed_one_is_the_old_bytes() {
+        let named = RepeaterCert::issue(&key(9), &cert_body(Some("Living room PC")));
+        assert_eq!(
+            named.verify().unwrap().name.as_deref(),
+            Some("Living room PC")
+        );
+
+        // Unnamed: exactly the four fields every older reader expects, nothing after them.
+        let unnamed = RepeaterCert::issue(&key(9), &cert_body(None));
+        assert_eq!(unnamed.body, postcard::to_allocvec(&cert_fields()).unwrap());
+        assert_eq!(unnamed.verify().unwrap().name, None);
+    }
+
+    #[test]
+    fn a_named_cert_reads_as_the_old_fields_to_an_older_reader() {
+        let named = RepeaterCert::issue(&key(9), &cert_body(Some("Attic Pi")));
+        // What a reader from before names does: decode the four fields, ignore the rest.
+        let old: CertFields = postcard::from_bytes(&named.body).unwrap();
+        assert_eq!(old.repeater, id_of(&key(9)));
+        assert_eq!(old.issued_ms, 5);
+    }
+
+    #[test]
+    fn a_cert_whose_name_the_app_would_refuse_does_not_verify() {
+        let mut body = postcard::to_allocvec(&cert_fields()).unwrap();
+        body.extend(postcard::to_allocvec(&Some("bell\u{7}")).unwrap());
+        let sig = key(9).sign(&signing_input(CERT_CTX, &body));
+        let cert = RepeaterCert {
+            body,
+            sig: sig.to_bytes().to_vec(),
+        };
+        assert!(cert.verify().is_err());
+    }
+
+    #[test]
+    fn names_are_trimmed_bounded_and_free_of_control_characters() {
+        assert_eq!(
+            repeater_name("  Living   room\tPC "),
+            Some("Living room PC".into())
+        );
+        assert_eq!(repeater_name("   "), None);
+        assert_eq!(repeater_name("a\u{0}b"), None);
+        assert!(repeater_name(&"x".repeat(MAX_REPEATER_NAME)).is_some());
+        assert_eq!(repeater_name(&"x".repeat(MAX_REPEATER_NAME + 1)), None);
+    }
+
     const OWNER: u8 = 1;
     const ALICE: u8 = 2;
     const BOB: u8 = 3;
@@ -965,6 +1111,7 @@ mod tests {
                     owner,
                     repeater: id_of(&key(repeater)),
                     issued_ms: 3,
+                    name: None,
                 },
             )
         }

@@ -80,7 +80,9 @@ describe('rosterSections', () => {
       [{ endpointId: SAM.toUpperCase(), handle: '@sam' }]
     );
     expect(sections.mine).toMatchObject({ rosterId: 'c', ownerLabel: 'Your repeaters' });
-    expect(sections.mine?.machines).toEqual([{ id: 'ff'.repeat(32), short: 'ffffff' }]);
+    expect(sections.mine?.machines).toEqual([
+      { id: 'ff'.repeat(32), short: 'ffffff', name: null, label: 'ffffff' },
+    ]);
     expect(sections.carryingMe.map((r) => r.ownerLabel)).toEqual(['@sam’s repeaters']);
     expect(sections.others.map((r) => r.ownerLabel)).toEqual(['333333’s repeaters']);
   });
@@ -166,6 +168,36 @@ describe('pairingOffers', () => {
       ME
     );
     expect(pairingOffers(sections, SAM).invite.map((r) => r.rosterId)).toEqual(['mine', 'kits']);
+  });
+});
+
+describe('machine names', () => {
+  it('shows a machine by the name it signed, and by its short id without one', () => {
+    const { mine } = rosterSections(
+      [
+        roster({
+          rosterId: 'mine',
+          mine: true,
+          repeaters: ['a1'.repeat(32), 'b2'.repeat(32)],
+          repeaterNames: ['  Living room PC ', ''],
+        }),
+      ],
+      [],
+      ME
+    );
+    expect(mine?.machines.map((m) => [m.name, m.label])).toEqual([
+      ['Living room PC', 'Living room PC'],
+      [null, 'b2b2b2'],
+    ]);
+  });
+
+  it('reads a binary without names as every machine unnamed', () => {
+    const { mine } = rosterSections(
+      [roster({ rosterId: 'mine', mine: true, repeaters: ['a1'.repeat(32)] })],
+      [],
+      ME
+    );
+    expect(mine?.machines[0]).toMatchObject({ name: null, label: 'a1a1a1' });
   });
 });
 

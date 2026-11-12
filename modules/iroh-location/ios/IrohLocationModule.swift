@@ -938,7 +938,8 @@ public final class IrohLocationModule: Module {
       return try await node.repeaterRosters().map { r in
         [
           "rosterId": r.rosterId, "owner": r.owner, "mine": r.mine, "open": r.open,
-          "carriesMe": r.carriesMe, "repeaters": r.repeaters, "carried": Double(r.carried),
+          "carriesMe": r.carriesMe, "repeaters": r.repeaters, "repeaterNames": r.repeaterNames,
+          "carried": Double(r.carried),
           "members": r.members, "vouchers": r.vouchers, "canEnroll": r.canEnroll,
           "inviters": r.inviters, "invited": r.invited, "canInvite": r.canInvite,
         ]
@@ -1007,6 +1008,13 @@ public final class IrohLocationModule: Module {
     AsyncFunction("removeRepeater") { (rosterId: String, repeaterId: String) async throws in
       guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
       try await node.removeRepeater(rosterId: rosterId, repeaterId: repeaterId)
+    }
+
+    // Pick up names this phone's own machines were given at their consoles. Dials each machine:
+    // only for Settings → Repeaters, never a background wake. Resolves how many were re-listed.
+    AsyncFunction("refreshRepeaterNames") { () async throws -> Double in
+      guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
+      return Double(try await node.refreshRepeaterNames())
     }
 
     // Ask every repeater that carries us to carry our namespaces now. Resolves at once; the dials

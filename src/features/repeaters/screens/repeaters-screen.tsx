@@ -31,7 +31,7 @@ import { useRepeaters } from '../hooks/use-repeaters';
 export default function RepeatersScreen() {
   const { chrome } = useRepeaterChrome();
   const router = useRouter();
-  const repeaters = useRepeaters();
+  const repeaters = useRepeaters({ refreshNames: true });
   const { status, sections, error, busyRoster } = repeaters;
   const [actionError, setActionError] = useState<string | null>(null);
   const { snapshot, setDeliveryMode } = useLocationSharing();
@@ -80,7 +80,7 @@ export default function RepeatersScreen() {
     </SettingsSection>
   ) : null;
 
-  const machineLine = (r: RosterView) => r.machines.map((m) => m.short).join('  ');
+  const machineLine = (r: RosterView) => r.machines.map((m) => m.label).join(' · ');
 
   const carryingCard = (r: RosterView) => (
     <RepeaterCard

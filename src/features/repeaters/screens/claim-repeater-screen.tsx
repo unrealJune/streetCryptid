@@ -82,6 +82,11 @@ export default function ClaimRepeaterScreen() {
 
   const machine = 'link' in state ? claimLinkMachineId(state.link) : null;
   const machineShort = machine ? shortId(machine) : null;
+  // The name the machine signed into its cert, once the roster lists it.
+  const claimedName =
+    state.step === 'claimed' && machine
+      ? (repeaters.sections.mine?.machines.find((m) => m.id === machine)?.name ?? null)
+      : null;
 
   function back() {
     if (router.canGoBack()) router.back();
@@ -307,6 +312,9 @@ export default function ClaimRepeaterScreen() {
           {machineShort ? (
             <Text style={[styles.machineId, { color: chrome.green }]}>{machineShort}</Text>
           ) : null}
+          {claimedName ? (
+            <Text style={[styles.machineName, { color: chrome.ink }]}>{claimedName}</Text>
+          ) : null}
         </View>
       );
       panel = (
@@ -387,6 +395,12 @@ const styles = StyleSheet.create({
     fontSize: 34,
     letterSpacing: 3,
     lineHeight: 38,
+  },
+  machineName: {
+    fontFamily: 'IBMPlexMono_600SemiBold',
+    fontSize: 13,
+    letterSpacing: 1,
+    textAlign: 'center',
   },
   kicker: {
     fontFamily: 'IBMPlexMono_600SemiBold',

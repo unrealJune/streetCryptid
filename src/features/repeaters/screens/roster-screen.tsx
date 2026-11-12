@@ -44,7 +44,7 @@ export default function RosterScreen() {
   const { chrome } = useRepeaterChrome();
   const insets = useSafeAreaInsets();
   const router = useRouter();
-  const repeaters = useRepeaters();
+  const repeaters = useRepeaters({ refreshNames: true });
   const { sections } = repeaters;
   const [selected, setSelected] = useState<string | null>(null);
   const [confirming, setConfirming] = useState(false);
@@ -194,11 +194,13 @@ function SelectionPanel({
     return (
       <IslandPanel
         chrome={chrome}
-        status={`${node.short} · YOUR REPEATER`}
+        status={`${node.label.toUpperCase()} · YOUR REPEATER`}
         statusColor={error ? chrome.amber : undefined}
         detail={
-          warn('Take it out of your roster? It stops carrying anyone once it hears.') ??
-          rosterLine(roster)
+          warn(
+            'Take it out of your roster? Once it hears, it stops carrying anyone and shows a new claim code. Getting it back means claiming it again.'
+          ) ??
+          (node.label === node.short ? rosterLine(roster) : `${node.short} · ${rosterLine(roster)}`)
         }
         onClose={onClose}
         marginBottom={marginBottom}
@@ -242,7 +244,7 @@ function SelectionPanel({
                 chrome={chrome}
                 kind="warn"
                 label="CONFIRM REMOVE"
-                accessibilityLabel={`Confirm: remove machine ${node.short}`}
+                accessibilityLabel={`Confirm: remove machine ${node.label}`}
                 disabled={busy}
                 onPress={() => void run(repeaters.removeMachine(roster.rosterId, node.id), onClose)}
               />
@@ -254,7 +256,7 @@ function SelectionPanel({
                   chrome={chrome}
                   kind="warn"
                   label="REMOVE"
-                  accessibilityLabel={`Remove machine ${node.short}`}
+                  accessibilityLabel={`Remove machine ${node.label}`}
                   disabled={busy}
                   onPress={() => onConfirm(true)}
                 />
@@ -275,7 +277,7 @@ function SelectionPanel({
         statusColor={error ? chrome.amber : undefined}
         detail={
           warn('These repeaters will stop carrying your location once they hear.') ??
-          `${rosterLine(roster)} · ${roster.machines.map((m) => m.short).join('  ')}`
+          `${rosterLine(roster)} · ${roster.machines.map((m) => m.label).join(', ')}`
         }
         onClose={onClose}
         marginBottom={marginBottom}
@@ -357,6 +359,14 @@ function SelectionPanel({
 }
 
 const DOT_STEP = 22;
+/** A node's label is a chip under a 16 pt square; past this it would cover its neighbours. */
+const NODE_LABEL_MAX = 14;
+/** Wide enough for a {@link NODE_LABEL_MAX}-character chip in 9 pt mono. */
+const NODE_WIDTH = 96;
+
+function nodeLabel(label: string): string {
+  return label.length > NODE_LABEL_MAX ? `${label.slice(0, NODE_LABEL_MAX - 1)}…` : label;
+}
 
 function GraphView({
   chrome,
@@ -471,13 +481,13 @@ function GraphView({
             accessibilityRole="button"
             accessibilityLabel={
               n.side === 'mine'
-                ? `Your repeater ${n.short}`
-                : `${owner.replace(/s$/, '')} ${n.short}${avail ? ', offered to you' : ''}`
+                ? `Your repeater ${n.label}`
+                : `${owner.replace(/s$/, '')} ${n.label}${avail ? ', offered to you' : ''}`
             }
             accessibilityState={{ selected: on }}
             hitSlop={6}
             onPress={() => onPick(n.id)}
-            style={[styles.node, { left: n.fx * W - 30, top: n.fy * H - 14 }]}
+            style={[styles.node, { left: n.fx * W - NODE_WIDTH / 2, top: n.fy * H - 14 }]}
           >
             <View
               style={[
@@ -499,7 +509,7 @@ function GraphView({
                 },
               ]}
             >
-              {n.short}
+              {nodeLabel(n.label)}
             </Text>
           </Pressable>
         );
@@ -544,7 +554,7 @@ const styles = StyleSheet.create({
     letterSpacing: 1.4,
     paddingHorizontal: 4,
   },
-  node: { alignItems: 'center', gap: 3, minHeight: 44, position: 'absolute', width: 60 },
+  node: { alignItems: 'center', gap: 3, minHeight: 44, position: 'absolute', width: NODE_WIDTH },
   nodeDot: { borderRadius: 3, borderWidth: 2, height: 16, width: 16 },
   nodeLabel: {
     borderRadius: 4,

@@ -407,6 +407,13 @@ impl RosterBook {
     pub fn states(&self) -> Vec<RosterState> {
         self.lock().values().map(Roster::state).collect()
     }
+
+    /// Whether our copy of `roster` says its owner listed `repeater` and has removed it.
+    pub fn is_removed(&self, roster: &RosterId, repeater: &EndpointId) -> bool {
+        self.lock()
+            .get(roster)
+            .is_some_and(|held| held.is_removed_repeater(repeater))
+    }
 }
 
 // ---- the card (pure) --------------------------------------------------------------------------
@@ -793,6 +800,64 @@ pub async fn claim(
     Ok(Claimed { roster, repeater })
 }
 
+/// Pick up names the machines in the roster this phone owns were given since they were listed
+/// (REPEATERS.md §4.1). A name is signed into the cert a machine issues, and a machine renamed at
+/// its console only issues a new one when asked: so ask each listed machine again (a repeated
+/// claim, which a machine answers for its own owner without a secret and which changes nothing
+/// else), and list any whose fresh cert carries a different name with a new `AddRepeater`; the
+/// newest cert for a machine is the one the roster shows. Dials every machine at once, each
+/// bounded by `CALL_TIMEOUT`, so run it only where a person is looking (Settings → Repeaters),
+/// never on a background wake. Returns how many machines were re-listed.
+///
+/// The zero secret can never claim anything: a machine that is not ours refuses the claim, and
+/// an unclaimed one checks the secret and refuses it without spending its own.
+pub async fn refresh_names(
+    endpoint: &Endpoint,
+    key: &SigningKey,
+    book: &RosterBook,
+    now_ms: u64,
+) -> Result<usize, RepeaterError> {
+    let me = key.verifying_key().to_bytes();
+    let Some(roster) = book.owned_by(&me) else {
+        return Ok(0);
+    };
+    let state = book.state(&roster).ok_or(RepeaterError::UnknownRoster)?;
+    let ops = book.export(&roster).ok_or(RepeaterError::UnknownRoster)?;
+    let answers = n0_future::join_all(state.repeaters.iter().map(|(id, listed)| {
+        let request = Request::Claim {
+            secret: [0; 32],
+            ops: ops.clone(),
+        };
+        async move {
+            let addr = endpoint_addr(id).ok()?;
+            let answer = call(endpoint, addr, &request).await.ok()?;
+            Some((*id, listed.name.clone(), answer))
+        }
+    }))
+    .await;
+    let mut relisted = 0;
+    for (id, listed, answer) in answers.into_iter().flatten() {
+        let Response::Claimed { cert } = answer else {
+            continue;
+        };
+        let Ok(attested) = cert.verify() else {
+            continue;
+        };
+        // The same checks as a first claim: this machine, this owner, this roster.
+        if attested.repeater != id || attested.owner != me || attested.roster != roster {
+            continue;
+        }
+        if attested.name != listed {
+            book.sign(&roster, key, Action::AddRepeater { cert }, now_ms)?;
+            relisted += 1;
+        }
+    }
+    if relisted > 0 {
+        publish_everywhere(endpoint, book, &roster).await;
+    }
+    Ok(relisted)
+}
+
 /// Enroll in (`carry = true`) or withdraw from a roster this phone holds, and tell its repeaters.
 /// Returns whether the roster now carries us, by our own copy.
 pub async fn set_carried(
@@ -1002,6 +1067,16 @@ async fn publish_to(
                     tracing::warn!(error = %e, "repeater: could not record a delivery");
                 }
             }
+            // A machine its owner removed releases itself on hearing it (REPEATERS.md §6.2) and
+            // belongs to nobody after that, so it refuses every later op as `NotClaimed`. It has
+            // heard all it needs to: count it delivered, or every grant pass would dial it again.
+            Ok(Response::Refused {
+                reason: Refusal::NotClaimed,
+            }) if book.is_removed(roster, &repeater) => {
+                if let Err(e) = book.mark_delivered(roster, &repeater, heads.clone()) {
+                    tracing::warn!(error = %e, "repeater: could not record a delivery");
+                }
+            }
             Ok(other) => tracing::warn!(response = ?other, "repeater: publish refused"),
             Err(e) => tracing::debug!(error = %e, "repeater: publish failed"),
         }
@@ -1190,6 +1265,7 @@ mod tests {
                     owner: id(owner),
                     repeater: id(*r),
                     issued_ms: 1,
+                    name: None,
                 },
             );
             book.sign(&roster, &key(owner), Action::AddRepeater { cert }, 2)

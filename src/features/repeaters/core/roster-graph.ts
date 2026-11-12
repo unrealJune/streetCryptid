@@ -15,6 +15,8 @@ export interface GraphNode {
   /** The machine's endpoint id. */
   readonly id: string;
   readonly short: string;
+  /** Its name when it has one, else `short`. */
+  readonly label: string;
   readonly rosterId: string;
   readonly side: GraphSide;
   /** Position as a fraction of the graph's width and height. */
@@ -51,6 +53,7 @@ export const MAX_GRAPH_MACHINES = 24;
 interface Body {
   id: string;
   short: string;
+  label: string;
   rosterId: string;
   side: GraphSide | 'you';
   x: number;
@@ -88,7 +91,7 @@ export function layoutRosterGraph(sections: RosterSections): RosterGraph {
     .filter((r) => r.machines.length > 0);
 
   const bodies: Body[] = [
-    { id: YOU, short: '', rosterId: '', side: 'you', x: W / 2, y: MID, dx: 0, dy: 0 },
+    { id: YOU, short: '', label: '', rosterId: '', side: 'you', x: W / 2, y: MID, dx: 0, dy: 0 },
   ];
   const links: (GraphLink & { length: number })[] = [];
   const tops = rosters.filter((r) => r.side !== 'mine');
@@ -101,6 +104,7 @@ export function layoutRosterGraph(sections: RosterSections): RosterGraph {
       bodies.push({
         id: m.id,
         short: m.short,
+        label: m.label,
         rosterId: r.roster.rosterId,
         side: r.side,
         x: cx + (rnd() - 0.5) * 60,
@@ -181,6 +185,7 @@ export function layoutRosterGraph(sections: RosterSections): RosterGraph {
     .map((b) => ({
       id: b.id,
       short: b.short,
+      label: b.label,
       rosterId: b.rosterId,
       side: b.side,
       fx: b.x / W,

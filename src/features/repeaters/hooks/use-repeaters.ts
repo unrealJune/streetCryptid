@@ -50,7 +50,16 @@ const UNSUPPORTED = 'Repeaters need the installed app.';
  * is a local file in the core (`repeaters.bin`), so it is cheap enough for the Settings menu too;
  * every change dials the roster's repeaters, and is re-read once it lands.
  */
-export function useRepeaters(): UseRepeaters {
+export function useRepeaters({
+  refreshNames = false,
+}: {
+  /**
+   * Also ask this phone's own machines for names given at their consoles since they were listed
+   * (`refreshRepeaterNames`), once per focus. It dials each machine, so only the repeater screens
+   * ask; the Settings menu reads the roster book alone.
+   */
+  readonly refreshNames?: boolean;
+} = {}): UseRepeaters {
   const { snapshot } = useLocationSharing();
   const client = useMemo(() => getRepeaterClient(), []);
   const [rosters, setRosters] = useState<NativeRepeaterRoster[]>([]);
@@ -82,7 +91,14 @@ export function useRepeaters(): UseRepeaters {
   useFocusEffect(
     useCallback(() => {
       void refresh();
-    }, [refresh])
+      const pickUp = refreshNames ? client?.refreshNames : null;
+      if (pickUp) {
+        void pickUp().then(
+          (changed) => (changed > 0 ? refresh() : undefined),
+          () => undefined
+        );
+      }
+    }, [client, refresh, refreshNames])
   );
 
   /** Run one change against a roster, then re-read; `rosterId` null for a claim. */

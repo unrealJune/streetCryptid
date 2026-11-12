@@ -370,6 +370,11 @@ export declare class IrohLocationNativeModule
   claimRepeater?(link: string, open: boolean, carryMe: boolean): Promise<NativeRepeaterClaim>;
   /** Every roster this phone knows. */
   repeaterRosters?(): Promise<NativeRepeaterRoster[]>;
+  /**
+   * Pick up names this phone's own machines were given at their consoles since they were listed.
+   * Dials each machine, so only for a screen someone is looking at. Resolves how many changed.
+   */
+  refreshRepeaterNames?(): Promise<number>;
   /** Have a roster carry our trail, or stop. Resolves whether it carries us now. */
   setRepeaterCarried?(rosterId: string, carry: boolean): Promise<boolean>;
   /** Owner only: who may enroll from now on (`open`, or invite-only). Never retroactive. */

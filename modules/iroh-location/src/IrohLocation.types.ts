@@ -23,6 +23,11 @@ export interface NativeRepeaterRoster {
   carriesMe: boolean;
   /** Endpoint ids of the machines in it. */
   repeaters: string[];
+  /**
+   * What each machine in `repeaters` is called, in the same order; `""` for one with no name.
+   * Optional: absent from binaries built before repeater names.
+   */
+  repeaterNames?: string[];
   /** How many people's trails it carries. */
   carried: number;
   /**
@@ -986,6 +991,11 @@ export interface IrohLocationApi {
   claimRepeater?(link: string, open: boolean, carryMe: boolean): Promise<NativeRepeaterClaim>;
   /** Every roster this phone knows. */
   repeaterRosters?(): Promise<NativeRepeaterRoster[]>;
+  /**
+   * Pick up names this phone's own machines were given at their consoles since they were listed.
+   * Dials each machine, so only for a screen someone is looking at. Resolves how many changed.
+   */
+  refreshRepeaterNames?(): Promise<number>;
   /** Have a roster carry our trail, or stop. Resolves whether it carries us now. */
   setRepeaterCarried?(rosterId: string, carry: boolean): Promise<boolean>;
   /** Owner only: who may enroll from now on (`open`, or invite-only). Never retroactive. */

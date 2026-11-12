@@ -942,7 +942,7 @@ async fn only_a_carried_member_can_have_their_own_namespace_carried() -> Result<
 }
 
 #[tokio::test]
-async fn a_repeater_its_owner_removed_stops_carrying_and_a_re_add_brings_it_back() -> Result<()> {
+async fn a_repeater_its_owner_removed_releases_itself_and_waits_for_a_new_claim() -> Result<()> {
     let node = spawn_repeater(&scratch("removed"), 121).await?;
     let (owner, mut roster) = claim(&node, 122, None, Policy::Open).await?;
     let repeater = node.repeater().expect("persistent").clone();
@@ -980,7 +980,10 @@ async fn a_repeater_its_owner_removed_stops_carrying_and_a_re_add_brings_it_back
         &Request::Publish { ops: vec![remove] },
     )
     .await?;
-    assert!(repeater.is_removed());
+    // It released itself: belongs to nobody, carries nothing, and shows a new claim code.
+    assert!(!repeater.is_claimed());
+    assert!(!repeater.is_removed());
+    assert!(repeater.claim_secret().is_some());
     assert!(node.handle(namespace).await.is_none(), "still carried");
     assert!(repeater.siblings().is_empty());
     let grant = Request::Grant {
@@ -995,19 +998,69 @@ async fn a_repeater_its_owner_removed_stops_carrying_and_a_re_add_brings_it_back
     let refused_grant = call(&phone.endpoint, node.endpoint_addr(), &grant).await?;
     assert_eq!(refused(&refused_grant), Some(&Refusal::NotCarried));
 
-    // The owner lists it again (an AddRepeater that has seen the removal): it carries again.
+    // Listing it again is not enough: it is unclaimed, so a re-add is refused as `NotClaimed`
+    // (which the owner's phone counts as delivered for a machine it removed). A new claim, with
+    // the new code, is how it comes back.
     let readd = sign_onto(&mut roster, 122, Action::AddRepeater { cert });
-    call(
+    let answer = call(
         &owner,
         node.endpoint_addr(),
         &Request::Publish { ops: vec![readd] },
     )
     .await?;
-    assert!(!repeater.is_removed());
-    let granted = call(&phone.endpoint, node.endpoint_addr(), &grant).await?;
-    assert!(matches!(granted, Response::Granted { .. }), "{granted:?}");
+    assert_eq!(refused(&answer), Some(&Refusal::NotClaimed));
+    assert!(!repeater.is_claimed());
 
     phone.vanish().await;
+    node.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_machine_signs_its_name_into_every_cert_and_a_repeated_claim_carries_a_rename(
+) -> Result<()> {
+    let node = spawn_repeater(&scratch("named"), 151).await?;
+    let repeater = node.repeater().expect("persistent").clone();
+    repeater.set_name(Some("  Attic   Pi "));
+    assert_eq!(repeater.name().as_deref(), Some("Attic Pi"));
+    let owner = bare_endpoint(152).await?;
+    let ops = vec![genesis(152, Policy::Open)];
+    let secret = repeater.claim_secret().expect("unclaimed");
+    let first = call(
+        &owner,
+        node.endpoint_addr(),
+        &Request::Claim {
+            secret,
+            ops: ops.clone(),
+        },
+    )
+    .await?;
+    let Response::Claimed { cert } = first else {
+        return Err(anyhow!("claim refused: {first:?}"));
+    };
+    assert_eq!(cert.verify()?.name.as_deref(), Some("Attic Pi"));
+
+    // Renamed at the console: the owner's phone asks again, with no secret (it is spent, and
+    // the phone sends zeros), and gets a cert with the new name to list.
+    repeater.set_name(Some("Hall closet"));
+    let again = call(
+        &owner,
+        node.endpoint_addr(),
+        &Request::Claim {
+            secret: [0; 32],
+            ops: ops.clone(),
+        },
+    )
+    .await?;
+    let Response::Claimed { cert } = again else {
+        return Err(anyhow!("repeated claim refused: {again:?}"));
+    };
+    assert_eq!(cert.verify()?.name.as_deref(), Some("Hall closet"));
+
+    // A name that would not show is no name at all.
+    repeater.set_name(Some(&"x".repeat(41)));
+    assert_eq!(repeater.name(), None);
+
     node.shutdown().await;
     Ok(())
 }

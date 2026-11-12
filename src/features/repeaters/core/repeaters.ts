@@ -124,6 +124,10 @@ export interface RosterPerson {
 export interface RosterMachine {
   readonly id: string;
   readonly short: string;
+  /** What the person at the machine called it ("Living room PC"), or null. Signed by the machine. */
+  readonly name: string | null;
+  /** The name when it has one, else the short id: how the machine is shown. */
+  readonly label: string;
 }
 
 export interface RosterView {
@@ -196,7 +200,10 @@ export function rosterSections(
     mine: r.mine,
     open: r.open,
     carriesMe: r.carriesMe,
-    machines: r.repeaters.map((id) => ({ id, short: shortId(id) })),
+    machines: r.repeaters.map((id, i) => {
+      const name = r.repeaterNames?.[i]?.trim() || null;
+      return { id, short: shortId(id), name, label: name ?? shortId(id) };
+    }),
     carried: r.carried,
     members: (r.members ?? [])
       .map(person)
