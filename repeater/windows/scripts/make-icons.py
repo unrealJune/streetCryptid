@@ -8,8 +8,8 @@ hand-tuned small sizes instead of a 1024 px image squeezed into 16 px:
 * 32 px and down (tray, title bar, small icons): the glyph cropped to 88% of the tile and its
   strokes thickened, because a 27-unit stroke on a 1024 grid is under half a pixel at 16 px.
 
-Run from the repository root:  python apps/repeater/scripts/make-icons.py
-Outputs (committed): apps/repeater/windows/Assets/repeater.ico and repeater-256.png.
+Run from the repository root:  python repeater/windows/scripts/make-icons.py
+Outputs (committed): repeater/windows/app/Assets/repeater.ico and repeater-256.png.
 """
 
 import math
@@ -21,7 +21,7 @@ from PIL import Image, ImageDraw
 
 ROOT = pathlib.Path(__file__).resolve().parents[3]
 SOURCE = ROOT / "assets/images/mothman-logo.svg"
-OUT = ROOT / "apps/repeater/windows/Assets"
+OUT = ROOT / "repeater/windows/app/Assets"
 SIZES = [16, 20, 24, 32, 40, 48, 64, 96, 128, 256]
 SUPERSAMPLE = 8
 TILE = "#eef2f5"

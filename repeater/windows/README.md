@@ -8,19 +8,21 @@ WinUI app ──stdio───────────────────�
 WinUI app ──named pipe──▶ Windows service ──stdio──▶ Rust host    (service: before and after sign-in)
 ```
 
-- `windows/` — the WinUI app: setup, claim QR, status, tray, updates.
+- `app/` — the WinUI app: setup, claim QR, status, tray, updates.
 - `service/` — `StreetCryptid.Repeater.Service.exe`, a native-AOT supervisor. `run` is what the
   Service Control Manager starts; `install` and `uninstall` are run elevated by the app.
 - `core/` — what both share and what the tests cover: the line protocol, the identity move,
   preferences, the SCM calls.
-- `native/` — the Rust host, on the trail-stash crate (`native/trail-stash.patch` on top).
+- `host/` — the Rust host, on the repeater server crate (`repeater/server`, crate `trail-stash`)
+  in its `Storage::MemoryRepeater` mode. A member of the repository's Cargo workspace.
 
 ## Build
 
-Use Windows 10 2004 or newer, PowerShell 7, .NET SDK 10.0.403, Rust 1.97.0, and Visual Studio
-C++ desktop tools with a Windows SDK (native AOT links with them). ARM64 builds additionally need
-the ARM64 MSVC toolchain and `aarch64-pc-windows-msvc` Rust target. The checked-in NuGet and
-Cargo lockfiles pin dependencies.
+Use Windows 10 2004 or newer, PowerShell 7, .NET SDK 10.0.403, Rust 1.97.0 (the repository's
+`rust-toolchain.toml`), and Visual Studio C++ desktop tools with a Windows SDK (native AOT links
+with them). ARM64 builds additionally need the ARM64 MSVC toolchain and `aarch64-pc-windows-msvc`
+Rust target. The checked-in NuGet lockfiles and the repository's one `Cargo.lock` pin
+dependencies.
 
 From the repository root:
 
@@ -31,26 +33,25 @@ just repeater-package x64 0.1.0-preview.1
 just repeater-package arm64 0.1.0-preview.1
 ```
 
-The equivalent entry point is `apps\repeater\scripts\build.ps1`. Application files land in
-`apps\repeater\artifacts\win-<architecture>\app`; installers and feed files land in the adjacent
+The equivalent entry point is `repeater\windows\scripts\build.ps1`. Application files land in
+`repeater\windows\artifacts\win-<architecture>\app`; installers and feed files land in the adjacent
 `releases` directory. Run `StreetCryptid.Repeater.exe` from the application directory, not the
 Rust executable alone.
 
-`prepare-runtime.ps1` checks out trail-stash at the revision in `NOTICE`, then applies
-`native\trail-stash.patch`. It refuses unexpected revisions or local changes. The checkout and
-build products are ignored. Update the patch whenever changing vendored source
-(`git -C vendor\trail-stash diff HEAD --binary > native\trail-stash.patch`); do not commit the
-checkout. This goes away when trail-stash moves into this repository (`docs/MONOREPO.md`).
+The host builds against the server crate in this repository (`repeater/server`), so a change
+to the stash is a change to the desktop repeater too; there is no vendored copy or patch to keep
+in step. It builds with the workspace's `desktop-release` profile into the root `target/`.
 
-The host links the phones' patched noq (`modules/iroh-location/rust/third_party/noq`): unpatched,
-iroh-docs reports most syncs as failed closes and content pulls stop before their bytes land.
+The host links the phones' patched noq (`third_party/noq`, the workspace's `[patch.crates-io]`):
+unpatched, iroh-docs reports most syncs as failed closes and content pulls stop before their bytes
+land.
 
-`scripts\make-icons.py` renders `windows\Assets\repeater.ico` from the app's mothman sigil, with
+`scripts\make-icons.py` renders `app\Assets\repeater.ico` from the app's mothman sigil, with
 thickened small sizes for the tray and title bar. Re-run it when the sigil changes.
 
 ### Tests
 
-`just repeater-test` runs the Rust host tests, the desktop tests in the patched trail-stash (real
+`just repeater-test` runs the Rust host tests, the desktop tests in the server crate (real
 iroh nodes: claim, grant, receive, serve, a restart that keeps the claim and grants but no content,
 removal), the C# tests (protocol,
 preferences, the identity move), format checks, and `test-host.ps1` against the built host.
@@ -157,12 +158,16 @@ is active.
 
 ## Releases and updates
 
-`repeater-ci.yml` builds/tests/packages x64 and ARM64 on matching Windows runners. It is separate
-from mobile CI. Tags of the form `repeater-v0.1.0-preview.1` trigger `repeater-release.yml`, which
-invokes the same build gates on that exact commit before publishing.
+`ci-repeater-windows.yml` builds/tests/packages x64 and ARM64 on matching Windows runners; it is
+CI's Windows lane, run when `repeater/windows`, the protocol or the workspace's shared files change
+(`scripts/ci-changes.sh`). `release-repeater-windows.yml` cuts releases: a push to main that
+touches what the host is built from resolves the next `windows-vX.Y.Z-preview.1` by the
+repository's Conventional Commit rules (`scripts/next-repeater-version.sh windows`), runs the same
+build gates on that commit, then creates the tag with the release. A `windows-v*` tag pushed by
+hand publishes that version; the workflow's dispatch can force a bump.
 
-Versioned releases include the desktop source archive (with the noq fix), upstream patch, notices
-and source commit. The `repeater-preview` prerelease provides two distinct Velopack channels,
+Versioned releases include the desktop source archive (the host, the server and protocol crates,
+the workspace files and the noq fix), notices and source commit. The `repeater-preview` prerelease provides two distinct Velopack channels,
 `repeater-win-x64` and `repeater-win-arm64`. Packages upload before feed manifests. Do not mix
 mobile artifacts into this feed.
 

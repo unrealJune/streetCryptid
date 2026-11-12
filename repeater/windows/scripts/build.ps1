@@ -7,36 +7,38 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $true
+# repeater/windows; the Rust host is a member of the repository's Cargo workspace, so cargo runs
+# with -p against the root lockfile and builds into the root target directory.
 $root = Split-Path $PSScriptRoot
+$repoRoot = Split-Path (Split-Path $root)
 Push-Location $root
 try {
-    & (Join-Path $PSScriptRoot 'prepare-runtime.ps1')
     $target = if ($Architecture -eq 'arm64') { 'aarch64-pc-windows-msvc' } else { 'x86_64-pc-windows-msvc' }
     $platform = if ($Architecture -eq 'arm64') { 'ARM64' } else { 'x64' }
     $rid = "win-$Architecture"
-    $profile = if ($Configuration -eq 'Release') { 'release' } else { 'dev' }
+    # `desktop-release` is the host's own release profile (/Cargo.toml); the workspace's `release`
+    # is the phone's size-optimized one.
+    $profile = if ($Configuration -eq 'Release') { 'desktop-release' } else { 'dev' }
+    $nativeProfile = if ($Configuration -eq 'Release') { 'desktop-release' } else { 'debug' }
+    $targetDir = if ($env:CARGO_TARGET_DIR) { $env:CARGO_TARGET_DIR } else { Join-Path $repoRoot 'target' }
     # Stamped into the host's telemetry and snapshots. SC_REPEATER_OTEL_ENDPOINT, when the caller
     # sets it, is compiled in as well; without it the host has no exporter at all.
     $env:REPEATER_VERSION = $Version
     if ($Test) {
-        & (Join-Path $PSScriptRoot 'test-prepare-runtime.ps1')
-        cargo fmt --manifest-path .\native\Cargo.toml --check
-        cargo test --manifest-path .\native\Cargo.toml --locked --quiet
-        $previousTarget = $env:CARGO_TARGET_DIR
-        try {
-            $env:CARGO_TARGET_DIR = Join-Path $root 'native\target'
-            cargo test --manifest-path .\vendor\trail-stash\rust\Cargo.toml --locked --features live desktop_ --quiet
-        } finally { $env:CARGO_TARGET_DIR = $previousTarget }
+        cargo fmt -p streetcryptid-repeater-host --check
+        cargo test -p streetcryptid-repeater-host --locked --quiet
+        # The desktop tests in the server crate: MemoryRepeater, arrivals, forwarding.
+        cargo test -p trail-stash --locked --features live desktop_ --quiet
         dotnet test .\tests\Repeater.Tests.csproj --nologo -v:q -p:RestoreLockedMode=true
         foreach ($project in '.\core\Repeater.Core.csproj', '.\tests\Repeater.Tests.csproj', '.\service\Repeater.Service.csproj') {
             dotnet format $project --verify-no-changes --no-restore
         }
     }
-    cargo build --manifest-path .\native\Cargo.toml --locked --profile $profile --target $target --quiet
+    cargo build -p streetcryptid-repeater-host --locked --profile $profile --target $target --quiet
     $output = Join-Path $root "artifacts\$rid\app"
     $appPri = Join-Path $output 'StreetCryptid.Repeater.pri'
     if (Test-Path -LiteralPath $appPri) { Remove-Item -LiteralPath $appPri -Force }
-    dotnet publish .\windows\Repeater.csproj --configuration $Configuration --runtime $rid `
+    dotnet publish .\app\Repeater.csproj --configuration $Configuration --runtime $rid `
         -p:Platform=$platform -p:Version=$Version --output $output --nologo -v:q -p:RestoreLockedMode=true
     if (!(Test-Path -LiteralPath $appPri -PathType Leaf) -or (Get-Item -LiteralPath $appPri).Length -eq 0) {
         throw 'Published app is missing its WinUI resource index.'
@@ -46,20 +48,20 @@ try {
     dotnet publish .\service\Repeater.Service.csproj --configuration $Configuration --runtime $rid `
         -p:Version=$Version --output $serviceOutput --nologo -v:q -p:RestoreLockedMode=true
     Copy-Item (Join-Path $serviceOutput 'StreetCryptid.Repeater.Service.exe') $output
-    $nativeProfile = if ($Configuration -eq 'Release') { 'release' } else { 'debug' }
-    Copy-Item ".\native\target\$target\$nativeProfile\streetcryptid-repeater-host.exe" $output
+    Copy-Item (Join-Path $targetDir "$target\$nativeProfile\streetcryptid-repeater-host.exe") $output
     if ($Test) {
         & (Join-Path $PSScriptRoot 'test-host.ps1') -Executable (Join-Path $output 'streetcryptid-repeater-host.exe')
     }
-    Copy-Item .\vendor\trail-stash\LICENSE (Join-Path $output 'LICENSE-trail-stash')
-    Copy-Item .\native\trail-stash.patch (Join-Path $output 'trail-stash.patch')
+    # Every part (app, service, host, the trail-stash server crate it embeds) is this repository's,
+    # under its AGPL-3.0-or-later LICENSE; NOTICE says where the source is.
+    Copy-Item (Join-Path $repoRoot 'LICENSE') (Join-Path $output 'LICENSE')
     Copy-Item .\NOTICE (Join-Path $output 'NOTICE')
     if ($Package) {
         dotnet tool restore
         dotnet vpk pack --packId StreetCryptid.Repeater --packVersion $Version `
             --packDir $output --mainExe StreetCryptid.Repeater.exe `
             --packTitle 'streetCryptid repeater' --packAuthors 'streetCryptid' `
-            --icon .\windows\Assets\repeater.ico --channel "repeater-$rid" `
+            --icon .\app\Assets\repeater.ico --channel "repeater-$rid" `
             --runtime $rid --outputDir ".\artifacts\$rid\releases" @(
                 # Signed only when the release environment provides a certificate; see README.
                 if ($env:REPEATER_SIGN_PARAMS) { '--signParams', $env:REPEATER_SIGN_PARAMS }

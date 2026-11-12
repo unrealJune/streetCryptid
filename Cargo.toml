@@ -16,6 +16,7 @@ members = [
   "modules/iroh-location/rust-wasm",
   "repeater/protocol",
   "repeater/server",
+  "repeater/windows/host",
 ]
 # Vendored for the phone alone, with their own SimRadio test workspace (`just test-ble-transport`).
 exclude = [
@@ -55,6 +56,14 @@ inherits = "release"
 opt-level = 3
 lto = false
 strip = "none"
+
+# --- the Windows repeater's host (repeater/windows/host): scripts/build.ps1 ----------------------
+# What its own manifest asked for as a separate workspace: optimized for speed, thin LTO, stripped.
+[profile.desktop-release]
+inherits = "release"
+opt-level = 3
+lto = "thin"
+strip = true
 
 # --- the browser bridge (modules/iroh-location/rust-wasm) ---------------------------------------
 # wasm-pack only knows `--release`, so `just build-wasm` turns the phone's release profile into

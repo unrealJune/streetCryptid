@@ -11,6 +11,3 @@ modules/iroh-location/ios/generated/** -whitespace text eol=lf
 # tree LF, and so does this one.
 repeater/server/** text=auto eol=lf
 repeater/protocol/** text=auto eol=lf
-
-# git apply reads the vendored-runtime patch byte for byte; CRLF would break every hunk.
-apps/repeater/native/*.patch -text

@@ -8,13 +8,13 @@ default:
 
 # Native Windows repeater; requires PowerShell 7 and Windows C++ build tools.
 repeater-build arch="x64":
-    pwsh -NoProfile -File 'apps\repeater\scripts\build.ps1' -Architecture {{arch}}
+    pwsh -NoProfile -File 'repeater\windows\scripts\build.ps1' -Architecture {{arch}}
 
 repeater-test:
-    pwsh -NoProfile -File 'apps\repeater\scripts\build.ps1' -Test -Configuration Debug
+    pwsh -NoProfile -File 'repeater\windows\scripts\build.ps1' -Test -Configuration Debug
 
 repeater-package arch="x64" version="0.1.0-preview.1":
-    pwsh -NoProfile -File 'apps\repeater\scripts\build.ps1' -Architecture {{arch}} -Package -Version {{version}}
+    pwsh -NoProfile -File 'repeater\windows\scripts\build.ps1' -Architecture {{arch}} -Package -Version {{version}}
 
 # --- Setup -------------------------------------------------------------------
 

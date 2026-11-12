@@ -23,7 +23,7 @@ public static class ServiceLayout
 
     /// <summary>Files the service needs beside it; the licence notices travel with the binaries.</summary>
     public static readonly string[] InstalledFiles =
-        [ServiceExecutable, HostExecutable, "NOTICE", "LICENSE-trail-stash", "trail-stash.patch"];
+        [ServiceExecutable, HostExecutable, "NOTICE", "LICENSE"];
 
     /// <summary>Must match the Rust host's <c>SERVICE_MARKER</c>.</summary>
     public const string MovedMarker = "moved-to-service";

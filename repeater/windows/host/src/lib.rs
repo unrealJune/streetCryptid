@@ -194,13 +194,10 @@ pub fn snapshot(node: &StashNode, host: HostInfo) -> Snapshot {
     let (missing, tracked) = node.content_stats();
     let metrics = node.endpoint().metrics();
     let socket = &metrics.socket;
-    let claim_url = repeater.claim_secret().map(|secret| {
-        format!(
-            "https://streetcrypt.id/repeater#t={}&s={}",
-            node.node_ticket(),
-            hex(&secret)
-        )
-    });
+    // The same link the server's console QR prints, from the crate the phone parses it with.
+    let claim_url = repeater
+        .claim_secret()
+        .map(|secret| streetcryptid_repeater::wire::claim_url(&node.node_ticket(), &secret));
     Snapshot {
         protocol: PROTOCOL,
         version: host.version,

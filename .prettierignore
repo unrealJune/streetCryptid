@@ -46,12 +46,9 @@ modules/iroh-location/android/src/main/java/uniffi/
 repeater/server/
 repeater/protocol/
 
-# Windows repeater build outputs, staged upstream, and NuGet-generated lockfiles
-apps/repeater/**/bin/
-apps/repeater/**/obj/
-apps/repeater/artifacts/
-apps/repeater/vendor/
-apps/repeater/native/upstream/
-apps/repeater/native/target/
-apps/repeater/.tools/
-apps/repeater/**/packages.lock.json
+# Windows repeater build outputs and NuGet-generated lockfiles
+repeater/windows/**/bin/
+repeater/windows/**/obj/
+repeater/windows/artifacts/
+repeater/windows/.tools/
+repeater/windows/**/packages.lock.json

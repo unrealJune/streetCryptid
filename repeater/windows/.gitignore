@@ -1,7 +1,4 @@
 **/bin/
 **/obj/
-native/upstream/
-vendor/
-native/target/
 artifacts/
 .tools/

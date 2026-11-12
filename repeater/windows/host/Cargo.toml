@@ -5,8 +5,6 @@ edition = "2021"
 publish = false
 license = "AGPL-3.0-or-later"
 
-[workspace]
-
 [dependencies]
 anyhow = "1"
 fs2 = "0.4"
@@ -18,8 +16,8 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "registry"] }
 # `otel` compiles the stash's OTLP exporter in; it stays dormant unless this build was given an
 # endpoint (SC_REPEATER_OTEL_ENDPOINT) AND the person running it left diagnostics on.
-trail-stash = { path = "../vendor/trail-stash/rust", features = ["live", "otel"] }
-streetcryptid-repeater = { path = "../vendor/trail-stash/rust/repeater" }
+trail-stash = { path = "../../server", features = ["live", "otel"] }
+streetcryptid-repeater = { path = "../../protocol" }
 
 [dev-dependencies]
 ed25519-dalek = "2"
@@ -28,12 +26,5 @@ iroh-docs = "0.101"
 iroh-blobs = "0.103"
 iroh-gossip = "0.101"
 
-[profile.release]
-strip = true
-lto = "thin"
-
-# The phones' noq 1.4.0 with its `read_to_end` fix (see that directory's NOTICE). iroh-docs reads
-# every sync stream to its end twice; unpatched, most syncs report a failed close and content
-# pulls stop before their bytes land — which is the whole of what a repeater does.
-[patch.crates-io]
-noq = { path = "../../../modules/iroh-location/rust/third_party/noq" }
+# Its release profile (`desktop-release`) and the patched noq come from the workspace root
+# (/Cargo.toml): Cargo reads neither in a member manifest.
