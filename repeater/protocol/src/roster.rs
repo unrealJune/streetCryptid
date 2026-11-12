@@ -43,15 +43,15 @@
 //! * an op counts only if its signer held the needed role **in the op's own causal past**; an op
 //!   that does not is refused at insert, because its past can never change;
 //! * a **removal beats anything concurrent with it**: an invite concurrent with its inviter's
-//!   revocation does not stand, and an enrolment concurrent with (or followed by) a removal or a
+//!   revocation does not stand, and an enrollment concurrent with (or followed by) a removal or a
 //!   withdrawal ends; a revocation made *after* an invite stops later invites, not that one;
-//! * a `Remove` is sticky against re-enrolment, until an invitation made *after* it;
+//! * a `Remove` is sticky against re-enrollment, until an invitation made *after* it;
 //! * a `SetPolicy` applies to ops that have seen it, never retroactively; two concurrent ones
 //!   resolve to `Invite`, the stricter;
-//! * an **uninvited** enrolment concurrent with a `SetPolicy { Invite }` does not stand. Without
+//! * an **uninvited** enrollment concurrent with a `SetPolicy { Invite }` does not stand. Without
 //!   this, closing a roster closed nothing: anyone holding the genesis (which friends' cards
 //!   publish) could sign an `Enroll` on the open genesis alone, and its past would say "open".
-//!   An enrolment the owner had SEEN when closing is in that op's past, so it is not concurrent
+//!   An enrollment the owner had SEEN when closing is in that op's past, so it is not concurrent
 //!   and keeps standing — closing is still never retroactive.
 //!
 //! Pure: no iroh, no tokio. ed25519 is ed25519-dalek 2, the same as the app's core, so the phone
@@ -81,14 +81,14 @@ const OP_ID_CTX: &str = "streetcryptid repeater roster op id v1";
 ///
 /// The last [`OWNER_RESERVE`] of them are the owner's alone, so a roster that strangers have
 /// filled can still be closed and cleaned by the one person entitled to: a flood of valid
-/// `Enroll`s from throwaway keys in an `open` roster stops further enrolments, never the owner's
+/// `Enroll`s from throwaway keys in an `open` roster stops further enrollments, never the owner's
 /// `SetPolicy` or `Remove`. Ops held aside for a missing parent are bounded separately
 /// ([`MAX_PENDING`]) and never count here, because they cost their sender nothing to mint.
 pub const MAX_OPS: usize = 4096;
 /// The share of [`MAX_OPS`] only the owner's ops may use.
 pub const OWNER_RESERVE: usize = 512;
 /// The most accepted ops any one signer other than the owner may have in a roster. A member
-/// enrols, withdraws and enrols again a handful of times in a lifetime; an inviter invites
+/// enrolls, withdraws and enrolls again a handful of times in a lifetime; an inviter invites
 /// people. Without it one key could spend the whole non-owner share by itself.
 pub const MAX_OPS_PER_SIGNER: usize = 128;
 /// The most ops held aside for a missing parent, per class (the owner's, and everyone else's).
@@ -779,7 +779,7 @@ impl Roster {
                 match &node.body.action {
                     Action::Remove { member: m } => m == member && self.unseen_by(w, e),
                     Action::Withdraw => node.op.signer == *member && self.unseen_by(w, e),
-                    // Closing beats an uninvited enrolment it had not seen, like a removal does.
+                    // Closing beats an uninvited enrollment it had not seen, like a removal does.
                     Action::SetPolicy {
                         policy: Policy::Invite,
                     } => uninvited && self.concurrent(w, e),
@@ -1155,7 +1155,7 @@ mod tests {
     }
 
     #[test]
-    fn a_removal_beats_a_concurrent_enrolment() {
+    fn a_removal_beats_a_concurrent_enrollment() {
         let mut f = Fixture::new(Policy::Open);
         let base = f.roster.heads();
         let enroll = f.op_on(ALICE, base.clone(), Action::Enroll { invite: None });
@@ -1274,7 +1274,7 @@ mod tests {
                 }
             )
             .is_err());
-        // Revoking Alice does not undo an enrolment her invite had already produced.
+        // Revoking Alice does not undo an enrollment her invite had already produced.
         assert!(f.carried(BOB));
         assert!(!f.roster.state().inviters.contains(&member(ALICE)));
     }
@@ -1308,7 +1308,7 @@ mod tests {
             },
         );
         f.roster.insert(invite).unwrap();
-        // Bob enrols having seen the invite but not the revocation.
+        // Bob enrolls having seen the invite but not the revocation.
         let enroll = f.op_on(
             BOB,
             vec![invite_id],
@@ -1370,7 +1370,7 @@ mod tests {
     }
 
     #[test]
-    fn an_enrolment_concurrent_with_closing_does_not_stand() {
+    fn an_enrollment_concurrent_with_closing_does_not_stand() {
         // Concurrent and backdated look the same: neither was seen by the close. So a genuine
         // race costs the enrollee an invite, which is the price of closing meaning anything.
         let mut f = Fixture::new(Policy::Open);
@@ -1387,12 +1387,12 @@ mod tests {
         f.roster.insert(enroll).unwrap();
         assert!(
             !f.carried(ALICE),
-            "closing beats an uninvited enrolment it had not seen"
+            "closing beats an uninvited enrollment it had not seen"
         );
     }
 
     #[test]
-    fn closing_a_roster_keeps_out_an_enrolment_backdated_onto_the_open_genesis() {
+    fn closing_a_roster_keeps_out_an_enrollment_backdated_onto_the_open_genesis() {
         let mut f = Fixture::new(Policy::Open);
         let genesis = f.roster.heads();
         f.act(ALICE, Action::Enroll { invite: None }).unwrap();
@@ -1699,7 +1699,7 @@ mod tests {
         let remove = f.op_on(OWNER, vec![close_id], Action::Remove { member: first });
         assert_eq!(f.roster.insert(remove), Ok(Inserted::Accepted));
         assert!(!f.roster.is_carried(&first));
-        // A close that had not seen the flood ends every uninvited enrolment in it (§3.3).
+        // A close that had not seen the flood ends every uninvited enrollment in it (§3.3).
         assert!(!f.roster.is_carried(&id_of(&stranger(1))));
     }
 
@@ -1770,7 +1770,7 @@ mod tests {
 
     /// The property everything else rests on: replicas that hold the same ops agree, whatever
     /// order the ops reached them in. Builds a log with concurrent branches (a revocation racing
-    /// an invite, a removal racing an enrolment, an enrolment backdated past a close), then
+    /// an invite, a removal racing an enrollment, an enrollment backdated past a close), then
     /// feeds it to fresh rosters in many orders.
     #[test]
     fn order_does_not_matter() {
@@ -1786,7 +1786,7 @@ mod tests {
         );
         let alice_in = f.op_on(ALICE, root.clone(), Action::Enroll { invite: None });
         let carol_in = f.op_on(CAROL, root.clone(), Action::Enroll { invite: None });
-        // The owner had seen Alice's enrolment when closing, so it keeps standing.
+        // The owner had seen Alice's enrollment when closing, so it keeps standing.
         let close = f.op_on(
             OWNER,
             vec![grant.id(), alice_in.id()],
@@ -1872,7 +1872,7 @@ mod tests {
         );
         assert!(
             !state.carried.contains(&member(CAROL)),
-            "her enrolment raced her removal"
+            "her enrollment raced her removal"
         );
         assert!(
             !state.carried.contains(&member(5)),

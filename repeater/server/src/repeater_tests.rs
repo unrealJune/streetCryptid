@@ -486,7 +486,7 @@ async fn desktop_multiple_writers_forward_to_multiple_readers_after_all_writers_
     for seed in 203..206 {
         let payload = vec![seed; 8192];
         let phone = Phone::spawn(seed, &payload).await?;
-        enrol_and_grant(&node, &mut roster, &phone, seed, vec![]).await?;
+        enroll_and_grant(&node, &mut roster, &phone, seed, vec![]).await?;
         tickets.push((phone.ticket.clone(), payload));
         phone.doc.start_sync(vec![node.endpoint_addr()]).await?;
         phones.push(phone);
@@ -857,7 +857,7 @@ async fn only_a_carried_member_can_have_their_own_namespace_carried() -> Result<
     let early = call(&phone.endpoint, node.endpoint_addr(), &grant).await?;
     assert_eq!(refused(&early), Some(&Refusal::NotCarried));
 
-    // Enrol (signed by the phone itself), on the heads the owner's card would name.
+    // Enroll (signed by the phone itself), on the heads the owner's card would name.
     let enroll = sign_onto(&mut roster, 93, Action::Enroll { invite: None });
     call(
         &phone.endpoint,
@@ -948,7 +948,7 @@ async fn a_repeater_its_owner_removed_stops_carrying_and_a_re_add_brings_it_back
     let repeater = node.repeater().expect("persistent").clone();
     let repeater_id = *node.endpoint_addr().id.as_bytes();
     let phone = Phone::spawn(123, b"sealed-envelope-on-a-removed-repeater").await?;
-    enrol_and_grant(&node, &mut roster, &phone, 123, vec![]).await?;
+    enroll_and_grant(&node, &mut roster, &phone, 123, vec![]).await?;
     let namespace = ticket_namespace(&phone.ticket)?;
     assert!(node.handle(namespace).await.is_some());
     assert!(!repeater.is_removed());
@@ -1091,7 +1091,7 @@ async fn an_owner_whose_claim_reply_was_lost_claims_again_and_a_release_frees_th
     )
     .await?;
     let phone = Phone::spawn(134, b"sealed-envelope-on-a-released-repeater").await?;
-    enrol_and_grant(&node, &mut roster, &phone, 134, vec![]).await?;
+    enroll_and_grant(&node, &mut roster, &phone, 134, vec![]).await?;
     let namespace = ticket_namespace(&phone.ticket)?;
     assert!(node.handle(namespace).await.is_some());
 
@@ -1156,7 +1156,7 @@ async fn sibling_repeaters_share_the_roster() -> Result<()> {
     let ops = roster.export();
     call(&owner, first.endpoint_addr(), &Request::Publish { ops }).await?;
 
-    // A member enrols through the first repeater alone.
+    // A member enrolls through the first repeater alone.
     let member = bare_endpoint(104).await?;
     let enroll = sign_onto(&mut roster, 104, Action::Enroll { invite: None });
     call(
@@ -1192,8 +1192,8 @@ async fn sibling_repeaters_share_the_roster() -> Result<()> {
     Ok(())
 }
 
-/// Enrol `phone` in `node`'s roster and have the node carry its namespace, naming `carriers`.
-async fn enrol_and_grant(
+/// Enroll `phone` in `node`'s roster and have the node carry its namespace, naming `carriers`.
+async fn enroll_and_grant(
     node: &StashNode,
     roster: &mut Roster,
     phone: &Phone,
@@ -1237,11 +1237,11 @@ async fn repeaters_in_different_rosters_converge_on_a_trail_they_both_carry() ->
         *b.endpoint_addr().id.as_bytes(),
     );
 
-    // One phone enrols in both, and names each repeater to the other as a co-carrier.
+    // One phone enrolls in both, and names each repeater to the other as a co-carrier.
     let payload = b"sealed-envelope-carried-across-rosters";
     let phone = Phone::spawn(115, payload).await?;
-    enrol_and_grant(&a, &mut roster_a, &phone, 115, vec![b_id]).await?;
-    enrol_and_grant(&b, &mut roster_b, &phone, 115, vec![a_id]).await?;
+    enroll_and_grant(&a, &mut roster_a, &phone, 115, vec![b_id]).await?;
+    enroll_and_grant(&b, &mut roster_b, &phone, 115, vec![a_id]).await?;
 
     // The phone reaches only the first, then is gone.
     phone.doc.start_sync(vec![a.endpoint_addr()]).await?;
