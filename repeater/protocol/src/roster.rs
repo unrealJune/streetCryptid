@@ -1615,9 +1615,9 @@ mod tests {
         // A cert claiming to be repeater 12 but signed by 13: the signature is checked against
         // the repeater it names.
         let mut forged = f.cert(13, roster, owner);
-        let mut body: CertBody = postcard::from_bytes(&forged.body).unwrap();
+        let mut body = CertBody::decode(&forged.body).unwrap();
         body.repeater = member(12);
-        forged.body = postcard::to_allocvec(&body).unwrap();
+        forged.body = body.encode();
         assert!(f.act(OWNER, Action::AddRepeater { cert: forged }).is_err());
 
         // Only the owner may list a repeater, even with a good cert.
