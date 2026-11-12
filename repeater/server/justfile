@@ -1,0 +1,27 @@
+# The hosted stash and the Linux/Docker repeater (crate `trail-stash`), as `just server::<recipe>`
+# from the repository root. Recipes run here, in repeater/server; cargo finds the root workspace.
+
+# The fast pure core: config, retention, the roster, the delivery seam. No iroh, no tokio.
+test:
+    cargo test --locked -p streetcryptid-repeater -p trail-stash
+
+# The live node against real iroh endpoints: the two-node stash tests and the repeater tests.
+test-live:
+    cargo test --locked -p trail-stash --features live -- --test-threads=4
+
+# Everything CI's server lane runs except the image build.
+check: test test-live
+    cargo fmt -p trail-stash -p streetcryptid-repeater --check
+    helm lint --strict charts/trail-stash
+
+# Run a local stash on the live node (see README.md for the environment it reads).
+run *args:
+    cargo run --locked -p trail-stash --features live --bin trail-stash -- {{args}}
+
+# Build the image exactly as the release does, from the repository root.
+image tag="trail-stash:dev":
+    cd ../.. && DOCKER_BUILDKIT=1 docker build -f repeater/server/Dockerfile -t {{tag}} .
+
+# The `server-v*` tag the next push to main would cut, and why.
+next-version:
+    bash ../../scripts/next-repeater-version.sh server

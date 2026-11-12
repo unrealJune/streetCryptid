@@ -6,15 +6,10 @@
 default:
     @just --list
 
-# Native Windows repeater; requires PowerShell 7 and Windows C++ build tools.
-repeater-build arch="x64":
-    pwsh -NoProfile -File 'repeater\windows\scripts\build.ps1' -Architecture {{arch}}
-
-repeater-test:
-    pwsh -NoProfile -File 'repeater\windows\scripts\build.ps1' -Test -Configuration Debug
-
-repeater-package arch="x64" version="0.1.0-preview.1":
-    pwsh -NoProfile -File 'repeater\windows\scripts\build.ps1' -Architecture {{arch}} -Package -Version {{version}}
+# The repeater products have their own recipes: `just server::test`, `just server::run`,
+# `just windows::build x64`, `just windows::package x64 <version>` (`just --list server`).
+mod server 'repeater/server'
+mod windows 'repeater/windows'
 
 # --- Setup -------------------------------------------------------------------
 
@@ -217,8 +212,8 @@ e2e-soak devices="auto" scenarios="background-walking" hours="2":
 
 # Start/reuse (default), check, or stop the local trail-stash used by network-chaos scenarios
 # (scripts/e2e/scenarios/chaos-*.yaml — see run-matrix.sh's `require_local_stash` handling and
-# lib/netchaos.sh). Needs a local github.com/unrealJune/trail-stash checkout (default: ~/trail-stash,
-# override with TRAIL_STASH_REPO). Prints the .env.local lines + rebuild reminder needed to point
+# lib/netchaos.sh). Builds the stash from repeater/server in this tree. Prints the .env.local lines
+# + rebuild reminder needed to point
 # a dev-client build at it — run-matrix.sh does NOT rebuild the app for you.
 # Example: `just e2e-local-stash` / `just e2e-local-stash status` / `just e2e-local-stash stop`
 e2e-local-stash cmd="start":
@@ -325,7 +320,7 @@ release-telemetry-check:
     node scripts/check-release-telemetry.mjs
 
 # Full gate including the native iroh-location Rust crate and generated bindings.
-check-all: check test-rust check-bindings
+check-all: check test-rust check-bindings server::test
 
 # Expo project health check.
 doctor:
