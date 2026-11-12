@@ -72,6 +72,31 @@ jobs:
           JEST_CACHE_DIRECTORY: ${{ runner.temp }}/jest-cache
         run: bun run "${{ matrix.script }}"
 
+  # Every workflow in the repository, the repeater lanes included: this lane runs whenever
+  # anything under .github/ changes (scripts/ci-changes.sh). shellcheck comes with the runner and
+  # checks each `run:` block; custom runner labels live in .github/actionlint.yaml.
+  workflows:
+    name: Quality / Workflows
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install actionlint
+        run: |
+          curl --fail --location --silent --show-error \
+            --output /tmp/actionlint.tar.gz \
+            https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz
+          echo "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8  /tmp/actionlint.tar.gz" |
+            sha256sum --check
+          tar --extract --gzip --file /tmp/actionlint.tar.gz --directory /tmp actionlint
+
+      - name: Run actionlint
+        run: /tmp/actionlint -color
+
   typecheck:
     name: Typecheck
     runs-on: ubuntu-latest
@@ -232,15 +257,16 @@ jobs:
             modules/iroh-location/ios/generated
         run: |
           set -euo pipefail
+          read -ra binding_paths <<<"$BINDING_PATHS"
           # Compare through the index, not the worktree: a new Rust type can make the generator
           # emit a file that does not exist yet, and `git diff` alone would not see it.
-          git add --all -- $BINDING_PATHS
-          if git diff --cached --quiet -- $BINDING_PATHS; then
+          git add --all -- "${binding_paths[@]}"
+          if git diff --cached --quiet -- "${binding_paths[@]}"; then
             echo 'stale=false' >> "$GITHUB_OUTPUT"
             echo 'Tracked UniFFI bindings match the Rust API.'
           else
             echo 'stale=true' >> "$GITHUB_OUTPUT"
-            git --no-pager diff --cached --stat -- $BINDING_PATHS
+            git --no-pager diff --cached --stat -- "${binding_paths[@]}"
           fi
 
       - name: Push refreshed bindings

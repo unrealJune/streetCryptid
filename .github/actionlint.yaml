@@ -1,0 +1,6 @@
+# Runner labels actionlint cannot know: the macOS image the iOS builds pin, and the ARM64
+# Windows image with Visual Studio 2026.
+self-hosted-runner:
+  labels:
+    - xcode-27
+    - windows-11-vs2026-arm
