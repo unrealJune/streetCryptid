@@ -83,12 +83,29 @@ public static class HostProtocol
     }
 
     /// <summary>
-    /// The only thing an app may ask of the host: its settings, in exactly the shape
-    /// <see cref="SettingsCommand"/> writes. The Windows service forwards nothing else, so a
-    /// client that can reach its pipe still cannot speak the host's protocol in general.
+    /// Release this repeater from its roster (REPEATERS.md §4.1): it stops carrying everyone and
+    /// shows a new claim code. The only roster decision the person at the machine can make.
     /// </summary>
-    public static bool IsSettingsCommand(string line)
+    public static string ReleaseCommand(string requestId)
     {
+        if (requestId.Length is 0 or > 64) throw new ArgumentException("Invalid request id.", nameof(requestId));
+        return JsonSerializer.Serialize(new { protocol = Version, kind = "release", requestId }, Options);
+    }
+
+    /// <summary>
+    /// Whether <paramref name="line"/> is one of the two things an app may ask of the host, in
+    /// exactly the shape <see cref="SettingsCommand"/> or <see cref="ReleaseCommand"/> writes. The
+    /// Windows service forwards nothing else, so a client that can reach its pipe still cannot
+    /// speak the host's protocol in general.
+    /// </summary>
+    public static bool IsHostCommand(string line) => IsCommand(line, "settings") || IsCommand(line, "release");
+
+    /// <summary>A settings command, exactly as <see cref="SettingsCommand"/> writes it.</summary>
+    public static bool IsSettingsCommand(string line) => IsCommand(line, "settings");
+
+    private static bool IsCommand(string line, string kind)
+    {
+        bool settings = kind == "settings";
         try
         {
             using var document = JsonDocument.Parse(line);
@@ -102,15 +119,16 @@ public static class HostProtocol
                     "protocol" => property.Value.ValueKind == JsonValueKind.Number &&
                                   property.Value.TryGetInt32(out int protocol) && protocol == Version,
                     "kind" => property.Value.ValueKind == JsonValueKind.String &&
-                              property.Value.GetString() == "settings",
+                              property.Value.GetString() == kind,
                     "requestId" => property.Value.ValueKind == JsonValueKind.String &&
                                    property.Value.GetString() is { Length: > 0 and <= 64 },
-                    "telemetry" or "keepAwake" => property.Value.ValueKind is JsonValueKind.True or JsonValueKind.False,
+                    "telemetry" or "keepAwake" => settings &&
+                        property.Value.ValueKind is JsonValueKind.True or JsonValueKind.False,
                     _ => false,
                 };
                 if (!ok) return false;
             }
-            return seen.Count == 5;
+            return seen.Count == (settings ? 5 : 3);
         }
         catch (JsonException) { return false; }
     }

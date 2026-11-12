@@ -300,7 +300,8 @@ public sealed partial class MainWindow : Window
             " Keeps what it carries in memory only." +
             (value.Settings?.KeepAwake == true ? " Keeps the PC awake on mains power." : "");
         PolicyStatus.Text = $"Membership: {value.Policy ?? "Unknown"}. To stop carrying someone, " +
-            "remove them from this repeater on your phone (Settings → Repeaters).";
+            "remove them from this repeater on your phone (Settings → Repeaters). " +
+            "If that phone is gone, release the repeater here and claim it again.";
         string rowsKey = string.Join(",", value.Members);
         if (memberRowsKey != rowsKey)
         {
@@ -490,6 +491,35 @@ public sealed partial class MainWindow : Window
             ShowMessage("Claim link copied.");
         }
         catch { ShowMessage("Clipboard unavailable."); }
+    }
+
+    /// <summary>
+    /// Release the repeater from its roster (REPEATERS.md §4.1): the one roster decision made at
+    /// the machine, for an owner whose phone is gone, a machine its owner removed, or a claim
+    /// that went wrong. Asked once, because it cannot be undone from here.
+    /// </summary>
+    private async void ReleaseClicked(object sender, RoutedEventArgs args)
+    {
+        if (host is not { } link) return;
+        var dialog = new ContentDialog
+        {
+            XamlRoot = Root.XamlRoot,
+            Title = "Release this repeater?",
+            Content = "It stops carrying everyone's trail and shows a new claim code, so a phone can claim it again. " +
+                      "Its owner will see it stop answering. This cannot be undone here.",
+            PrimaryButtonText = "Release",
+            CloseButtonText = "Cancel",
+            DefaultButton = ContentDialogButton.Close,
+        };
+        if (await dialog.ShowAsync() != ContentDialogResult.Primary || host != link) return;
+        ReleaseButton.IsEnabled = false;
+        try
+        {
+            ShowMessage(await link.ReleaseAsync()
+                ? "Released. Scan the new code with the phone that should own it."
+                : "The repeater did not confirm the release. Try again.");
+        }
+        finally { ReleaseButton.IsEnabled = true; }
     }
 
     private async void RetryClicked(object sender, RoutedEventArgs args)

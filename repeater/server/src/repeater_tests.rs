@@ -1013,6 +1013,139 @@ async fn a_repeater_its_owner_removed_stops_carrying_and_a_re_add_brings_it_back
 }
 
 #[tokio::test]
+async fn an_owner_whose_claim_reply_was_lost_claims_again_and_a_release_frees_the_machine(
+) -> Result<()> {
+    let dir = scratch("reclaim");
+    let node = spawn_repeater(&dir, 131).await?;
+    let repeater = node.repeater().expect("persistent").clone();
+    let owner = bare_endpoint(132).await?;
+    let ops = vec![genesis(132, Policy::Open)];
+    let secret = repeater.claim_secret().expect("unclaimed");
+    let first = call(
+        &owner,
+        node.endpoint_addr(),
+        &Request::Claim {
+            secret,
+            ops: ops.clone(),
+        },
+    )
+    .await?;
+    assert!(matches!(first, Response::Claimed { .. }), "{first:?}");
+
+    // Pretend that reply never arrived: the owner tries again, with a spent secret.
+    let again = call(
+        &owner,
+        node.endpoint_addr(),
+        &Request::Claim {
+            secret,
+            ops: ops.clone(),
+        },
+    )
+    .await?;
+    let Response::Claimed { cert } = again else {
+        return Err(anyhow!("the owner's repeated claim was refused: {again:?}"));
+    };
+    assert_eq!(cert.verify()?.roster, ops[0].id());
+    // Anyone else, or the owner with a different roster, is still refused.
+    let other = bare_endpoint(133).await?;
+    let stolen = call(
+        &other,
+        node.endpoint_addr(),
+        &Request::Claim {
+            secret,
+            ops: ops.clone(),
+        },
+    )
+    .await?;
+    assert_eq!(refused(&stolen), Some(&Refusal::AlreadyClaimed));
+    let second_roster = call(
+        &owner,
+        node.endpoint_addr(),
+        &Request::Claim {
+            secret,
+            ops: vec![SignedOp::sign(
+                &signer(132),
+                &OpBody {
+                    roster: None,
+                    parents: vec![],
+                    ts_ms: now_ms(),
+                    action: Action::Genesis {
+                        owner: id_of(132),
+                        policy: Policy::Open,
+                        nonce: [9; 16],
+                    },
+                },
+            )],
+        },
+    )
+    .await?;
+    assert_eq!(refused(&second_roster), Some(&Refusal::AlreadyClaimed));
+
+    // List it, carry a member, then release it from the console.
+    let mut roster = Roster::from_ops(ops)?;
+    let add = sign_onto(&mut roster, 132, Action::AddRepeater { cert });
+    call(
+        &owner,
+        node.endpoint_addr(),
+        &Request::Publish { ops: vec![add] },
+    )
+    .await?;
+    let phone = Phone::spawn(134, b"sealed-envelope-on-a-released-repeater").await?;
+    enrol_and_grant(&node, &mut roster, &phone, 134, vec![]).await?;
+    let namespace = ticket_namespace(&phone.ticket)?;
+    assert!(node.handle(namespace).await.is_some());
+
+    assert!(repeater.release().await?);
+    assert!(!repeater.is_claimed());
+    assert!(node.handle(namespace).await.is_none(), "still carried");
+    assert!(
+        repeater.claim_secret().is_some(),
+        "a released repeater offers a claim"
+    );
+    // And it stays released across a restart.
+    phone.vanish().await;
+    node.shutdown().await;
+    drop(node);
+    drop(repeater);
+    let node = reopen_repeater(&dir, 131).await?;
+    assert!(!node.repeater().expect("persistent").is_claimed());
+    node.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_removed_member_can_read_its_removal() -> Result<()> {
+    let node = spawn_repeater(&scratch("removed-member"), 141).await?;
+    let (owner, mut roster) = claim(&node, 142, None, Policy::Open).await?;
+    let phone = bare_endpoint(143).await?;
+    let enroll = sign_onto(&mut roster, 143, Action::Enroll { invite: None });
+    call(
+        &phone,
+        node.endpoint_addr(),
+        &Request::Publish { ops: vec![enroll] },
+    )
+    .await?;
+    let remove = sign_onto(&mut roster, 142, Action::Remove { member: id_of(143) });
+    call(
+        &owner,
+        node.endpoint_addr(),
+        &Request::Publish { ops: vec![remove] },
+    )
+    .await?;
+    let Response::Roster { ops } = call(&phone, node.endpoint_addr(), &Request::Fetch).await?
+    else {
+        return Err(anyhow!("a removed member could not fetch"));
+    };
+    assert!(!Roster::from_ops(ops)?.is_carried(&id_of(143)));
+    // Someone who never signed anything still cannot.
+    let stranger = bare_endpoint(144).await?;
+    let refused_fetch = call(&stranger, node.endpoint_addr(), &Request::Fetch).await?;
+    assert_eq!(refused(&refused_fetch), Some(&Refusal::NotCarried));
+    node.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test]
 async fn sibling_repeaters_share_the_roster() -> Result<()> {
     let first = spawn_repeater(&scratch("roster-a"), 101).await?;
     let second = spawn_repeater(&scratch("roster-b"), 102).await?;

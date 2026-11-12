@@ -259,7 +259,10 @@ impl Repeater {
                     return refused(Refusal::NotClaimed);
                 };
                 let state = roster.state();
-                let may_read = remote == state.owner
+                // Anyone the log names as a signer (members past and present, inviters), and the
+                // roster's machines. A removed member must be able to read its removal, or its
+                // phone keeps pushing here believing it is carried.
+                let may_read = roster.has_signed(&remote)
                     || state.carried.contains(&remote)
                     || state.inviters.contains(&remote)
                     || state.repeaters.contains_key(&remote);
@@ -292,8 +295,32 @@ impl Repeater {
     fn claim(&self, remote: EndpointId, secret: [u8; 32], ops: Vec<SignedOp>) -> Response {
         let refused = |reason| Response::Refused { reason };
         let mut guard = self.roster.lock().expect("roster poisoned");
-        if guard.is_some() {
-            return refused(Refusal::AlreadyClaimed);
+        if let Some(current) = guard.as_mut() {
+            // The owner asking again for the roster this machine already belongs to: the reply
+            // to its first claim was lost (the roster is persisted before the answer goes out, so
+            // the machine is claimed while the phone holds no cert to list it with). Issuing the
+            // same attestation again gives nothing away: the QUIC handshake already proves the
+            // caller is the owner, and the cert names only this machine, this roster and them.
+            // The secret is not needed and not checked; it was spent by the first claim.
+            let same_roster = ops
+                .first()
+                .is_some_and(|genesis| genesis.id() == current.id());
+            if remote != current.owner() || !same_roster {
+                return refused(Refusal::AlreadyClaimed);
+            }
+            let mut next = current.clone();
+            for op in ops.into_iter().skip(1) {
+                let _ = next.insert(op);
+            }
+            if let Err(e) = self.persist(&next) {
+                tracing::warn!(error = %e, "repeater: could not persist a repeated claim");
+                return refused(Refusal::Unavailable);
+            }
+            *current = next;
+            tracing::info!("repeater: claim repeated by its owner; attestation reissued");
+            return Response::Claimed {
+                cert: self.cert_for(current),
+            };
         }
         {
             let mut claim = self.claim.lock().expect("claim poisoned");
@@ -313,15 +340,7 @@ impl Repeater {
         if roster.owner() != remote {
             return refused(Refusal::BadClaimRoster);
         }
-        let cert = RepeaterCert::issue(
-            &self.key,
-            &CertBody {
-                roster: roster.id(),
-                owner: roster.owner(),
-                repeater: self.id,
-                issued_ms: now_ms(),
-            },
-        );
+        let cert = self.cert_for(&roster);
         if let Err(e) = self.persist(&roster) {
             tracing::warn!(error = %e, "repeater: could not persist the claim");
             return refused(Refusal::Unavailable);
@@ -333,6 +352,60 @@ impl Repeater {
         );
         *guard = Some(roster);
         Response::Claimed { cert }
+    }
+
+    /// This machine's attestation that it belongs to `roster`.
+    fn cert_for(&self, roster: &Roster) -> RepeaterCert {
+        RepeaterCert::issue(
+            &self.key,
+            &CertBody {
+                roster: roster.id(),
+                owner: roster.owner(),
+                repeater: self.id,
+                issued_ms: now_ms(),
+            },
+        )
+    }
+
+    /// Release this machine from its roster, by the person at its console (REPEATERS.md §4.1):
+    /// release every namespace it carries, forget the roster, and offer a fresh claim link. For an
+    /// owner whose phone is gone, a machine its owner removed, or a claim that went wrong. The
+    /// roster's other machines and its members are untouched; the owner, if there still is one,
+    /// sees this machine stop answering for the roster and can remove it.
+    pub async fn release(&self) -> Result<bool> {
+        let had = {
+            let mut guard = self.roster.lock().expect("roster poisoned");
+            let had = guard.is_some();
+            if had {
+                match std::fs::remove_file(&self.path) {
+                    Ok(()) => {}
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(e) => return Err(anyhow!("remove {}: {e}", self.path.display())),
+                }
+                *guard = None;
+            }
+            *self.claim.lock().expect("claim poisoned") = None;
+            had
+        };
+        if let Some(node) = self.node() {
+            node.release_all_members().await;
+        }
+        if had {
+            tracing::info!("repeater: released by its console; unclaimed again");
+        }
+        Ok(had)
+    }
+
+    /// [`Self::release`] for a machine that is not running: forget the roster on disk. The
+    /// namespaces it carried are released at its next start, which releases every member's
+    /// grant on an unclaimed repeater.
+    pub fn release_offline(dir: &Path) -> Result<bool> {
+        let path = dir.join(ROSTER_FILE);
+        match std::fs::remove_file(&path) {
+            Ok(()) => Ok(true),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(e) => Err(anyhow!("remove {}: {e}", path.display())),
+        }
     }
 
     async fn grant(

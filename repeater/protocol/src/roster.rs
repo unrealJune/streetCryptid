@@ -851,6 +851,31 @@ impl Roster {
         }
     }
 
+    /// The newest invite naming `member` that an `Enroll` could cite now: one whose inviter was
+    /// not revoked concurrently with it, made after every `Remove` of `member` (a removal is
+    /// sticky until an invitation made after it, §3.3). What a phone cites, and what an owner's
+    /// screen lists as "invited".
+    pub fn standing_invite(&self, member: &EndpointId) -> Option<OpId> {
+        let scope = Scope::All;
+        self.indices(scope)
+            .filter(|&i| {
+                matches!(&self.nodes[i].body.action, Action::Invite { member: m } if m == member)
+                    && self.invite_survives(i, scope)
+                    && self
+                        .removals_of(member, None, scope)
+                        .all(|r| self.nodes[i].ancestors.has(r))
+            })
+            .last()
+            .map(|i| self.nodes[i].op.id())
+    }
+
+    /// Whether `who` signed any accepted op here: the owner, and everyone who ever enrolled,
+    /// withdrew or invited. A repeater lets them `Fetch`, so a member the owner removed can read
+    /// that it was (the same log is on every member's card anyway, §3.3).
+    pub fn has_signed(&self, who: &EndpointId) -> bool {
+        *who == self.owner || self.per_signer.contains_key(who)
+    }
+
     /// Whether `repeater` was listed by the owner and is no longer: an `AddRepeater` for it is in
     /// the log and the derived state does not list it. A machine that was claimed but whose
     /// `AddRepeater` has not arrived yet is *not* removed — that is the ordinary window between
@@ -1503,6 +1528,54 @@ mod tests {
         assert!(f.roster.is_removed_repeater(&member(REPEATER)));
         // A sibling that was never listed is not "removed" either.
         assert!(!f.roster.is_removed_repeater(&member(10)));
+    }
+
+    #[test]
+    fn a_standing_invite_is_one_made_after_any_removal() {
+        let mut f = Fixture::new(Policy::Invite);
+        assert_eq!(f.roster.standing_invite(&member(ALICE)), None);
+        let first = f
+            .act(
+                OWNER,
+                Action::Invite {
+                    member: member(ALICE),
+                },
+            )
+            .unwrap();
+        assert_eq!(f.roster.standing_invite(&member(ALICE)), Some(first));
+        f.act(
+            ALICE,
+            Action::Enroll {
+                invite: Some(first),
+            },
+        )
+        .unwrap();
+        f.act(
+            OWNER,
+            Action::Remove {
+                member: member(ALICE),
+            },
+        )
+        .unwrap();
+        // The removal voids the invite before it.
+        assert_eq!(f.roster.standing_invite(&member(ALICE)), None);
+        let second = f
+            .act(
+                OWNER,
+                Action::Invite {
+                    member: member(ALICE),
+                },
+            )
+            .unwrap();
+        assert_eq!(f.roster.standing_invite(&member(ALICE)), Some(second));
+        f.act(
+            ALICE,
+            Action::Enroll {
+                invite: Some(second),
+            },
+        )
+        .unwrap();
+        assert!(f.carried(ALICE));
     }
 
     // ---- limits ------------------------------------------------------------------------------

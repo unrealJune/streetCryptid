@@ -23,6 +23,11 @@
 //! * `OTEL_EXPORTER_OTLP_ENDPOINT`      — developer telemetry (`otel` builds only): OTLP/HTTP
 //!   base URL of a collector (e.g. `http://otel-collector:4318`). Unset ⇒ telemetry dormant.
 //! * `OTEL_SERVICE_NAME`                — telemetry service name (default `trail-stash`).
+//!
+//! `trail-stash release` (with `TRAIL_STASH_DATA_DIR` set, the repeater stopped) releases the
+//! repeater from its roster: it forgets the roster, releases everything it carried at its next
+//! start, and prints a fresh claim link then. For an owner whose phone is gone, a machine its
+//! owner removed, or a claim that went wrong (REPEATERS.md §4.1). Its identity is kept.
 
 use std::fmt;
 use std::sync::Arc;
@@ -43,6 +48,15 @@ async fn main() -> Result<()> {
     // Secret first: the subscriber wants the public key as `service.instance.id`. A missing key
     // therefore reports via anyhow/stderr instead of a log line — same visibility, earlier exit.
     let config = StashConfig::from_env(|k| std::env::var(k).ok());
+    match std::env::args().nth(1).as_deref() {
+        None => {}
+        Some("release") => return release(config.data_dir.as_deref()),
+        Some(other) => {
+            return Err(anyhow!(
+                "unknown command {other:?}; the only one is `release`"
+            ))
+        }
+    }
     let secret = load_secret_key(config.data_dir.as_deref())?;
 
     init_tracing(&secret);
@@ -123,6 +137,23 @@ async fn main() -> Result<()> {
     node.shutdown().await;
     #[cfg(feature = "otel")]
     trail_stash::telemetry::shutdown();
+    Ok(())
+}
+
+/// `trail-stash release`: forget this repeater's roster. Run with the repeater stopped; another
+/// process holding the directory would write the roster back.
+fn release(data_dir: Option<&str>) -> Result<()> {
+    let dir = data_dir.ok_or_else(|| {
+        anyhow!("TRAIL_STASH_DATA_DIR is not set: only a repeater has a roster to release")
+    })?;
+    if trail_stash::repeater::Repeater::release_offline(std::path::Path::new(dir))? {
+        println!(
+            "Released. This repeater belongs to nobody now: start it again to stop carrying \
+             everyone it carried and to print a new claim link. Its identity is unchanged."
+        );
+    } else {
+        println!("This repeater is not claimed; there is nothing to release.");
+    }
     Ok(())
 }
 

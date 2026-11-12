@@ -89,6 +89,21 @@ public class HostProtocolTests
         Assert.False(HostProtocol.IsSettingsCommand("not json"));
     }
 
+    [Fact]
+    public void OnlyWellFormedReleaseCommandsPassTheService()
+    {
+        string release = HostProtocol.ReleaseCommand("abc");
+        Assert.Contains("\"kind\":\"release\"", release);
+        Assert.True(HostProtocol.IsHostCommand(release));
+        Assert.False(HostProtocol.IsSettingsCommand(release));
+        Assert.True(HostProtocol.IsHostCommand(HostProtocol.SettingsCommand("abc", new HostSettings(true, true))));
+        Assert.False(HostProtocol.IsHostCommand(
+            "{\"protocol\":2,\"kind\":\"release\",\"requestId\":\"a\",\"telemetry\":true}"));
+        Assert.False(HostProtocol.IsHostCommand("{\"protocol\":2,\"kind\":\"release\"}"));
+        Assert.False(HostProtocol.IsHostCommand("{\"protocol\":2,\"kind\":\"claim\",\"requestId\":\"a\"}"));
+        Assert.Throws<ArgumentException>(() => HostProtocol.ReleaseCommand(""));
+    }
+
     [Theory]
     [InlineData("{\"protocol\":3,\"kind\":\"arrival\",\"runId\":\"test\",\"sequence\":1}")]
     [InlineData("{\"protocol\":2,\"kind\":\"arrival\",\"runId\":\"\"}")]

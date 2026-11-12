@@ -107,6 +107,9 @@
                             <StackPanel x:Name="Members" Spacing="12" />
                         </ScrollViewer>
                         <TextBlock x:Name="PolicyStatus" FontSize="12" TextWrapping="Wrap" />
+                        <Button x:Name="ReleaseButton" Content="RELEASE THIS REPEATER" Click="ReleaseClicked"
+                                Style="{StaticResource CryptidButton}"
+                                ToolTipService.ToolTip="Stop carrying everyone and show a new claim code" />
                     </StackPanel>
                     </StackPanel>
                     <TextBlock x:Name="MessageText" TextWrapping="Wrap" Visibility="Collapsed"

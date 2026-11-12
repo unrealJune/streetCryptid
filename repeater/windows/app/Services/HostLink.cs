@@ -98,10 +98,21 @@ public abstract class HostLink : IAsyncDisposable
         }
     }
 
-    public async Task<bool> ApplySettingsAsync(HostSettings settings)
+    public Task<bool> ApplySettingsAsync(HostSettings settings)
     {
         string id = Guid.NewGuid().ToString("N");
-        string command = HostProtocol.SettingsCommand(id, settings);
+        return SendCommandAsync(id, HostProtocol.SettingsCommand(id, settings));
+    }
+
+    /// <summary>Release this repeater from its roster; true once the host confirms.</summary>
+    public Task<bool> ReleaseAsync()
+    {
+        string id = Guid.NewGuid().ToString("N");
+        return SendCommandAsync(id, HostProtocol.ReleaseCommand(id));
+    }
+
+    private async Task<bool> SendCommandAsync(string id, string command)
+    {
         var completion = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         commands[id] = completion;
         try

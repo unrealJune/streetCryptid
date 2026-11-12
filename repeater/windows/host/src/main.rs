@@ -91,23 +91,31 @@ struct Command {
     protocol: u32,
     kind: String,
     request_id: String,
-    telemetry: bool,
-    keep_awake: bool,
+    telemetry: Option<bool>,
+    keep_awake: Option<bool>,
+}
+
+/// What the app may ask of the host: its settings, or releasing the repeater from its roster
+/// (REPEATERS.md §4.1), which only the person at this machine can do.
+#[derive(Debug, PartialEq)]
+enum Action {
+    Settings(HostSettings),
+    Release,
 }
 
 impl Command {
-    fn settings(&self) -> Result<HostSettings> {
-        if self.protocol != PROTOCOL
-            || self.kind != "settings"
-            || self.request_id.is_empty()
-            || self.request_id.len() > 64
-        {
+    fn action(&self) -> Result<Action> {
+        if self.protocol != PROTOCOL || self.request_id.is_empty() || self.request_id.len() > 64 {
             bail!("Invalid command");
         }
-        Ok(HostSettings {
-            telemetry: self.telemetry,
-            keep_awake: self.keep_awake,
-        })
+        match (self.kind.as_str(), self.telemetry, self.keep_awake) {
+            ("settings", Some(telemetry), Some(keep_awake)) => Ok(Action::Settings(HostSettings {
+                telemetry,
+                keep_awake,
+            })),
+            ("release", None, None) => Ok(Action::Release),
+            _ => bail!("Invalid command"),
+        }
     }
 }
 
@@ -216,7 +224,7 @@ async fn serve(args: Args, secret: SecretKey, settings: Arc<Settings>) -> Result
             let Ok(command) = serde_json::from_slice::<Command>(&line) else {
                 break;
             };
-            if command.settings().is_err() || commands.try_send(command).is_err() {
+            if command.action().is_err() || commands.try_send(command).is_err() {
                 break;
             }
         }
@@ -258,8 +266,12 @@ async fn serve(args: Args, secret: SecretKey, settings: Arc<Settings>) -> Result
         let message = tokio::select! {
             _ = stopped.recv() => break,
             Some(command) = requested.recv() => {
-                let ok = match command.settings() {
-                    Ok(next) => settings.set(next).is_ok(),
+                let ok = match command.action() {
+                    Ok(Action::Settings(next)) => settings.set(next).is_ok(),
+                    Ok(Action::Release) => match node.repeater() {
+                        Some(repeater) => repeater.release().await.is_ok(),
+                        None => false,
+                    },
                     Err(_) => false,
                 };
                 // Command replies must not be silently dropped like decorative arrival events.
@@ -466,21 +478,33 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            command.settings().unwrap(),
-            HostSettings {
+            command.action().unwrap(),
+            Action::Settings(HostSettings {
                 telemetry: true,
                 keep_awake: false
-            }
+            })
         );
         let old: Command = serde_json::from_str(
             r#"{"protocol":1,"kind":"settings","requestId":"one","telemetry":true,"keepAwake":false}"#,
         )
         .unwrap();
-        assert!(old.settings().is_err());
+        assert!(old.action().is_err());
         assert!(serde_json::from_str::<Command>(
             r#"{"protocol":2,"kind":"subscription","requestId":"one","member":"ab","receiving":false}"#,
         )
         .is_err());
+        // Settings without their values, or a release carrying some, are refused.
+        let partial: Command =
+            serde_json::from_str(r#"{"protocol":2,"kind":"settings","requestId":"one"}"#).unwrap();
+        assert!(partial.action().is_err());
+        let release: Command =
+            serde_json::from_str(r#"{"protocol":2,"kind":"release","requestId":"two"}"#).unwrap();
+        assert_eq!(release.action().unwrap(), Action::Release);
+        let odd: Command = serde_json::from_str(
+            r#"{"protocol":2,"kind":"release","requestId":"two","telemetry":true}"#,
+        )
+        .unwrap();
+        assert!(odd.action().is_err());
     }
 
     struct PausedOutput {

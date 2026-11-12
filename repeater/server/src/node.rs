@@ -425,8 +425,12 @@ impl StashNode {
         }
         // A roster that moved on while this node was down is applied once at start, including a
         // removal of this machine, which releases everything it carried.
-        if let Some(state) = node.repeater.as_ref().and_then(|r| r.carrying_state()) {
-            node.enforce_roster(&state).await;
+        if let Some(repeater) = node.repeater.as_ref() {
+            match repeater.carrying_state() {
+                Some(state) => node.enforce_roster(&state).await,
+                // Unclaimed (released from its console while it was down): it carries nobody.
+                None => node.release_all_members().await,
+            }
         }
         Ok(node)
     }
@@ -695,7 +699,17 @@ impl StashNode {
 
     /// Stop carrying every namespace granted on behalf of someone `state` no longer carries.
     pub async fn enforce_roster(&self, state: &streetcryptid_repeater::roster::RosterState) {
-        let carried: HashSet<String> = state.carried.iter().map(full_hex).collect();
+        self.release_members_except(state.carried.iter().map(full_hex).collect())
+            .await;
+    }
+
+    /// Stop carrying every namespace any member granted: what an unclaimed repeater holds for
+    /// nobody (a console release, or `roster.bin` removed while the machine was down).
+    pub async fn release_all_members(&self) {
+        self.release_members_except(HashSet::new()).await;
+    }
+
+    async fn release_members_except(&self, carried: HashSet<String>) {
         let doomed: Vec<String> = match &self.book {
             Some(book) => book
                 .lock()

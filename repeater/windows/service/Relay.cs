@@ -250,7 +250,7 @@ internal sealed class PipeServer(SecurityIdentifier owner, Hub hub, Supervisor s
             while (!session.IsCancellationRequested)
             {
                 string? line = await ReadBoundedLineAsync(reader, session.Token);
-                if (line is null || !HostProtocol.IsSettingsCommand(line)) break;
+                if (line is null || !HostProtocol.IsHostCommand(line)) break;
                 if (!await supervisor.SendAsync(line, session.Token)) break;
             }
         }
