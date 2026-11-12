@@ -30,7 +30,7 @@ jobs:
           path: modules/iroh-location/web
           # Must stay byte-identical to the `wasm-output-*` key in ci.yml's typecheck job so this
           # workflow and CI share one entry instead of each rebuilding the bindings.
-          key: wasm-output-${{ runner.os }}-rust-1.97.0-wasm-pack-0.15.0-binaryen-117-${{ hashFiles('modules/iroh-location/rust-wasm/Cargo.lock', 'modules/iroh-location/rust-wasm/Cargo.toml', 'modules/iroh-location/rust-wasm/src/**/*.rs', 'modules/iroh-location/rust/Cargo.lock', 'modules/iroh-location/rust/Cargo.toml', 'modules/iroh-location/rust/src/**/*.rs', 'justfile') }}
+          key: wasm-output-${{ runner.os }}-rust-1.97.0-wasm-pack-0.15.0-binaryen-117-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'third_party/**', 'modules/iroh-location/rust-wasm/Cargo.toml', 'modules/iroh-location/rust-wasm/src/**/*.rs', 'modules/iroh-location/rust/Cargo.toml', 'modules/iroh-location/rust/src/**/*.rs', 'justfile') }}
 
       - name: Install Linux build dependencies
         run: |

@@ -3,8 +3,9 @@ name: CI / repeater server
 # The hosted stash and the Linux repeater daemon (`repeater/server`, crate `trail-stash`) and the
 # roster/wire crate it shares with the phone (`repeater/protocol`). Called only from `ci.yml`.
 #
-# Until the root Cargo workspace lands (docs/MONOREPO.md, PR B) the server is its own workspace
-# with its own lockfile, and `repeater/protocol` is a member of it.
+# Both crates are members of the root Cargo workspace, which also holds the phone's crates. Every
+# cargo command here names its packages: `--workspace` would build the phone too, and features on
+# a workspace-wide build would unify across all of it.
 
 on:
   workflow_call:
@@ -21,19 +22,15 @@ jobs:
     name: Test
     runs-on: ubuntu-latest
     timeout-minutes: 40
-    defaults:
-      run:
-        working-directory: repeater/server
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
+      # rust-toolchain.toml selects the version; this installs it with rustfmt.
       - name: Install Rust
-        run: |
-          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --component rustfmt
-          rustup default "$RUST_TOOLCHAIN"
+        run: rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --component rustfmt
 
       - name: Install protoc
         run: sudo apt-get update && sudo apt-get install --yes --no-install-recommends protobuf-compiler
@@ -41,16 +38,17 @@ jobs:
       - name: Restore Rust compilation cache
         uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
-          workspaces: repeater/server -> target
+          workspaces: . -> target
           key: repeater-server
           save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
+      # Every crate in the workspace, the phone's included: one rustfmt.toml covers them all.
       - name: cargo fmt
         run: cargo fmt --all --check
 
       # The default build is the pure core: no iroh, no tokio. It is what the release gates on.
       - name: cargo test (pure core)
-        run: cargo test --locked --workspace
+        run: cargo test --locked -p streetcryptid-repeater -p trail-stash
 
       # `-p`, never `--workspace`, with features: resolver 2 unifies features across everything in
       # one invocation, so a workspace-wide build would test the pure core with iroh compiled in.

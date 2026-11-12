@@ -30,6 +30,12 @@ on:
       - bun.lock
       - package.json
       - modules/iroh-location/rust/**
+      # The rest of the native digest (scripts/eas-build-pre-install.sh): the root Cargo workspace
+      # and the protocol crate the phone links by path.
+      - Cargo.toml
+      - Cargo.lock
+      - third_party/**
+      - repeater/protocol/**
       - scripts/eas-build-pre-install.sh
       - scripts/generate-uniffi-bindings.sh
   workflow_dispatch:

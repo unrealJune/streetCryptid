@@ -6,11 +6,6 @@ publish = false
 license = "AGPL-3.0-or-later"
 description = "streetCryptid always-on, ciphertext-blind, stateless iroh-docs replica + push-to-sync waker (offline trail delivery)"
 
-# Its own workspace until the root one lands (docs/MONOREPO.md, PR B), so this lockfile and the
-# deployed image stay exactly what they were before the import.
-[workspace]
-members = ["../protocol"]
-
 [lib]
 name = "trail_stash"
 

@@ -6,11 +6,13 @@
 # src/telemetry.rs). The first build is slow (iroh + deps); BuildKit cache mounts keep re-builds
 # fast.
 #
-# The build context is the REPOSITORY ROOT (`docker build -f repeater/server/Dockerfile .`), because
-# the server links `repeater/protocol` by path. The root `.dockerignore` is an allowlist, so the
-# context is the two crates and nothing else (no node_modules, no target/).
-FROM rust:1-slim-bookworm AS build
-WORKDIR /src/repeater/server
+# The build context is the REPOSITORY ROOT (`docker build -f repeater/server/Dockerfile .`): the
+# server is a member of the root Cargo workspace, which shares one lockfile and the patched noq
+# (third_party/noq) with the phone. The root `.dockerignore` is an allowlist of the workspace's
+# crates and nothing else (no node_modules, no target/). The toolchain is the workspace's
+# (rust-toolchain.toml), pinned here by tag rather than read from that file.
+FROM rust:1.97.0-slim-bookworm AS build
+WORKDIR /src
 
 # Native toolchain the iroh/rustls dependency tree needs to compile from source. If a build ever
 # fails on a missing tool, it is almost always one of these.
@@ -18,14 +20,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential cmake perl pkg-config protobuf-compiler \
     && rm -rf /var/lib/apt/lists/*
 
-COPY repeater/protocol /src/repeater/protocol
-COPY repeater/server/Cargo.toml repeater/server/Cargo.lock ./
-COPY repeater/server/src ./src
+COPY . .
 
+# `server-release` is Cargo's default release profile (opt-level 3, no LTO); the workspace's own
+# `release` is the phone's size-optimized one. See /Cargo.toml.
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/src/repeater/server/target \
-    cargo build --locked --release --features live,otel --bin trail-stash \
-    && cp target/release/trail-stash /trail-stash
+    --mount=type=cache,target=/src/target \
+    cargo build --locked --profile server-release -p trail-stash --features live,otel --bin trail-stash \
+    && cp target/server-release/trail-stash /trail-stash
 
 # --- runtime stage -------------------------------------------------------
 # distroless "cc" (glibc + libgcc, no shell/pkg manager) — matches the default gnu target the

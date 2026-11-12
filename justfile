@@ -370,8 +370,15 @@ check-bindings:
 
 # Needs wasm-pack + the wasm32-unknown-unknown target; web/ is a git-ignored build output (README §5).
 # Build the browser WASM bundle (relay-only iroh + in-memory docs) into modules/iroh-location/web/.
+# The workspace's `release` profile is the phone's (thin LTO); the browser bundle was always built
+# with fat LTO, one codegen unit and panic = "abort", which Cargo now takes only from the root, so
+# they are applied here rather than in rust-wasm/Cargo.toml (see /Cargo.toml).
 build-wasm:
-    cd modules/iroh-location/rust-wasm && wasm-pack build --target web --release --out-dir ../web
+    cd modules/iroh-location/rust-wasm && \
+      CARGO_PROFILE_RELEASE_LTO=fat \
+      CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1 \
+      CARGO_PROFILE_RELEASE_PANIC=abort \
+      wasm-pack build --target web --release --out-dir ../web
 
 # Needs the Android NDK + cargo-ndk. Run after changing the Rust UniFFI surface (see README §3).
 # Regenerate Android jniLibs + Kotlin UniFFI bindings.
@@ -438,14 +445,16 @@ bindgen-ios:
     cp ../ios/generated/iroh_locationFFI.h ../ios/headers/
     cp ../ios/generated/iroh_locationFFI.modulemap ../ios/headers/module.modulemap
     rm -rf ../ios/IrohLocationFFI.xcframework
-    mkdir -p target/ios-simulator/release
+    # The root Cargo workspace's target directory, unless the caller pinned one.
+    target="${CARGO_TARGET_DIR:-../../../target}"
+    mkdir -p "$target/ios-simulator/release"
     lipo -create \
-      target/aarch64-apple-ios-sim/release/libiroh_location.a \
-      target/x86_64-apple-ios/release/libiroh_location.a \
-      -output target/ios-simulator/release/libiroh_location.a
+      "$target/aarch64-apple-ios-sim/release/libiroh_location.a" \
+      "$target/x86_64-apple-ios/release/libiroh_location.a" \
+      -output "$target/ios-simulator/release/libiroh_location.a"
     xcodebuild -create-xcframework \
-      -library target/aarch64-apple-ios/release/libiroh_location.a -headers ../ios/headers \
-      -library target/ios-simulator/release/libiroh_location.a -headers ../ios/headers \
+      -library "$target/aarch64-apple-ios/release/libiroh_location.a" -headers ../ios/headers \
+      -library "$target/ios-simulator/release/libiroh_location.a" -headers ../ios/headers \
       -output ../ios/IrohLocationFFI.xcframework
 
 # --- EAS: cloud build / submit / update --------------------------------------
@@ -543,10 +552,10 @@ clean:
     rm -rf .expo dist web-build node_modules/.cache
 
 # Remove native caches: the generated ios/ and android/ projects, the
-# iroh-location cargo target dir, and this project's Xcode DerivedData.
+# Cargo workspace's target dir, and this project's Xcode DerivedData.
 clean-native: clean
     rm -rf ios android
-    rm -rf modules/iroh-location/rust/target
+    rm -rf target
     rm -rf ~/Library/Developer/Xcode/DerivedData/streetCryptid-*
 
 # Print key tool versions.
@@ -599,7 +608,7 @@ ios-dev-install device="":
       fi
     fi
     echo "Installing to device $dev"
-    export CARGO_TARGET_DIR="$root/modules/iroh-location/rust/target"
+    export CARGO_TARGET_DIR="$root/target"
     export EXPO_NO_TELEMETRY=1
     bunx eas-cli build \
       --local \

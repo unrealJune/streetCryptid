@@ -17,7 +17,9 @@ name: Release / repeater server
 # workflow pushes does not start it again: GITHUB_TOKEN pushes never trigger workflows.
 #
 # The path filter is what keeps an app commit from rolling the stash pod. It names the server, the
-# protocol it links, the build context's ignore file and this workflow.
+# protocol it links, what the root Cargo workspace feeds every build (manifest, lockfile, toolchain,
+# the patched crates in third_party/), the build context's ignore file and this workflow -- the
+# same inputs scripts/next-server-version.sh counts.
 #
 # The image and chart packages were created by the trail-stash repository. Each needs this
 # repository granted write under its "Manage Actions access", or the push fails with a 403.
@@ -29,6 +31,10 @@ on:
     paths:
       - repeater/server/**
       - repeater/protocol/**
+      - Cargo.toml
+      - Cargo.lock
+      - rust-toolchain.toml
+      - third_party/**
       - .dockerignore
       - .github/workflows/release-repeater-server.yml
     tags:
@@ -64,29 +70,26 @@ jobs:
     name: Test (pure core)
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    defaults:
-      run:
-        working-directory: repeater/server
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
+      # rust-toolchain.toml selects the version.
       - name: Install Rust
-        run: |
-          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
-          rustup default "$RUST_TOOLCHAIN"
+        run: rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
 
       - name: Restore Rust compilation cache
         uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
-          workspaces: repeater/server -> target
+          workspaces: . -> target
           key: repeater-server
           save-if: false
 
+      # `-p`, never `--workspace`: the workspace also holds the phone's crates.
       - name: cargo test (pure core)
-        run: cargo test --locked --workspace
+        run: cargo test --locked -p streetcryptid-repeater -p trail-stash
 
   # ---- what this run publishes ------------------------------------------------
   version:

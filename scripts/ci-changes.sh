@@ -5,7 +5,7 @@
 # A path-filtered workflow that does not run leaves a required check pending forever, so `ci.yml`
 # always runs and asks this script instead. The rules (docs/MONOREPO.md, "CI"):
 #
-#   repeater/server/**                                       -> server
+#   repeater/server/**, .dockerignore (the server image's)   -> server
 #   repeater/windows/**                                      -> windows
 #   repeater/protocol/**, Cargo.toml, Cargo.lock,
 #   rust-toolchain.toml, third_party/**, .github/**,
@@ -36,7 +36,7 @@ classify() {
   while IFS= read -r path; do
     [[ -z "$path" ]] && continue
     case "$path" in
-      repeater/server/*) server=true ;;
+      repeater/server/* | .dockerignore) server=true ;;
       repeater/windows/*) windows=true ;;
       repeater/protocol/* | Cargo.toml | Cargo.lock | rust-toolchain.toml | third_party/* | \
         .github/* | scripts/ci-changes.sh | repeater/*)
