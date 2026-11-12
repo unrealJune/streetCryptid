@@ -114,11 +114,18 @@ fi
 # The repeater server and the Windows repeater release under their own tags (`server-v*`,
 # `windows-v*`), so a commit confined to them must not cut a store release. `repeater/protocol/`
 # still counts: the phone links it. Which commits count, and how far they bump, is shared with the
-# server's release (scripts/lib/conventional-commits.sh).
+# repeaters' releases (scripts/lib/conventional-commits.sh).
+#
+# Nor does a commit confined to what never ships in the app: CI and release workflows, docs, the
+# justfile and the repository's ignore/attribute files. `apps/repeater` is the Windows client's
+# home before it moved to repeater/windows -- a path filter does not follow a rename, and its
+# history arrived in one merge (#192).
 app_commits=()
 while IFS= read -r commit; do
   app_commits+=("$commit")
-done < <(release_commits "$repo_root" "$previous_tag" . ':!repeater/server' ':!repeater/windows')
+done < <(release_commits "$repo_root" "$previous_tag" . \
+  ':!repeater/server' ':!repeater/windows' ':!apps/repeater' \
+  ':!.github' ':!docs' ':!justfile' ':!.gitattributes' ':!.prettierignore')
 
 level="$(bump_level "$repo_root" ${app_commits[@]+"${app_commits[@]}"})"
 
