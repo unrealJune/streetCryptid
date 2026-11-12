@@ -17,7 +17,7 @@
     <PublishAot>true</PublishAot>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
     <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
-    <ApplicationIcon>..\windows\Assets\repeater.ico</ApplicationIcon>
+    <ApplicationIcon>..\app\Assets\repeater.ico</ApplicationIcon>
     <Product>streetCryptid repeater</Product>
     <Description>streetCryptid repeater service</Description>
   </PropertyGroup>
