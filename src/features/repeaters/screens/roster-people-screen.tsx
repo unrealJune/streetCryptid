@@ -25,7 +25,12 @@ export default function RosterPeopleScreen() {
   const params = useLocalSearchParams<{ roster?: string }>();
   const [error, setError] = useState<string | null>(null);
 
-  const all = [sections.mine, ...sections.carryingMe, ...sections.throughFriends, ...sections.others];
+  const all = [
+    sections.mine,
+    ...sections.carryingMe,
+    ...sections.throughFriends,
+    ...sections.others,
+  ];
   const roster: RosterView | null =
     (typeof params.roster === 'string'
       ? all.find((r) => r?.rosterId === params.roster)

@@ -179,9 +179,7 @@ export default function RepeatersScreen() {
         ) : (
           <RepeaterCard
             title="Add a repeater"
-            lines={[
-              'Run trail-stash on a computer that stays on, then scan the code it shows.',
-            ]}
+            lines={['Run trail-stash on a computer that stays on, then scan the code it shows.']}
             accent={chrome.green}
             onOpen={() => router.push('/settings/repeaters/claim' as Href)}
             openLabel="Add a repeater"

@@ -278,9 +278,7 @@ export default function ClaimRepeaterScreen() {
           status={refused ? 'NOTHING WAS ADDED' : 'REACHING THE REPEATER'}
           statusColor={refused ? chrome.amber : chrome.green}
           detail={
-            refused
-              ? state.reason
-              : 'It has to be running and online. This takes up to 20 seconds.'
+            refused ? state.reason : 'It has to be running and online. This takes up to 20 seconds.'
           }
           marginBottom={Math.max(insets.bottom, Spacing.two)}
         >
@@ -316,7 +314,11 @@ export default function ClaimRepeaterScreen() {
           chrome={chrome}
           status="CLAIMED"
           detail={[
-            state.firstRepeater ? (state.open ? 'Open to anyone' : 'Invite only') : 'Joined your roster',
+            state.firstRepeater
+              ? state.open
+                ? 'Open to anyone'
+                : 'Invite only'
+              : 'Joined your roster',
             state.carry ? 'carries your location' : 'not carrying you',
           ]
             .filter(Boolean)

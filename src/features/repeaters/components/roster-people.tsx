@@ -50,9 +50,7 @@ export function RosterPeople({ roster, accent, warning, busy, owner, invite }: R
         <ThemedText type="small" themeColor="textSecondary">
           CARRYING
         </ThemedText>
-        {roster.members.some((m) => m.isMe) ? (
-          <ThemedText type="small">You</ThemedText>
-        ) : null}
+        {roster.members.some((m) => m.isMe) ? <ThemedText type="small">You</ThemedText> : null}
         {others.length === 0 && !roster.members.some((m) => m.isMe) ? (
           <ThemedText type="small" themeColor="textSecondary">
             {roster.members.length === 0 && roster.carried > 0

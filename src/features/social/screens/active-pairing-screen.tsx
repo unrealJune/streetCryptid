@@ -290,9 +290,7 @@ export default function ActivePairingScreen() {
     readonly chosen: ReadonlySet<string>;
   } | null>(null);
   const shownFriend = friend ?? enrollPrompt?.friend ?? null;
-  const signal = shownFriend
-    ? resolveSignalColor(shownFriend.color, chrome.green)
-    : chrome.green;
+  const signal = shownFriend ? resolveSignalColor(shownFriend.color, chrome.green) : chrome.green;
   // The repeater questions at pairing (REPEATERS.md §4.4): invites above ACKNOWLEDGE, carried out
   // after it; the enroll question after it.
   const repeaterOffer = usePairingRepeaterOffer(friend);

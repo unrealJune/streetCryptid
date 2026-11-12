@@ -34,7 +34,13 @@ export interface RosterGraph {
   readonly nodes: readonly GraphNode[];
   readonly links: readonly GraphLink[];
   /** One label per other person's roster, above its machines. */
-  readonly clusters: readonly { rosterId: string; label: string; side: GraphSide; fx: number; fy: number }[];
+  readonly clusters: readonly {
+    rosterId: string;
+    label: string;
+    side: GraphSide;
+    fx: number;
+    fy: number;
+  }[];
 }
 
 export const YOU = 'you';
@@ -53,7 +59,9 @@ interface Body {
   dy: number;
 }
 
-export function rosterGraphRosters(sections: RosterSections): { roster: RosterView; side: GraphSide }[] {
+export function rosterGraphRosters(
+  sections: RosterSections
+): { roster: RosterView; side: GraphSide }[] {
   const out: { roster: RosterView; side: GraphSide }[] = [];
   for (const r of sections.carryingMe) out.push({ roster: r, side: 'joined' });
   for (const r of sections.throughFriends) out.push({ roster: r, side: 'available' });
@@ -102,10 +110,16 @@ export function layoutRosterGraph(sections: RosterSections): RosterGraph {
       });
       if (i > 0) links.push({ a: r.machines[i - 1].id, b: m.id, kind, length: 50 });
       if (r.side === 'mine') links.push({ a: YOU, b: m.id, kind: 'mine', length: 110 });
-      else if (r.side === 'joined' && i === 0) links.push({ a: YOU, b: m.id, kind: 'carry', length: 120 });
+      else if (r.side === 'joined' && i === 0)
+        links.push({ a: YOU, b: m.id, kind: 'carry', length: 120 });
     });
     if (r.machines.length > 2) {
-      links.push({ a: r.machines[r.machines.length - 1].id, b: r.machines[0].id, kind, length: 50 });
+      links.push({
+        a: r.machines[r.machines.length - 1].id,
+        b: r.machines[0].id,
+        kind,
+        length: 50,
+      });
     }
   }
 

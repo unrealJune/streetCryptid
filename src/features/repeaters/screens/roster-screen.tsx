@@ -232,16 +232,19 @@ function SelectionPanel({
         <PanelActions>
           {confirming ? (
             <>
-              <PanelButton chrome={chrome} kind="outline" label="CANCEL" onPress={() => onConfirm(false)} />
+              <PanelButton
+                chrome={chrome}
+                kind="outline"
+                label="CANCEL"
+                onPress={() => onConfirm(false)}
+              />
               <PanelButton
                 chrome={chrome}
                 kind="warn"
                 label="CONFIRM REMOVE"
                 accessibilityLabel={`Confirm: remove machine ${node.short}`}
                 disabled={busy}
-                onPress={() =>
-                  void run(repeaters.removeMachine(roster.rosterId, node.id), onClose)
-                }
+                onPress={() => void run(repeaters.removeMachine(roster.rosterId, node.id), onClose)}
               />
             </>
           ) : (
@@ -280,7 +283,12 @@ function SelectionPanel({
         <PanelActions>
           {confirming ? (
             <>
-              <PanelButton chrome={chrome} kind="outline" label="CANCEL" onPress={() => onConfirm(false)} />
+              <PanelButton
+                chrome={chrome}
+                kind="outline"
+                label="CANCEL"
+                onPress={() => onConfirm(false)}
+              />
               <PanelButton
                 chrome={chrome}
                 kind="warn"
@@ -367,15 +375,15 @@ function GraphView({
 }) {
   const { width: W, height: H } = size;
   const paths = useMemo(() => {
-    const grid = Skia.Path.Make();
+    const grid = Skia.PathBuilder.Make();
     for (let y = DOT_STEP / 2; y < H; y += DOT_STEP) {
       for (let x = DOT_STEP / 2; x < W; x += DOT_STEP) grid.addCircle(x, y, 1);
     }
-    const divide = Skia.Path.Make();
+    const divide = Skia.PathBuilder.Make();
     for (let x = 4; x < W; x += 7) divide.addCircle(x, H / 2, 0.8);
-    const tied = Skia.Path.Make();
-    const tiedHot = Skia.Path.Make();
-    const floating = Skia.Path.Make();
+    const tied = Skia.PathBuilder.Make();
+    const tiedHot = Skia.PathBuilder.Make();
+    const floating = Skia.PathBuilder.Make();
     const at = (id: string): [number, number] => {
       if (id === YOU) return [W / 2, H / 2];
       const n = graph.nodes.find((m) => m.id === id)!;
@@ -398,7 +406,13 @@ function GraphView({
         into.addCircle(x1 + (x2 - x1) * f, y1 + (y2 - y1) * f, avail ? 1 : 1.3);
       }
     }
-    return { grid, divide, tied, tiedHot, floating };
+    return {
+      grid: grid.detach(),
+      divide: divide.detach(),
+      tied: tied.detach(),
+      tiedHot: tiedHot.detach(),
+      floating: floating.detach(),
+    };
   }, [W, H, graph, selected]);
 
   const rosterLabel = (id: string) =>
@@ -441,7 +455,9 @@ function GraphView({
 
       <View pointerEvents="none" style={[styles.you, { left: W / 2 - 30, top: H / 2 - 10 }]}>
         <View style={[styles.youDot, { backgroundColor: chrome.ink }]} />
-        <Text style={[styles.youLabel, { color: chrome.ink, backgroundColor: chrome.bg }]}>YOU</Text>
+        <Text style={[styles.youLabel, { color: chrome.ink, backgroundColor: chrome.bg }]}>
+          YOU
+        </Text>
       </View>
 
       {graph.nodes.map((n) => {
@@ -495,7 +511,12 @@ function GraphView({
 const styles = StyleSheet.create({
   screen: { flex: 1 },
   graph: { flex: 1, marginBottom: Spacing.two, marginHorizontal: 12, minHeight: 0 },
-  empty: { ...StyleSheet.absoluteFillObject, alignItems: 'center', justifyContent: 'flex-end', paddingBottom: '18%' },
+  empty: {
+    ...StyleSheet.absoluteFill,
+    alignItems: 'center',
+    justifyContent: 'flex-end',
+    paddingBottom: '18%',
+  },
   emptyText: { fontFamily: 'IBMPlexMono_600SemiBold', fontSize: 9, letterSpacing: 1.6 },
   sideLabel: {
     fontFamily: 'IBMPlexMono_600SemiBold',

@@ -198,8 +198,12 @@ describe('enrollFacts', () => {
     ];
     const facts = enrollFacts(sections.throughFriends[0]);
     expect(facts.map((f) => f.good)).toEqual([true, true, false]);
-    expect(facts[2].text).toBe('The 6 people it carries can see you’re carried. sam can remove you.');
-    expect(rosterLine(sections.throughFriends[0])).toBe('0 machines · invite only · carrying 6 people');
+    expect(facts[2].text).toBe(
+      'The 6 people it carries can see you’re carried. sam can remove you.'
+    );
+    expect(rosterLine(sections.throughFriends[0])).toBe(
+      '0 machines · invite only · carrying 6 people'
+    );
     expect(offeredCount(sections)).toBe(1);
   });
 });
