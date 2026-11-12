@@ -363,7 +363,7 @@ export declare class IrohLocationNativeModule
   // ── Repeaters (docs/social/REPEATERS.md). Optional: absent on binaries that predate them. ───
   /**
    * Claim the repeater whose console printed `link` (`streetcryptid-repeater:…`) into the roster
-   * this phone owns, creating it (`open` or invite-only) if there is none. `carryMe` also enrols
+   * this phone owns, creating it (`open` or invite-only) if there is none. `carryMe` also enrolls
    * this phone. Rejects unless the repeater's signed cert names this phone, this roster and the
    * machine that answered.
    */
@@ -372,7 +372,7 @@ export declare class IrohLocationNativeModule
   repeaterRosters?(): Promise<NativeRepeaterRoster[]>;
   /** Have a roster carry our trail, or stop. Resolves whether it carries us now. */
   setRepeaterCarried?(rosterId: string, carry: boolean): Promise<boolean>;
-  /** Owner only: who may enrol from now on (`open`, or invite-only). Never retroactive. */
+  /** Owner only: who may enroll from now on (`open`, or invite-only). Never retroactive. */
   setRepeaterPolicy?(rosterId: string, open: boolean): Promise<void>;
   /** Owner only: stop carrying `member`'s trail. Sticky until someone invites them again. */
   removeRepeaterMember?(rosterId: string, member: string): Promise<void>;
@@ -382,7 +382,7 @@ export declare class IrohLocationNativeModule
   grantRepeaters?(): Promise<void>;
   /**
    * Invite `member` to an invite-only roster this phone may invite to. Resolves whether a new
-   * invite was signed. An invite carries nobody until they enrol.
+   * invite was signed. An invite carries nobody until they enroll.
    */
   inviteToRepeater?(rosterId: string, member: string): Promise<boolean>;
   /**

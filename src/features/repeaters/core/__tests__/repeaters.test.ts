@@ -95,16 +95,16 @@ describe('rosterSections', () => {
     expect(rosterSections([roster({ carried: 2 })], []).others[0].members).toEqual([]);
   });
 
-  it('offers what friends vouch for, named by who vouched and whether I may enrol', () => {
+  it('offers what friends vouch for, named by who vouched and whether I may enroll', () => {
     const sections = rosterSections(
       [
-        roster({ rosterId: 'open', owner: SAM, open: true, vouchers: [SAM], canEnrol: true }),
-        roster({ rosterId: 'closed', owner: STRANGER, vouchers: [SAM], canEnrol: false }),
+        roster({ rosterId: 'open', owner: SAM, open: true, vouchers: [SAM], canEnroll: true }),
+        roster({ rosterId: 'closed', owner: STRANGER, vouchers: [SAM], canEnroll: false }),
         roster({ rosterId: 'seen', owner: STRANGER }),
       ],
       [{ endpointId: SAM, handle: '@sam' }]
     );
-    expect(sections.throughFriends.map((r) => [r.rosterId, r.canEnrol])).toEqual([
+    expect(sections.throughFriends.map((r) => [r.rosterId, r.canEnroll])).toEqual([
       ['open', true],
       ['closed', false],
     ]);
@@ -121,18 +121,18 @@ describe('rosterSections', () => {
 });
 
 describe('pairingOffers', () => {
-  it('asks to enrol in the new friend’s own rosters, and offers to invite them to mine', () => {
+  it('asks to enroll in the new friend’s own rosters, and offers to invite them to mine', () => {
     const sections = rosterSections(
       [
-        roster({ rosterId: 'sams', owner: SAM, open: true, vouchers: [SAM], canEnrol: true }),
-        roster({ rosterId: 'theirs', owner: STRANGER, vouchers: [STRANGER], canEnrol: true }),
+        roster({ rosterId: 'sams', owner: SAM, open: true, vouchers: [SAM], canEnroll: true }),
+        roster({ rosterId: 'theirs', owner: STRANGER, vouchers: [STRANGER], canEnroll: true }),
         roster({ rosterId: 'mine', owner: ME, mine: true, canInvite: true, inviters: [ME] }),
       ],
       [{ endpointId: SAM, handle: '@sam' }],
       ME
     );
     const offers = pairingOffers(sections, SAM.toUpperCase());
-    expect(offers.enrol.map((r) => r.rosterId)).toEqual(['sams']);
+    expect(offers.enroll.map((r) => r.rosterId)).toEqual(['sams']);
     expect(offers.canInvite).toBe(true);
   });
 
@@ -147,7 +147,7 @@ describe('pairingOffers', () => {
       []
     );
     expect(pairingOffers(open, SAM).canInvite).toBe(false);
-    expect(pairingOffers(rosterSections([], []), SAM)).toEqual({ enrol: [], canInvite: false });
+    expect(pairingOffers(rosterSections([], []), SAM)).toEqual({ enroll: [], canInvite: false });
   });
 });
 

@@ -108,7 +108,7 @@ export interface RosterView {
   /** Friends whose repeater cards list it and who are in it themselves. */
   readonly vouchers: readonly RosterPerson[];
   /** Enrolling would be accepted: open, or an invite naming me. */
-  readonly canEnrol: boolean;
+  readonly canEnroll: boolean;
   /** This phone may invite people: it owns it or holds `inviter` (any policy). */
   readonly canInvite: boolean;
   /** Who besides the owner may invite people. */
@@ -168,7 +168,7 @@ export function rosterSections(
       .sort((a, b) => Number(b.isMe) - Number(a.isMe) || a.label.localeCompare(b.label)),
     vouchers: (r.vouchers ?? []).map(person).sort((a, b) => a.label.localeCompare(b.label)),
     // A binary without the field could always try; the repeater is what judges.
-    canEnrol: r.carriesMe ? false : (r.canEnrol ?? true),
+    canEnroll: r.carriesMe ? false : (r.canEnroll ?? true),
     canInvite: r.canInvite ?? false,
     inviters: (r.inviters ?? [])
       .filter((id) => id.toLowerCase() !== r.owner.toLowerCase())
@@ -193,11 +193,10 @@ export function inviteCandidates(
   roster: RosterView,
   friends: readonly FriendName[]
 ): RosterPerson[] {
-  const taken = new Set(
-    [roster.owner, ...roster.members.map((m) => m.id), ...roster.invited.map((p) => p.id)].map(
-      (id) => id.toLowerCase()
-    )
-  );
+  const taken = new Set([roster.owner.toLowerCase()]);
+  for (const person of [...roster.members, ...roster.invited]) {
+    taken.add(person.id.toLowerCase());
+  }
   return friends
     .filter((f) => !taken.has(f.endpointId.toLowerCase()))
     .map((f) => ({ id: f.endpointId, label: f.handle, isMe: false }))
@@ -206,14 +205,14 @@ export function inviteCandidates(
 
 /** What the pairing screen can offer about a friend just found (REPEATERS.md §4.4). */
 export interface PairingOffers {
-  /** Their rosters (owned or vouched for by them) that I may enrol in and am not carried by. */
-  readonly enrol: readonly RosterView[];
+  /** Their rosters (owned or vouched for by them) that I may enroll in and am not carried by. */
+  readonly enroll: readonly RosterView[];
   /** I may invite them to at least one invite-only roster they are not in or invited to. */
   readonly canInvite: boolean;
 }
 
 /**
- * The Enrol question and the "also invite them" choice for `friendId`, from rosters this phone
+ * The Enroll question and the "also invite them" choice for `friendId`, from rosters this phone
  * already knows. Their card may not have arrived yet; then there is nothing to ask here, and the
  * roster turns up under Available through friends once it does.
  */
@@ -227,11 +226,11 @@ export function pairingOffers(sections: RosterSections, friendId: string): Pairi
   ];
   const isFriend = (p: RosterPerson) => p.id.toLowerCase() === friend;
   return {
-    enrol: all.filter(
+    enroll: all.filter(
       (r) =>
         !r.mine &&
         !r.carriesMe &&
-        r.canEnrol &&
+        r.canEnroll &&
         (r.owner.toLowerCase() === friend || r.vouchers.some(isFriend))
     ),
     // Open rosters need no invite to join; offering one there would only add an op.
@@ -253,7 +252,7 @@ export function repeatersSummary(sections: RosterSections): string {
   const parts: string[] = [];
   if (machines > 0) parts.push(`${machines} ${machines === 1 ? 'machine' : 'machines'}`);
   if (carriers > 0) parts.push(`carried by ${carriers}`);
-  const offered = sections.throughFriends.filter((r) => r.canEnrol).length;
+  const offered = sections.throughFriends.filter((r) => r.canEnroll).length;
   if (offered > 0) parts.push(`${offered} offered by friends`);
   return parts.length > 0 ? parts.join(' · ') : 'None';
 }
@@ -279,7 +278,10 @@ export function repeaterErrorCopy(error: unknown): string {
       'That code has expired or was already used. Use the newest one the repeater printed.',
     ],
     [/removed, and not invited again/, 'The owner removed you. Only a new invite lets you back.'],
-    [/only the owner or an inviter invites/, 'Only the owner, or someone they allowed, can invite.'],
+    [
+      /only the owner or an inviter invites/,
+      'Only the owner, or someone they allowed, can invite.',
+    ],
     [/this roster is invite-only/, 'This roster is invite-only, and nobody has invited you to it.'],
     [/only the roster's owner/, 'Only the owner can change this roster.'],
     [/AlreadyClaimed/, 'Someone has already claimed this repeater.'],

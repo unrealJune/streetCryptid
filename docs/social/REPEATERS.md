@@ -96,7 +96,7 @@ Nothing in iroh gates who reads a replica, and this design does not add a gate.
 
 So there is **no consent to read and no consent to be read through**:
 
-- Nobody enrols with anyone's repeaters to pull from them (§5).
+- Nobody enrolls with anyone's repeaters to pull from them (§5).
 - Phones do not filter incoming docs or gossip connections by who the peer is.
 - The stash opt-out keeps your trail off the hosted stash. It does not promise that your phone
   never ends up connected to it through someone else's swarm.
@@ -270,12 +270,12 @@ same ops agree. The test `order_does_not_matter` feeds one log in 200 orders.
   did not is refused when inserted, because its past can never change.
 - **A removal beats anything concurrent with it:**
   - an invite concurrent with its inviter's revocation does not stand;
-  - an enrolment concurrent with a `Remove` or `Withdraw` ends.
+  - an enrollment concurrent with a `Remove` or `Withdraw` ends.
 - A revocation made _after_ an invite stops later invites, not that one.
-- A `Remove` is sticky against re-enrolment until an invite made after it.
-- A `SetPolicy` applies to ops that have seen it. It never drops an enrolment the owner had seen
+- A `Remove` is sticky against re-enrollment until an invite made after it.
+- A `SetPolicy` applies to ops that have seen it. It never drops an enrollment the owner had seen
   when closing. Two concurrent ones resolve to `invite`, the stricter.
-- **Closing beats an uninvited enrolment it had not seen**, the same way a removal does. Without
+- **Closing beats an uninvited enrollment it had not seen**, the same way a removal does. Without
   this, closing closed nothing: anyone holding the genesis, which friends' cards publish (§4.2),
   could sign an `Enroll` citing the open genesis alone, and its past would say "open". Concurrent
   and backdated look the same, so a genuine race now costs the enrollee an invite.
@@ -290,11 +290,11 @@ share that trap.
 - The log is replicated between the owner's repeaters over the repeater protocol (§6). A repeater
   cannot forge any of it, because every op is signed by a phone.
 - The owner, carried members, inviters and the owner's repeaters can fetch it from a repeater.
-  Members can therefore see who else is carried; the enrol screen says so.
+  Members can therefore see who else is carried; the enroll screen says so.
 - Every member's repeater card carries the whole log too (§4.2), so the friends of anyone in a
   roster can read who it carries. Members are endpoint ids, which mean something only to people
   who already hold them, but this is wider than "members only" and is a deliberate trade: the log
-  is what lets a friend check a roster, label it and enrol, without fetching it from a repeater
+  is what lets a friend check a roster, label it and enroll, without fetching it from a repeater
   that would refuse them.
 
 ### 3.4 One crate, both sides
@@ -312,7 +312,7 @@ The boundary is drawn so the crate holds only what both sides must agree on byte
 | ---------------------------- | -------------------------------------- | --------------------------------- |
 | roster ops, rules, state     | console claim window                   | the roster book (`repeaters.bin`) |
 | `RepeaterCert`               | namespace book, release                | claim flow + cert check           |
-| requests, responses, framing | protocol handler, sibling/carrier sync | grant plan, enrol/withdraw        |
+| requests, responses, framing | protocol handler, sibling/carrier sync | grant plan, enroll/withdraw       |
 | grant proof, claim link      | persistent node                        | `RepeaterCard`                    |
 
 It has no iroh, tokio or I/O. Each side brings its own iroh (one workspace now, so both resolve
@@ -323,7 +323,7 @@ One thing is not shared and should be: the client half of the wire. `call` and `
 exist twice, word for word, in `repeater/server/src/repeater.rs` and in the app core's
 `repeater.rs`, because the crate holds no iroh (§6.2).
 
-## 4. Attestation and enrolment, without SAS
+## 4. Attestation and enrollment, without SAS
 
 Short authentication strings (SAS) exist because pairing has to authenticate a stranger's key
 over an untrusted path. Everything here rides on a path that is already authenticated: a code shown
@@ -412,14 +412,14 @@ nothing.
   _"June's repeaters · vouched for by June, Sam"_. An owner who is not your friend is shown by
   short id.
 - Enrolling from there needs the roster to be `open`, or an `Invite` naming you in the log. The
-  app cites the newest such invite; a roster you cannot enrol in shows why instead of a switch.
+  app cites the newest such invite; a roster you cannot enroll in shows why instead of a switch.
 - **A card vouches only from the friend whose profile it was read from.** Cards are read per
   friend (`ProfileDocs::read_key_from_friends`), each paired with the friend the pairing ticket
   says owns that namespace, and `ingest_cards` counts a card as a vouch only when its signer is
   that friend. A card someone else signed, republished in a friend's namespace, still teaches the
   rosters on it (the logs verify themselves) and vouches for nothing.
-- **Auto-enrol can require two vouches.** Defeating that means compromising two of your friends,
-  not one. Not built: there is no auto-enrol, and vouches are only shown. The binding above is
+- **Auto-enroll can require two vouches.** Defeating that means compromising two of your friends,
+  not one. Not built: there is no auto-enroll, and vouches are only shown. The binding above is
   what makes counting them safe when it is.
 
 The same cards also tell your phone which repeaters carry a friend, which is what pulls use (§5).
@@ -444,25 +444,25 @@ would close most of the gap and is not built.
 
 ### 4.2.1 What is gated, and by what
 
-| action                         | gate                                                                                  | checked by                         |
-| ------------------------------ | ------------------------------------------------------------------------------------- | ---------------------------------- |
-| claim a machine                | the console's one-time secret, and the caller is the genesis owner                    | the repeater, at `Claim`           |
-| change the roster              | the op's signature, and its signer's role in the op's own causal past (§3.3)          | every replica, at insert           |
-| send ops to a repeater         | **nothing** (`Publish` is open; each op is judged)                                    | n/a                                |
-| read the roster from a machine | caller is the owner, carried, an inviter, or a listed repeater                        | the repeater, at `Fetch`           |
-| read the roster at all         | **nothing in practice**: it is on every member's card                                 | n/a                                |
-| have a namespace carried       | caller is carried, the namespace's own key signed the proof, at most four per member  | the repeater, at `Grant`           |
-| become carried                 | an `open` roster: nothing but an `Enroll`. An `invite` roster: an invite naming you   | the roster rules                   |
-| read a carried trail           | **nothing** (§2.1). Holding the namespace id is enough                                | n/a                                |
-| write into a carried trail     | the namespace's write key, which only its author's phone holds                        | iroh-docs, on every entry          |
-| open an envelope               | being in the wrap set                                                                 | the ratchet                        |
+| action                         | gate                                                                                 | checked by                |
+| ------------------------------ | ------------------------------------------------------------------------------------ | ------------------------- |
+| claim a machine                | the console's one-time secret, and the caller is the genesis owner                   | the repeater, at `Claim`  |
+| change the roster              | the op's signature, and its signer's role in the op's own causal past (§3.3)         | every replica, at insert  |
+| send ops to a repeater         | **nothing** (`Publish` is open; each op is judged)                                   | n/a                       |
+| read the roster from a machine | caller is the owner, carried, an inviter, or a listed repeater                       | the repeater, at `Fetch`  |
+| read the roster at all         | **nothing in practice**: it is on every member's card                                | n/a                       |
+| have a namespace carried       | caller is carried, the namespace's own key signed the proof, at most four per member | the repeater, at `Grant`  |
+| become carried                 | an `open` roster: nothing but an `Enroll`. An `invite` roster: an invite naming you  | the roster rules          |
+| read a carried trail           | **nothing** (§2.1). Holding the namespace id is enough                               | n/a                       |
+| write into a carried trail     | the namespace's write key, which only its author's phone holds                       | iroh-docs, on every entry |
+| open an envelope               | being in the wrap set                                                                | the ratchet               |
 
 Every "who is this" reads the QUIC handshake, never a field in a request. The whole of access
 control is therefore the `Grant` check plus the roster rules, and what they protect is the
 repeater's memory and the choice to be carried. They do not protect who reads.
 
 `open` is wider than "the friends of its members" (§3.2) suggests. A member's card carries the
-roster to their friends; each who enrols publishes it on their own card. So an `open` roster is
+roster to their friends; each who enrolls publishes it on their own card. So an `open` roster is
 open to everyone connected to it through any chain of friendships, and to anyone at all who is
 handed the roster id and a repeater's endpoint id.
 
@@ -499,7 +499,7 @@ repeaters answers, the same way the outbox holds envelopes. Nobody has to be onl
 moment:
 
 - an inviter can invite while every repeater is off;
-- the person can enrol days later;
+- the person can enroll days later;
 - whichever repeater wakes first takes the ops, and its siblings converge from it.
 
 **How it is built.** A signed op is saved in the roster book at once and offered to the roster's
@@ -523,7 +523,7 @@ Say June owns a roster and Sam is her friend.
    already replicates that namespace because they paired. The card holds the roster's whole
    signed log, so Sam's phone now knows the roster id, its policy, and each repeater's endpoint
    id.
-2. **Sam's phone decides whether it may enrol.** It may if the roster is `open`, or if the log
+2. **Sam's phone decides whether it may enroll.** It may if the roster is `open`, or if the log
    holds an `Invite` naming Sam that still stands.
 3. **Sam signs an `Enroll`** and sends the log to June's repeaters with `Publish`, dialling each
    by endpoint id. Anyone may `Publish`; the op stands on Sam's signature and the roster's rules.
@@ -532,7 +532,7 @@ Say June owns a roster and Sam is her friend.
 5. **The repeater imports the namespace** from the ticket and joins its swarm. From then on
    Sam's phone pushes to it, and anyone who reads Sam can pull from it.
 6. **Sam's own card now lists June's roster**, so Sam's friends learn that June's repeaters
-   carry Sam (and, if the roster is `open`, that they may enrol too).
+   carry Sam (and, if the roster is `open`, that they may enroll too).
 
 What follows from that shape:
 
@@ -543,14 +543,14 @@ What follows from that shape:
   ticket too, as his friend, and that is exactly why `Grant` demands the namespace's own
   signature: otherwise June could volunteer Sam.
 - **Nothing is pushed to Sam.** A person who never opens Settings → Repeaters is never carried.
-  The Enrol prompt at pairing (below) would change how often people are asked, not who acts.
+  The Enroll prompt at pairing (below) would change how often people are asked, not who acts.
 - **The owner's remedy is `Remove`,** which is cooperative in the same way `Withdraw` is (§2.2).
 
-The same question, _"Replicate your trail on June's repeaters?"_ (Enrol / Not now), appears in two
+The same question, _"Replicate your trail on June's repeaters?"_ (Enroll / Not now), appears in two
 places.
 
 **At pairing.** When a pair completes, the pairing result screen (above ACKNOWLEDGE / REJECT)
-looks at the rosters this phone knows and offers every one of the new friend's it may enrol in:
+looks at the rosters this phone knows and offers every one of the new friend's it may enroll in:
 
 - an `open` one;
 - an `invite` one where the other side has invited me.
@@ -572,7 +572,7 @@ line counts it ("1 offered by friends").
 
 - **Carrying my trail.** Whose repeaters I am enrolled with. Each shows its machines and when each
   was last in contact, with a Withdraw action.
-- **Available through friends.** Every roster on a friend's card that I may enrol in: `open` ones,
+- **Available through friends.** Every roster on a friend's card that I may enroll in: `open` ones,
   and `invite` ones with an invite waiting for me. This is how repeaters a friend sets up later
   reach people who paired long before they existed.
 - **My repeaters.** Claim a machine, set the policy, grant `inviter`, remove members, and toggle
@@ -602,7 +602,7 @@ on.
   never extends a push that had someone else to wait for.
 - **Pull: from whoever carries the friend, enrolled or not.** For each friend, `friend_pull` also
   dials the repeaters on that friend's cards, because those repeaters carry that friend. Reading is
-  open (§2.1), so this needs no enrolment. Pull targets are capped at 3 repeaters per friend and 6
+  open (§2.1), so this needs no enrollment. Pull targets are capped at 3 repeaters per friend and 6
   per pass, because every extra dial costs iOS wake time. A repeater that answers is a source like
   any other.
 - **Isolation (`isolation.rs`).** An answer from a repeater counts as contact. Its silence does
@@ -701,10 +701,10 @@ the roster and reaching it by id alone, which is the only way it runs in the fie
 ### 6.1 Repeaters in different people's rosters
 
 Rosters are per owner, and a person can be carried by several: their own, and any friend's they
-enrolled in. If A and B both run repeaters and each enrols in the other's roster, A's trail is
+enrolled in. If A and B both run repeaters and each enrolls in the other's roster, A's trail is
 carried by A's repeater and by B's. That needs no new mechanism:
 
-- A's phone enrols in B's roster like any member (policy `open`, or an invite from an inviter), and
+- A's phone enrolls in B's roster like any member (policy `open`, or an invite from an inviter), and
   B's phone in A's. Each is its own opt-in; nothing is reciprocal by default.
 - A's phone grants its namespaces to every repeater carrying it, and names each to the others as
   **co-carriers**. A repeater reconciles each namespace with its co-carriers on the same timer as
@@ -721,12 +721,12 @@ phone and a repeater. `repeaters_in_different_rosters_converge_on_a_trail_they_b
 
 There are four channels. Only the first is "the repeater protocol".
 
-| channel                         | carries                                             | transport                                                            |
-| ------------------------------- | --------------------------------------------------- | -------------------------------------------------------------------- |
-| phone → repeater, and siblings  | `Claim`, `Publish`, `Fetch`, `Grant`, `Have`        | ALPN `streetcryptid/repeater/1` on the node's own iroh endpoint      |
-| owner or member → their friends | the roster's signed log (`RepeaterCard`)            | iroh-docs: the `repeaters` key of the publisher's profile namespace  |
-| phone → hosted stash            | namespace grants, push subscriptions                | HTTP + a PSK baked into the build. Not served in repeater mode       |
-| Windows app ↔ service ↔ host    | status snapshots out; `settings` and `release` in   | JSON lines on the host's stdin/stdout, relayed over a named pipe (v2)  |
+| channel                         | carries                                           | transport                                                             |
+| ------------------------------- | ------------------------------------------------- | --------------------------------------------------------------------- |
+| phone → repeater, and siblings  | `Claim`, `Publish`, `Fetch`, `Grant`, `Have`      | ALPN `streetcryptid/repeater/1` on the node's own iroh endpoint       |
+| owner or member → their friends | the roster's signed log (`RepeaterCard`)          | iroh-docs: the `repeaters` key of the publisher's profile namespace   |
+| phone → hosted stash            | namespace grants, push subscriptions              | HTTP + a PSK baked into the build. Not served in repeater mode        |
+| Windows app ↔ service ↔ host    | status snapshots out; `settings` and `release` in | JSON lines on the host's stdin/stdout, relayed over a named pipe (v2) |
 
 **The repeater protocol, exactly** (`repeater/protocol/src/wire.rs`):
 
@@ -834,12 +834,12 @@ needs plaintext, so it must be in the wrap set. What the protocol already implie
   - of the `MAX_OPS` = 4096 lifetime ops, the last `OWNER_RESERVE` = 512 are the owner's alone.
   So the owner can always close the roster and remove people. What remains: in an `open` roster,
   throwaway keys can each `Enroll` until the non-owner share is spent, which stops new
-  enrolments for good, since the log is never compacted (§10). A close that had not seen those
-  enrolments ends them, but does not free their slots. Replicas that see ops in different
+  enrollments for good, since the log is never compacted (§10). A close that had not seen those
+  enrollments ends them, but does not free their slots. Replicas that see ops in different
   orders can disagree at the cap, as they could before.
 - **A repeater that left, or was removed, was still a reader** (§2.2). It keeps the read
   capability for every namespace it ever carried.
-- **A compromised inviter** can invite anyone, but cannot make anyone enrol. The owner revokes the
+- **A compromised inviter** can invite anyone, but cannot make anyone enroll. The owner revokes the
   role.
 - **A leaked claim code** is worth one attempt within 30 minutes, and only to a phone that is
   also the owner the claim names. That means it is worth nothing to anyone but the person at the
@@ -879,8 +879,8 @@ The repeater work landed as trail-stash#8 and #9 before that repository moved in
    - Built: `RepeaterCard` (whole signed logs, vouching checked against the log), Available
      through friends in Settings → Repeaters, enrolling with a cited invite, and
      `fix.provenance` / `contact.role = repeater` telemetry (`infra/otel/README.md`).
-   - Built: the Enrol and invite question on the pairing result screen, inviting, granting
-     `inviter`, and auto-invite (§3.2, §4.4). Not yet: auto-enrol.
+   - Built: the Enroll and invite question on the pairing result screen, inviting, granting
+     `inviter`, and auto-invite (§3.2, §4.4). Not yet: auto-enroll.
    - Built: vouches only from the friend whose profile namespace a card was read from (§4.2).
    - Delivery, built: unwaited pushes to rosters I am enrolled in, capped and rotated pulls from
      friends' repeaters, `contact.role` / `fix.provenance`. Isolation needed no change (any
@@ -919,7 +919,7 @@ The repeater work landed as trail-stash#8 and #9 before that repository moved in
   swarm (§2.2), so the copy would have to be careful.
 - **Roster compaction.** Per-signer limits and the owner's reserve (§8) keep a flooded roster
   governable, but throwaway keys can still spend the non-owner share of the 4096-op lifetime cap
-  in an `open` roster. An owner-signed checkpoint that drops ended enrolments would free it.
+  in an `open` roster. An owner-signed checkpoint that drops ended enrollments would free it.
   Needed before `open` rosters are safe to recommend.
 
 ## 11. Where the code differs (audit of 2026-11-12)
@@ -939,7 +939,7 @@ what is not. What was found, and what changed:
 | G7  | every roster in the book was fetched on every start            | only rosters this phone owns or is carried by; a phone that signed nothing dials nothing |
 | G8  | no release; a lost `Claimed` reply stranded the machine        | the owner may repeat a claim; `trail-stash release` and the Windows app's RELEASE (§4.1) |
 | G9  | a card's signer was not tied to the namespace it was read from | a card vouches only from the friend whose profile it was read from (§4.2)                |
-| G10 | no Enrol question at pairing                                   | enrol and invite on the pairing result screen (§4.4)                                     |
+| G10 | no Enroll question at pairing                                  | enroll and invite on the pairing result screen (§4.4)                                    |
 | G11 | no `repeaters.*` on `device.health`                            | `repeaters.enrolled`, `.carriers`, `.last_contact_age_ms` (§5)                           |
 | G12 | the `wire.rs` table omitted inviters from `Fetch`              | fixed; `Fetch` is now open to anyone who signed in the roster (§6.2)                     |
 
@@ -947,5 +947,5 @@ Found while fixing them, and fixed with them: a member the owner removed could n
 roster (`NotCarried`), so its phone kept believing it was carried and pushing there. Anyone who
 has signed an op in a roster may now fetch it (§6.2).
 
-What remains is design, not drift: auto-enrol (§4.2), quotas and daemon health (§9), and the
+What remains is design, not drift: auto-enroll (§4.2), quotas and daemon health (§9), and the
 open questions in §10. None of the fixes above has run against a live daemon from a phone yet.

@@ -10,7 +10,7 @@
 //! * keep every roster it has seen ([`RosterBook`], in `state_dir`, judged by signature alone);
 //! * **claim** a repeater from the link its console printed, and check the cert it hands back
 //!   names this phone, this roster and the machine that answered ([`claim`]);
-//! * **enrol or withdraw** — the one opt-in there is, which is having one's own trail carried;
+//! * **enroll or withdraw** — the one opt-in there is, which is having one's own trail carried;
 //! * ask every repeater that carries it to hold its own namespaces, naming each repeater to the
 //!   others as co-carriers so they converge between themselves ([`grant_plan`], [`grant`]);
 //! * publish a **card** of the rosters it owns or is carried by, in its own profile namespace,
@@ -510,7 +510,7 @@ fn card_signing_input(body: &[u8]) -> Vec<u8> {
 /// A card vouches only when its signer IS the friend it was read from (§11, G9). A friend who
 /// republishes a card someone else signed still teaches us the rosters on it, since a log
 /// verifies itself, but makes nobody a voucher: otherwise a friend could have a stranger listed
-/// as one, and the day vouches decide auto-enrolment, that stranger would count.
+/// as one, and the day vouches decide auto-enrollment, that stranger would count.
 pub fn ingest_cards(
     book: &RosterBook,
     cards: &[(EndpointId, Vec<u8>)],
@@ -734,7 +734,7 @@ pub struct Claimed {
 }
 
 /// Claim the repeater whose console printed `link`, into the roster this phone owns (started
-/// here if there is none), and list it there. `carry_me` enrols this phone too — the same opt-in
+/// here if there is none), and list it there. `carry_me` enrolls this phone too — the same opt-in
 /// every other member makes, offered at the moment it is most obviously wanted.
 ///
 /// The link carries the repeater's full endpoint id, and the dial authenticates the machine that
@@ -793,7 +793,7 @@ pub async fn claim(
     Ok(Claimed { roster, repeater })
 }
 
-/// Enrol in (`carry = true`) or withdraw from a roster this phone holds, and tell its repeaters.
+/// Enroll in (`carry = true`) or withdraw from a roster this phone holds, and tell its repeaters.
 /// Returns whether the roster now carries us, by our own copy.
 pub async fn set_carried(
     endpoint: &Endpoint,
@@ -824,9 +824,9 @@ pub async fn set_carried(
 /// What an owner may change about their roster from the phone.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OwnerChange {
-    /// Who may enrol from now on. Never retroactive: nobody already carried is dropped.
+    /// Who may enroll from now on. Never retroactive: nobody already carried is dropped.
     Policy(Policy),
-    /// Stop carrying a member. Sticky: they cannot enrol again, even in an open roster, until
+    /// Stop carrying a member. Sticky: they cannot enroll again, even in an open roster, until
     /// someone invites them after this.
     RemoveMember(EndpointId),
     /// Take a machine out of the roster.
@@ -904,7 +904,7 @@ pub fn sign_invite(
 }
 
 /// Who holds an invite to `roster` and is not carried yet. Whether each invite still stands is
-/// the roster's call at enrolment; this is what the owner's screen lists as "invited".
+/// the roster's call at enrollment; this is what the owner's screen lists as "invited".
 pub fn pending_invites(book: &RosterBook, roster: &RosterId) -> BTreeSet<EndpointId> {
     let Some(state) = book.state(roster) else {
         return BTreeSet::new();
@@ -1583,9 +1583,9 @@ mod tests {
     }
 
     #[test]
-    fn an_owner_can_remove_a_member_and_they_cannot_simply_enrol_again() {
+    fn an_owner_can_remove_a_member_and_they_cannot_simply_enroll_again() {
         let book = RosterBook::open(&scratch("remove")).unwrap();
-        // An open roster: anyone may enrol, which is what makes the removal's stickiness matter.
+        // An open roster: anyone may enroll, which is what makes the removal's stickiness matter.
         let roster = roster_with(&book, 1, &[10], &[2]);
         assert!(book.state(&roster).unwrap().carried.contains(&id(2)));
 
@@ -1720,7 +1720,7 @@ mod tests {
     }
 
     #[test]
-    fn an_invite_is_what_an_enrolment_cites_in_an_invite_only_roster() {
+    fn an_invite_is_what_an_enrollment_cites_in_an_invite_only_roster() {
         let book = RosterBook::open(&scratch("invite")).unwrap();
         let roster = book.create(&key(1), Policy::Invite, 1).unwrap();
         assert_eq!(invite_for(&book, &roster, &id(2)), None);

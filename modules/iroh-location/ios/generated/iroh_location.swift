@@ -941,7 +941,7 @@ public protocol LocationNodeProtocol: AnyObject, Sendable {
     /**
      * Claim the repeater whose console printed `link` (`streetcryptid-repeater:...`), into the
      * roster this phone owns (started here, `open` or invite-only, if there is none) and list
-     * it there. `carry_me` also enrols this phone, so the repeater carries our own trail.
+     * it there. `carry_me` also enrolls this phone, so the repeater carries our own trail.
      *
      * Fails without listing anything unless the repeater's signed cert names this phone, this
      * roster and the machine that answered (see [`repeater::claim`]).
@@ -1119,7 +1119,7 @@ public protocol LocationNodeProtocol: AnyObject, Sendable {
      * Invite `member` to an invite-only roster this phone may invite to (it owns it, or holds
      * `inviter`), and tell its repeaters. Resolves whether a new invite was signed: a member
      * already carried, or already holding an invite that stands, is not invited twice. An invite
-     * carries nobody; they still choose to enrol (REPEATERS.md §4.5).
+     * carries nobody; they still choose to enroll (REPEATERS.md §4.5).
      */
     func inviteToRepeater(rosterId: String, member: String) async throws  -> Bool
     
@@ -1304,7 +1304,7 @@ public protocol LocationNodeProtocol: AnyObject, Sendable {
     
     /**
      * Stop the roster this phone owns carrying `member`'s trail. Each repeater releases what it
-     * held for them as the removal reaches it, and they cannot enrol again, even in an open
+     * held for them as the removal reaches it, and they cannot enroll again, even in an open
      * roster, until someone invites them after this.
      */
     func removeRepeaterMember(rosterId: String, member: String) async throws 
@@ -1420,7 +1420,7 @@ public protocol LocationNodeProtocol: AnyObject, Sendable {
     func setRepeaterInviter(rosterId: String, member: String, inviter: Bool) async throws 
     
     /**
-     * Set who may enrol in the roster this phone owns (`open`, or invite-only) from now on.
+     * Set who may enroll in the roster this phone owns (`open`, or invite-only) from now on.
      * Nobody already carried is dropped.
      */
     func setRepeaterPolicy(rosterId: String, `open`: Bool) async throws 
@@ -1801,7 +1801,7 @@ open func cancelPair(sessionId: Data)async throws   {
     /**
      * Claim the repeater whose console printed `link` (`streetcryptid-repeater:...`), into the
      * roster this phone owns (started here, `open` or invite-only, if there is none) and list
-     * it there. `carry_me` also enrols this phone, so the repeater carries our own trail.
+     * it there. `carry_me` also enrolls this phone, so the repeater carries our own trail.
      *
      * Fails without listing anything unless the repeater's signed cert names this phone, this
      * roster and the machine that answered (see [`repeater::claim`]).
@@ -2338,7 +2338,7 @@ open func inviteFriendToRepeaters(member: String)async throws  -> UInt32  {
      * Invite `member` to an invite-only roster this phone may invite to (it owns it, or holds
      * `inviter`), and tell its repeaters. Resolves whether a new invite was signed: a member
      * already carried, or already holding an invite that stands, is not invited twice. An invite
-     * carries nobody; they still choose to enrol (REPEATERS.md §4.5).
+     * carries nobody; they still choose to enroll (REPEATERS.md §4.5).
      */
 open func inviteToRepeater(rosterId: String, member: String)async throws  -> Bool  {
     return
@@ -2908,7 +2908,7 @@ open func removeRepeater(rosterId: String, repeaterId: String)async throws   {
     
     /**
      * Stop the roster this phone owns carrying `member`'s trail. Each repeater releases what it
-     * held for them as the removal reaches it, and they cannot enrol again, even in an open
+     * held for them as the removal reaches it, and they cannot enroll again, even in an open
      * roster, until someone invites them after this.
      */
 open func removeRepeaterMember(rosterId: String, member: String)async throws   {
@@ -3241,7 +3241,7 @@ open func setRepeaterInviter(rosterId: String, member: String, inviter: Bool)asy
 }
     
     /**
-     * Set who may enrol in the roster this phone owns (`open`, or invite-only) from now on.
+     * Set who may enroll in the roster this phone owns (`open`, or invite-only) from now on.
      * Nobody already carried is dropped.
      */
 open func setRepeaterPolicy(rosterId: String, `open`: Bool)async throws   {
@@ -7634,7 +7634,7 @@ public struct RepeaterRoster: Equatable, Hashable {
      */
     public var mine: Bool
     /**
-     * Anyone may enrol, rather than only whoever an inviter invited.
+     * Anyone may enroll, rather than only whoever an inviter invited.
      */
     public var `open`: Bool
     /**
@@ -7658,7 +7658,7 @@ public struct RepeaterRoster: Equatable, Hashable {
     /**
      * Enrolling would be accepted, as far as this phone can tell: open, or an invite naming us.
      */
-    public var canEnrol: Bool
+    public var canEnroll: Bool
     /**
      * Who may invite people (endpoint ids), the owner included.
      */
@@ -7680,7 +7680,7 @@ public struct RepeaterRoster: Equatable, Hashable {
          * This phone owns it (it claimed the roster's first repeater).
          */mine: Bool, 
         /**
-         * Anyone may enrol, rather than only whoever an inviter invited.
+         * Anyone may enroll, rather than only whoever an inviter invited.
          */`open`: Bool, 
         /**
          * It carries this phone's own trail: the one opt-in there is.
@@ -7697,7 +7697,7 @@ public struct RepeaterRoster: Equatable, Hashable {
          */vouchers: [String], 
         /**
          * Enrolling would be accepted, as far as this phone can tell: open, or an invite naming us.
-         */canEnrol: Bool, 
+         */canEnroll: Bool, 
         /**
          * Who may invite people (endpoint ids), the owner included.
          */inviters: [String], 
@@ -7717,7 +7717,7 @@ public struct RepeaterRoster: Equatable, Hashable {
         self.carried = carried
         self.members = members
         self.vouchers = vouchers
-        self.canEnrol = canEnrol
+        self.canEnroll = canEnroll
         self.inviters = inviters
         self.invited = invited
         self.canInvite = canInvite
@@ -7748,7 +7748,7 @@ public struct FfiConverterTypeRepeaterRoster: FfiConverterRustBuffer {
                 carried: FfiConverterUInt32.read(from: &buf), 
                 members: FfiConverterSequenceString.read(from: &buf), 
                 vouchers: FfiConverterSequenceString.read(from: &buf), 
-                canEnrol: FfiConverterBool.read(from: &buf), 
+                canEnroll: FfiConverterBool.read(from: &buf), 
                 inviters: FfiConverterSequenceString.read(from: &buf), 
                 invited: FfiConverterSequenceString.read(from: &buf), 
                 canInvite: FfiConverterBool.read(from: &buf)
@@ -7765,7 +7765,7 @@ public struct FfiConverterTypeRepeaterRoster: FfiConverterRustBuffer {
         FfiConverterUInt32.write(value.carried, into: &buf)
         FfiConverterSequenceString.write(value.members, into: &buf)
         FfiConverterSequenceString.write(value.vouchers, into: &buf)
-        FfiConverterBool.write(value.canEnrol, into: &buf)
+        FfiConverterBool.write(value.canEnroll, into: &buf)
         FfiConverterSequenceString.write(value.inviters, into: &buf)
         FfiConverterSequenceString.write(value.invited, into: &buf)
         FfiConverterBool.write(value.canInvite, into: &buf)

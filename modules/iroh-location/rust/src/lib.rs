@@ -331,7 +331,7 @@ pub struct RepeaterRoster {
     pub owner: String,
     /// This phone owns it (it claimed the roster's first repeater).
     pub mine: bool,
-    /// Anyone may enrol, rather than only whoever an inviter invited.
+    /// Anyone may enroll, rather than only whoever an inviter invited.
     pub open: bool,
     /// It carries this phone's own trail: the one opt-in there is.
     pub carries_me: bool,
@@ -344,7 +344,7 @@ pub struct RepeaterRoster {
     /// a roster this phone knows only by claiming or enrolling.
     pub vouchers: Vec<String>,
     /// Enrolling would be accepted, as far as this phone can tell: open, or an invite naming us.
-    pub can_enrol: bool,
+    pub can_enroll: bool,
     /// Who may invite people (endpoint ids), the owner included.
     pub inviters: Vec<String>,
     /// Who holds a standing invite and is not carried yet (endpoint ids).
@@ -3090,7 +3090,7 @@ impl LocationNode {
 
     /// Claim the repeater whose console printed `link` (`streetcryptid-repeater:...`), into the
     /// roster this phone owns (started here, `open` or invite-only, if there is none) and list
-    /// it there. `carry_me` also enrols this phone, so the repeater carries our own trail.
+    /// it there. `carry_me` also enrolls this phone, so the repeater carries our own trail.
     ///
     /// Fails without listing anything unless the repeater's signed cert names this phone, this
     /// roster and the machine that answered (see [`repeater::claim`]).
@@ -3137,7 +3137,7 @@ impl LocationNode {
                 let open = state.policy == streetcryptid_repeater::roster::Policy::Open;
                 let carries_me = state.carried.contains(&me);
                 let mine = state.owner == me;
-                let can_enrol = !carries_me
+                let can_enroll = !carries_me
                     && (mine || open || repeater::invite_for(&book, &state.id, &me).is_some());
                 // Any policy: in an open roster an invite is how a removed member comes back.
                 let can_invite = state.inviters.contains(&me);
@@ -3155,7 +3155,7 @@ impl LocationNode {
                         .get(&state.id)
                         .map(|ids| ids.iter().map(|id| encode_hex(id)).collect())
                         .unwrap_or_default(),
-                    can_enrol,
+                    can_enroll,
                     inviters: state.inviters.iter().map(|id| encode_hex(id)).collect(),
                     invited: invited.iter().map(|id| encode_hex(id)).collect(),
                     can_invite,
@@ -3186,14 +3186,14 @@ impl LocationNode {
         .await?;
         if carried {
             // The grant pass republishes the card after its refresh.
-            self.grant_repeaters("enrol").await;
+            self.grant_repeaters("enroll").await;
         } else {
             self.republish_repeater_card().await;
         }
         Ok(carried)
     }
 
-    /// Set who may enrol in the roster this phone owns (`open`, or invite-only) from now on.
+    /// Set who may enroll in the roster this phone owns (`open`, or invite-only) from now on.
     /// Nobody already carried is dropped.
     pub async fn set_repeater_policy(
         &self,
@@ -3210,7 +3210,7 @@ impl LocationNode {
     }
 
     /// Stop the roster this phone owns carrying `member`'s trail. Each repeater releases what it
-    /// held for them as the removal reaches it, and they cannot enrol again, even in an open
+    /// held for them as the removal reaches it, and they cannot enroll again, even in an open
     /// roster, until someone invites them after this.
     pub async fn remove_repeater_member(
         &self,
@@ -3242,7 +3242,7 @@ impl LocationNode {
     /// Invite `member` to an invite-only roster this phone may invite to (it owns it, or holds
     /// `inviter`), and tell its repeaters. Resolves whether a new invite was signed: a member
     /// already carried, or already holding an invite that stands, is not invited twice. An invite
-    /// carries nobody; they still choose to enrol (REPEATERS.md §4.5).
+    /// carries nobody; they still choose to enroll (REPEATERS.md §4.5).
     pub async fn invite_to_repeater(
         &self,
         roster_id: String,

@@ -39,7 +39,7 @@ interface RosterCardProps {
 /**
  * One roster: whose it is, its machines, and the one choice there is about it for everyone,
  * whether it carries your trail (REPEATERS.md §2.1: carrying is the only opt-in). On your own
- * roster it also holds the owner's controls: who may enrol, and removing people or machines.
+ * roster it also holds the owner's controls: who may enroll, and removing people or machines.
  */
 export function RosterCard({
   roster,
@@ -85,12 +85,12 @@ export function RosterCard({
           <ThemedText type="small" themeColor="textSecondary">
             {roster.carriesMe
               ? 'Kept on these machines, sealed, for friends to pick up while your phone sleeps.'
-              : roster.canEnrol
+              : roster.canEnroll
                 ? 'Off. These machines do not keep your trail.'
                 : 'Invite only, and nobody has invited you yet.'}
           </ThemedText>
         </View>
-        {roster.carriesMe || roster.canEnrol ? (
+        {roster.carriesMe || roster.canEnroll ? (
           <Switch
             accessibilityRole="switch"
             accessibilityLabel={`Carry my trail on ${roster.ownerLabel}`}

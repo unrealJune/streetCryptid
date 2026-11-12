@@ -11,10 +11,10 @@ import { getRepeaterClient } from '../net/repeater-client';
 
 export interface PairingRepeaterOffer {
   readonly offers: PairingOffers;
-  /** Rosters the person chose to enrol in. */
-  readonly enrol: ReadonlySet<string>;
+  /** Rosters the person chose to enroll in. */
+  readonly enroll: ReadonlySet<string>;
   readonly invite: boolean;
-  toggleEnrol(rosterId: string, on: boolean): void;
+  toggleEnroll(rosterId: string, on: boolean): void;
   setInvite(on: boolean): void;
   /**
    * Carry out the choices. Called once the pair is acknowledged, and never awaited: like
@@ -24,10 +24,10 @@ export interface PairingRepeaterOffer {
   apply(): void;
 }
 
-const NONE: PairingOffers = { enrol: [], canInvite: false };
+const NONE: PairingOffers = { enroll: [], canInvite: false };
 
 /**
- * The repeater question at pairing (REPEATERS.md §4.4): enrol in the new friend's rosters, and
+ * The repeater question at pairing (REPEATERS.md §4.4): enroll in the new friend's rosters, and
  * invite them to mine. Read from the rosters this phone already knows, including the friend's
  * card if it arrived with the pair; when it has not, there is nothing to ask here and the roster
  * shows up later under Settings → Repeaters → Available through friends.
@@ -76,18 +76,18 @@ export function usePairingRepeaterOffer(
   const current = loaded && loaded.friendId === friendId ? loaded : null;
   const offers = current?.offers ?? NONE;
   const mine = picked.friendId === friendId ? picked : UNPICKED;
-  const enrol = mine.enrol;
+  const enroll = mine.enroll;
   // Pre-checked when auto-invite is on, until the person says otherwise.
   const invite = offers.canInvite && (mine.invite ?? current?.auto ?? false);
 
-  const toggleEnrol = useCallback(
+  const toggleEnroll = useCallback(
     (rosterId: string, on: boolean) => {
       setPicked((was) => {
         const base = was.friendId === friendId ? was : { ...UNPICKED, friendId };
-        const next = new Set(base.enrol);
+        const next = new Set(base.enroll);
         if (on) next.add(rosterId);
         else next.delete(rosterId);
-        return { ...base, enrol: next };
+        return { ...base, enroll: next };
       });
     },
     [friendId]
@@ -105,15 +105,15 @@ export function usePairingRepeaterOffer(
 
   const apply = useCallback(() => {
     if (!client || !friendId) return;
-    for (const rosterId of enrol) {
+    for (const rosterId of enroll) {
       void client.setCarried(rosterId, true).catch(() => undefined);
     }
     if (invite && client.invites) {
       void client.invites.inviteFriend(friendId).catch(() => undefined);
     }
-  }, [client, friendId, enrol, invite]);
+  }, [client, friendId, enroll, invite]);
 
-  return { offers, enrol, invite, toggleEnrol, setInvite, apply };
+  return { offers, enroll, invite, toggleEnroll, setInvite, apply };
 }
 
 interface Loaded {
@@ -125,14 +125,14 @@ interface Loaded {
 
 interface Picked {
   readonly friendId: string | null;
-  readonly enrol: ReadonlySet<string>;
+  readonly enroll: ReadonlySet<string>;
   /** `null` until the person touches the switch. */
   readonly invite: boolean | null;
 }
 
-const UNPICKED: Picked = { friendId: null, enrol: new Set(), invite: null };
+const UNPICKED: Picked = { friendId: null, enroll: new Set(), invite: null };
 
-/** The switches for {@link usePairingRepeaterOffer}; renders nothing when there is nothing to ask. */
+/** The switches for {@link usePairingRepeaterOffer}; nothing when there is nothing to ask. */
 export function PairingRepeaterOfferView({
   offer,
   friendHandle,
@@ -145,11 +145,11 @@ export function PairingRepeaterOfferView({
   readonly disabled: boolean;
 }) {
   const theme = useTheme();
-  const { offers, enrol, invite } = offer;
-  if (offers.enrol.length === 0 && !offers.canInvite) return null;
+  const { offers, enroll, invite } = offer;
+  if (offers.enroll.length === 0 && !offers.canInvite) return null;
   return (
     <View style={[styles.box, { borderColor: theme.backgroundSelected }]}>
-      {offers.enrol.map((roster) => (
+      {offers.enroll.map((roster) => (
         <View key={roster.rosterId} style={styles.option}>
           <View style={styles.copy}>
             <ThemedText type="small">{`Replicate your trail on ${roster.ownerLabel}?`}</ThemedText>
@@ -161,8 +161,8 @@ export function PairingRepeaterOfferView({
             accessibilityRole="switch"
             accessibilityLabel={`Carry my trail on ${roster.ownerLabel}`}
             disabled={disabled}
-            value={enrol.has(roster.rosterId)}
-            onValueChange={(on) => offer.toggleEnrol(roster.rosterId, on)}
+            value={enroll.has(roster.rosterId)}
+            onValueChange={(on) => offer.toggleEnroll(roster.rosterId, on)}
             trackColor={{ true: accent, false: theme.backgroundSelected }}
           />
         </View>

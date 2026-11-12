@@ -24,7 +24,7 @@ interface ClaimRepeaterFormProps {
 }
 
 /**
- * Claim a machine: paste the link its console printed, choose who may enrol (first machine only),
+ * Claim a machine: paste the link its console printed, choose who may enroll (first machine only),
  * and whether it carries your own trail. The core refuses anything whose signed cert does not
  * name this phone and the machine that answered, so a mistyped or swapped link adds nothing.
  */

@@ -135,9 +135,7 @@ export function useRepeaters(): UseRepeaters {
           ? change(rosterId, () => setInviterCall(rosterId, member, inviter))
           : Promise.resolve(UNSUPPORTED),
       setAutoInvite: (on: boolean) =>
-        invites
-          ? change(null, () => invites.setAutoInvite(on))
-          : Promise.resolve(UNSUPPORTED),
+        invites ? change(null, () => invites.setAutoInvite(on)) : Promise.resolve(UNSUPPORTED),
     }),
     [client, owner, invites, setInviterCall, change]
   );

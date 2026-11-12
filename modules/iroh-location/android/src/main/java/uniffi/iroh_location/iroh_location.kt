@@ -2775,7 +2775,7 @@ public interface LocationNodeInterface {
     /**
      * Claim the repeater whose console printed `link` (`streetcryptid-repeater:...`), into the
      * roster this phone owns (started here, `open` or invite-only, if there is none) and list
-     * it there. `carry_me` also enrols this phone, so the repeater carries our own trail.
+     * it there. `carry_me` also enrolls this phone, so the repeater carries our own trail.
      *
      * Fails without listing anything unless the repeater's signed cert names this phone, this
      * roster and the machine that answered (see [`repeater::claim`]).
@@ -2953,7 +2953,7 @@ public interface LocationNodeInterface {
      * Invite `member` to an invite-only roster this phone may invite to (it owns it, or holds
      * `inviter`), and tell its repeaters. Resolves whether a new invite was signed: a member
      * already carried, or already holding an invite that stands, is not invited twice. An invite
-     * carries nobody; they still choose to enrol (REPEATERS.md §4.5).
+     * carries nobody; they still choose to enroll (REPEATERS.md §4.5).
      */
     suspend fun `inviteToRepeater`(`rosterId`: kotlin.String, `member`: kotlin.String): kotlin.Boolean
     
@@ -3138,7 +3138,7 @@ public interface LocationNodeInterface {
     
     /**
      * Stop the roster this phone owns carrying `member`'s trail. Each repeater releases what it
-     * held for them as the removal reaches it, and they cannot enrol again, even in an open
+     * held for them as the removal reaches it, and they cannot enroll again, even in an open
      * roster, until someone invites them after this.
      */
     suspend fun `removeRepeaterMember`(`rosterId`: kotlin.String, `member`: kotlin.String)
@@ -3254,7 +3254,7 @@ public interface LocationNodeInterface {
     suspend fun `setRepeaterInviter`(`rosterId`: kotlin.String, `member`: kotlin.String, `inviter`: kotlin.Boolean)
     
     /**
-     * Set who may enrol in the roster this phone owns (`open`, or invite-only) from now on.
+     * Set who may enroll in the roster this phone owns (`open`, or invite-only) from now on.
      * Nobody already carried is dropped.
      */
     suspend fun `setRepeaterPolicy`(`rosterId`: kotlin.String, `open`: kotlin.Boolean)
@@ -3645,7 +3645,7 @@ open class LocationNode: Disposable, AutoCloseable, LocationNodeInterface
     /**
      * Claim the repeater whose console printed `link` (`streetcryptid-repeater:...`), into the
      * roster this phone owns (started here, `open` or invite-only, if there is none) and list
-     * it there. `carry_me` also enrols this phone, so the repeater carries our own trail.
+     * it there. `carry_me` also enrolls this phone, so the repeater carries our own trail.
      *
      * Fails without listing anything unless the repeater's signed cert names this phone, this
      * roster and the machine that answered (see [`repeater::claim`]).
@@ -4288,7 +4288,7 @@ open class LocationNode: Disposable, AutoCloseable, LocationNodeInterface
      * Invite `member` to an invite-only roster this phone may invite to (it owns it, or holds
      * `inviter`), and tell its repeaters. Resolves whether a new invite was signed: a member
      * already carried, or already holding an invite that stands, is not invited twice. An invite
-     * carries nobody; they still choose to enrol (REPEATERS.md §4.5).
+     * carries nobody; they still choose to enroll (REPEATERS.md §4.5).
      */
     @Throws(LocationException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
@@ -4959,7 +4959,7 @@ open class LocationNode: Disposable, AutoCloseable, LocationNodeInterface
     
     /**
      * Stop the roster this phone owns carrying `member`'s trail. Each repeater releases what it
-     * held for them as the removal reaches it, and they cannot enrol again, even in an open
+     * held for them as the removal reaches it, and they cannot enroll again, even in an open
      * roster, until someone invites them after this.
      */
     @Throws(LocationException::class)
@@ -5356,7 +5356,7 @@ open class LocationNode: Disposable, AutoCloseable, LocationNodeInterface
 
     
     /**
-     * Set who may enrol in the roster this phone owns (`open`, or invite-only) from now on.
+     * Set who may enroll in the roster this phone owns (`open`, or invite-only) from now on.
      * Nobody already carried is dropped.
      */
     @Throws(LocationException::class)
@@ -9520,7 +9520,7 @@ data class RepeaterRoster (
     var `mine`: kotlin.Boolean
     , 
     /**
-     * Anyone may enrol, rather than only whoever an inviter invited.
+     * Anyone may enroll, rather than only whoever an inviter invited.
      */
     var `open`: kotlin.Boolean
     , 
@@ -9550,7 +9550,7 @@ data class RepeaterRoster (
     /**
      * Enrolling would be accepted, as far as this phone can tell: open, or an invite naming us.
      */
-    var `canEnrol`: kotlin.Boolean
+    var `canEnroll`: kotlin.Boolean
     , 
     /**
      * Who may invite people (endpoint ids), the owner included.
@@ -9609,7 +9609,7 @@ public object FfiConverterTypeRepeaterRoster: FfiConverterRustBuffer<RepeaterRos
             FfiConverterUInt.allocationSize(value.`carried`) +
             FfiConverterSequenceString.allocationSize(value.`members`) +
             FfiConverterSequenceString.allocationSize(value.`vouchers`) +
-            FfiConverterBoolean.allocationSize(value.`canEnrol`) +
+            FfiConverterBoolean.allocationSize(value.`canEnroll`) +
             FfiConverterSequenceString.allocationSize(value.`inviters`) +
             FfiConverterSequenceString.allocationSize(value.`invited`) +
             FfiConverterBoolean.allocationSize(value.`canInvite`)
@@ -9625,7 +9625,7 @@ public object FfiConverterTypeRepeaterRoster: FfiConverterRustBuffer<RepeaterRos
             FfiConverterUInt.write(value.`carried`, buf)
             FfiConverterSequenceString.write(value.`members`, buf)
             FfiConverterSequenceString.write(value.`vouchers`, buf)
-            FfiConverterBoolean.write(value.`canEnrol`, buf)
+            FfiConverterBoolean.write(value.`canEnroll`, buf)
             FfiConverterSequenceString.write(value.`inviters`, buf)
             FfiConverterSequenceString.write(value.`invited`, buf)
             FfiConverterBoolean.write(value.`canInvite`, buf)

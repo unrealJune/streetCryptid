@@ -1075,7 +1075,7 @@ class IrohLocationModule : Module() {
             "carried" to r.carried.toLong(),
             "members" to r.members,
             "vouchers" to r.vouchers,
-            "canEnrol" to r.canEnrol,
+            "canEnroll" to r.canEnroll,
             "inviters" to r.inviters,
             "invited" to r.invited,
             "canInvite" to r.canInvite,
@@ -1084,7 +1084,7 @@ class IrohLocationModule : Module() {
       }
 
     /// Invite someone to an invite-only roster we may invite to. Resolves whether a new invite
-    /// was signed; an invite carries nobody until they enrol.
+    /// was signed; an invite carries nobody until they enroll.
     AsyncFunction("inviteToRepeater") Coroutine
       { rosterId: String, member: String ->
         val n = node ?: throw IllegalStateException("call createNode first")
@@ -1137,7 +1137,7 @@ class IrohLocationModule : Module() {
         n.setRepeaterCarried(rosterId, carry)
       }
 
-    /// Owner only: who may enrol in our roster from now on. Never drops anyone already carried.
+    /// Owner only: who may enroll in our roster from now on. Never drops anyone already carried.
     AsyncFunction("setRepeaterPolicy") Coroutine
       { rosterId: String, open: Boolean ->
         val n = node ?: throw IllegalStateException("call createNode first")

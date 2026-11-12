@@ -939,14 +939,14 @@ public final class IrohLocationModule: Module {
         [
           "rosterId": r.rosterId, "owner": r.owner, "mine": r.mine, "open": r.open,
           "carriesMe": r.carriesMe, "repeaters": r.repeaters, "carried": Double(r.carried),
-          "members": r.members, "vouchers": r.vouchers, "canEnrol": r.canEnrol,
+          "members": r.members, "vouchers": r.vouchers, "canEnroll": r.canEnroll,
           "inviters": r.inviters, "invited": r.invited, "canInvite": r.canInvite,
         ]
       }
     }
 
     // Invite someone to an invite-only roster we may invite to. Resolves whether a new invite was
-    // signed; an invite carries nobody until they enrol.
+    // signed; an invite carries nobody until they enroll.
     AsyncFunction("inviteToRepeater") { (rosterId: String, member: String) async throws -> Bool in
       guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
       return try await node.inviteToRepeater(rosterId: rosterId, member: member)
@@ -991,7 +991,7 @@ public final class IrohLocationModule: Module {
       return try await node.setRepeaterCarried(rosterId: rosterId, carry: carry)
     }
 
-    // Owner only: who may enrol in our roster from now on. Never drops anyone already carried.
+    // Owner only: who may enroll in our roster from now on. Never drops anyone already carried.
     AsyncFunction("setRepeaterPolicy") { (rosterId: String, open: Bool) async throws in
       guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
       try await node.setRepeaterPolicy(rosterId: rosterId, open: open)
