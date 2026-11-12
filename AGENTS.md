@@ -636,7 +636,10 @@ Conventions when changing that code:
 - **iroh is 1.4 or later, and that is load-bearing.** 1.0.2's remote-state actor re-queued a path
   open once per refusing connection on every 333 ms retry; on 2026-11-01 an iPhone 16 Pro Max
   aborted in `VecDeque::grow` a second into a Bump (`ios.diagnostic` SIGABRT). We patched it by
-  hand until 1.4 bounded the queue (#4551). 1.4 also stops an Initial send waiting on a slow
+  hand until 1.4 bounded the queue (#4551). The stash hit the same bug from the other side: on
+  1.0.2 until the workspace merge, it was OOM-killed ten times between 2026-10-27 and 2026-11-09,
+  flat at ~45 MiB and then past its 512 MiB limit inside one scrape; `repeater/server` states the
+  1.4 floor itself for that reason. 1.4 also stops an Initial send waiting on a slow
   transport (a full BLE inbox) from stalling that peer's actor (#4512). Its noq 1.4 is patched
   (`third_party/noq`, the root workspace's `[patch.crates-io]`): `read_to_end` on a stream already
   read to its FIN returned `ClosedStream`, and iroh-docs does that at the end of every sync, so most syncs
