@@ -8,6 +8,7 @@ jest.mock('@/global.css', () => ({}));
 
 const ROSTER: RosterView = {
   rosterId: 'r1',
+  owner: '11'.repeat(32),
   ownerLabel: 'Your repeaters',
   mine: true,
   open: true,
@@ -20,6 +21,9 @@ const ROSTER: RosterView = {
   ],
   vouchers: [],
   canEnrol: false,
+  canInvite: true,
+  inviters: [],
+  invited: [],
 };
 
 describe('RosterCard', () => {
@@ -94,5 +98,35 @@ describe('RosterCard', () => {
     const text = JSON.stringify(renderer.toJSON());
     expect(text).toContain('Vouched for by @sam');
     expect(text).toContain('nobody has invited you yet');
+  });
+
+  it('invites a friend in one tap, and lets the owner make a member an inviter', () => {
+    const onInvite = jest.fn();
+    const onSetInviter = jest.fn();
+    render({
+      roster: {
+        ...ROSTER,
+        open: false,
+        invited: [{ id: '44'.repeat(32), label: '@kit', isMe: false }],
+      },
+      owner: { ...owner, onSetInviter },
+      invite: { candidates: [{ id: '33'.repeat(32), label: '@ash', isMe: false }], onInvite },
+    });
+    act(() => pressable('Invite @ash').props.onPress());
+    expect(onInvite).toHaveBeenCalledWith('33'.repeat(32));
+    expect(JSON.stringify(renderer.toJSON())).toContain('@kit · invited');
+    act(() => pressable('Let @sam invite people').props.onPress());
+    expect(onSetInviter).toHaveBeenCalledWith('22'.repeat(32), true);
+  });
+
+  it('shows no invite list where this phone may not invite', () => {
+    render({
+      roster: { ...ROSTER, canInvite: false },
+      invite: {
+        candidates: [{ id: '33'.repeat(32), label: '@ash', isMe: false }],
+        onInvite: jest.fn(),
+      },
+    });
+    expect(renderer.root.findAllByProps({ accessibilityLabel: 'Invite @ash' })).toHaveLength(0);
   });
 });

@@ -1,8 +1,9 @@
 import { useState } from 'react';
+import { StyleSheet, Switch, View } from 'react-native';
 import { useLocalSearchParams } from 'expo-router';
 
 import { ThemedText } from '@/components/themed-text';
-import { CryptidThemes } from '@/constants/theme';
+import { CryptidThemes, Spacing } from '@/constants/theme';
 import { SettingsPage, SettingsSection } from '@/features/settings/components/settings-page';
 import { STASH_RETENTION_MS } from '@/features/social/core/delivery-mode';
 import { useLocationSharing } from '@/features/social/hooks/use-location-sharing';
@@ -11,7 +12,12 @@ import { useColorScheme } from '@/hooks/use-color-scheme';
 import { ClaimRepeaterForm } from '../components/claim-repeater-form';
 import { RosterCard } from '../components/roster-card';
 import { StashCard } from '../components/stash-card';
-import { checkClaimLink, retentionWords, type RosterView } from '../core/repeaters';
+import {
+  checkClaimLink,
+  inviteCandidates,
+  retentionWords,
+  type RosterView,
+} from '../core/repeaters';
 import { useRepeaters } from '../hooks/use-repeaters';
 
 /**
@@ -82,11 +88,24 @@ export default function RepeatersScreen() {
               onRemoveMember: (member) => void run(repeaters.removeMember(roster.rosterId, member)),
               onRemoveMachine: (machine) =>
                 void run(repeaters.removeMachine(roster.rosterId, machine)),
+              onSetInviter: repeaters.inviteControls
+                ? (member, inviter) =>
+                    void run(repeaters.setInviter(roster.rosterId, member, inviter))
+                : undefined,
+            }
+          : undefined
+      }
+      invite={
+        roster.canInvite && repeaters.inviteControls
+          ? {
+              candidates: inviteCandidates(roster, repeaters.friends),
+              onInvite: (member) => void run(repeaters.invite(roster.rosterId, member)),
             }
           : undefined
       }
     />
   );
+  const mayInvite = [sections.mine, ...sections.carryingMe].some((r) => r?.canInvite && !r.open);
 
   if (status === 'unsupported') {
     return (
@@ -125,6 +144,27 @@ export default function RepeatersScreen() {
         />
       </SettingsSection>
 
+      {mayInvite && repeaters.autoInvite !== null ? (
+        <SettingsSection label="NEW FRIENDS">
+          <View style={styles.option}>
+            <View style={styles.copy}>
+              <ThemedText type="small">Invite new friends</ThemedText>
+              <ThemedText type="small" themeColor="textSecondary">
+                When you pair, offer to invite them to the invite-only repeaters you can invite to.
+                They still choose whether their trail is carried.
+              </ThemedText>
+            </View>
+            <Switch
+              accessibilityRole="switch"
+              accessibilityLabel="Invite new friends to my repeaters"
+              value={repeaters.autoInvite}
+              onValueChange={(on) => void run(repeaters.setAutoInvite(on))}
+              trackColor={{ true: chrome.green, false: chrome.steel }}
+            />
+          </View>
+        </SettingsSection>
+      ) : null}
+
       {sections.carryingMe.length > 0 ? (
         <SettingsSection label="CARRYING MY TRAIL">{sections.carryingMe.map(card)}</SettingsSection>
       ) : null}
@@ -141,3 +181,15 @@ export default function RepeatersScreen() {
     </SettingsPage>
   );
 }
+
+const styles = StyleSheet.create({
+  option: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: Spacing.three,
+  },
+  copy: {
+    flex: 1,
+    gap: Spacing.one,
+  },
+});

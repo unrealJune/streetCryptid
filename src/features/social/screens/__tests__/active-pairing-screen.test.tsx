@@ -32,6 +32,11 @@ jest.mock('../../components/pairing-figure-view', () => ({
   PairingFigureChoices: () => null,
 }));
 jest.mock('../../components/persona-reveal', () => ({ PersonaReveal: () => null }));
+const mockRepeaterOffer = { apply: jest.fn() };
+jest.mock('@/features/repeaters/components/pairing-repeater-offer', () => ({
+  usePairingRepeaterOffer: () => mockRepeaterOffer,
+  PairingRepeaterOfferView: () => null,
+}));
 jest.mock('@/features/social/net/bluetooth-settings', () => ({ openBluetoothSettings: jest.fn() }));
 jest.mock('@/features/social/net/location-sharing', () => ({
   TERMINAL_PAIR_STATES: ['complete', 'rejected', 'failed'],

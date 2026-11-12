@@ -345,6 +345,24 @@ pub struct RepeaterRoster {
     pub vouchers: Vec<String>,
     /// Enrolling would be accepted, as far as this phone can tell: open, or an invite naming us.
     pub can_enrol: bool,
+    /// Who may invite people (endpoint ids), the owner included.
+    pub inviters: Vec<String>,
+    /// Who holds a standing invite and is not carried yet (endpoint ids).
+    pub invited: Vec<String>,
+    /// This phone may invite people to it: it owns it or holds `inviter`. In an open roster an
+    /// invite is only needed to bring back someone the owner removed.
+    pub can_invite: bool,
+}
+
+/// What `device.health` says about repeaters (REPEATERS.md §5).
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct RepeaterHealth {
+    /// How many rosters carry this phone's trail.
+    pub enrolled: u32,
+    /// How many repeaters carry it, across those rosters.
+    pub carriers: u32,
+    /// Since this process last exchanged anything with a repeater; absent if it has not.
+    pub last_contact_age_ms: Option<u64>,
 }
 
 /// A decrypted ratcheted envelope read from the durable replica.
@@ -1331,6 +1349,41 @@ impl LocationNode {
         );
     }
 
+    /// After a push that reached carriers only: ask them, briefly, whether they hold our newest
+    /// entries (span `repeater.receipt`). True once one confirms.
+    async fn repeater_receipt(&self, carriers: &BTreeSet<[u8; 32]>) -> bool {
+        use tracing::Instrument;
+        let Some(live) = self.live_opt().await else {
+            return false;
+        };
+        let Ok(hashes) = live.trail.own_latest_hashes().await else {
+            return false;
+        };
+        let span = tracing::info_span!(
+            "repeater.receipt",
+            sc.author = %telemetry::short_hex(&self.author),
+            carriers = carriers.len(),
+            hashes = hashes.len(),
+            confirmed = tracing::field::Empty,
+            sc.peer = tracing::field::Empty,
+        );
+        async {
+            let by = repeater::receipt(&live.endpoint, carriers, &hashes, repeater::RECEIPT_BUDGET)
+                .await;
+            let current = tracing::Span::current();
+            current.record("confirmed", by.is_some());
+            if let Some(peer) = by {
+                current.record(
+                    "sc.peer",
+                    tracing::field::display(telemetry::short_hex(&peer)),
+                );
+            }
+            by.is_some()
+        }
+        .instrument(span)
+        .await
+    }
+
     /// Republish our card after a roster change made on this phone. Best-effort, like every card
     /// write: a friend who misses this one reads the next.
     async fn republish_repeater_card(&self) {
@@ -1340,13 +1393,31 @@ impl LocationNode {
         publish_repeater_card(&live.profile, &self.roster_key(), &book).await;
     }
 
+    /// Every friend's endpoint id, recipients and watchers alike. Empty when the store is not
+    /// open yet.
+    async fn known_friends(&self) -> BTreeSet<[u8; 32]> {
+        match self.recipient_store().await {
+            Ok(store) => store
+                .get()
+                .iter()
+                .chain(store.watchers().iter())
+                .filter_map(|id| decode_endpoint(id).ok())
+                .collect(),
+            Err(_) => BTreeSet::new(),
+        }
+    }
+
     /// Read every friend's card into the roster book and return who vouches for each roster. An
     /// empty answer before the node is live: this only adds to what the settings show.
     async fn read_repeater_cards(&self) -> BTreeMap<[u8; 32], BTreeSet<[u8; 32]>> {
         let (Some(live), Ok(book)) = (self.live_opt().await, self.roster_book().await) else {
             return BTreeMap::new();
         };
-        let cards = live.profile.read_key_everywhere(repeater::CARD_KEY).await;
+        let friends = self.known_friends().await;
+        let cards = live
+            .profile
+            .read_key_from_friends(repeater::CARD_KEY, &friends)
+            .await;
         let me = self.roster_key().verifying_key().to_bytes();
         repeater::ingest_cards(&book, &cards, &me)
     }
@@ -3068,6 +3139,9 @@ impl LocationNode {
                 let mine = state.owner == me;
                 let can_enrol = !carries_me
                     && (mine || open || repeater::invite_for(&book, &state.id, &me).is_some());
+                // Any policy: in an open roster an invite is how a removed member comes back.
+                let can_invite = state.inviters.contains(&me);
+                let invited = repeater::pending_invites(&book, &state.id);
                 RepeaterRoster {
                     roster_id: encode_hex(&state.id),
                     owner: encode_hex(&state.owner),
@@ -3082,6 +3156,9 @@ impl LocationNode {
                         .map(|ids| ids.iter().map(|id| encode_hex(id)).collect())
                         .unwrap_or_default(),
                     can_enrol,
+                    inviters: state.inviters.iter().map(|id| encode_hex(id)).collect(),
+                    invited: invited.iter().map(|id| encode_hex(id)).collect(),
+                    can_invite,
                 }
             })
             .collect())
@@ -3160,6 +3237,104 @@ impl LocationNode {
     /// as a `repeater.grant` span.
     pub async fn grant_repeaters_now(&self) {
         self.grant_repeaters("app").await;
+    }
+
+    /// Invite `member` to an invite-only roster this phone may invite to (it owns it, or holds
+    /// `inviter`), and tell its repeaters. Resolves whether a new invite was signed: a member
+    /// already carried, or already holding an invite that stands, is not invited twice. An invite
+    /// carries nobody; they still choose to enrol (REPEATERS.md §4.5).
+    pub async fn invite_to_repeater(
+        &self,
+        roster_id: String,
+        member: String,
+    ) -> Result<bool, LocationError> {
+        let roster = decode_id32(&roster_id, "roster id")?;
+        let member = decode_id32(&member, "member id")?;
+        let live = self.live().await?;
+        let book = self.roster_book().await?;
+        let signed = repeater::invite(
+            &live.endpoint,
+            &self.roster_key(),
+            &book,
+            &roster,
+            &member,
+            now_ms(),
+        )
+        .await?;
+        if signed {
+            self.republish_repeater_card().await;
+        }
+        Ok(signed)
+    }
+
+    /// Invite a friend to every invite-only roster this phone may invite to and has not yet: what
+    /// the pairing screen's "also invite them to my repeaters" does, pre-checked when auto-invite
+    /// is on (§4.4). Resolves how many invites were signed. Every roster is offered to its
+    /// repeaters by the grant pass that follows, so nothing here waits on a machine.
+    pub async fn invite_friend_to_repeaters(&self, member: String) -> Result<u32, LocationError> {
+        let member = decode_id32(&member, "member id")?;
+        let book = self.roster_book().await?;
+        let key = self.roster_key();
+        let me = key.verifying_key().to_bytes();
+        let mut signed = 0u32;
+        for roster in repeater::invite_targets(&book, &me, &member) {
+            match repeater::sign_invite(&key, &book, &roster, &member, now_ms()) {
+                Ok(true) => signed += 1,
+                Ok(false) => {}
+                Err(error) => tracing::warn!(%error, "repeater: could not invite a new friend"),
+            }
+        }
+        if signed > 0 {
+            // Offers the new ops to every repeater (`repeater::deliver`), then republishes the card.
+            self.grant_repeaters("invite").await;
+        }
+        Ok(signed)
+    }
+
+    /// Owner only: let `member` invite people to our roster (`inviter`), or stop them. Invites they
+    /// already made stand (§3.3).
+    pub async fn set_repeater_inviter(
+        &self,
+        roster_id: String,
+        member: String,
+        inviter: bool,
+    ) -> Result<(), LocationError> {
+        let member = decode_id32(&member, "member id")?;
+        let change = if inviter {
+            repeater::OwnerChange::GrantInviter(member)
+        } else {
+            repeater::OwnerChange::RevokeInviter(member)
+        };
+        self.change_roster(&roster_id, change).await
+    }
+
+    /// Whether new friends are invited, at pairing, to the rosters this phone may invite to.
+    pub async fn repeater_auto_invite(&self) -> Result<bool, LocationError> {
+        Ok(self.roster_book().await?.auto_invite())
+    }
+
+    pub async fn set_repeater_auto_invite(&self, on: bool) -> Result<(), LocationError> {
+        self.roster_book()
+            .await?
+            .set_auto_invite(on)
+            .map_err(|e| LocationError::Decode(e.to_string()))
+    }
+
+    /// What `device.health` reports about repeaters: how many rosters and machines carry us, and
+    /// how long since this process last heard from one. A local read; dials nothing.
+    pub async fn repeater_health(&self) -> Result<RepeaterHealth, LocationError> {
+        let book = self.roster_book().await?;
+        let me = self.roster_key().verifying_key().to_bytes();
+        let states = book.states();
+        Ok(RepeaterHealth {
+            enrolled: states
+                .iter()
+                .filter(|state| state.carried.contains(&me))
+                .count() as u32,
+            carriers: repeater::carriers(&states, &me).len() as u32,
+            last_contact_age_ms: contact::last_repeater_contact_ms()
+                .map(|at| now_ms().saturating_sub(at)),
+        })
     }
 
     /// Where the native drain path will push right now. For diagnostics and `device.health`.
@@ -4066,15 +4241,7 @@ impl LocationNode {
             // A friend's trail can also be pulled from the repeaters carrying it (their cards say
             // which), so a friend whose phone sleeps is still readable. Capped and rotated per
             // pass (`repeater::pull_plan`); never a target for any other namespace.
-            let friends: BTreeSet<_> = match self.recipient_store().await {
-                Ok(store) => store
-                    .get()
-                    .iter()
-                    .chain(store.watchers().iter())
-                    .filter_map(|id| decode_endpoint(id).ok())
-                    .collect(),
-                Err(_) => BTreeSet::new(),
-            };
+            let friends = self.known_friends().await;
             let friend_namespaces = repeater::friend_namespaces(&trail.friend_tickets(), &friends);
             let mut repeater_peers = HashMap::new();
             if !friend_namespaces.is_empty() {
@@ -5110,19 +5277,25 @@ impl publish::PublishSink for NodeSink<'_> {
                 .roster_book()
                 .await
                 .map_err(|e| publish::PublishError::Send(e.to_string()))?;
-            if repeater::carriers(&book.states(), &node.author).is_empty() {
+            let carriers = repeater::carriers(&book.states(), &node.author);
+            if carriers.is_empty() {
                 return Ok(publish::FlushOutcome::NoTargets);
             }
-            true
+            Some(carriers)
         } else {
-            false
+            None
         };
         // This is the push. Its success or failure is the whole of whether the entries left.
         node.push_trail(config.peer_tickets.clone())
             .await
             .map_err(|e| publish::PublishError::Send(e.to_string()))?;
-        if carriers_only {
-            return Ok(publish::FlushOutcome::Scheduled);
+        if let Some(carriers) = carriers_only {
+            // Only a carrier's own receipt turns this into a delivery (REPEATERS.md §5, G5).
+            return Ok(if node.repeater_receipt(&carriers).await {
+                publish::FlushOutcome::Pushed
+            } else {
+                publish::FlushOutcome::Scheduled
+            });
         }
         // The blob upload is a SEPARATE fact and must not be able to discard the push above.
         //

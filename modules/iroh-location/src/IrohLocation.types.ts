@@ -37,6 +37,22 @@ export interface NativeRepeaterRoster {
   vouchers?: string[];
   /** Enrolling would be accepted, as far as this phone can tell: open, or an invite naming us. */
   canEnrol?: boolean;
+  /** Who may invite people (endpoint ids), the owner included. Optional: newer binaries only. */
+  inviters?: string[];
+  /** Who holds a standing invite and is not carried yet (endpoint ids). Optional, as above. */
+  invited?: string[];
+  /** This phone may invite people: it owns the roster or holds `inviter` in it. */
+  canInvite?: boolean;
+}
+
+/** What `device.health` reports about repeaters. Mirrors Rust's `RepeaterHealth`. */
+export interface NativeRepeaterHealth {
+  /** How many rosters carry this phone's trail. */
+  enrolled: number;
+  /** How many repeaters carry it, across those rosters. */
+  carriers: number;
+  /** Since this process last exchanged anything with a repeater; null if it has not. */
+  lastContactAgeMs: number | null;
 }
 
 /** What one {@link IrohLocationApi.pushTelemetryNow} did. Mirrors Rust's `TelemetryPush`. */
@@ -980,6 +996,23 @@ export interface IrohLocationApi {
   removeRepeater?(rosterId: string, repeaterId: string): Promise<void>;
   /** Ask every repeater that carries us to carry our namespaces now. Resolves at once. */
   grantRepeaters?(): Promise<void>;
+  /**
+   * Invite `member` to an invite-only roster this phone may invite to. Resolves whether a new
+   * invite was signed. An invite carries nobody until they enrol.
+   */
+  inviteToRepeater?(rosterId: string, member: string): Promise<boolean>;
+  /**
+   * Invite a new friend to every invite-only roster this phone may invite to and has not yet (the
+   * pairing screen's "also invite them"). Resolves how many invites were signed.
+   */
+  inviteFriendToRepeaters?(member: string): Promise<number>;
+  /** Owner only: let `member` invite people to the roster, or stop them. */
+  setRepeaterInviter?(rosterId: string, member: string, inviter: boolean): Promise<void>;
+  /** Whether new friends are invited, at pairing, to the rosters this phone may invite to. */
+  repeaterAutoInvite?(): Promise<boolean>;
+  setRepeaterAutoInvite?(on: boolean): Promise<void>;
+  /** What `device.health` reports about repeaters. A local read. */
+  repeaterHealth?(): Promise<NativeRepeaterHealth>;
 
   // ── Developer telemetry (dev/preview builds; see src/features/dev/telemetry in the app) ─────
   /**

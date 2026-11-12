@@ -28,6 +28,26 @@
 //! as `trail.push.peer`.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+/// When this process last exchanged anything with a repeater (ms since the epoch; 0 = never):
+/// a `peer.contact` with one, or any answered `streetcryptid/repeater/1` call. Read by
+/// `device.health` as `repeaters.last_contact_age_ms` (REPEATERS.md §5). Per process, like the
+/// isolation tracker: a relaunch starts at "never", which the age reports as absent, not as zero.
+static LAST_REPEATER_CONTACT_MS: AtomicU64 = AtomicU64::new(0);
+
+/// Note an exchange with a repeater, now.
+pub fn note_repeater_contact() {
+    LAST_REPEATER_CONTACT_MS.store(crate::now_ms(), Ordering::Relaxed);
+}
+
+/// When this process last heard from a repeater, if it has.
+pub fn last_repeater_contact_ms() -> Option<u64> {
+    match LAST_REPEATER_CONTACT_MS.load(Ordering::Relaxed) {
+        0 => None,
+        at => Some(at),
+    }
+}
 
 /// Which direction the data went.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -171,6 +191,9 @@ pub fn record(contact: Contact<'_>) {
         span.record("contact.from_author", from_author);
     }
     span.in_scope(|| {});
+    if contact.role == "repeater" {
+        note_repeater_contact();
+    }
     // Any exchange with a named peer proves this phone is reachable, whatever the pass was for.
     crate::isolation::observe(
         crate::isolation::Observation::Answered,

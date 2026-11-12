@@ -33,6 +33,10 @@ import {
   type PairingRouteIntent,
 } from '@/features/social/core/active-pairing-state';
 import { patternHaptic, successHaptic, tapHaptic, warningHaptic } from '@/features/haptics/haptics';
+import {
+  PairingRepeaterOfferView,
+  usePairingRepeaterOffer,
+} from '@/features/repeaters/components/pairing-repeater-offer';
 import { PERSONA_RESOLVE } from '@/features/social/core/pairing-experience';
 import { pairingSearchProgress, secondsRemaining } from '@/features/social/core/pairing-countdown';
 import { useArmedBump } from '@/features/social/hooks/use-armed-bump';
@@ -273,6 +277,8 @@ export default function ActivePairingScreen() {
   }, []);
   const friend = pairing?.discoveredFriend ?? null;
   const signal = friend ? resolveSignalColor(friend.color, chrome.green) : chrome.green;
+  // The repeater question at pairing (REPEATERS.md §4.4), carried out after ACKNOWLEDGE.
+  const repeaterOffer = usePairingRepeaterOffer(friend);
 
   const stage: ActivePairingStage = deriveActivePairingStage({
     servicePhase: service.phase,
@@ -764,8 +770,11 @@ export default function ActivePairingScreen() {
       setDiscoveryError(null);
       if (!accept) setRejectedDiscovery(key);
       try {
-        if (accept) await acknowledgeDiscoveredFriend();
-        else await rejectDiscoveredFriend();
+        if (accept) {
+          await acknowledgeDiscoveredFriend();
+          // Never awaited: the friend is kept whatever a repeater does.
+          repeaterOffer.apply();
+        } else await rejectDiscoveredFriend();
         close();
       } catch (error: unknown) {
         setDiscoveryError(
@@ -776,7 +785,14 @@ export default function ActivePairingScreen() {
         setWorking(null);
       }
     },
-    [acknowledgeDiscoveredFriend, close, friend, rejectedDiscovery, rejectDiscoveredFriend]
+    [
+      acknowledgeDiscoveredFriend,
+      close,
+      friend,
+      rejectedDiscovery,
+      rejectDiscoveredFriend,
+      repeaterOffer,
+    ]
   );
 
   useEffect(() => {
@@ -1029,6 +1045,15 @@ export default function ActivePairingScreen() {
                 <Text style={[styles.buttonLabel, { color: signal }]}>PAIR</Text>
               </PressableAction>
             </View>
+          ) : null}
+
+          {friend ? (
+            <PairingRepeaterOfferView
+              offer={repeaterOffer}
+              friendHandle={friend.handle}
+              accent={signal}
+              disabled={Boolean(working)}
+            />
           ) : null}
 
           {discoveryError ? (

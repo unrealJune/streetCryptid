@@ -93,6 +93,8 @@ export interface RosterMachine {
 
 export interface RosterView {
   readonly rosterId: string;
+  /** The owner's endpoint id. */
+  readonly owner: string;
   /** "Your repeaters", or the friend whose they are, or a short id for someone unknown. */
   readonly ownerLabel: string;
   readonly mine: boolean;
@@ -107,6 +109,12 @@ export interface RosterView {
   readonly vouchers: readonly RosterPerson[];
   /** Enrolling would be accepted: open, or an invite naming me. */
   readonly canEnrol: boolean;
+  /** This phone may invite people: it owns it or holds `inviter` (any policy). */
+  readonly canInvite: boolean;
+  /** Who besides the owner may invite people. */
+  readonly inviters: readonly RosterPerson[];
+  /** Invited and not carried yet. */
+  readonly invited: readonly RosterPerson[];
 }
 
 export interface RosterSections {
@@ -143,8 +151,10 @@ export function rosterSections(
     const isMe = key === me;
     return { id, isMe, label: isMe ? 'You' : (names.get(key) ?? shortId(id)) };
   };
+  const byName = (a: RosterPerson, b: RosterPerson) => a.label.localeCompare(b.label);
   const view = (r: NativeRepeaterRoster): RosterView => ({
     rosterId: r.rosterId,
+    owner: r.owner,
     ownerLabel: r.mine
       ? 'Your repeaters'
       : `${names.get(r.owner.toLowerCase()) ?? shortId(r.owner)}’s repeaters`,
@@ -159,6 +169,12 @@ export function rosterSections(
     vouchers: (r.vouchers ?? []).map(person).sort((a, b) => a.label.localeCompare(b.label)),
     // A binary without the field could always try; the repeater is what judges.
     canEnrol: r.carriesMe ? false : (r.canEnrol ?? true),
+    canInvite: r.canInvite ?? false,
+    inviters: (r.inviters ?? [])
+      .filter((id) => id.toLowerCase() !== r.owner.toLowerCase())
+      .map(person)
+      .sort(byName),
+    invited: (r.invited ?? []).map(person).sort(byName),
   });
   const views = rosters.map(view);
   const byLabel = (a: RosterView, b: RosterView) => a.ownerLabel.localeCompare(b.ownerLabel);
@@ -169,6 +185,64 @@ export function rosterSections(
       .filter((v) => !v.mine && !v.carriesMe && v.vouchers.length > 0)
       .sort(byLabel),
     others: views.filter((v) => !v.mine && !v.carriesMe && v.vouchers.length === 0).sort(byLabel),
+  };
+}
+
+/** Friends who could be invited to `roster`: not its owner, not in it, not already invited. */
+export function inviteCandidates(
+  roster: RosterView,
+  friends: readonly FriendName[]
+): RosterPerson[] {
+  const taken = new Set(
+    [roster.owner, ...roster.members.map((m) => m.id), ...roster.invited.map((p) => p.id)].map(
+      (id) => id.toLowerCase()
+    )
+  );
+  return friends
+    .filter((f) => !taken.has(f.endpointId.toLowerCase()))
+    .map((f) => ({ id: f.endpointId, label: f.handle, isMe: false }))
+    .sort((a, b) => a.label.localeCompare(b.label));
+}
+
+/** What the pairing screen can offer about a friend just found (REPEATERS.md §4.4). */
+export interface PairingOffers {
+  /** Their rosters (owned or vouched for by them) that I may enrol in and am not carried by. */
+  readonly enrol: readonly RosterView[];
+  /** I may invite them to at least one invite-only roster they are not in or invited to. */
+  readonly canInvite: boolean;
+}
+
+/**
+ * The Enrol question and the "also invite them" choice for `friendId`, from rosters this phone
+ * already knows. Their card may not have arrived yet; then there is nothing to ask here, and the
+ * roster turns up under Available through friends once it does.
+ */
+export function pairingOffers(sections: RosterSections, friendId: string): PairingOffers {
+  const friend = friendId.toLowerCase();
+  const all = [
+    ...(sections.mine ? [sections.mine] : []),
+    ...sections.carryingMe,
+    ...sections.throughFriends,
+    ...sections.others,
+  ];
+  const isFriend = (p: RosterPerson) => p.id.toLowerCase() === friend;
+  return {
+    enrol: all.filter(
+      (r) =>
+        !r.mine &&
+        !r.carriesMe &&
+        r.canEnrol &&
+        (r.owner.toLowerCase() === friend || r.vouchers.some(isFriend))
+    ),
+    // Open rosters need no invite to join; offering one there would only add an op.
+    canInvite: all.some(
+      (r) =>
+        r.canInvite &&
+        !r.open &&
+        r.owner.toLowerCase() !== friend &&
+        !r.members.some(isFriend) &&
+        !r.invited.some(isFriend)
+    ),
   };
 }
 
@@ -204,7 +278,8 @@ export function repeaterErrorCopy(error: unknown): string {
       /BadClaimSecret/,
       'That code has expired or was already used. Use the newest one the repeater printed.',
     ],
-    [/removed, and not invited again/, "The owner removed you, so you can't rejoin this roster."],
+    [/removed, and not invited again/, 'The owner removed you. Only a new invite lets you back.'],
+    [/only the owner or an inviter invites/, 'Only the owner, or someone they allowed, can invite.'],
     [/this roster is invite-only/, 'This roster is invite-only, and nobody has invited you to it.'],
     [/only the roster's owner/, 'Only the owner can change this roster.'],
     [/AlreadyClaimed/, 'Someone has already claimed this repeater.'],

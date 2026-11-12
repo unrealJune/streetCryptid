@@ -2,7 +2,9 @@ import type { NativeRepeaterRoster } from 'iroh-location';
 
 import {
   checkClaimLink,
+  inviteCandidates,
   isWebClaimLink,
+  pairingOffers,
   repeaterErrorCopy,
   repeatersSummary,
   retentionWords,
@@ -115,6 +117,56 @@ describe('rosterSections', () => {
     const sections = rosterSections([], []);
     expect(sections).toEqual({ mine: null, carryingMe: [], throughFriends: [], others: [] });
     expect(repeatersSummary(sections)).toBe('None');
+  });
+});
+
+describe('pairingOffers', () => {
+  it('asks to enrol in the new friend’s own rosters, and offers to invite them to mine', () => {
+    const sections = rosterSections(
+      [
+        roster({ rosterId: 'sams', owner: SAM, open: true, vouchers: [SAM], canEnrol: true }),
+        roster({ rosterId: 'theirs', owner: STRANGER, vouchers: [STRANGER], canEnrol: true }),
+        roster({ rosterId: 'mine', owner: ME, mine: true, canInvite: true, inviters: [ME] }),
+      ],
+      [{ endpointId: SAM, handle: '@sam' }],
+      ME
+    );
+    const offers = pairingOffers(sections, SAM.toUpperCase());
+    expect(offers.enrol.map((r) => r.rosterId)).toEqual(['sams']);
+    expect(offers.canInvite).toBe(true);
+  });
+
+  it('offers nothing to invite them to once they are in it or invited, or if it is open', () => {
+    const invited = rosterSections(
+      [roster({ rosterId: 'mine', mine: true, canInvite: true, invited: [SAM] })],
+      []
+    );
+    expect(pairingOffers(invited, SAM).canInvite).toBe(false);
+    const open = rosterSections(
+      [roster({ rosterId: 'mine', mine: true, open: true, canInvite: true })],
+      []
+    );
+    expect(pairingOffers(open, SAM).canInvite).toBe(false);
+    expect(pairingOffers(rosterSections([], []), SAM)).toEqual({ enrol: [], canInvite: false });
+  });
+});
+
+describe('inviteCandidates', () => {
+  it('lists friends who are not the owner, not in it and not invited', () => {
+    const KIT = '44'.repeat(32);
+    const { mine } = rosterSections(
+      [roster({ mine: true, owner: ME, members: [SAM], invited: [KIT], canInvite: true })],
+      [],
+      ME
+    );
+    if (!mine) throw new Error('expected my roster');
+    const friends = [
+      { endpointId: SAM, handle: '@sam' },
+      { endpointId: KIT, handle: '@kit' },
+      { endpointId: STRANGER, handle: '@ash' },
+      { endpointId: ME, handle: '@me' },
+    ];
+    expect(inviteCandidates(mine, friends).map((p) => p.label)).toEqual(['@ash']);
   });
 });
 

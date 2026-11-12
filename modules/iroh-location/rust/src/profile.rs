@@ -619,6 +619,9 @@ impl ProfileDocs {
 
     /// The newest bytes under `key` in every profile namespace we hold whose content has arrived,
     /// our own included. Unverified: the caller checks whatever signature the record carries.
+    /// Tests only: the app reads cards with [`Self::read_key_from_friends`], which knows whose
+    /// namespace each came from.
+    #[cfg(test)]
     pub async fn read_key_everywhere(&self, key: &[u8]) -> Vec<Vec<u8>> {
         let namespaces: Vec<NamespaceId> = self
             .handles
@@ -631,6 +634,37 @@ impl ProfileDocs {
         for ns in namespaces {
             if let Ok(Some(bytes)) = self.latest_key_bytes(ns, key).await {
                 out.push(bytes);
+            }
+        }
+        out
+    }
+
+    /// The newest bytes under `key` in each friend's profile namespace, paired with the friend it
+    /// belongs to. The owner comes from the ticket handed over at pairing (the same unambiguous
+    /// match [`Self::sync_known_friends`] uses), never from the record, so a reader can check
+    /// that whatever signed the bytes is the friend whose namespace they were read from
+    /// (REPEATERS.md §4.2: a card counts as a vouch only from the friend it claims to be).
+    /// Unverified otherwise. Empty without a book.
+    pub async fn read_key_from_friends(
+        &self,
+        key: &[u8],
+        friends: &BTreeSet<[u8; 32]>,
+    ) -> Vec<([u8; 32], Vec<u8>)> {
+        let Some(book) = &self.book else {
+            return Vec::new();
+        };
+        let tickets: Vec<_> = book
+            .friends()
+            .into_iter()
+            .map(|entry| entry.ticket)
+            .collect();
+        let mut out = Vec::new();
+        for (owner, namespace) in crate::repeater::friend_namespaces(&tickets, friends) {
+            if let Ok(Some(bytes)) = self
+                .latest_key_bytes(NamespaceId::from(namespace), key)
+                .await
+            {
+                out.push((owner, bytes));
             }
         }
         out

@@ -940,8 +940,49 @@ public final class IrohLocationModule: Module {
           "rosterId": r.rosterId, "owner": r.owner, "mine": r.mine, "open": r.open,
           "carriesMe": r.carriesMe, "repeaters": r.repeaters, "carried": Double(r.carried),
           "members": r.members, "vouchers": r.vouchers, "canEnrol": r.canEnrol,
+          "inviters": r.inviters, "invited": r.invited, "canInvite": r.canInvite,
         ]
       }
+    }
+
+    // Invite someone to an invite-only roster we may invite to. Resolves whether a new invite was
+    // signed; an invite carries nobody until they enrol.
+    AsyncFunction("inviteToRepeater") { (rosterId: String, member: String) async throws -> Bool in
+      guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
+      return try await node.inviteToRepeater(rosterId: rosterId, member: member)
+    }
+
+    // Invite a new friend to every invite-only roster we may invite to (the pairing screen's
+    // "also invite them"). Resolves how many invites were signed.
+    AsyncFunction("inviteFriendToRepeaters") { (member: String) async throws -> Double in
+      guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
+      return Double(try await node.inviteFriendToRepeaters(member: member))
+    }
+
+    // Owner only: let someone invite people to our roster, or stop them.
+    AsyncFunction("setRepeaterInviter") { (rosterId: String, member: String, inviter: Bool) async throws in
+      guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
+      try await node.setRepeaterInviter(rosterId: rosterId, member: member, inviter: inviter)
+    }
+
+    AsyncFunction("repeaterAutoInvite") { () async throws -> Bool in
+      guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
+      return try await node.repeaterAutoInvite()
+    }
+
+    AsyncFunction("setRepeaterAutoInvite") { (on: Bool) async throws in
+      guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
+      try await node.setRepeaterAutoInvite(on: on)
+    }
+
+    // What device.health reports about repeaters. A local read.
+    AsyncFunction("repeaterHealth") { () async throws -> [String: Any] in
+      guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
+      let h = try await node.repeaterHealth()
+      return [
+        "enrolled": Double(h.enrolled), "carriers": Double(h.carriers),
+        "lastContactAgeMs": h.lastContactAgeMs.map { Double($0) as Any } ?? NSNull(),
+      ]
     }
 
     // Have a roster carry our trail, or stop. Resolves whether it carries us now.

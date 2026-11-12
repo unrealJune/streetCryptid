@@ -748,6 +748,22 @@ impl TrailDocs {
     /// property of one slot — so they are counted and the last one is returned once the loop has
     /// still given every slot a chance. That keeps `trail.content.upload` reporting a genuine stash
     /// outage while no longer reporting a backlog of untracked slots as one.
+    /// The content hashes of the newest entry under every key of our own trail namespace: what a
+    /// repeater is asked about (`Have`) to confirm it holds what we just pushed.
+    pub async fn own_latest_hashes(&self) -> Result<Vec<[u8; 32]>> {
+        let doc = self.doc_for(self.own_ns).await?;
+        let stream = doc.get_many(Query::single_latest_per_key().build()).await?;
+        tokio::pin!(stream);
+        let mut hashes = Vec::new();
+        while let Some(entry) = stream.next().await {
+            let entry = entry?;
+            if entry.content_len() > 0 {
+                hashes.push(*entry.content_hash().as_bytes());
+            }
+        }
+        Ok(hashes)
+    }
+
     #[cfg(not(target_arch = "wasm32"))]
     pub async fn upload_own_latest(
         &self,

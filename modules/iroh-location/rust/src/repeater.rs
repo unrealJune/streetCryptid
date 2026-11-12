@@ -48,6 +48,17 @@ const BOOK_V: u32 = 1;
 /// roster once more.
 pub const DELIVERED_FILE: &str = "repeaters-delivered.bin";
 const DELIVERED_V: u32 = 1;
+/// This phone's repeater preferences (today only auto-invite, §3.2). Lost or torn means the
+/// defaults, which invite nobody.
+pub const PREFS_FILE: &str = "repeaters-prefs.bin";
+const PREFS_V: u32 = 1;
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+struct Prefs {
+    v: u32,
+    /// Invite each new friend, at pairing, to every invite-only roster this phone may invite to.
+    auto_invite: bool,
+}
 
 /// How long one request may take, dial included. Nothing a user waits on is bounded by this
 /// except a claim, which they started at a repeater's console and are watching.
@@ -97,6 +108,8 @@ pub struct RosterBook {
     /// For each (roster, repeater), our heads when that repeater last answered a `Publish` of
     /// it. A roster whose heads have moved since is owed to that repeater ([`deliver`]).
     delivered: Mutex<BTreeMap<(RosterId, EndpointId), Vec<OpId>>>,
+    prefs_path: PathBuf,
+    prefs: Mutex<Prefs>,
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -121,6 +134,12 @@ impl RosterBook {
                     .map(|(roster, repeater, heads)| ((roster, repeater), heads))
                     .collect()
             })
+            .unwrap_or_default();
+        let prefs_path = dir.join(PREFS_FILE);
+        let prefs = std::fs::read(&prefs_path)
+            .ok()
+            .and_then(|raw| postcard::from_bytes::<Prefs>(&raw).ok())
+            .filter(|prefs| prefs.v == PREFS_V)
             .unwrap_or_default();
         let path = dir.join(BOOK_FILE);
         let mut rosters = BTreeMap::new();
@@ -149,7 +168,28 @@ impl RosterBook {
             rosters: Mutex::new(rosters),
             delivered_path,
             delivered: Mutex::new(delivered),
+            prefs: Mutex::new(prefs),
+            prefs_path,
         })
+    }
+
+    /// Whether new friends are invited, at pairing, to the rosters this phone may invite to.
+    pub fn auto_invite(&self) -> bool {
+        self.prefs
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .auto_invite
+    }
+
+    pub fn set_auto_invite(&self, on: bool) -> anyhow::Result<()> {
+        let mut prefs = self.prefs.lock().unwrap_or_else(|p| p.into_inner());
+        let next = Prefs {
+            v: PREFS_V,
+            auto_invite: on,
+        };
+        std::fs::write(&self.prefs_path, postcard::to_allocvec(&next)?)?;
+        *prefs = next;
+        Ok(())
     }
 
     /// The rosters this phone has signed an op in: the one it owns, and every one it enrolled
@@ -461,22 +501,30 @@ fn card_signing_input(body: &[u8]) -> Vec<u8> {
     msg
 }
 
-/// Take in friends' cards: every roster log into the book (judged op by op, as anything else
-/// there), and for each roster, who vouched for it. Our own card is skipped; a card that does not
-/// verify is ignored, never an error, since it came from a namespace we only read.
+/// Take in friends' cards, each paired with the friend whose profile namespace it was read from
+/// ([`crate::profile::ProfileDocs::read_key_from_friends`]): every roster log into the book (judged
+/// op by op, as anything else there), and for each roster, who vouched for it. Our own card is
+/// skipped; a card that does not verify is ignored, never an error, since it came from a
+/// namespace we only read.
+///
+/// A card vouches only when its signer IS the friend it was read from (§11, G9). A friend who
+/// republishes a card someone else signed still teaches us the rosters on it, since a log
+/// verifies itself, but makes nobody a voucher: otherwise a friend could have a stranger listed
+/// as one, and the day vouches decide auto-enrolment, that stranger would count.
 pub fn ingest_cards(
     book: &RosterBook,
-    cards: &[Vec<u8>],
+    cards: &[(EndpointId, Vec<u8>)],
     me: &EndpointId,
 ) -> BTreeMap<RosterId, BTreeSet<EndpointId>> {
     let mut vouchers: BTreeMap<RosterId, BTreeSet<EndpointId>> = BTreeMap::new();
-    for bytes in cards {
+    for (owner, bytes) in cards {
         let Ok((signer, rosters)) = open_card(bytes) else {
             continue;
         };
         if signer == *me {
             continue;
         }
+        let vouches = signer == *owner;
         for ops in rosters {
             // Every roster the log names, known already or not: `ingest` reports only changes,
             // and a card we have read before still vouches.
@@ -490,7 +538,7 @@ pub fn ingest_cards(
                     }
                 })
                 .collect();
-            if book.ingest(ops).is_err() {
+            if book.ingest(ops).is_err() || !vouches {
                 continue;
             }
             for id in ids {
@@ -507,18 +555,10 @@ pub fn ingest_cards(
     vouchers
 }
 
-/// The newest invite naming `member` in `roster`, if any: what an `Enroll` cites in an
-/// invite-only roster. Whether it still stands is the roster's call when the op is inserted.
+/// The newest invite naming `member` in `roster` that still stands
+/// ([`Roster::standing_invite`]): what an `Enroll` cites in an invite-only roster.
 pub fn invite_for(book: &RosterBook, roster: &RosterId, member: &EndpointId) -> Option<OpId> {
-    book.export(roster)?
-        .iter()
-        .filter(|op| {
-            op.verify().is_ok_and(
-                |body| matches!(body.action, Action::Invite { member: m } if m == *member),
-            )
-        })
-        .map(SignedOp::id)
-        .last()
+    book.lock().get(roster)?.standing_invite(member)
 }
 
 // ---- planning (pure) --------------------------------------------------------------------------
@@ -665,6 +705,8 @@ pub async fn call(
         let body = read_frame(&mut recv).await?;
         let response: Response = decode_body(&body)?;
         conn.close(0u32.into(), b"done");
+        // A refusal is an answer too: the machine is up and reachable (`device.health`).
+        crate::contact::note_repeater_contact();
         Ok(response)
     })
     .await
@@ -789,6 +831,10 @@ pub enum OwnerChange {
     RemoveMember(EndpointId),
     /// Take a machine out of the roster.
     RemoveRepeater(EndpointId),
+    /// Let someone invite people to an invite-only roster (§3.2).
+    GrantInviter(EndpointId),
+    /// Stop someone inviting. Invites they already made stand (§3.3).
+    RevokeInviter(EndpointId),
 }
 
 /// Sign `change` into a roster this phone owns, and return every repeater to tell: the roster's
@@ -808,9 +854,91 @@ pub fn sign_owner_change(
         OwnerChange::Policy(policy) => Action::SetPolicy { policy },
         OwnerChange::RemoveMember(member) => Action::Remove { member },
         OwnerChange::RemoveRepeater(repeater) => Action::RemoveRepeater { repeater },
+        OwnerChange::GrantInviter(member) => Action::Grant {
+            member,
+            role: streetcryptid_repeater::roster::Role::Inviter,
+        },
+        OwnerChange::RevokeInviter(member) => Action::Revoke {
+            member,
+            role: streetcryptid_repeater::roster::Role::Inviter,
+        },
     };
     book.sign(roster, key, action, now_ms)?;
     Ok(before.repeaters.into_keys().collect())
+}
+
+/// Invite `member` to an invite-only roster this phone may invite to (it owns it or holds
+/// `inviter`), and tell its repeaters. An invite carries nobody: `member` still decides, with an
+/// `Enroll` that cites it (§4.5). Returns whether a new invite was signed; a member already
+/// carried, or with an invite still standing, is not invited twice.
+pub async fn invite(
+    endpoint: &Endpoint,
+    key: &SigningKey,
+    book: &RosterBook,
+    roster: &RosterId,
+    member: &EndpointId,
+    now_ms: u64,
+) -> Result<bool, RepeaterError> {
+    if !sign_invite(key, book, roster, member, now_ms)? {
+        return Ok(false);
+    }
+    publish_everywhere(endpoint, book, roster).await;
+    Ok(true)
+}
+
+/// The signing half of [`invite`].
+pub fn sign_invite(
+    key: &SigningKey,
+    book: &RosterBook,
+    roster: &RosterId,
+    member: &EndpointId,
+    now_ms: u64,
+) -> Result<bool, RepeaterError> {
+    let state = book.state(roster).ok_or(RepeaterError::UnknownRoster)?;
+    if state.carried.contains(member) || pending_invites(book, roster).contains(member) {
+        return Ok(false);
+    }
+    // The roster judges whether we may (owner or a standing inviter, in the op's own past).
+    book.sign(roster, key, Action::Invite { member: *member }, now_ms)?;
+    Ok(true)
+}
+
+/// Who holds an invite to `roster` and is not carried yet. Whether each invite still stands is
+/// the roster's call at enrolment; this is what the owner's screen lists as "invited".
+pub fn pending_invites(book: &RosterBook, roster: &RosterId) -> BTreeSet<EndpointId> {
+    let Some(state) = book.state(roster) else {
+        return BTreeSet::new();
+    };
+    let invited: BTreeSet<EndpointId> = book
+        .export(roster)
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|op| match op.verify().ok()?.action {
+            Action::Invite { member } => Some(member),
+            _ => None,
+        })
+        .filter(|member| !state.carried.contains(member))
+        .collect();
+    invited
+        .into_iter()
+        .filter(|member| invite_for(book, roster, member).is_some())
+        .collect()
+}
+
+/// The invite-only rosters `me` may invite `member` to and has not yet: what auto-invite, and
+/// the pairing screen's "also invite them", act on (§4.4).
+pub fn invite_targets(book: &RosterBook, me: &EndpointId, member: &EndpointId) -> Vec<RosterId> {
+    book.states()
+        .into_iter()
+        .filter(|state| {
+            state.policy == Policy::Invite
+                && state.inviters.contains(me)
+                && *member != state.owner
+                && !state.carried.contains(member)
+        })
+        .map(|state| state.id)
+        .filter(|roster| !pending_invites(book, roster).contains(member))
+        .collect()
 }
 
 /// [`sign_owner_change`], then hand the roster to every repeater it names. A removal takes effect
@@ -923,6 +1051,59 @@ pub async fn refresh(endpoint: &Endpoint, me: &EndpointId, book: &RosterBook) ->
         }
     }
     fetched
+}
+
+/// How long a push to carriers alone waits for one of them to confirm it holds what was pushed
+/// ([`receipt`]). Short: a carrier is never what a push depends on (§5), and on iOS this is wake
+/// time. A carrier that misses it still reconciles whenever it next wakes.
+pub const RECEIPT_BUDGET: Duration = Duration::from_secs(8);
+/// How long to wait between asking the carriers again, while the entries are still crossing.
+const RECEIPT_RETRY: Duration = Duration::from_millis(1500);
+
+/// Ask our carriers, in parallel and until `budget` runs out, whether they hold every one of
+/// `hashes` in full (`Have`, §5). Returns the first carrier that does. This is the only way a
+/// phone with no stash and no awake friend learns that a push landed anywhere (§11, G5); the push
+/// itself hands carriers to the live engine without waiting for them.
+pub async fn receipt(
+    endpoint: &Endpoint,
+    carriers: &BTreeSet<EndpointId>,
+    hashes: &[[u8; 32]],
+    budget: Duration,
+) -> Option<EndpointId> {
+    if carriers.is_empty() || hashes.is_empty() {
+        return None;
+    }
+    let hashes: Vec<[u8; 32]> = hashes.iter().copied().take(wire::MAX_HAVE_HASHES).collect();
+    let request = Request::Have { hashes };
+    let deadline = tokio::time::Instant::now() + budget;
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            return None;
+        }
+        let answers = n0_future::join_all(carriers.iter().map(|carrier| {
+            let request = &request;
+            async move {
+                let addr = endpoint_addr(carrier).ok()?;
+                match tokio::time::timeout(remaining, call(endpoint, addr, request)).await {
+                    Ok(Ok(Response::Have { present })) if present.iter().all(|held| *held) => {
+                        Some(*carrier)
+                    }
+                    _ => None,
+                }
+            }
+        }))
+        .await;
+        if let Some(carrier) = answers.into_iter().flatten().next() {
+            return Some(carrier);
+        }
+        let pause =
+            RECEIPT_RETRY.min(deadline.saturating_duration_since(tokio::time::Instant::now()));
+        if pause.is_zero() {
+            return None;
+        }
+        tokio::time::sleep(pause).await;
+    }
 }
 
 /// One namespace of ours to have carried: its read ticket, and its write key, which signs the
@@ -1479,7 +1660,8 @@ mod tests {
         assert_eq!(build_card(&key(2), &sams).unwrap(), card, "deterministic");
 
         let mine = RosterBook::open(&scratch("card-me")).unwrap();
-        let vouchers = ingest_cards(&mine, std::slice::from_ref(&card), &id(4));
+        let from_sam = [(id(2), card.clone())];
+        let vouchers = ingest_cards(&mine, &from_sam, &id(4));
         let mut expected = vec![owned, junes];
         expected.sort();
         assert_eq!(vouchers.keys().copied().collect::<Vec<_>>(), expected);
@@ -1488,13 +1670,10 @@ mod tests {
         assert_eq!(mine.state(&owned), sams.state(&owned));
 
         // Reading the same card again still vouches (nothing new to ingest, same answer).
-        assert_eq!(
-            ingest_cards(&mine, std::slice::from_ref(&card), &id(4)),
-            vouchers
-        );
+        assert_eq!(ingest_cards(&mine, &from_sam, &id(4)), vouchers);
 
         // My own card vouches for nothing; a tampered one is ignored.
-        assert!(ingest_cards(&mine, std::slice::from_ref(&card), &id(2)).is_empty());
+        assert!(ingest_cards(&mine, &from_sam, &id(2)).is_empty());
         let mut tampered = card;
         let last = tampered.len() - 1;
         tampered[last] ^= 1;
@@ -1521,8 +1700,23 @@ mod tests {
         })
         .unwrap();
         let mine = RosterBook::open(&scratch("card-mallory")).unwrap();
-        assert!(ingest_cards(&mine, &[card], &id(4)).is_empty());
+        assert!(ingest_cards(&mine, &[(id(6), card)], &id(4)).is_empty());
         assert!(mine.state(&roster).is_some());
+    }
+
+    #[test]
+    fn a_card_vouches_only_from_the_friend_whose_profile_it_was_read_from() {
+        // June's genuine card, republished in Mallory's profile namespace: the roster is learned,
+        // but June is not a voucher on Mallory's say-so (§11, G9).
+        let junes = RosterBook::open(&scratch("card-relayed-june")).unwrap();
+        let roster = roster_with(&junes, 1, &[10], &[1]);
+        let card = build_card(&key(1), &junes).unwrap();
+        let mine = RosterBook::open(&scratch("card-relayed-me")).unwrap();
+        assert!(ingest_cards(&mine, &[(id(6), card.clone())], &id(4)).is_empty());
+        assert!(mine.state(&roster).is_some());
+        // Read from June's own namespace, it vouches.
+        let vouchers = ingest_cards(&mine, &[(id(1), card)], &id(4));
+        assert_eq!(vouchers.get(&roster), Some(&BTreeSet::from([id(1)])));
     }
 
     #[test]
@@ -1544,6 +1738,48 @@ mod tests {
         )
         .unwrap();
         assert!(book.state(&roster).unwrap().carried.contains(&id(2)));
+    }
+
+    #[test]
+    fn an_inviter_invites_new_friends_once_and_only_to_invite_rosters() {
+        let dir = scratch("invite-plan");
+        let book = RosterBook::open(&dir).unwrap();
+        let closed = book.create(&key(1), Policy::Invite, 1).unwrap();
+        let open = book.create(&key(1), Policy::Open, 1).unwrap();
+        // Someone else's invite-only roster, where I am not an inviter.
+        let theirs = book.create(&key(5), Policy::Invite, 1).unwrap();
+        assert_eq!(invite_targets(&book, &id(1), &id(2)), vec![closed]);
+        assert!(!invite_targets(&book, &id(1), &id(2)).contains(&open));
+        assert!(!invite_targets(&book, &id(1), &id(2)).contains(&theirs));
+
+        assert!(sign_invite(&key(1), &book, &closed, &id(2), 2).unwrap());
+        assert_eq!(pending_invites(&book, &closed), BTreeSet::from([id(2)]));
+        assert!(invite_targets(&book, &id(1), &id(2)).is_empty());
+        assert!(
+            !sign_invite(&key(1), &book, &closed, &id(2), 3).unwrap(),
+            "not twice"
+        );
+
+        // An inviter the owner granted may invite too; once revoked, not any more.
+        sign_owner_change(&key(1), &book, &closed, OwnerChange::GrantInviter(id(3)), 4).unwrap();
+        assert_eq!(invite_targets(&book, &id(3), &id(4)), vec![closed]);
+        assert!(sign_invite(&key(3), &book, &closed, &id(4), 5).unwrap());
+        sign_owner_change(
+            &key(1),
+            &book,
+            &closed,
+            OwnerChange::RevokeInviter(id(3)),
+            6,
+        )
+        .unwrap();
+        assert!(invite_targets(&book, &id(3), &id(6)).is_empty());
+        assert!(sign_invite(&key(3), &book, &closed, &id(6), 7).is_err());
+
+        // Auto-invite is off until set, and survives a reopen.
+        assert!(!book.auto_invite());
+        book.set_auto_invite(true).unwrap();
+        drop(book);
+        assert!(RosterBook::open(&dir).unwrap().auto_invite());
     }
 
     #[test]

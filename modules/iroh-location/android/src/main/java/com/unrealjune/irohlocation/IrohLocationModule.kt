@@ -1076,8 +1076,58 @@ class IrohLocationModule : Module() {
             "members" to r.members,
             "vouchers" to r.vouchers,
             "canEnrol" to r.canEnrol,
+            "inviters" to r.inviters,
+            "invited" to r.invited,
+            "canInvite" to r.canInvite,
           )
         }
+      }
+
+    /// Invite someone to an invite-only roster we may invite to. Resolves whether a new invite
+    /// was signed; an invite carries nobody until they enrol.
+    AsyncFunction("inviteToRepeater") Coroutine
+      { rosterId: String, member: String ->
+        val n = node ?: throw IllegalStateException("call createNode first")
+        n.inviteToRepeater(rosterId, member)
+      }
+
+    /// Invite a new friend to every invite-only roster we may invite to (the pairing screen's
+    /// "also invite them"). Resolves how many invites were signed.
+    AsyncFunction("inviteFriendToRepeaters") Coroutine
+      { member: String ->
+        val n = node ?: throw IllegalStateException("call createNode first")
+        n.inviteFriendToRepeaters(member).toLong()
+      }
+
+    /// Owner only: let someone invite people to our roster, or stop them.
+    AsyncFunction("setRepeaterInviter") Coroutine
+      { rosterId: String, member: String, inviter: Boolean ->
+        val n = node ?: throw IllegalStateException("call createNode first")
+        n.setRepeaterInviter(rosterId, member, inviter)
+      }
+
+    AsyncFunction("repeaterAutoInvite") Coroutine
+      { ->
+        val n = node ?: throw IllegalStateException("call createNode first")
+        n.repeaterAutoInvite()
+      }
+
+    AsyncFunction("setRepeaterAutoInvite") Coroutine
+      { on: Boolean ->
+        val n = node ?: throw IllegalStateException("call createNode first")
+        n.setRepeaterAutoInvite(on)
+      }
+
+    /// What device.health reports about repeaters. A local read.
+    AsyncFunction("repeaterHealth") Coroutine
+      { ->
+        val n = node ?: throw IllegalStateException("call createNode first")
+        val h = n.repeaterHealth()
+        mapOf(
+          "enrolled" to h.enrolled.toLong(),
+          "carriers" to h.carriers.toLong(),
+          "lastContactAgeMs" to h.lastContactAgeMs?.toLong(),
+        )
       }
 
     /// Have a roster carry our trail, or stop. Resolves whether it carries us now.

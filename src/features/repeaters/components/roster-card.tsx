@@ -5,13 +5,22 @@ import { ThemedText } from '@/components/themed-text';
 import { Spacing } from '@/constants/theme';
 import { useTheme } from '@/hooks/use-theme';
 
-import type { RosterView } from '../core/repeaters';
+import type { RosterPerson, RosterView } from '../core/repeaters';
 
 /** The owner's controls, present only on the roster this phone owns. */
 export interface RosterOwnerActions {
   readonly onPolicyChange: (open: boolean) => void;
   readonly onRemoveMember: (member: string) => void;
   readonly onRemoveMachine: (repeaterId: string) => void;
+  /** Grant or revoke `inviter` (REPEATERS.md §3.2); absent on a binary without it. */
+  readonly onSetInviter?: (member: string, inviter: boolean) => void;
+}
+
+/** Inviting friends, on any roster this phone may invite to (owner or inviter). */
+export interface RosterInviteActions {
+  /** Friends who are not in it, not invited, and not its owner. */
+  readonly candidates: readonly RosterPerson[];
+  readonly onInvite: (member: string) => void;
 }
 
 interface RosterCardProps {
@@ -24,6 +33,7 @@ interface RosterCardProps {
   readonly busy: boolean;
   readonly onCarryChange: (carry: boolean) => void;
   readonly owner?: RosterOwnerActions;
+  readonly invite?: RosterInviteActions;
 }
 
 /**
@@ -38,6 +48,7 @@ export function RosterCard({
   busy,
   onCarryChange,
   owner,
+  invite,
 }: RosterCardProps) {
   const theme = useTheme();
   const machines = roster.machines.length;
@@ -138,21 +149,79 @@ export function RosterCard({
               </ThemedText>
               {roster.members
                 .filter((m) => !m.isMe)
-                .map((member) => (
-                  <ListRow
-                    key={member.id}
-                    label={member.label}
-                    accent={accent}
-                    warning={warning}
-                    busy={busy}
-                    removeLabel={`Remove ${member.label}`}
-                    confirmCopy="Stop carrying their trail? They won't be able to rejoin this roster."
-                    onRemove={() => owner.onRemoveMember(member.id)}
-                  />
-                ))}
+                .map((member) => {
+                  const inviter = roster.inviters.some((i) => i.id === member.id);
+                  const onSetInviter = owner.onSetInviter;
+                  return (
+                    <ListRow
+                      key={member.id}
+                      label={inviter ? `${member.label} · can invite` : member.label}
+                      accent={accent}
+                      warning={warning}
+                      busy={busy}
+                      removeLabel={`Remove ${member.label}`}
+                      confirmCopy="Stop carrying their trail? Only a new invite lets them back."
+                      onRemove={() => owner.onRemoveMember(member.id)}
+                      secondary={
+                        onSetInviter && !roster.open
+                          ? {
+                              label: inviter ? 'NO INVITES' : 'LET INVITE',
+                              accessibilityLabel: inviter
+                                ? `Stop ${member.label} inviting people`
+                                : `Let ${member.label} invite people`,
+                              onPress: () => onSetInviter(member.id, !inviter),
+                            }
+                          : undefined
+                      }
+                    />
+                  );
+                })}
             </View>
           ) : null}
         </>
+      ) : null}
+
+      {invite && roster.canInvite ? (
+        <View style={[styles.list, styles.divided, divider]}>
+          <ThemedText type="small" themeColor="textSecondary">
+            INVITE
+          </ThemedText>
+          <ThemedText type="small" themeColor="textSecondary">
+            {roster.open
+              ? 'Anyone may join already. Invite someone only to let back a person who was removed.'
+              : 'An invite lets a friend choose to have their trail carried here. It carries nobody by itself.'}
+          </ThemedText>
+          {roster.invited.map((person) => (
+            <ThemedText key={person.id} type="small" themeColor="textSecondary">
+              {`${person.label} · invited`}
+            </ThemedText>
+          ))}
+          {invite.candidates.length === 0 ? (
+            <ThemedText type="small" themeColor="textSecondary">
+              Every friend is already in it or invited.
+            </ThemedText>
+          ) : (
+            invite.candidates.map((person) => (
+              <View key={person.id} style={styles.listRow}>
+                <View style={styles.copy}>
+                  <ThemedText type="small">{person.label}</ThemedText>
+                </View>
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel={`Invite ${person.label}`}
+                  accessibilityState={{ disabled: busy }}
+                  disabled={busy}
+                  onPress={() => invite.onInvite(person.id)}
+                  style={({ pressed }) => [styles.action, (pressed || busy) && styles.pressed]}
+                >
+                  <ThemedText type="code" style={{ color: accent }}>
+                    INVITE
+                  </ThemedText>
+                </Pressable>
+              </View>
+            ))
+          )}
+        </View>
       ) : null}
     </View>
   );
@@ -168,6 +237,7 @@ function ListRow({
   removeLabel,
   confirmCopy,
   onRemove,
+  secondary,
 }: {
   readonly label: string;
   readonly code?: boolean;
@@ -177,6 +247,12 @@ function ListRow({
   readonly removeLabel: string;
   readonly confirmCopy: string;
   readonly onRemove: () => void;
+  /** A second, reversible action beside REMOVE, taken without confirming. */
+  readonly secondary?: {
+    readonly label: string;
+    readonly accessibilityLabel: string;
+    readonly onPress: () => void;
+  };
 }) {
   const [confirming, setConfirming] = useState(false);
   return (
@@ -189,6 +265,20 @@ function ListRow({
           </ThemedText>
         ) : null}
       </View>
+      {secondary && !confirming ? (
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel={secondary.accessibilityLabel}
+          accessibilityState={{ disabled: busy }}
+          disabled={busy}
+          onPress={secondary.onPress}
+          style={({ pressed }) => [styles.action, (pressed || busy) && styles.pressed]}
+        >
+          <ThemedText type="code" themeColor="textSecondary">
+            {secondary.label}
+          </ThemedText>
+        </Pressable>
+      ) : null}
       {confirming ? (
         <Pressable
           accessibilityRole="button"
