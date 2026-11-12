@@ -3,11 +3,11 @@
 
 # The fast pure core: config, retention, the roster, the delivery seam. No iroh, no tokio.
 test:
-    cargo test --locked -p streetcryptid-repeater -p trail-stash
+    cargo test --locked --profile repeater-test -p streetcryptid-repeater -p trail-stash
 
 # The live node against real iroh endpoints: the two-node stash tests and the repeater tests.
 test-live:
-    cargo test --locked -p trail-stash --features live -- --test-threads=4
+    cargo test --locked --profile repeater-test -p trail-stash --features live -- --test-threads=4
 
 # Everything CI's server lane runs except the image build.
 check: test test-live
