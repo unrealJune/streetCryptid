@@ -1,0 +1,92 @@
+name: Repeater CI
+
+on:
+  pull_request:
+    paths:
+      - 'apps/repeater/**'
+      - 'assets/images/mothman-logo*.svg'
+      - 'modules/iroh-location/rust/third_party/noq/**'
+      - '.github/workflows/repeater-*.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'apps/repeater/**'
+      - 'assets/images/mothman-logo*.svg'
+      - 'modules/iroh-location/rust/third_party/noq/**'
+      - '.github/workflows/repeater-*.yml'
+  workflow_call:
+    inputs:
+      version:
+        type: string
+        required: true
+    secrets:
+      # signtool parameters (`vpk pack --signParams`), e.g. Azure Trusted Signing's dlib and
+      # metadata. Only a release passes it; every other build stays an unsigned preview.
+      sign-params:
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Windows / ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            runner: windows-2025-vs2026
+          - arch: arm64
+            runner: windows-11-vs2026-arm
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      REPEATER_VERSION: ${{ inputs.version || format('0.1.0-preview.{0}', github.run_number) }}
+      # Compiled into the host; empty means a build with no exporter at all. Kept in a repository
+      # variable rather than here, like every other internal hostname (check-release-telemetry.mjs).
+      SC_REPEATER_OTEL_ENDPOINT: ${{ vars.REPEATER_OTEL_ENDPOINT }}
+      REPEATER_SIGN_PARAMS: ${{ secrets.sign-params }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
+        with:
+          dotnet-version: '10.0.403'
+      - name: Install pinned Rust toolchain
+        run: |
+          rustup toolchain install 1.97.0 --profile minimal --component rustfmt
+          rustup override set 1.97.0
+      - name: Prepare pinned upstream
+        run: .\apps\repeater\scripts\prepare-runtime.ps1
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          workspaces: apps/repeater/native
+          key: repeater-${{ matrix.arch }}
+          save-if: ${{ github.event_name != 'pull_request' }}
+      - name: Test, publish and package matching native binaries
+        run: |
+          .\apps\repeater\scripts\build.ps1 -Architecture '${{ matrix.arch }}' `
+            -Test -Package -Version $env:REPEATER_VERSION
+      # The runner is disposable and elevated: install the real service, talk to it, remove it.
+      - name: Install, exercise and remove the Windows service
+        run: .\apps\repeater\scripts\test-service.ps1 -AppDirectory '.\apps\repeater\artifacts\win-${{ matrix.arch }}\app'
+      - name: Record source provenance
+        run: |
+          $path = '.\apps\repeater\artifacts\win-${{ matrix.arch }}\releases'
+          git archive --format=zip --output="$path\repeater-source-${{ matrix.arch }}.zip" HEAD `
+            apps/repeater modules/iroh-location/rust/third_party/noq assets/images/mothman-logo.svg
+          "$env:GITHUB_SHA" | Set-Content "$path\source-${{ matrix.arch }}.txt"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: repeater-win-${{ matrix.arch }}
+          path: apps/repeater/artifacts/win-${{ matrix.arch }}/releases/
+          if-no-files-found: error
+          retention-days: 14

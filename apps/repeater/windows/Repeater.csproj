@@ -1,0 +1,43 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows10.0.19041.0</TargetFramework>
+    <TargetPlatformMinVersion>10.0.19041.0</TargetPlatformMinVersion>
+    <RootNamespace>StreetCryptid.Repeater</RootNamespace>
+    <AssemblyName>StreetCryptid.Repeater</AssemblyName>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <Platforms>x64;ARM64</Platforms>
+    <RuntimeIdentifiers>win-x64;win-arm64</RuntimeIdentifiers>
+    <UseWinUI>true</UseWinUI>
+    <WindowsPackageType>None</WindowsPackageType>
+    <WindowsAppSDKSelfContained>true</WindowsAppSDKSelfContained>
+    <SelfContained>true</SelfContained>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
+    <DefineConstants>$(DefineConstants);DISABLE_XAML_GENERATED_MAIN</DefineConstants>
+    <ApplicationIcon>Assets\repeater.ico</ApplicationIcon>
+    <Product>streetCryptid repeater</Product>
+  </PropertyGroup>
+  <ItemGroup>
+    <Content Include="Assets\**\*" CopyToOutputDirectory="PreserveNewest" />
+    <ProjectReference Include="..\core\Repeater.Core.csproj" />
+    <PackageReference Include="Microsoft.WindowsAppSDK" Version="2.6.5" />
+    <PackageReference Include="Microsoft.Graphics.Win2D" Version="1.4.0" />
+    <PackageReference Include="QRCoder" Version="1.8.1" />
+    <PackageReference Include="Velopack" Version="1.2.161" />
+  </ItemGroup>
+  <!-- Unpackaged WinUI omits the app PRI from publish (WindowsAppSDK#6720). -->
+  <Target Name="PublishUnpackagedProjectPri"
+          BeforeTargets="ComputeResolvedFilesToPublishList"
+          DependsOnTargets="$(GenerateProjectPriFile)"
+          Condition="'$(WindowsPackageType)' == 'None' and '$(UseWinUI)' == 'true'">
+    <Error Condition="!Exists('$(ProjectPriFullPath)')" Text="The app resource index was not generated." />
+    <ItemGroup>
+      <ResolvedFileToPublish Include="$(ProjectPriFullPath)">
+        <RelativePath>$(ProjectPriFileName)</RelativePath>
+        <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+      </ResolvedFileToPublish>
+    </ItemGroup>
+  </Target>
+</Project>

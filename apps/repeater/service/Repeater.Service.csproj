@@ -1,0 +1,27 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!--
+    The Windows service: a small native-AOT supervisor that runs the Rust host as a child and relays
+    its line protocol to the desktop app over a named pipe. Native AOT so the copy under Program
+    Files is one self-contained executable with no runtime beside it.
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <RootNamespace>StreetCryptid.Repeater.Service</RootNamespace>
+    <AssemblyName>StreetCryptid.Repeater.Service</AssemblyName>
+    <RuntimeIdentifiers>win-x64;win-arm64</RuntimeIdentifiers>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <PublishAot>true</PublishAot>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
+    <ApplicationIcon>..\windows\Assets\repeater.ico</ApplicationIcon>
+    <Product>streetCryptid repeater</Product>
+    <Description>streetCryptid repeater service</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\core\Repeater.Core.csproj" />
+  </ItemGroup>
+</Project>
