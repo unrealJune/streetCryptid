@@ -9710,6 +9710,12 @@ data class RepeaterRoster (
      * invite is only needed to bring back someone the owner removed.
      */
     var `canInvite`: kotlin.Boolean
+    , 
+    /**
+     * Carried by our own copy, and no repeater has confirmed our `Enroll` yet: it goes out the
+     * next time one of them is reachable (REPEATERS.md §4.4).
+     */
+    var `waiting`: kotlin.Boolean
     
 ){
     
@@ -9740,6 +9746,7 @@ public object FfiConverterTypeRepeaterRoster: FfiConverterRustBuffer<RepeaterRos
             FfiConverterSequenceString.read(buf),
             FfiConverterSequenceString.read(buf),
             FfiConverterBoolean.read(buf),
+            FfiConverterBoolean.read(buf),
         )
     }
 
@@ -9757,7 +9764,8 @@ public object FfiConverterTypeRepeaterRoster: FfiConverterRustBuffer<RepeaterRos
             FfiConverterBoolean.allocationSize(value.`canEnroll`) +
             FfiConverterSequenceString.allocationSize(value.`inviters`) +
             FfiConverterSequenceString.allocationSize(value.`invited`) +
-            FfiConverterBoolean.allocationSize(value.`canInvite`)
+            FfiConverterBoolean.allocationSize(value.`canInvite`) +
+            FfiConverterBoolean.allocationSize(value.`waiting`)
     )
 
     override fun write(value: RepeaterRoster, buf: ByteBuffer) {
@@ -9775,6 +9783,7 @@ public object FfiConverterTypeRepeaterRoster: FfiConverterRustBuffer<RepeaterRos
             FfiConverterSequenceString.write(value.`inviters`, buf)
             FfiConverterSequenceString.write(value.`invited`, buf)
             FfiConverterBoolean.write(value.`canInvite`, buf)
+            FfiConverterBoolean.write(value.`waiting`, buf)
     }
 }
 

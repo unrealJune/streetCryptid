@@ -7786,6 +7786,11 @@ public struct RepeaterRoster: Equatable, Hashable {
      * invite is only needed to bring back someone the owner removed.
      */
     public var canInvite: Bool
+    /**
+     * Carried by our own copy, and no repeater has confirmed our `Enroll` yet: it goes out the
+     * next time one of them is reachable (REPEATERS.md §4.4).
+     */
+    public var waiting: Bool
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
@@ -7825,7 +7830,11 @@ public struct RepeaterRoster: Equatable, Hashable {
         /**
          * This phone may invite people to it: it owns it or holds `inviter`. In an open roster an
          * invite is only needed to bring back someone the owner removed.
-         */canInvite: Bool) {
+         */canInvite: Bool, 
+        /**
+         * Carried by our own copy, and no repeater has confirmed our `Enroll` yet: it goes out the
+         * next time one of them is reachable (REPEATERS.md §4.4).
+         */waiting: Bool) {
         self.rosterId = rosterId
         self.owner = owner
         self.mine = mine
@@ -7840,6 +7849,7 @@ public struct RepeaterRoster: Equatable, Hashable {
         self.inviters = inviters
         self.invited = invited
         self.canInvite = canInvite
+        self.waiting = waiting
     }
 
     
@@ -7871,7 +7881,8 @@ public struct FfiConverterTypeRepeaterRoster: FfiConverterRustBuffer {
                 canEnroll: FfiConverterBool.read(from: &buf), 
                 inviters: FfiConverterSequenceString.read(from: &buf), 
                 invited: FfiConverterSequenceString.read(from: &buf), 
-                canInvite: FfiConverterBool.read(from: &buf)
+                canInvite: FfiConverterBool.read(from: &buf), 
+                waiting: FfiConverterBool.read(from: &buf)
         )
     }
 
@@ -7890,6 +7901,7 @@ public struct FfiConverterTypeRepeaterRoster: FfiConverterRustBuffer {
         FfiConverterSequenceString.write(value.inviters, into: &buf)
         FfiConverterSequenceString.write(value.invited, into: &buf)
         FfiConverterBool.write(value.canInvite, into: &buf)
+        FfiConverterBool.write(value.waiting, into: &buf)
     }
 }
 
