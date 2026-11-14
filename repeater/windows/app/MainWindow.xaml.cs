@@ -117,7 +117,11 @@ public sealed partial class MainWindow : Window
         editing = !preferences.SetupComplete;
         Render();
         Activated += (_, _) => UpdateAnimation();
-        AppWindow.Changed += (_, _) => { UpdateAnimation(); UpdateTitleBar(); };
+        AppWindow.Changed += (_, change) =>
+        {
+            UpdateAnimation();
+            if (change.DidSizeChange || change.DidPositionChange || change.DidPresenterChange) UpdateTitleBar();
+        };
         AppWindow.Closing += (sender, e) =>
         {
             if (quitting) return;
@@ -211,16 +215,30 @@ public sealed partial class MainWindow : Window
     /// </summary>
     private void UpdateTitleBar()
     {
+        // A minimized or hidden window has no meaningful geometry, and handing the windowing layer
+        // a region computed from it fails the process fast (minimizing crashed the app). The
+        // region is recomputed when the window is restored, which changes its size again.
+        if (quitting || !AppWindow.IsVisible ||
+            AppWindow.Presenter is OverlappedPresenter { State: OverlappedPresenterState.Minimized }) return;
         if (AppTitleBar.XamlRoot is not { } root || !SettingsButton.IsLoaded) return;
-        double scale = root.RasterizationScale;
-        CaptionColumn.Width = new GridLength(AppWindow.TitleBar.RightInset / scale);
-        var bounds = SettingsButton.TransformToVisual(null).TransformBounds(
-            new Windows.Foundation.Rect(0, 0, SettingsButton.ActualWidth, SettingsButton.ActualHeight));
-        var region = new Windows.Graphics.RectInt32(
-            (int)Math.Round(bounds.X * scale), (int)Math.Round(bounds.Y * scale),
-            (int)Math.Round(bounds.Width * scale), (int)Math.Round(bounds.Height * scale));
-        InputNonClientPointerSource.GetForWindowId(AppWindow.Id)
-            .SetRegionRects(NonClientRegionKind.Passthrough, [region]);
+        try
+        {
+            double scale = root.RasterizationScale;
+            if (scale <= 0) return;
+            CaptionColumn.Width = new GridLength(Math.Max(0, AppWindow.TitleBar.RightInset / scale));
+            var bounds = SettingsButton.TransformToVisual(null).TransformBounds(
+                new Windows.Foundation.Rect(0, 0, SettingsButton.ActualWidth, SettingsButton.ActualHeight));
+            var region = new Windows.Graphics.RectInt32(
+                (int)Math.Round(bounds.X * scale), (int)Math.Round(bounds.Y * scale),
+                (int)Math.Round(bounds.Width * scale), (int)Math.Round(bounds.Height * scale));
+            if (region.X < 0 || region.Y < 0 || region.Width <= 0 || region.Height <= 0) return;
+            InputNonClientPointerSource.GetForWindowId(AppWindow.Id)
+                .SetRegionRects(NonClientRegionKind.Passthrough, [region]);
+        }
+        catch (Exception)
+        {
+            // Only the Settings button's click-through is lost; the window still works.
+        }
     }
 
     private void UpdateExclusions()
