@@ -585,7 +585,7 @@ line counts it ("1 offered by friends") with a badge.
 
 **In the repeater menu** (Settings → Repeaters), at any time:
 
-- **Stash**, then **My repeaters**: your roster, opening the roster map and its People page, or
+- **Stash**, then **My repeaters**: your roster in a card, opening _Your repeaters_, or
   _Add a repeater_.
 - **Carrying my location.** Whose repeaters I am enrolled with, with their machines; switching it
   off is a Withdraw. Per-machine last contact is not shown: nothing records it per machine.
@@ -601,11 +601,14 @@ Behind it (`src/app/settings/repeaters/`):
   opens, landing here on SCANNED); SCANNED names the machine read from the link's endpoint ticket
   (`claimLinkMachineId`) and asks the policy (first machine only) and whether it carries me;
   REACHING is the claim in flight, bounded at 20 s, so it has no cancel; CLAIMED or REFUSED.
-- **Roster map** (`roster`): my machines below a divide, rosters carrying me above it, offered
-  ones floating unconnected (`layoutRosterGraph`). A machine opens a panel: the policy, carry and
-  REMOVE on mine; STOP CARRYING (never "remove": §2.2) on a carrier; ENROLL / NOT NOW on an
-  offered one. There is no "deny": nothing refuses an offer.
-- **People** (`people`): members, inviters, invites, and auto-invite.
+- **Your repeaters** (`mine`): the roster this phone owns on one page, in the order a person
+  decides about it: carrying me, its machines (each REMOVE confirmed once; _Add a repeater_), who
+  can join (the policy), and its people with invites and auto-invite. People are the roster's, so
+  they live here rather than on a page of their own. Rosters that carry me or are offered stay as
+  cards on the list itself: switching one off is a Withdraw (never "remove": §2.2), and switching
+  an offered one on asks first in a sheet. There is no "deny": nothing refuses an offer.
+- **People** (`people?roster=`): members, inviters, invites, and auto-invite, for another person's
+  roster this phone may invite to.
 
 No pairing-wire change is needed, and none should be made: `PairMsg` is signed over a re-encode,
 so appending to it means bumping `PAIR_ALPN` (see `AGENTS.md`).
@@ -905,10 +908,10 @@ The repeater work landed as trail-stash#8 and #9 before that repository moved in
    - A `repeaters` collection outside `friends`, with the invariant test.
    - `RepeaterCard` on the profile namespace, with cross-friend vouching.
    - Built (UI): Settings → Repeaters (`src/features/repeaters`, §4.5): the list, a full-screen
-     claim (by the camera's QR code or a pasted link), the roster map (policy, carrying, removing
-     machines, each removal confirmed once), and a People page (removing members, inviters,
-     invites); the Settings menu summarises them and badges offers. A build without the calls
-     hides the entry.
+     claim (by the camera's QR code or a pasted link), Your repeaters (carrying, machines with
+     each removal confirmed once, the policy, and people: removing members, inviters, invites),
+     and a People page for other rosters this phone may invite to; the Settings menu summarises
+     them and badges offers. A build without the calls hides the entry.
    - Built: `RepeaterCard` (whole signed logs, vouching checked against the log), Available
      through friends in Settings → Repeaters, enrolling with a cited invite, and
      `fix.provenance` / `contact.role = repeater` telemetry (`infra/otel/README.md`).

@@ -50,15 +50,12 @@ export function ScreenHeader({
   mode,
   onBack,
   backLabel = 'Back',
-  onAdd,
   paddingTop,
 }: {
   readonly chrome: CryptidChrome;
   readonly mode: string;
   readonly onBack: () => void;
   readonly backLabel?: string;
-  /** The + on the roster map: add a repeater. */
-  readonly onAdd?: () => void;
   readonly paddingTop: number;
 }) {
   return (
@@ -75,19 +72,7 @@ export function ScreenHeader({
       <Text accessibilityRole="header" style={[styles.mode, { color: chrome.ink }]}>
         {mode}
       </Text>
-      {onAdd ? (
-        <PressableAction
-          accessibilityLabel="Add a repeater"
-          accessibilityRole="button"
-          onPress={onAdd}
-          pressScale={0.9}
-          style={[styles.round, { backgroundColor: chrome.seg }]}
-        >
-          <Text style={[styles.roundGlyph, { color: chrome.ink }]}>+</Text>
-        </PressableAction>
-      ) : (
-        <View style={styles.roundSpacer} />
-      )}
+      <View style={styles.roundSpacer} />
     </View>
   );
 }

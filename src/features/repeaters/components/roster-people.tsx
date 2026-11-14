@@ -1,4 +1,3 @@
-import { useState } from 'react';
 import { Pressable, StyleSheet, View } from 'react-native';
 
 import { ThemedText } from '@/components/themed-text';
@@ -6,6 +5,7 @@ import { Spacing } from '@/constants/theme';
 import { useTheme } from '@/hooks/use-theme';
 
 import type { RosterPerson, RosterView } from '../core/repeaters';
+import { RemovableRow } from './removable-row';
 
 /** The owner's controls over people, present only on the roster this phone owns. */
 export interface RosterOwnerActions {
@@ -35,7 +35,7 @@ interface RosterPeopleProps {
 
 /**
  * The people in one roster: who it carries, who may invite, who is invited, and the friends who
- * could be (REPEATERS.md §3.2). Machines and the policy live on the roster map; this is a list,
+ * could be (REPEATERS.md §3.2). Machines and the policy sit beside it on Your repeaters; this is a list,
  * because people outnumber machines and a list is what reads at that size. Members see who else
  * is carried (§3.3), so a member's view shows the list too, without the owner's actions.
  */
@@ -70,7 +70,7 @@ export function RosterPeople({ roster, accent, warning, busy, owner, invite }: R
           }
           const onSetInviter = owner.onSetInviter;
           return (
-            <ListRow
+            <RemovableRow
               key={member.id}
               label={label}
               accent={accent}
@@ -137,91 +137,6 @@ export function RosterPeople({ roster, accent, warning, busy, owner, invite }: R
           )}
         </View>
       ) : null}
-    </View>
-  );
-}
-
-/** One person, with a REMOVE that asks once before it acts. */
-function ListRow({
-  label,
-  accent,
-  warning,
-  busy,
-  removeLabel,
-  confirmCopy,
-  onRemove,
-  secondary,
-}: {
-  readonly label: string;
-  readonly accent: string;
-  readonly warning: string;
-  readonly busy: boolean;
-  readonly removeLabel: string;
-  readonly confirmCopy: string;
-  readonly onRemove: () => void;
-  /** A second, reversible action beside REMOVE, taken without confirming. */
-  readonly secondary?: {
-    readonly label: string;
-    readonly accessibilityLabel: string;
-    readonly onPress: () => void;
-  };
-}) {
-  const [confirming, setConfirming] = useState(false);
-  return (
-    <View style={styles.listRow}>
-      <View style={styles.copy}>
-        <ThemedText type="small">{label}</ThemedText>
-        {confirming ? (
-          <ThemedText accessibilityRole="alert" type="small" themeColor="textSecondary">
-            {confirmCopy}
-          </ThemedText>
-        ) : null}
-      </View>
-      {secondary && !confirming ? (
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel={secondary.accessibilityLabel}
-          accessibilityState={{ disabled: busy }}
-          disabled={busy}
-          onPress={secondary.onPress}
-          style={({ pressed }) => [styles.action, (pressed || busy) && styles.pressed]}
-        >
-          <ThemedText type="code" themeColor="textSecondary">
-            {secondary.label}
-          </ThemedText>
-        </Pressable>
-      ) : null}
-      {confirming ? (
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel="Cancel"
-          onPress={() => setConfirming(false)}
-          style={({ pressed }) => [styles.action, pressed && styles.pressed]}
-        >
-          <ThemedText type="code" themeColor="textSecondary">
-            CANCEL
-          </ThemedText>
-        </Pressable>
-      ) : null}
-      <Pressable
-        accessibilityRole="button"
-        accessibilityLabel={confirming ? `Confirm: ${removeLabel}` : removeLabel}
-        accessibilityState={{ disabled: busy }}
-        disabled={busy}
-        onPress={() => {
-          if (!confirming) {
-            setConfirming(true);
-            return;
-          }
-          setConfirming(false);
-          onRemove();
-        }}
-        style={({ pressed }) => [styles.action, (pressed || busy) && styles.pressed]}
-      >
-        <ThemedText type="code" style={{ color: confirming ? warning : accent }}>
-          REMOVE
-        </ThemedText>
-      </Pressable>
     </View>
   );
 }

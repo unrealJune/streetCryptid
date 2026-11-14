@@ -19,8 +19,8 @@ import { useRepeaters } from '../hooks/use-repeaters';
  *
  * - STASH: the hosted one, owned by nobody (§5.1). Its switch is the delivery mode, so this page
  *   and Settings → Delivery are one setting.
- * - MY REPEATERS: your roster, opening the roster map (machines, policy) and its people; or a way
- *   to add your first machine.
+ * - MY REPEATERS: your roster in a card, opening Your repeaters (machines, policy, people); or a
+ *   way to add your first machine.
  * - CARRYING MY LOCATION: other people's rosters you are enrolled in. Off is a Withdraw.
  * - AVAILABLE THROUGH FRIENDS: rosters on friends' cards (§4.2). On asks first, in a sheet that
  *   says what enrolling means; an invite-only roster nobody invited you to says so instead.
@@ -172,9 +172,8 @@ export default function RepeatersScreen() {
               machineLine(mine),
             ]}
             accent={chrome.green}
-            onOpen={() => router.push('/settings/repeaters/roster' as Href)}
-            openLabel="Open your roster"
-            link={{ label: 'People', onPress: () => people(mine.rosterId) }}
+            onOpen={() => router.push('/settings/repeaters/mine' as Href)}
+            openLabel="Open your repeaters"
           />
         ) : (
           <RepeaterCard
@@ -183,14 +182,6 @@ export default function RepeatersScreen() {
             accent={chrome.green}
             onOpen={() => router.push('/settings/repeaters/claim' as Href)}
             openLabel="Add a repeater"
-            link={
-              sections.carryingMe.length + sections.throughFriends.length > 0
-                ? {
-                    label: 'See the roster map',
-                    onPress: () => router.push('/settings/repeaters/roster' as Href),
-                  }
-                : undefined
-            }
           />
         )}
       </SettingsSection>

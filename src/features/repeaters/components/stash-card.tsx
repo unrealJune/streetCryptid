@@ -42,11 +42,11 @@ export function StashCard({
       <View style={[styles.option, { borderTopColor: theme.backgroundSelected }]}>
         <View style={styles.copy}>
           <ThemedText type="small">Carry my location</ThemedText>
-          <ThemedText type="small" themeColor="textSecondary">
-            {carriesMe
-              ? 'Friends who were offline catch up from it. It can never read what it holds.'
-              : 'Off. Friends catch up from each other only.'}
-          </ThemedText>
+          {carriesMe ? null : (
+            <ThemedText type="small" themeColor="textSecondary">
+              Off. Friends catch up from each other only.
+            </ThemedText>
+          )}
         </View>
         <Switch
           accessibilityRole="switch"

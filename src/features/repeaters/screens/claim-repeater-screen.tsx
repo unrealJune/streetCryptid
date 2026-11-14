@@ -342,8 +342,8 @@ export default function ClaimRepeaterScreen() {
             />
             <PanelButton
               chrome={chrome}
-              label="VIEW ROSTER"
-              onPress={() => router.replace('/settings/repeaters/roster' as Href)}
+              label="VIEW REPEATERS"
+              onPress={() => router.replace('/settings/repeaters/mine' as Href)}
             />
           </PanelActions>
         </IslandPanel>

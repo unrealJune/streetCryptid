@@ -14,7 +14,6 @@ import {
   rosterLine,
   rosterSections,
 } from '../repeaters';
-import { layoutRosterGraph, MAX_GRAPH_MACHINES } from '../roster-graph';
 
 const SECRET = 'ab'.repeat(32);
 const ME = '11'.repeat(32);
@@ -237,60 +236,6 @@ describe('enrollFacts', () => {
       '0 machines · invite only · carrying 6 people'
     );
     expect(offeredCount(sections)).toBe(1);
-  });
-});
-
-describe('layoutRosterGraph', () => {
-  const sections = rosterSections(
-    [
-      roster({ rosterId: 'mine', mine: true, repeaters: ['a1'.repeat(32), 'a2'.repeat(32)] }),
-      roster({ rosterId: 'sams', owner: SAM, carriesMe: true, repeaters: ['b1'.repeat(32)] }),
-      roster({
-        rosterId: 'kits',
-        owner: STRANGER,
-        vouchers: [STRANGER],
-        canEnroll: true,
-        repeaters: ['c1'.repeat(32), 'c2'.repeat(32), 'c3'.repeat(32)],
-      }),
-    ],
-    [{ endpointId: SAM, handle: '@sam' }],
-    ME
-  );
-
-  it('puts my machines below the divide and everyone else’s above it', () => {
-    const { nodes } = layoutRosterGraph(sections);
-    expect(nodes).toHaveLength(6);
-    for (const n of nodes) {
-      if (n.side === 'mine') expect(n.fy).toBeGreaterThan(0.5);
-      else expect(n.fy).toBeLessThan(0.5);
-      expect(n.fx).toBeGreaterThan(0);
-      expect(n.fx).toBeLessThan(1);
-    }
-  });
-
-  it('ties me to my machines and to what carries me, never to what is only offered', () => {
-    const { links } = layoutRosterGraph(sections);
-    const toMe = links.filter((l) => l.a === 'you').map((l) => l.b.slice(0, 2));
-    expect(toMe.sort()).toEqual(['a1', 'a2', 'b1']);
-    expect(links.filter((l) => l.kind === 'avail')).toHaveLength(3);
-  });
-
-  it('lands in the same places every time', () => {
-    expect(layoutRosterGraph(sections)).toEqual(layoutRosterGraph(sections));
-  });
-
-  it('stops adding machines past what reads', () => {
-    const many = rosterSections(
-      [
-        roster({
-          rosterId: 'mine',
-          mine: true,
-          repeaters: Array.from({ length: 40 }, (_, i) => i.toString(16).padStart(64, '0')),
-        }),
-      ],
-      []
-    );
-    expect(layoutRosterGraph(many).nodes).toHaveLength(MAX_GRAPH_MACHINES);
   });
 });
 

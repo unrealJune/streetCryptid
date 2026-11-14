@@ -1,11 +1,10 @@
 import { useState } from 'react';
-import { StyleSheet, Switch, View } from 'react-native';
 import { useLocalSearchParams } from 'expo-router';
 
 import { ThemedText } from '@/components/themed-text';
-import { Spacing } from '@/constants/theme';
 import { SettingsPage, SettingsSection } from '@/features/settings/components/settings-page';
 
+import { AutoInviteSwitch } from '../components/auto-invite-switch';
 import { useRepeaterChrome } from '../components/repeater-chrome';
 import { RosterPeople } from '../components/roster-people';
 import { inviteCandidates, rosterLine, type RosterView } from '../core/repeaters';
@@ -13,8 +12,8 @@ import { useRepeaters } from '../hooks/use-repeaters';
 
 /**
  * Settings → Repeaters → People: who a roster carries and who may join it (REPEATERS.md §3.2).
- * Opened from the roster map (your machines' PEOPLE, a carrier's INVITE) and from the list page,
- * as `?roster=<id>`; without one, your own roster.
+ * Opened from a carrier's card on Settings → Repeaters (INVITE FRIENDS), as `?roster=<id>`;
+ * without one, your own roster, whose people Your repeaters already lists in place.
  *
  * "Invite new friends" (auto-invite) is here, beside the invite lists it pre-fills at pairing.
  */
@@ -95,29 +94,13 @@ export default function RosterPeopleScreen() {
 
       {mayAutoInvite && repeaters.autoInvite !== null ? (
         <SettingsSection label="NEW FRIENDS">
-          <View style={styles.option}>
-            <View style={styles.copy}>
-              <ThemedText type="small">Invite new friends</ThemedText>
-              <ThemedText type="small" themeColor="textSecondary">
-                When you pair, the invite to your invite-only repeaters starts switched on. They
-                still choose whether their location is carried.
-              </ThemedText>
-            </View>
-            <Switch
-              accessibilityRole="switch"
-              accessibilityLabel="Invite new friends to my repeaters"
-              value={repeaters.autoInvite}
-              onValueChange={(on) => void run(repeaters.setAutoInvite(on))}
-              trackColor={{ true: chrome.green, false: chrome.steel }}
-            />
-          </View>
+          <AutoInviteSwitch
+            value={repeaters.autoInvite}
+            accent={chrome.green}
+            onChange={(on) => void run(repeaters.setAutoInvite(on))}
+          />
         </SettingsSection>
       ) : null}
     </SettingsPage>
   );
 }
-
-const styles = StyleSheet.create({
-  option: { alignItems: 'center', flexDirection: 'row', gap: Spacing.three },
-  copy: { flex: 1, gap: Spacing.one },
-});
