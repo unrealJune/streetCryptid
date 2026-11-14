@@ -1679,6 +1679,18 @@ mod tests {
             .await?
             .set(&[crate::encode_hex(live.endpoint.id().as_bytes())])?;
         let reader_live = reader.live().await?;
+        // What the app does for a friend: register them with their receiving key, which is what
+        // puts them in the writer's profile keyring. The card is sealed (`crate::profile_seal`).
+        let reader_hex = crate::encode_hex(reader_live.endpoint.id().as_bytes());
+        writer
+            .set_sharing_recipients(vec![reader_hex.clone()], vec![])
+            .await?;
+        writer
+            .set_recipient_keys(vec![crate::RecipientKey {
+                endpoint_id: reader_hex,
+                recv_public: crate::encode_hex(&reader.recv_public()),
+            }])
+            .await?;
         reader_live.endpoint.address_lookup()?.add(
             iroh::address_lookup::memory::MemoryLookup::from_endpoint_info([live.endpoint.addr()]),
         );
