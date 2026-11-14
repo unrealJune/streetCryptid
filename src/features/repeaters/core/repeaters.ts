@@ -317,6 +317,26 @@ export function rosterLine(roster: RosterView): string {
   ].join(' · ');
 }
 
+/**
+ * A roster as one row's mono line on Settings → Repeaters: "2 machines · open · 9 people". Your
+ * own leaves the policy out (its page says it) and says when it is not carrying you; an offered
+ * one names the friends in it; one nobody invited you to says so.
+ */
+export function rosterRowDetail(roster: RosterView): string {
+  const parts = [count(roster.machines.length, 'machine', 'machines')];
+  if (!roster.mine) parts.push(roster.open ? 'open' : 'invite only');
+  parts.push(count(roster.carried, 'person', 'people'));
+  if (roster.mine && !roster.carriesMe) parts.push('not carrying you');
+  if (!roster.mine && !roster.carriesMe) {
+    if (!roster.canEnroll) parts.push('not invited');
+    else if (roster.vouchers.length > 0) {
+      const names = roster.vouchers.map((v) => v.label);
+      parts.push(`${names.join(', ')} ${names.length === 1 ? 'is' : 'are'} in it`);
+    }
+  }
+  return parts.join(' · ');
+}
+
 /** "Vouched for by Sam, quietmoth", or null when nobody did. */
 export function vouchLine(roster: RosterView): string | null {
   return roster.vouchers.length > 0

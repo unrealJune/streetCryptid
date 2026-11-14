@@ -12,6 +12,7 @@ import {
   repeatersSummary,
   retentionWords,
   rosterLine,
+  rosterRowDetail,
   rosterSections,
 } from '../repeaters';
 
@@ -255,6 +256,50 @@ describe('inviteCandidates', () => {
       { endpointId: ME, handle: '@me' },
     ];
     expect(inviteCandidates(mine, friends).map((p) => p.label)).toEqual(['@ash']);
+  });
+});
+
+describe('rosterRowDetail', () => {
+  const view = (over: Partial<NativeRepeaterRoster>) => {
+    const s = rosterSections([roster(over)], [{ endpointId: SAM, handle: '@sam' }], ME);
+    return s.mine ?? s.carryingMe[0] ?? s.throughFriends[0] ?? s.others[0];
+  };
+
+  it('leaves the policy off my own roster, and says when it is not carrying me', () => {
+    expect(
+      rosterRowDetail(view({ mine: true, carriesMe: true, repeaters: ['a', 'b'], carried: 4 }))
+    ).toBe('2 machines · 4 people');
+    expect(rosterRowDetail(view({ mine: true, repeaters: ['a'], carried: 1 }))).toBe(
+      '1 machine · 1 person · not carrying you'
+    );
+  });
+
+  it('names the policy of a roster carrying me', () => {
+    expect(
+      rosterRowDetail(
+        view({ owner: SAM, open: true, carriesMe: true, repeaters: ['a'], carried: 9 })
+      )
+    ).toBe('1 machine · open · 9 people');
+  });
+
+  it('names who vouches for an offer, and says when nobody invited me', () => {
+    expect(
+      rosterRowDetail(
+        view({
+          owner: STRANGER,
+          open: true,
+          canEnroll: true,
+          vouchers: [SAM],
+          repeaters: ['a'],
+          carried: 3,
+        })
+      )
+    ).toBe('1 machine · open · 3 people · @sam is in it');
+    expect(
+      rosterRowDetail(
+        view({ owner: STRANGER, canEnroll: false, vouchers: [SAM], repeaters: ['a'], carried: 3 })
+      )
+    ).toBe('1 machine · invite only · 3 people · not invited');
   });
 });
 

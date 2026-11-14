@@ -97,7 +97,7 @@ describe('MyRepeatersScreen', () => {
 
   it('shows machines, policy and people on one page', () => {
     render();
-    for (const label of ['YOUR LOCATION', 'MACHINES', 'WHO CAN JOIN', 'PEOPLE']) {
+    for (const label of ['MACHINES · 2', 'WHO CAN JOIN', 'PEOPLE · 2 CARRIED', 'INVITE']) {
       expect(text()).toContain(label);
     }
     expect(text()).toContain('Living room PC');
@@ -118,8 +118,26 @@ describe('MyRepeatersScreen', () => {
     render();
     await act(async () => toggle('Carry my location on your repeaters').props.onValueChange(false));
     expect(mockRepeaters.setCarried).toHaveBeenCalledWith('mine', false);
-    await act(async () => toggle('Open to anyone').props.onValueChange(true));
+    await act(async () => byLabel('Anyone')[0].props.onPress());
     expect(mockRepeaters.setPolicy).toHaveBeenCalledWith('mine', true);
+  });
+
+  it('removes a person from their row, only on the second tap', async () => {
+    render();
+    expect(byLabel('Remove @sam')).toHaveLength(0);
+    act(() => byLabel('Options for @sam')[0].props.onPress());
+    act(() => byLabel('Remove @sam')[0].props.onPress());
+    expect(mockRepeaters.removeMember).not.toHaveBeenCalled();
+    await act(async () => byLabel('Confirm: Remove @sam')[0].props.onPress());
+    expect(mockRepeaters.removeMember).toHaveBeenCalledWith('mine', SAM);
+  });
+
+  it('lets a removal be cancelled', () => {
+    render();
+    act(() => byLabel('Remove machine Living room PC')[0].props.onPress());
+    act(() => byLabel('CANCEL')[0].props.onPress());
+    expect(byLabel('Confirm: Remove machine Living room PC')).toHaveLength(0);
+    expect(mockRepeaters.removeMachine).not.toHaveBeenCalled();
   });
 
   it('offers auto-invite while the roster is invite only', () => {
@@ -135,18 +153,19 @@ describe('MyRepeatersScreen', () => {
     mockRepeaters.ownerControls = false;
     render();
     expect(byLabel('Remove machine Living room PC')).toHaveLength(0);
+    expect(byLabel('Options for @sam')).toHaveLength(0);
     expect(text()).not.toContain('WHO CAN JOIN');
   });
 
   it('adds a repeater through the claim screen', () => {
     render();
-    act(() => byLabel('Add a repeater')[0].props.onPress());
+    act(() => byLabel('Add a machine')[0].props.onPress());
     expect(mockRouter.push).toHaveBeenCalledWith('/settings/repeaters/claim');
   });
 
   it('says so when there is no roster yet', () => {
     mockRepeaters.sections.mine = null;
     render();
-    expect(text()).toContain('You have no repeaters yet');
+    expect(text()).toContain('No repeaters yet');
   });
 });

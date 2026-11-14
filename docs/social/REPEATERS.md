@@ -585,14 +585,17 @@ line counts it ("1 offered by friends") with a badge.
 
 **In the repeater menu** (Settings → Repeaters), at any time:
 
-- **Stash**, then **My repeaters**: your roster in a card, opening _Your repeaters_, or
-  _Add a repeater_.
-- **Carrying my location.** Whose repeaters I am enrolled with, with their machines; switching it
-  off is a Withdraw. Per-machine last contact is not shown: nothing records it per machine.
-- **Available through friends.** Every roster on a friend's card: `open` ones and `invite` ones
-  with an invite waiting for me get a switch, which asks first in a sheet with the same facts as
-  at pairing; an invite-only one nobody invited me to says so. This is how repeaters a friend
-  sets up later reach people who paired long before they existed.
+One row per roster, in grouped cards, each row a name, a mono line (`rosterRowDetail`) and one
+control:
+
+- **Who carries your location.** The stash (its switch is the delivery mode), _Your repeaters_
+  (opening its page), and every roster I am enrolled with; switching one off is a Withdraw.
+  Per-machine last contact is not shown: nothing records it per machine.
+- **Offered.** Every roster on a friend's card, badged with how many I could join: `open` ones and
+  `invite` ones with an invite waiting for me get a switch, which asks first in a sheet with the
+  same facts as at pairing; an invite-only one nobody invited me to shows a lock. This is how
+  repeaters a friend sets up later reach people who paired long before they existed.
+- **Known to this phone**, then _Add a repeater_.
 
 Behind it (`src/app/settings/repeaters/`):
 
