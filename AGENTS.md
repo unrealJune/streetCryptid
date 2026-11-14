@@ -317,6 +317,28 @@ Conventions when changing that code:
   JS subscribe/topic/reachability model of its own; it was deleted, not kept as a fallback, so do
   not add a second lane to speed delivery up — fix the docs path. Web (wasm) reads the replica and
   does not publish (`web-no-publish`).
+- **A record is not its bytes, and a reader must fetch the bytes itself** (`TrailDocs::settle_stranded`).
+  iroh-docs reconciles entry records; the content behind each is a separate iroh-blobs download
+  that the engine attempts ONCE, from whichever peer handed the record over, and then waits for a
+  gossip `ContentReady`. The stash receives a writer's record by reconciliation and its bytes
+  moments later by HTTP, which imports straight into its blob store and announces nothing. So a
+  reader that reconciled in between (any phone that keeps friend namespaces live, which every build
+  since the gossip removal does) held the record with no bytes forever: `read_latest_sealed` skips
+  such a slot without a word, the ratchet never sees it, and not even a miss is counted. From
+  2026-11-10 17:25 to 11-12 an iPhone read nothing from one friend while the Pixel beside it read
+  everything; the friend's entries were in its replica and 0 of 17 of their bytes were in its blob
+  store. Every pull now fetches stranded friend slots (`fix`, `nul`, `rsy`) from the peers it
+  dialled, then each namespace's own sources (`namespace_sources`: the repeaters this pass planned
+  for that friend, `repeater::pull_plan`), then the author and the last serving peer, inside the
+  pull's deadline, and reports `sync.stranded` / `sync.stranded_fetched` on `trail.sync`. Friends'
+  profile namespaces get the same pass beside it (`ProfileDocs::settle_stranded`, every key, so the
+  sealed `s/profile`, `s/repeaters` and `keyring` too; sources are the owner's `profile_relays`,
+  then the owner named by the read ticket), which hands a profile that became readable to the app
+  because no `ContentReady` will, and re-reads repeater cards when anything landed; it reports
+  `sync.profile_stranded` / `_fetched`. Do not move
+  either into the replica read (a read never dials), and do not drop the `rsy` lane: a control
+  record without bytes is a restart request the leader cannot see. The web build does not run it
+  yet.
 - **There is ONE node per process, and only `NodeHost` builds it** (`rust/src/host.rs`). The
   mounted app (every JS context, through the module's `createNode`/`shutdown`) and the native
   background runtime (`acquireBackground`) take LEASES on it; the last one out shuts it down,
