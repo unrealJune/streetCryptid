@@ -80,6 +80,24 @@ enum BackgroundWakeLedger {
   private static let pullOpenTrigger = "sc.bg.pull_open_trigger"
   private static let pullOpenBudget = "sc.bg.pull_open_budget_ms"
 
+  /// Native publish work (`PublishAssertion`): the background-task assertion each capture, heartbeat
+  /// and claim runs under, and how it ended. See `PublishAssertion.swift` for why it exists.
+  private static let publishBegun = "sc.bg.publish_begun"
+  private static let publishCompleted = "sc.bg.publish_completed"
+  /// iOS ran the expiration handler while the work was still going: the process was about to be
+  /// suspended inside a seal or a push.
+  private static let publishExpired = "sc.bg.publish_expired"
+  /// Assertions a process began and never ended, found by the NEXT process: it was killed holding
+  /// them (jetsam, watchdog, crash) — the one ending neither the work nor its handler can report.
+  private static let publishStranded = "sc.bg.publish_stranded"
+  /// Publishes that sealed but had no time left to push (`IngestOutcome.push_deferred`).
+  private static let publishPushDeferred = "sc.bg.publish_push_deferred"
+  private static let publishHeldMsTotal = "sc.bg.publish_held_ms_total"
+  private static let publishHeldMsMax = "sc.bg.publish_held_ms_max"
+  /// Assertions held right now, and by which process. State, not counts: not reset.
+  private static let publishOpen = "sc.bg.publish_open"
+  private static let publishOpenProcess = "sc.bg.publish_open_process"
+
   /// Marks of an open window. Absent means nothing is being timed, which is the ordinary state of a
   /// foregrounded app.
   private static let openCpu = "sc.bg.open_cpu_ms"
@@ -309,6 +327,64 @@ enum BackgroundWakeLedger {
   static func notePullStranded() { bump(pullStranded) }
   static func notePullNoTime() { bump(pullNoTime) }
 
+  // MARK: - Publish assertions
+
+  /// Identifies this process among the ones that wrote `publishOpen`. A pid alone is reused.
+  private static let processToken = "\(getpid())-\(UUID().uuidString)"
+  private static let publishLock = NSLock()
+  /// The open count left by an earlier process, adopted on first use in this one. Only ever
+  /// computed once, so a process reports another's stranded assertions exactly once.
+  private static var adoptedStranded: Int?
+
+  /// Fold an earlier process's open assertions into `publishStranded`, once per process. Returns how
+  /// many there were, so the caller can say so on a span. Caller holds `publishLock`.
+  private static func adoptEarlierProcessLocked() -> Int {
+    if let adopted = adoptedStranded { return adopted }
+    var stranded = 0
+    if defaults.string(forKey: publishOpenProcess) != processToken {
+      stranded = max(0, defaults.integer(forKey: publishOpen))
+      if stranded > 0 {
+        defaults.set(defaults.integer(forKey: publishStranded) + stranded, forKey: publishStranded)
+      }
+      defaults.set(0, forKey: publishOpen)
+      defaults.set(processToken, forKey: publishOpenProcess)
+    }
+    adoptedStranded = stranded
+    return stranded
+  }
+
+  /// An assertion was taken. Synchronous, so it is on disk before the work can be frozen or killed.
+  /// Returns how many an EARLIER process left open — non-zero at most once per process.
+  @discardableResult
+  static func openPublish() -> Int {
+    publishLock.lock()
+    defer { publishLock.unlock() }
+    let stranded = adoptEarlierProcessLocked()
+    defaults.set(defaults.integer(forKey: publishOpen) + 1, forKey: publishOpen)
+    bump(publishBegun)
+    if strandedReported { return 0 }
+    strandedReported = true
+    return stranded
+  }
+  /// Whether `openPublish` has already handed this process's adopted count to a caller.
+  private static var strandedReported = false
+
+  /// An assertion was ended — by the work finishing (`expired: false`) or by iOS's expiration
+  /// handler (`expired: true`). Exactly once per `openPublish`.
+  static func closePublish(heldMs: Double, expired: Bool) {
+    publishLock.lock()
+    defer { publishLock.unlock() }
+    _ = adoptEarlierProcessLocked()
+    defaults.set(max(0, defaults.integer(forKey: publishOpen) - 1), forKey: publishOpen)
+    bump(expired ? publishExpired : publishCompleted)
+    defaults.set(defaults.double(forKey: publishHeldMsTotal) + heldMs, forKey: publishHeldMsTotal)
+    if heldMs > defaults.double(forKey: publishHeldMsMax) {
+      defaults.set(heldMs, forKey: publishHeldMsMax)
+    }
+  }
+
+  static func notePublishPushDeferred() { bump(publishPushDeferred) }
+
   private static func bump(_ key: String) {
     defaults.set(defaults.integer(forKey: key) + 1, forKey: key)
   }
@@ -392,6 +468,21 @@ enum BackgroundWakeLedger {
     ] {
       out[name] = defaults.integer(forKey: key)
     }
+    // `publish_*`: see the keys above. Between two resets `publish_begun` is `publish_completed` +
+    // `publish_expired` + `publish_stranded`, give or take what was open (`publish_open`) at
+    // either end. `publish_held_ms_max` is read against the ~30 s iOS grants an assertion.
+    publishLock.lock()
+    _ = adoptEarlierProcessLocked()
+    publishLock.unlock()
+    for (key, name) in [
+      (publishBegun, "publish_begun"), (publishCompleted, "publish_completed"),
+      (publishExpired, "publish_expired"), (publishStranded, "publish_stranded"),
+      (publishPushDeferred, "publish_push_deferred"), (publishOpen, "publish_open"),
+    ] {
+      out[name] = defaults.integer(forKey: key)
+    }
+    out["publish_held_ms_total"] = Int(defaults.double(forKey: publishHeldMsTotal))
+    out["publish_held_ms_max"] = Int(defaults.double(forKey: publishHeldMsMax))
     if let at = defaults.object(forKey: pullOpenAt) as? Double {
       out["pull_open"] = true
       out["pull_open_age_ms"] = Int(Date().timeIntervalSince1970 * 1000 - at)
@@ -413,8 +504,12 @@ enum BackgroundWakeLedger {
       pullMsTotal, pullMsMax, pullCpuMsTotal, pullDelivered, pullFailed, pullDeadlineHits,
       pullOverruns, pullExpired, pullStranded, pullNoTime,
     ]
+    let publishes = [
+      publishBegun, publishCompleted, publishExpired, publishStranded, publishPushDeferred,
+      publishHeldMsTotal, publishHeldMsMax,
+    ]
     for key in [wakes, bgLaunches, jsBoots, cpuTotal, cpuMax, wallTotal, wallAtCpuMax, syncs, dropped]
-      + groups + pulls
+      + groups + pulls + publishes
     {
       defaults.removeObject(forKey: key)
     }

@@ -787,6 +787,8 @@ external fun uniffi_iroh_location_checksum_method_locationnode_has_session(
 ): Int
 external fun uniffi_iroh_location_checksum_method_locationnode_heartbeat_fix(
 ): Int
+external fun uniffi_iroh_location_checksum_method_locationnode_heartbeat_fix_within(
+): Int
 external fun uniffi_iroh_location_checksum_method_locationnode_identity_secret(
 ): Int
 external fun uniffi_iroh_location_checksum_method_locationnode_import_doc_ticket(
@@ -794,6 +796,8 @@ external fun uniffi_iroh_location_checksum_method_locationnode_import_doc_ticket
 external fun uniffi_iroh_location_checksum_method_locationnode_import_profile_ticket(
 ): Int
 external fun uniffi_iroh_location_checksum_method_locationnode_ingest_fix(
+): Int
+external fun uniffi_iroh_location_checksum_method_locationnode_ingest_fix_within(
 ): Int
 external fun uniffi_iroh_location_checksum_method_locationnode_initiate_pair(
 ): Int
@@ -1011,6 +1015,8 @@ external fun uniffi_iroh_location_fn_method_locationnode_has_session(`ptr`: Long
 ): Long
 external fun uniffi_iroh_location_fn_method_locationnode_heartbeat_fix(`ptr`: Long,`battery`: RustBuffer.ByValue,`intervalMs`: Long,`nowMs`: Long,`parked`: RustBuffer.ByValue,
 ): Long
+external fun uniffi_iroh_location_fn_method_locationnode_heartbeat_fix_within(`ptr`: Long,`battery`: RustBuffer.ByValue,`intervalMs`: Long,`nowMs`: Long,`parked`: RustBuffer.ByValue,`budgetMs`: Long,
+): Long
 external fun uniffi_iroh_location_fn_method_locationnode_identity_secret(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
 external fun uniffi_iroh_location_fn_method_locationnode_import_doc_ticket(`ptr`: Long,`ticket`: RustBuffer.ByValue,
@@ -1018,6 +1024,8 @@ external fun uniffi_iroh_location_fn_method_locationnode_import_doc_ticket(`ptr`
 external fun uniffi_iroh_location_fn_method_locationnode_import_profile_ticket(`ptr`: Long,`ticket`: RustBuffer.ByValue,
 ): Long
 external fun uniffi_iroh_location_fn_method_locationnode_ingest_fix(`ptr`: Long,`fix`: RustBuffer.ByValue,`battery`: RustBuffer.ByValue,`intervalMs`: Long,`nowMs`: Long,
+): Long
+external fun uniffi_iroh_location_fn_method_locationnode_ingest_fix_within(`ptr`: Long,`fix`: RustBuffer.ByValue,`battery`: RustBuffer.ByValue,`intervalMs`: Long,`nowMs`: Long,`budgetMs`: Long,
 ): Long
 external fun uniffi_iroh_location_fn_method_locationnode_initiate_pair(`ptr`: Long,`invite`: RustBuffer.ByValue,
 ): Long
@@ -1473,6 +1481,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_iroh_location_checksum_method_locationnode_heartbeat_fix() != 49997) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_iroh_location_checksum_method_locationnode_heartbeat_fix_within() != 58916) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_iroh_location_checksum_method_locationnode_identity_secret() != 6853) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1483,6 +1494,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_iroh_location_checksum_method_locationnode_ingest_fix() != 21806) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_iroh_location_checksum_method_locationnode_ingest_fix_within() != 40339) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_iroh_location_checksum_method_locationnode_initiate_pair() != 61841) {
@@ -2787,6 +2801,11 @@ public interface LocationNodeInterface {
     suspend fun `heartbeatFix`(`battery`: BatteryState, `intervalMs`: kotlin.ULong, `nowMs`: kotlin.ULong, `parked`: kotlin.Boolean?): IngestOutcome
     
     /**
+     * [`Self::heartbeat_fix`] under a deadline. See [`Self::ingest_fix_within`].
+     */
+    suspend fun `heartbeatFixWithin`(`battery`: BatteryState, `intervalMs`: kotlin.ULong, `nowMs`: kotlin.ULong, `parked`: kotlin.Boolean?, `budgetMs`: kotlin.ULong): IngestOutcome
+    
+    /**
      * The ed25519 identity secret — persist in the OS secure store.
      */
     fun `identitySecret`(): kotlin.ByteArray
@@ -2817,6 +2836,18 @@ public interface LocationNodeInterface {
      * that delivered the fix.
      */
     suspend fun `ingestFix`(`fix`: LocationFix, `battery`: BatteryState, `intervalMs`: kotlin.ULong, `nowMs`: kotlin.ULong): IngestOutcome
+    
+    /**
+     * [`Self::ingest_fix`] for a caller with a deadline: an iOS background wake, which owns only
+     * the seconds its background-task assertion buys.
+     *
+     * The gate, the seal and the commit run exactly as unbudgeted — they are local, and the seal
+     * is the part that must not be lost. Only the push is bounded: clamped to what is left of
+     * `budget_ms` (counted from this call's start), and not started when that is under two
+     * seconds, in which case the outcome says `push_deferred` and the envelopes wait in the
+     * replica for the next push.
+     */
+    suspend fun `ingestFixWithin`(`fix`: LocationFix, `battery`: BatteryState, `intervalMs`: kotlin.ULong, `nowMs`: kotlin.ULong, `budgetMs`: kotlin.ULong): IngestOutcome
     
     /**
      * Begin an invite-based pair from a decoded [`PairInvite`]. Returns the session id.
@@ -3857,6 +3888,30 @@ open class LocationNode: Disposable, AutoCloseable, LocationNodeInterface
 
     
     /**
+     * [`Self::heartbeat_fix`] under a deadline. See [`Self::ingest_fix_within`].
+     */
+    @Throws(LocationException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `heartbeatFixWithin`(`battery`: BatteryState, `intervalMs`: kotlin.ULong, `nowMs`: kotlin.ULong, `parked`: kotlin.Boolean?, `budgetMs`: kotlin.ULong) : IngestOutcome {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_iroh_location_fn_method_locationnode_heartbeat_fix_within(
+                uniffiHandle,
+                FfiConverterTypeBatteryState.lower(`battery`),FfiConverterULong.lower(`intervalMs`),FfiConverterULong.lower(`nowMs`),FfiConverterOptionalBoolean.lower(`parked`),FfiConverterULong.lower(`budgetMs`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_iroh_location_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_iroh_location_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterTypeIngestOutcome.lift(it) },
+        // Error FFI converter
+        LocationException.ErrorHandler,
+    )
+    }
+
+    
+    /**
      * The ed25519 identity secret — persist in the OS secure store.
      */override fun `identitySecret`(): kotlin.ByteArray {
             return FfiConverterByteArray.lift(
@@ -3945,6 +4000,37 @@ open class LocationNode: Disposable, AutoCloseable, LocationNodeInterface
             UniffiLib.uniffi_iroh_location_fn_method_locationnode_ingest_fix(
                 uniffiHandle,
                 FfiConverterTypeLocationFix.lower(`fix`),FfiConverterTypeBatteryState.lower(`battery`),FfiConverterULong.lower(`intervalMs`),FfiConverterULong.lower(`nowMs`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_iroh_location_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_iroh_location_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterTypeIngestOutcome.lift(it) },
+        // Error FFI converter
+        LocationException.ErrorHandler,
+    )
+    }
+
+    
+    /**
+     * [`Self::ingest_fix`] for a caller with a deadline: an iOS background wake, which owns only
+     * the seconds its background-task assertion buys.
+     *
+     * The gate, the seal and the commit run exactly as unbudgeted — they are local, and the seal
+     * is the part that must not be lost. Only the push is bounded: clamped to what is left of
+     * `budget_ms` (counted from this call's start), and not started when that is under two
+     * seconds, in which case the outcome says `push_deferred` and the envelopes wait in the
+     * replica for the next push.
+     */
+    @Throws(LocationException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `ingestFixWithin`(`fix`: LocationFix, `battery`: BatteryState, `intervalMs`: kotlin.ULong, `nowMs`: kotlin.ULong, `budgetMs`: kotlin.ULong) : IngestOutcome {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_iroh_location_fn_method_locationnode_ingest_fix_within(
+                uniffiHandle,
+                FfiConverterTypeLocationFix.lower(`fix`),FfiConverterTypeBatteryState.lower(`battery`),FfiConverterULong.lower(`intervalMs`),FfiConverterULong.lower(`nowMs`),FfiConverterULong.lower(`budgetMs`),
             )
         },
         { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_rust_buffer(future, callback, continuation) },
@@ -7190,6 +7276,14 @@ data class IngestOutcome (
      * Publishing is suspended on critical battery. Distinct from "nothing was due".
      */
     var `suspended`: kotlin.Boolean
+    , 
+    /**
+     * Something this call sealed, or a recovery it started, is waiting in the replica for a push
+     * the caller's budget left no time for ([`FlushOutcome::Deferred`]). Only a budgeted call
+     * (`ingest_fix_within` / `heartbeat_fix_within`) can set it. The next push carries it; the
+     * caller's job is to make sure there is a next wake.
+     */
+    var `pushDeferred`: kotlin.Boolean
     
 ){
     
@@ -7215,6 +7309,7 @@ public object FfiConverterTypeIngestOutcome: FfiConverterRustBuffer<IngestOutcom
             FfiConverterUInt.read(buf),
             FfiConverterUInt.read(buf),
             FfiConverterBoolean.read(buf),
+            FfiConverterBoolean.read(buf),
         )
     }
 
@@ -7227,7 +7322,8 @@ public object FfiConverterTypeIngestOutcome: FfiConverterRustBuffer<IngestOutcom
             FfiConverterUInt.allocationSize(value.`pending`) +
             FfiConverterUInt.allocationSize(value.`slotsSkipped`) +
             FfiConverterUInt.allocationSize(value.`overflowDropped`) +
-            FfiConverterBoolean.allocationSize(value.`suspended`)
+            FfiConverterBoolean.allocationSize(value.`suspended`) +
+            FfiConverterBoolean.allocationSize(value.`pushDeferred`)
     )
 
     override fun write(value: IngestOutcome, buf: ByteBuffer) {
@@ -7240,6 +7336,7 @@ public object FfiConverterTypeIngestOutcome: FfiConverterRustBuffer<IngestOutcom
             FfiConverterUInt.write(value.`slotsSkipped`, buf)
             FfiConverterUInt.write(value.`overflowDropped`, buf)
             FfiConverterBoolean.write(value.`suspended`, buf)
+            FfiConverterBoolean.write(value.`pushDeferred`, buf)
     }
 }
 
@@ -9611,7 +9708,14 @@ enum class LocationRuntimeKind {
     /**
      * Authorization changed. `reason` is the new status.
      */
-    AUTHORIZATION;
+    AUTHORIZATION,
+    /**
+     * Native publish work did not finish inside its background-task assertion. `reason` is
+     * `expired` (iOS ran the expiration handler mid-work) or `stranded` (a later process found
+     * assertions an earlier one never ended: it was killed holding them); `detail` says which
+     * lane and how long it had been held. The durable `wake.publish_*` counters say the same.
+     */
+    PUBLISH_ASSERTION;
 
     
 

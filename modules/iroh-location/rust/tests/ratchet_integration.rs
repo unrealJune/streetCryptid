@@ -29,7 +29,7 @@ async fn start_node() -> Arc<LocationNode> {
         "test-token".into(),
         true,
         true,
-        true,
+        false, // BLE off: on a Mac it attaches CoreBluetooth and TCC aborts a bare test binary
     )
     .await
     .expect("start node");

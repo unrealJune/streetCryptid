@@ -165,6 +165,22 @@ Conventions when changing that code:
   `onFriendsPulled` and re-reads the replica — a local read, never a second dial. Android had the
   same hole (the service keeps the app mounted, so every capture is a hand-off) and pulls the same
   way after a hand-off while no activity is in the foreground. See `infra/otel/README.md`.
+- **Native publish work on iOS runs under a background assertion, taken in the callback.** Every
+  capture, heartbeat and claim `BackgroundLocationRuntime` decides on goes through `publish(lane)`,
+  which begins a `PublishAssertion` (`beginBackgroundTask`) synchronously, before the `Task` hop —
+  never a bare `Task { await self.heartbeat(...) }`. iOS owes a process nothing once a Core Location
+  callback returns, and on 2026-11-10/11 (v2.28.0) it suspended iPhones mid-push (`trail.push` 162.8
+  s against a 30 s budget; `trail.push.wait` p50 47 s fleet-wide) and before a `CLVisit` arrival's
+  parked declaration was even sealed: friends read "out of contact" about a phone sitting still.
+  The seal is never bounded; the push is (`ingest_fix_within` / `heartbeat_fix_within`, the
+  remaining allowance minus 5 s, not started under 2 s → `push_deferred`, which asks for a
+  `NativeRefreshTask` wake if none is pending). An ingest that owes a claim leaves 8 s for the
+  claim's push and pulls only after it. Outcomes are durable `wake.publish_*` counters plus
+  `location.runtime{event=publish_assertion}` (`expired` / `stranded`).
+  `native-publish-assertion.test.ts` scans the Swift for a bare `Task`. The `serviceRefresh` path is
+  the one exception: its `BGProcessingTask` is its assertion. Android was checked and left alone:
+  its foreground service keeps the process running, and the newest `trail.push.wait` spans there
+  end on their 30 s budget.
 - **A phone that reaches nobody notices, and heals itself** (`rust/src/isolation.rs`). On 2026-10-22
   the field-soak SE showed a friend "parked here 12 hr" while she was publishing live elsewhere:
   every dial the SE made, the stash's included, timed out for hours while its relays and Wi-Fi

@@ -71,6 +71,24 @@ enum NativeRefreshTask {
     }
   }
 
+  /// Ask for a wake only if none is pending.
+  ///
+  /// For a publish that sealed and could not push (`PublishAssertion`): the envelope is in the
+  /// replica, and a phone that has just parked gives Core Location no reason to wake it again, so
+  /// the refresh is the next chance to send it — a refresh heartbeat finds a slot due and pushes the
+  /// whole namespace. Not `schedule()`, because replacing a pending request moves its earliest date
+  /// out by another fifteen minutes; a request already waiting is the sooner chance.
+  static func ensureScheduled() {
+    lock.lock()
+    let ok = registered
+    lock.unlock()
+    guard ok else { return }
+    BGTaskScheduler.shared.getPendingTaskRequests { requests in
+      guard !requests.contains(where: { $0.identifier == identifier }) else { return }
+      schedule()
+    }
+  }
+
   /// Withdraw any pending request — sharing was switched off.
   static func cancel() {
     BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: identifier)
