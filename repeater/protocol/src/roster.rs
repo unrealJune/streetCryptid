@@ -949,6 +949,14 @@ impl Roster {
             .map(|i| self.nodes[i].op.id())
     }
 
+    /// Whether an `Enroll` signed by `member` now, citing [`Self::standing_invite`], would be
+    /// accepted: what a phone checks before offering to carry them. False for a member the owner
+    /// removed, even in an open roster, until someone invites them again.
+    pub fn may_enroll(&self, member: &EndpointId) -> bool {
+        self.enroll_allowed(member, self.standing_invite(member), Scope::All)
+            .is_ok()
+    }
+
     /// Whether `who` signed any accepted op here: the owner, and everyone who ever enrolled,
     /// withdrew or invited. A repeater lets them `Fetch`, so a member the owner removed can read
     /// that it was (the same log is on every member's card anyway, §3.3).
@@ -1280,7 +1288,9 @@ mod tests {
         )
         .unwrap();
         assert!(!f.carried(ALICE));
-        // Open roster, but removed: enrolling again is refused.
+        // Open roster, but removed: enrolling again is refused, and a phone can tell first.
+        assert!(!f.roster.may_enroll(&member(ALICE)));
+        assert!(f.roster.may_enroll(&member(BOB)));
         assert!(f.act(ALICE, Action::Enroll { invite: None }).is_err());
         // The owner changes their mind.
         let invite = f
@@ -1291,6 +1301,8 @@ mod tests {
                 },
             )
             .unwrap();
+        assert!(f.roster.may_enroll(&member(ALICE)));
+        assert_eq!(f.roster.standing_invite(&member(ALICE)), Some(invite));
         f.act(
             ALICE,
             Action::Enroll {
