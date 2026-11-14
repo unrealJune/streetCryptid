@@ -3708,6 +3708,10 @@ impl LocationNode {
             // frozen on this phone however healthy the sync looks.
             sync.stranded = tracing::field::Empty,
             sync.stranded_fetched = tracing::field::Empty,
+            // The same for friends' profile namespaces (`profile::ProfileDocs::settle_stranded`):
+            // a stranded profile is a friend whose name and sigil stopped updating.
+            sync.profile_stranded = tracing::field::Empty,
+            sync.profile_stranded_fetched = tracing::field::Empty,
         );
         if let Some(budget) = budget {
             span.record("sync.budget_ms", budget.as_millis() as u64);
@@ -3742,17 +3746,41 @@ impl LocationNode {
             current.record("sync.ns_deadline", pass.ends.deadline);
 
             // The reconciliation brings records; the bytes behind a friend's record can still be
-            // missing, and nothing else will ever fetch them. Inside the same deadline.
-            match trail
-                .settle_stranded(&started.endpoint, &dialed_endpoints, deadline)
-                .await
-            {
+            // missing, and nothing else will ever fetch them. Trail slots and profile entries
+            // alike, side by side inside the same deadline. No per-namespace sources yet: those
+            // are the repeaters carrying each friend, which this build does not know about.
+            let namespace_sources: HashMap<[u8; 32], Vec<EndpointId>> = HashMap::new();
+            let (trail_settled, profile_settled) = tokio::join!(
+                trail.settle_stranded(
+                    &started.endpoint,
+                    &dialed_endpoints,
+                    &namespace_sources,
+                    deadline,
+                ),
+                started.profile.settle_stranded(
+                    &started.endpoint,
+                    &dialed_endpoints,
+                    &namespace_sources,
+                    deadline,
+                    Some(&self.profile_events as &dyn ProfileSink),
+                ),
+            );
+            match trail_settled {
                 Ok(settled) => {
                     current.record("sync.stranded", settled.stranded);
                     current.record("sync.stranded_fetched", settled.fetched);
                 }
                 Err(error) => {
                     tracing::warn!(%error, "trail sync: could not settle stranded friend slots");
+                }
+            }
+            match profile_settled {
+                Ok(settled) => {
+                    current.record("sync.profile_stranded", settled.stranded);
+                    current.record("sync.profile_stranded_fetched", settled.fetched);
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "trail sync: could not settle stranded profile entries");
                 }
             }
 

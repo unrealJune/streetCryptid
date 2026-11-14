@@ -617,7 +617,10 @@ same pass is its `trail.sync`, which now carries `sync.budget_ms`, `sync.entries
 namespace's wait ended (`sync.ns_content_ready` / `_idle` / `_no_answer` / `_deadline` /
 `_closed`), plus `sync.stranded` / `sync.stranded_fetched`: friend slots whose newest record had
 no local bytes when the reconciliation finished, and how many of those the pass then fetched
-(`TrailDocs::settle_stranded`).
+(`TrailDocs::settle_stranded`). `sync.profile_stranded` / `sync.profile_stranded_fetched` count the
+same for entries in friends' profile namespaces (`ProfileDocs::settle_stranded`); a stuck one logs
+`fetched a stranded friend profile entry's bytes` (or `… still without bytes`) with `sc.namespace`
+and `profile.key`.
 
 **`sync.stranded` that stays above zero is a friend whose dot is frozen on this phone**, however
 healthy the rest of the pass looks. A record and its bytes travel separately. The docs engine

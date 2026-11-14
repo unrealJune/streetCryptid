@@ -312,10 +312,15 @@ Conventions when changing that code:
   2026-11-10 17:25 to 11-12 an iPhone read nothing from one friend while the Pixel beside it read
   everything; the friend's entries were in its replica and 0 of 17 of their bytes were in its blob
   store. Every pull now fetches stranded friend slots (`fix`, `nul`, `rsy`) from the peers it
-  dialled, the author and the last serving peer, inside the pull's deadline, and reports
-  `sync.stranded` / `sync.stranded_fetched` on `trail.sync`. Do not move this into the replica read
-  (a read never dials), and do not drop the `rsy` lane: a control record without bytes is a restart
-  request the leader cannot see. The web build does not run it yet.
+  dialled, then each namespace's own sources (`namespace_sources`: the repeaters carrying that
+  friend, once a build knows them), then the author and the last serving peer, inside the pull's
+  deadline, and reports `sync.stranded` / `sync.stranded_fetched` on `trail.sync`. Friends' profile
+  namespaces get the same pass beside it (`ProfileDocs::settle_stranded`, every key, sources ending
+  in the owner named by the read ticket), which hands a profile that became readable to the app
+  because no `ContentReady` will; it reports `sync.profile_stranded` / `_fetched`. Do not move
+  either into the replica read (a read never dials), and do not drop the `rsy` lane: a control
+  record without bytes is a restart request the leader cannot see. The web build does not run it
+  yet.
 - **There is ONE node per process, and only `NodeHost` builds it** (`rust/src/host.rs`). The
   mounted app (every JS context, through the module's `createNode`/`shutdown`) and the native
   background runtime (`acquireBackground`) take LEASES on it; the last one out shuts it down,

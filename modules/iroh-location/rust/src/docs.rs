@@ -325,20 +325,23 @@ pub struct SettleReport {
 /// Who to ask for one stranded slot's bytes, most likely first, each once, never ourselves.
 ///
 /// The pass's dialled peers come first because the stash is among them and it is the one peer
-/// that holds every friend's bytes and is always up. The author is next (the key is its
-/// `EndpointId`, so no address book is needed), then whoever last served that author's entry to
-/// us. Asking only the author would strand exactly the friend whose phone is asleep — the case
-/// the stash exists for. Pure, so the order and the self-exclusion are testable.
+/// that holds every friend's bytes and is always up. The namespace's own extra sources are next —
+/// the repeaters carrying that friend, which hold their namespaces for exactly the hours the
+/// friend's phone is away. Then the author (the key is its `EndpointId`, so no address book is
+/// needed), then whoever last served that author's entry to us. Asking only the author would
+/// strand exactly the friend whose phone is asleep — the case the stash and the repeaters exist
+/// for. Pure, so the order and the self-exclusion are testable.
 #[cfg(not(target_arch = "wasm32"))]
-fn stranded_sources(
+pub(crate) fn stranded_sources(
     dialled: &[iroh::EndpointId],
-    author: [u8; 32],
+    namespace_sources: &[iroh::EndpointId],
+    author: Option<[u8; 32]>,
     served_by: Option<[u8; 32]>,
     own: iroh::EndpointId,
 ) -> Vec<iroh::EndpointId> {
     let mut out: Vec<iroh::EndpointId> = Vec::new();
-    let candidates = dialled.iter().copied().chain(
-        [Some(author), served_by]
+    let candidates = dialled.iter().chain(namespace_sources).copied().chain(
+        [author, served_by]
             .into_iter()
             .flatten()
             .filter_map(|bytes| iroh::EndpointId::from_bytes(&bytes).ok()),
@@ -349,6 +352,56 @@ fn stranded_sources(
         }
     }
     out
+}
+
+/// How long a settle pass may spend on each fetch: the caller's remaining deadline, capped at
+/// [`STRANDED_FETCH_TIMEOUT_SECS`]. Zero means "no time left; dial nobody".
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn stranded_wait(deadline: Option<Instant>) -> Duration {
+    let cap = Duration::from_secs(STRANDED_FETCH_TIMEOUT_SECS);
+    match deadline {
+        Some(deadline) => deadline.saturating_duration_since(Instant::now()).min(cap),
+        None => cap,
+    }
+}
+
+/// Download each `(hash, providers)` concurrently, each bounded by `wait`, and say per job
+/// whether the bytes are now complete in `blobs`.
+///
+/// Shared by the trail's and the profile's settle passes: both are the same missing-bytes state
+/// (iroh-docs gives a record's content one download attempt and never retries), only the slots
+/// differ. A download that reports done is checked against the store, since that is what a read
+/// will see.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) async fn fetch_stranded(
+    blobs: &BlobsStore,
+    endpoint: &iroh::Endpoint,
+    jobs: Vec<(Hash, Vec<iroh::EndpointId>)>,
+    wait: Duration,
+) -> Vec<Result<()>> {
+    let downloader = blobs.downloader(endpoint);
+    let attempts = jobs.into_iter().map(|(hash, providers)| {
+        let downloader = downloader.clone();
+        async move {
+            if providers.is_empty() {
+                return Err(anyhow!("no peer to ask"));
+            }
+            match timeout(
+                wait,
+                downloader.download(iroh_blobs::HashAndFormat::raw(hash), providers),
+            )
+            .await
+            {
+                Ok(Ok(())) if blobs.blobs().has(hash).await.unwrap_or(false) => Ok(()),
+                Ok(Ok(())) => Err(anyhow!(
+                    "download reported done but the bytes are not complete"
+                )),
+                Ok(Err(error)) => Err(anyhow!("{error}")),
+                Err(_) => Err(anyhow!("timed out after {} ms", wait.as_millis())),
+            }
+        }
+    });
+    join_all(attempts).await
 }
 
 /// Explicit-pruning selection: given `(key, entry_ts)` pairs, return the keys whose entry is
@@ -497,7 +550,7 @@ struct ServingPeer {
 /// The peers a docs read ticket names, with each address's relays scrubbed to ones this node
 /// knows (a ticket's relay is history, not an address; see `relay::scrub_addr`). Empty for a
 /// ticket that does not parse.
-fn ticket_peers(ticket: &str) -> Vec<EndpointAddr> {
+pub(crate) fn ticket_peers(ticket: &str) -> Vec<EndpointAddr> {
     match ticket.parse::<iroh_docs::DocTicket>() {
         Ok(parsed) => parsed
             .nodes
@@ -1136,17 +1189,19 @@ impl TrailDocs {
     /// nothing anywhere recorded a failure: `read_latest_sealed` skips a slot with no bytes, and
     /// a skipped slot is never offered to the ratchet, so not even a miss was counted.
     ///
-    /// Sources per slot: `sources` (the peers this pass dialled — the stash among them), the
-    /// slot's author (its `EndpointId` is the key), and whoever last served that author to us.
-    /// Each fetch is bounded by `deadline` when there is one and by
-    /// [`STRANDED_FETCH_TIMEOUT_SECS`] regardless; a slot still stranded is simply tried again on
-    /// the next pull. Failures are expected (a sleeping author, a stash that has not received the
-    /// bytes either) and are reported, not raised.
+    /// Sources per slot, most likely first (see [`stranded_sources`]): `sources` (the peers this
+    /// pass dialled — the stash among them), `namespace_sources` for the slot's namespace (the
+    /// repeaters carrying that friend), the slot's author (its `EndpointId` is the key), and
+    /// whoever last served that author to us. Each fetch is bounded by `deadline` when there is
+    /// one and by [`STRANDED_FETCH_TIMEOUT_SECS`] regardless; a slot still stranded is simply
+    /// tried again on the next pull. Failures are expected (a sleeping author, a stash that has
+    /// not received the bytes either) and are reported, not raised.
     #[cfg(not(target_arch = "wasm32"))]
     pub async fn settle_stranded(
         &self,
         endpoint: &iroh::Endpoint,
         sources: &[iroh::EndpointId],
+        namespace_sources: &HashMap<[u8; 32], Vec<iroh::EndpointId>>,
         deadline: Option<Instant>,
     ) -> Result<SettleReport> {
         let stranded = self.stranded_slots().await?;
@@ -1157,13 +1212,7 @@ impl TrailDocs {
         if stranded.is_empty() {
             return Ok(report);
         }
-        let wait = {
-            let cap = Duration::from_secs(STRANDED_FETCH_TIMEOUT_SECS);
-            match deadline {
-                Some(deadline) => deadline.saturating_duration_since(Instant::now()).min(cap),
-                None => cap,
-            }
-        };
+        let wait = stranded_wait(deadline);
         let now_us = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_micros() as u64)
@@ -1190,35 +1239,26 @@ impl TrailDocs {
             }
         }
         let own = endpoint.id();
-        let downloader = self.blobs.downloader(endpoint);
-        let attempts = stranded.iter().map(|slot| {
-            let providers = stranded_sources(
-                sources,
-                slot.author,
-                served_by.get(&slot.author).copied(),
-                own,
-            );
-            let downloader = downloader.clone();
-            async move {
-                if providers.is_empty() {
-                    return (slot, Err(anyhow!("no peer to ask")));
-                }
-                let fetch = timeout(
-                    wait,
-                    downloader.download(iroh_blobs::HashAndFormat::raw(slot.hash), providers),
-                )
-                .await;
-                let outcome = match fetch {
-                    Ok(Ok(())) => Ok(()),
-                    Ok(Err(error)) => Err(anyhow!("{error}")),
-                    Err(_) => Err(anyhow!("timed out after {} ms", wait.as_millis())),
-                };
-                (slot, outcome)
-            }
-        });
-        for (slot, outcome) in join_all(attempts).await {
+        let jobs = stranded
+            .iter()
+            .map(|slot| {
+                let providers = stranded_sources(
+                    sources,
+                    namespace_sources
+                        .get(&slot.namespace)
+                        .map(Vec::as_slice)
+                        .unwrap_or(&[]),
+                    Some(slot.author),
+                    served_by.get(&slot.author).copied(),
+                    own,
+                );
+                (slot.hash, providers)
+            })
+            .collect();
+        let outcomes = fetch_stranded(&self.blobs, endpoint, jobs, wait).await;
+        for (slot, outcome) in stranded.iter().zip(outcomes) {
             match outcome {
-                Ok(()) if self.blobs.blobs().has(slot.hash).await.unwrap_or(false) => {
+                Ok(()) => {
                     report.fetched += 1;
                     if !report.readable.contains(&slot.author) {
                         report.readable.push(slot.author);
@@ -1228,13 +1268,6 @@ impl TrailDocs {
                         sc.entry_hash = %crate::telemetry::short_hex(slot.hash.as_bytes()),
                         age_ms = now_us.saturating_sub(slot.written_us) / 1000,
                         "fetched a stranded friend slot's bytes"
-                    );
-                }
-                Ok(()) => {
-                    tracing::debug!(
-                        sc.author = %crate::telemetry::short_hex(&slot.author),
-                        sc.entry_hash = %crate::telemetry::short_hex(slot.hash.as_bytes()),
-                        "stranded slot: download reported done but the bytes are not complete"
                     );
                 }
                 Err(error) => {
@@ -2994,10 +3027,13 @@ pub(crate) mod tests {
         );
         assert_eq!(seen.times_readable(MAYA), 0, "and the app was never told");
 
-        // A pull's settle step asks the peers it dialled.
+        // A pull's settle step asks the peers it dialled and the namespace's own sources. The
+        // serving peer is offered only as the latter here — the role a repeater carrying that
+        // friend plays — so this also proves a namespace source alone is enough.
+        let by_namespace = HashMap::from([(ns.to_bytes(), vec![author_node.endpoint.id()])]);
         let report = reader
             .td
-            .settle_stranded(&reader.endpoint, &[author_node.endpoint.id()], None)
+            .settle_stranded(&reader.endpoint, &[], &by_namespace, None)
             .await
             .unwrap();
         assert_eq!(report.stranded, 1);
@@ -3014,7 +3050,12 @@ pub(crate) mod tests {
         // Nothing stranded is a cheap no-op, and says so.
         let again = reader
             .td
-            .settle_stranded(&reader.endpoint, &[author_node.endpoint.id()], None)
+            .settle_stranded(
+                &reader.endpoint,
+                &[author_node.endpoint.id()],
+                &HashMap::new(),
+                None,
+            )
             .await
             .unwrap();
         assert_eq!(again, SettleReport::default());
@@ -3062,6 +3103,7 @@ pub(crate) mod tests {
             .settle_stranded(
                 &reader.endpoint,
                 &[author_node.endpoint.id()],
+                &HashMap::new(),
                 Some(deadline),
             )
             .await
@@ -3075,6 +3117,7 @@ pub(crate) mod tests {
             .settle_stranded(
                 &reader.endpoint,
                 &[author_node.endpoint.id()],
+                &HashMap::new(),
                 Some(Instant::now()),
             )
             .await
@@ -3092,20 +3135,45 @@ pub(crate) mod tests {
         let own = SecretKey::generate().public();
         let author = SecretKey::generate().public();
         let relay = SecretKey::generate().public();
+        let repeater = SecretKey::generate().public();
 
         assert_eq!(
             stranded_sources(
                 &[stash, own],
-                *author.as_bytes(),
+                &[],
+                Some(*author.as_bytes()),
                 Some(*relay.as_bytes()),
                 own
             ),
             vec![stash, author, relay],
         );
+        // The repeaters carrying that friend come before the friend's own (likely asleep) phone,
+        // and a repeater that is also a dialled peer is asked once.
+        assert_eq!(
+            stranded_sources(
+                &[stash],
+                &[repeater, stash, own],
+                Some(*author.as_bytes()),
+                None,
+                own
+            ),
+            vec![stash, repeater, author],
+        );
         // The stash that served the record is also a dialled peer: asked once.
         assert_eq!(
-            stranded_sources(&[stash], *author.as_bytes(), Some(*stash.as_bytes()), own),
+            stranded_sources(
+                &[stash],
+                &[],
+                Some(*author.as_bytes()),
+                Some(*stash.as_bytes()),
+                own
+            ),
             vec![stash, author],
+        );
+        // A profile slot names no author: only the other sources are asked.
+        assert_eq!(
+            stranded_sources(&[stash], &[repeater], None, None, own),
+            vec![stash, repeater],
         );
         // An author key that is not a valid endpoint id is simply not a source.
         let mut not_a_point = [0u8; 32];
@@ -3115,7 +3183,10 @@ pub(crate) mod tests {
                 break;
             }
         }
-        assert_eq!(stranded_sources(&[], not_a_point, None, own), Vec::new());
+        assert_eq!(
+            stranded_sources(&[], &[], Some(not_a_point), None, own),
+            Vec::new()
+        );
     }
 
     #[test]
