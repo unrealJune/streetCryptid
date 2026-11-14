@@ -300,6 +300,24 @@ describe('rosterRowDetail', () => {
         view({ owner: STRANGER, canEnroll: false, vouchers: [SAM], repeaters: ['a'], carried: 3 })
       )
     ).toBe('1 machine · invite only · 3 people · not invited');
+    // An open roster refuses only someone its owner removed.
+    expect(
+      rosterRowDetail(
+        view({ owner: SAM, open: true, canEnroll: false, repeaters: ['a'], carried: 2 })
+      )
+    ).toBe('1 machine · open · 2 people · removed by the owner');
+  });
+
+  it('says a roster I joined is waiting until a repeater confirms it', () => {
+    expect(
+      rosterRowDetail(
+        view({ owner: SAM, carriesMe: true, waiting: true, repeaters: ['a'], carried: 2 })
+      )
+    ).toBe('1 machine · invite only · 2 people · waiting for a repeater');
+    // Only while it carries me: a stale flag on a roster I left says nothing.
+    expect(
+      rosterRowDetail(view({ owner: SAM, waiting: true, repeaters: ['a'], carried: 2 }))
+    ).not.toContain('waiting');
   });
 });
 

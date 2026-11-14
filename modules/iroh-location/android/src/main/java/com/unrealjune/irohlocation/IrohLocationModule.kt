@@ -1080,6 +1080,7 @@ class IrohLocationModule : Module() {
             "inviters" to r.inviters,
             "invited" to r.invited,
             "canInvite" to r.canInvite,
+            "waiting" to r.waiting,
           )
         }
       }

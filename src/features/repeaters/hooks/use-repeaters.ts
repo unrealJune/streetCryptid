@@ -47,8 +47,9 @@ const UNSUPPORTED = 'Repeaters need the installed app.';
 
 /**
  * The rosters this phone knows, re-read whenever the screen holding it comes into focus. Reading
- * is a local file in the core (`repeaters.bin`), so it is cheap enough for the Settings menu too;
- * every change dials the roster's repeaters, and is re-read once it lands.
+ * is a local file in the core (`repeaters.bin`), so it is cheap enough for the Settings menu too.
+ * A change is signed into that file and resolves at once; the core takes it to the repeaters in
+ * the background, since a repeater may be a computer that is asleep (REPEATERS.md §4.4).
  */
 export function useRepeaters({
   refreshNames = false,

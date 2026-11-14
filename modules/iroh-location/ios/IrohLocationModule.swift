@@ -942,6 +942,7 @@ public final class IrohLocationModule: Module {
           "carried": Double(r.carried),
           "members": r.members, "vouchers": r.vouchers, "canEnroll": r.canEnroll,
           "inviters": r.inviters, "invited": r.invited, "canInvite": r.canInvite,
+          "waiting": r.waiting,
         ]
       }
     }

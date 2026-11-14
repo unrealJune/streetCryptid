@@ -137,7 +137,11 @@ export default function RepeatersScreen() {
           />
         ) : (
           <SymbolView
-            accessibilityLabel="Invite only, and nobody has invited you"
+            accessibilityLabel={
+              r.open
+                ? 'The owner removed you. Only a new invite lets you back.'
+                : 'Invite only, and nobody has invited you'
+            }
             name={{ ios: 'lock', android: 'lock', web: 'lock' }}
             size={15}
             tintColor={theme.textSecondary}

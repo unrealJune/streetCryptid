@@ -2293,7 +2293,7 @@ pub(crate) mod tests {
     async fn reopened_friend_profile_schedules_card_sync_only_for_known_friends() -> Result<()> {
         use crate::ns_book::PROFILE_BOOK_FILE;
         use crate::profile::ProfileDocs;
-        use std::collections::BTreeSet;
+        use std::collections::{BTreeSet, HashMap};
 
         let state = scratch_dir("profile-card-reader-state");
         let writer_state = scratch_dir("profile-card-writer-state");
@@ -2313,7 +2313,9 @@ pub(crate) mod tests {
 
         let reader =
             ProfileDocs::init(reader_docs, reader_blobs, state.clone(), Some(profile_book)).await?;
-        reader.sync_known_friends(&BTreeSet::new()).await;
+        reader
+            .sync_known_friends(&BTreeSet::new(), &HashMap::new())
+            .await;
         tokio::time::sleep(Duration::from_millis(200)).await;
         assert!(reader
             .read_key_everywhere(crate::repeater::CARD_KEY)
@@ -2322,7 +2324,10 @@ pub(crate) mod tests {
 
         tokio::time::timeout(
             Duration::from_secs(15),
-            reader.sync_known_friends(&BTreeSet::from([*writer_endpoint.id().as_bytes()])),
+            reader.sync_known_friends(
+                &BTreeSet::from([*writer_endpoint.id().as_bytes()]),
+                &HashMap::new(),
+            ),
         )
         .await?;
         assert!(reader
@@ -2334,6 +2339,84 @@ pub(crate) mod tests {
         writer_router.shutdown().await?;
         let _ = std::fs::remove_dir_all(state);
         let _ = std::fs::remove_dir_all(writer_state);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_sealed_card_opens_for_a_friend_in_the_keyring_only() -> Result<()> {
+        use crate::ns_book::PROFILE_BOOK_FILE;
+        use crate::profile::{ProfileDocs, Sealer};
+        use std::collections::{BTreeSet, HashMap};
+
+        let writer_state = scratch_dir("sealed-card-writer");
+        let friend_state = scratch_dir("sealed-card-friend");
+        let stranger_state = scratch_dir("sealed-card-stranger");
+        let (writer_endpoint, writer_docs, writer_blobs, writer_router) =
+            replication_peer().await?;
+        let (_friend_endpoint, friend_docs, friend_blobs, friend_router) =
+            replication_peer().await?;
+        let (_stranger_endpoint, stranger_docs, stranger_blobs, stranger_router) =
+            replication_peer().await?;
+        let (friend_secret, friend_pub) = crate::crypto::generate_recv_keypair();
+        let (stranger_secret, _) = crate::crypto::generate_recv_keypair();
+        let (writer_secret, _) = crate::crypto::generate_recv_keypair();
+
+        let writer = ProfileDocs::init(writer_docs, writer_blobs, writer_state.clone(), None)
+            .await?
+            .with_seal(Sealer::new([1; 32], writer_secret, writer_state.clone()));
+        writer
+            .publish_key(crate::repeater::CARD_KEY, b"new card".to_vec())
+            .await?;
+        assert!(writer.reseal(&[([2; 32], friend_pub)], 1).await?);
+        // What the writer holds is sealed: no clear copy under the card's own key.
+        assert!(writer
+            .read_key_everywhere(crate::repeater::CARD_KEY)
+            .await
+            .iter()
+            .any(|bytes| bytes == b"new card"));
+        let ticket = writer.ticket().await?;
+        let namespace = crate::ns_book::ticket_namespace(&ticket)?;
+
+        let writer_id = *writer_endpoint.id().as_bytes();
+        let reader = |docs: Docs, blobs: BlobsStore, state: PathBuf, secret: Vec<u8>| {
+            let ticket = ticket.clone();
+            async move {
+                let book = Arc::new(NamespaceBook::open(&state, PROFILE_BOOK_FILE)?);
+                book.add_friend(namespace, &ticket)?;
+                let docs = ProfileDocs::init(docs, blobs, state.clone(), Some(book))
+                    .await?
+                    .with_seal(Sealer::new([3; 32], secret, state));
+                tokio::time::timeout(
+                    Duration::from_secs(15),
+                    docs.sync_known_friends(&BTreeSet::from([writer_id]), &HashMap::new()),
+                )
+                .await?;
+                Ok::<_, anyhow::Error>(docs.read_key_everywhere(crate::repeater::CARD_KEY).await)
+            }
+        };
+        let friend_reads = reader(
+            friend_docs,
+            friend_blobs,
+            friend_state.clone(),
+            friend_secret,
+        )
+        .await?;
+        assert!(friend_reads.iter().any(|bytes| bytes == b"new card"));
+        let stranger_reads = reader(
+            stranger_docs,
+            stranger_blobs,
+            stranger_state.clone(),
+            stranger_secret,
+        )
+        .await?;
+        assert!(stranger_reads.is_empty());
+
+        for router in [writer_router, friend_router, stranger_router] {
+            router.shutdown().await?;
+        }
+        for dir in [writer_state, friend_state, stranger_state] {
+            let _ = std::fs::remove_dir_all(dir);
+        }
         Ok(())
     }
 

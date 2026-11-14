@@ -49,6 +49,7 @@ mod pairing;
 /// `process.memory` spans: the platform runtime sampling its own process (see the module docs).
 pub mod process_memory;
 mod profile;
+mod profile_seal;
 pub mod publish;
 pub mod ratchet;
 pub mod recipients;
@@ -355,6 +356,9 @@ pub struct RepeaterRoster {
     /// This phone may invite people to it: it owns it or holds `inviter`. In an open roster an
     /// invite is only needed to bring back someone the owner removed.
     pub can_invite: bool,
+    /// Carried by our own copy, and no repeater has confirmed our `Enroll` yet: it goes out the
+    /// next time one of them is reachable (REPEATERS.md §4.4).
+    pub waiting: bool,
 }
 
 /// What `device.health` says about repeaters (REPEATERS.md §5).
@@ -1191,6 +1195,11 @@ impl LocationNode {
         let Some(live) = self.live_opt().await else {
             return;
         };
+        if matches!(scope, StashGrant::All { .. }) {
+            // Every start and refresh: the stash releases what is older than its window, the
+            // profile included, so keep ours sealed afresh (a no-op while it is recent).
+            self.reseal_profile(reason).await;
+        }
         let config = match self.delivery_store().await {
             Ok(store) => store.get(),
             Err(_) => return,
@@ -1216,6 +1225,15 @@ impl LocationNode {
                     }
                 }
                 tickets.extend(live.trail.friend_tickets());
+                // Profiles too: sealed, so the stash holds them blind and serves them while their
+                // owners' phones sleep (`profile_seal`).
+                match live.profile.ticket().await {
+                    Ok(own) => tickets.push(own),
+                    Err(err) => {
+                        tracing::warn!(error = %err, "stash grant: no ticket for our profile")
+                    }
+                }
+                tickets.extend(live.profile.friend_tickets());
                 tickets
             }
         };
@@ -1241,6 +1259,47 @@ impl LocationNode {
         );
     }
 
+    /// Wrap our profile key for every friend and seal our profile again when that changed or the
+    /// stash's copy is due a refresh (see [`ProfileDocs::reseal`]); span `profile.reseal`. Local
+    /// writes only. A friend's receiving key comes from the recipient store, else from their
+    /// verified profile.
+    async fn reseal_profile(&self, reason: &'static str) {
+        let (Some(live), Ok(store)) = (self.live_opt().await, self.recipient_store().await) else {
+            return;
+        };
+        let mut friends = Vec::new();
+        for hex in store.get().iter().chain(store.watchers().iter()) {
+            let Ok(id) = decode_endpoint(hex) else {
+                continue;
+            };
+            let key = match store.key_for(hex).and_then(|key| decode_hex(&key)) {
+                Some(key) => Some(key),
+                None => live
+                    .profile
+                    .read_for_endpoint(&id)
+                    .await
+                    .ok()
+                    .flatten()
+                    .map(|record| record.recv_pub),
+            };
+            if let Some(key) = key.filter(|key| key.len() == 32) {
+                friends.push((id, key));
+            }
+        }
+        let span = tracing::info_span!(
+            "profile.reseal",
+            sc.author = %telemetry::short_hex(&self.author),
+            reason,
+            friends = friends.len(),
+            written = tracing::field::Empty,
+            error = tracing::field::Empty,
+        );
+        match live.profile.reseal(&friends, now_ms()).await {
+            Ok(written) => span.record("written", written),
+            Err(e) => span.record("error", tracing::field::display(e)),
+        };
+    }
+
     /// The roster book, opened from `state_dir` the first time anything asks.
     async fn roster_book(&self) -> Result<Arc<repeater::RosterBook>, LocationError> {
         let mut slot = self.repeater_book.lock().await;
@@ -1261,26 +1320,66 @@ impl LocationNode {
         ed25519_dalek::SigningKey::from_bytes(&self.identity_seed)
     }
 
-    /// Sign an owner's change into our roster and tell its repeaters (see [`repeater::change_roster`]).
+    /// Sign an owner's change into our roster (see [`repeater::sign_owner_change`]), republish our
+    /// card, and take it to the repeaters in the background. Resolves once it is saved here: the
+    /// roster is ours, so our copy is the truth, and a sleeping machine hears it when it wakes.
     async fn change_roster(
         &self,
         roster_id: &str,
         change: repeater::OwnerChange,
     ) -> Result<(), LocationError> {
         let roster = decode_id32(roster_id, "roster id")?;
-        let live = self.live().await?;
         let book = self.roster_book().await?;
-        repeater::change_roster(
-            &live.endpoint,
-            &self.roster_key(),
-            &book,
-            &roster,
-            change,
-            now_ms(),
-        )
-        .await?;
-        self.republish_repeater_card().await;
+        repeater::sign_owner_change(&self.roster_key(), &book, &roster, change, now_ms())?;
+        self.roster_changed("owner").await;
         Ok(())
+    }
+
+    /// After a roster op was signed on this phone: republish our card (a local write, so friends
+    /// read the change from our profile) and deliver the op to the repeaters in the background.
+    async fn roster_changed(&self, reason: &'static str) {
+        self.republish_repeater_card().await;
+        self.deliver_roster_ops(reason).await;
+    }
+
+    /// Offer every roster op the repeaters have not acknowledged ([`repeater::deliver`]), spawned
+    /// and coalesced ([`repeater::DeliveryGate`]); span `repeater.deliver`. Nothing waits on it:
+    /// what was not delivered stays owed and goes out on the next pass or grant.
+    async fn deliver_roster_ops(&self, reason: &'static str) {
+        use tracing::Instrument;
+        let (Some(live), Ok(book)) = (self.live_opt().await, self.roster_book().await) else {
+            return;
+        };
+        let gate = self.repeater_delivery.clone();
+        if !gate.begin() {
+            return;
+        }
+        let me = self.roster_key().verifying_key().to_bytes();
+        let endpoint = live.endpoint.clone();
+        let span = tracing::info_span!(
+            "repeater.deliver",
+            sc.author = %telemetry::short_hex(&self.author),
+            reason,
+            passes = tracing::field::Empty,
+            delivered = tracing::field::Empty,
+        );
+        tokio::spawn(
+            async move {
+                let mut passes = 0u32;
+                let mut delivered = 0usize;
+                loop {
+                    passes += 1;
+                    delivered += repeater::deliver(&endpoint, &me, &book).await;
+                    if !gate.finish() {
+                        break;
+                    }
+                }
+                let current = tracing::Span::current();
+                current.record("passes", passes);
+                current.record("delivered", delivered);
+            }
+            .instrument(span),
+        );
     }
 
     /// Offer our repeaters every roster op they have not acknowledged, bring our rosters up to
@@ -1410,6 +1509,38 @@ impl LocationNode {
         }
     }
 
+    /// Where else each friend's profile can be read while their phone is away: the stash, when it
+    /// is opted into, and up to two of the repeaters that carry them.
+    async fn profile_relays(
+        &self,
+        friends: &BTreeSet<[u8; 32]>,
+    ) -> HashMap<[u8; 32], Vec<EndpointAddr>> {
+        const REPEATERS_PER_FRIEND: usize = 2;
+        let stash = self
+            .delivery_store()
+            .await
+            .ok()
+            .and_then(|store| stash_addr(&store.get()));
+        let states = match self.roster_book().await {
+            Ok(book) => book.states(),
+            Err(_) => Vec::new(),
+        };
+        friends
+            .iter()
+            .map(|friend| {
+                let mut addrs: Vec<EndpointAddr> = stash.iter().cloned().collect();
+                addrs.extend(
+                    repeater::carriers(&states, friend)
+                        .into_iter()
+                        .take(REPEATERS_PER_FRIEND)
+                        .filter_map(|id| EndpointId::from_bytes(&id).ok())
+                        .map(EndpointAddr::new),
+                );
+                (*friend, addrs)
+            })
+            .collect()
+    }
+
     /// Read every friend's card into the roster book and return who vouches for each roster. An
     /// empty answer before the node is live: this only adds to what the settings show.
     async fn read_repeater_cards(&self) -> BTreeMap<[u8; 32], BTreeSet<[u8; 32]>> {
@@ -1469,6 +1600,8 @@ pub struct LocationNode {
     /// Every repeater roster this phone knows (see [`repeater`]), opened from `state_dir` on first
     /// use. It claims nothing, so it has no part in `start` or `shutdown`.
     repeater_book: Mutex<Option<Arc<repeater::RosterBook>>>,
+    /// One background roster delivery at a time ([`Self::deliver_roster_ops`]).
+    repeater_delivery: Arc<repeater::DeliveryGate>,
     /// Rotate the capped pull plan so a large friend list cannot starve its later entries.
     repeater_pull_cursor: AtomicU64,
     /// On-disk root for the persistent docs replica + blobs store (durable trail). Derived from
@@ -2354,6 +2487,7 @@ fn new_location_node_at(
         ordinal,
         stash_grant_at: AtomicU64::new(0),
         repeater_book: Mutex::new(None),
+        repeater_delivery: Arc::default(),
         repeater_pull_cursor: AtomicU64::new(0),
     });
     tracing::info!(
@@ -2704,7 +2838,13 @@ impl LocationNode {
                 Some(profile_book),
             )
             .await
-            .map_err(|e| LocationError::Network(e.to_string()))?,
+            .map_err(|e| LocationError::Network(e.to_string()))?
+            // Sealed: the stash and the repeaters relay it blind (`profile_seal`).
+            .with_seal(profile::Sealer::new(
+                self.identity_seed,
+                self.recv_secret.clone(),
+                self.state_dir.clone(),
+            )),
         );
         // Arm the profile namespace as soon as the engine exists, not just on the next publish:
         // a friend who imported our read-ticket dials us to reconcile, and the live engine only
@@ -3043,7 +3183,10 @@ impl LocationNode {
         self.recipient_store()
             .await?
             .set_keys(&entries)
-            .map_err(|e| LocationError::Network(e.to_string()))
+            .map_err(|e| LocationError::Network(e.to_string()))?;
+        // Whoever holds a key now holds our profile's; whoever left stops at the next one.
+        self.reseal_profile("friends").await;
+        Ok(())
     }
 
     /// Who the latest fix envelope was sealed for and who it left out. `None` before the first.
@@ -3136,7 +3279,7 @@ impl LocationNode {
         let relisted =
             repeater::refresh_names(&live.endpoint, &self.roster_key(), &book, now_ms()).await?;
         if relisted > 0 {
-            self.republish_repeater_card().await;
+            self.roster_changed("rename").await;
         }
         Ok(relisted as u32)
     }
@@ -3154,8 +3297,9 @@ impl LocationNode {
                 let open = state.policy == streetcryptid_repeater::roster::Policy::Open;
                 let carries_me = state.carried.contains(&me);
                 let mine = state.owner == me;
-                let can_enroll = !carries_me
-                    && (mine || open || repeater::invite_for(&book, &state.id, &me).is_some());
+                // The roster's own rule, so a member the owner removed is not offered a switch
+                // that would be refused, even in an open roster.
+                let can_enroll = !carries_me && (mine || book.may_enroll(&state.id, &me));
                 // Any policy: in an open roster an invite is how a removed member comes back.
                 let can_invite = state.inviters.contains(&me);
                 let invited = repeater::pending_invites(&book, &state.id);
@@ -3181,6 +3325,7 @@ impl LocationNode {
                     inviters: state.inviters.iter().map(|id| encode_hex(id)).collect(),
                     invited: invited.iter().map(|id| encode_hex(id)).collect(),
                     can_invite,
+                    waiting: carries_me && book.is_awaiting(&state.id),
                 }
             })
             .collect())
@@ -3195,22 +3340,14 @@ impl LocationNode {
         carry: bool,
     ) -> Result<bool, LocationError> {
         let roster = decode_id32(&roster_id, "roster id")?;
-        let live = self.live().await?;
         let book = self.roster_book().await?;
-        let carried = repeater::set_carried(
-            &live.endpoint,
-            &self.roster_key(),
-            &book,
-            &roster,
-            carry,
-            now_ms(),
-        )
-        .await?;
+        let carried = repeater::sign_carried(&self.roster_key(), &book, &roster, carry, now_ms())?;
         if carried {
-            // The grant pass republishes the card after its refresh.
+            // Spawned: delivers the `Enroll`, then asks the repeaters to carry us, and republishes
+            // the card after its refresh.
             self.grant_repeaters("enroll").await;
         } else {
-            self.republish_repeater_card().await;
+            self.roster_changed("withdraw").await;
         }
         Ok(carried)
     }
@@ -3272,19 +3409,10 @@ impl LocationNode {
     ) -> Result<bool, LocationError> {
         let roster = decode_id32(&roster_id, "roster id")?;
         let member = decode_id32(&member, "member id")?;
-        let live = self.live().await?;
         let book = self.roster_book().await?;
-        let signed = repeater::invite(
-            &live.endpoint,
-            &self.roster_key(),
-            &book,
-            &roster,
-            &member,
-            now_ms(),
-        )
-        .await?;
+        let signed = repeater::sign_invite(&self.roster_key(), &book, &roster, &member, now_ms())?;
         if signed {
-            self.republish_repeater_card().await;
+            self.roster_changed("invite").await;
         }
         Ok(signed)
     }
@@ -3692,6 +3820,8 @@ impl LocationNode {
             .map_err(|e| LocationError::Network(e.to_string()))?;
         let sink: Arc<dyn ProfileSink> = Arc::new(self.profile_events.clone());
         profile.watch(ns, sink);
+        // The stash holds it sealed, for when this friend's phone is away.
+        self.grant_stash(StashGrant::One(ticket), "import").await;
         Ok(())
     }
 
@@ -4298,6 +4428,10 @@ impl LocationNode {
                 .collect();
             tracing::Span::current().record("sync.repeater_peers", repeater_count.len());
 
+            // A friend's profile, card included, is held sealed by the stash and by the repeaters
+            // that carry them, so it is taken from those as well as from their phone.
+            let profile_relays = self.profile_relays(&friends).await;
+
             // Reopened profile replicas are not syncing. Wait for known friends' cards alongside
             // the trail pass, then persist what arrived before a native-only node can shut down.
             let profile_budget = if friend_namespaces.is_empty() {
@@ -4315,7 +4449,9 @@ impl LocationNode {
                 let profile_deadline = n0_future::time::Instant::now() + profile_budget;
                 let _ = tokio::time::timeout(
                     profile_budget * 3 / 4,
-                    started.profile.sync_known_friends(&friends),
+                    started
+                        .profile
+                        .sync_known_friends(&friends, &profile_relays),
                 )
                 .await;
                 let remaining =
@@ -4702,6 +4838,17 @@ fn transport_rank(label: &str) -> u8 {
         "relay" => 3,
         _ => u8::MAX,
     }
+}
+
+/// The stash's endpoint, when durable delivery is opted into: first in the delivery list, as
+/// [`peer_roles_from`] reads it.
+fn stash_addr(config: &delivery::DeliveryConfig) -> Option<EndpointAddr> {
+    config
+        .stash_base_url
+        .as_ref()
+        .and(config.peer_tickets.first())
+        .and_then(|ticket| ticket.parse::<EndpointTicket>().ok())
+        .map(|ticket| relay::scrub_addr(ticket.endpoint_addr().clone()))
 }
 
 /// [`LocationNode::peer_roles`] over stores already in hand. Each store sits behind its own small

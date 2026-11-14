@@ -48,6 +48,11 @@ export interface NativeRepeaterRoster {
   invited?: string[];
   /** This phone may invite people: it owns the roster or holds `inviter` in it. */
   canInvite?: boolean;
+  /**
+   * Carried by this phone's own copy, and no repeater has confirmed the enrollment yet; it goes
+   * out the next time one is reachable. Optional: newer binaries only.
+   */
+  waiting?: boolean;
 }
 
 /** What `device.health` reports about repeaters. Mirrors Rust's `RepeaterHealth`. */

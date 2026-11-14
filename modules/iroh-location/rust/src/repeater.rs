@@ -51,6 +51,9 @@ const DELIVERED_V: u32 = 1;
 /// This phone's repeater preferences (today only auto-invite, §3.2). Lost or torn means the
 /// defaults, which invite nobody.
 pub const PREFS_FILE: &str = "repeaters-prefs.bin";
+/// Our `Enroll`s no repeater has confirmed yet ([`RosterBook::is_awaiting`]), beside the book.
+pub const AWAITING_FILE: &str = "repeaters-awaiting.bin";
+const AWAITING_V: u32 = 1;
 const PREFS_V: u32 = 1;
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -110,6 +113,16 @@ pub struct RosterBook {
     delivered: Mutex<BTreeMap<(RosterId, EndpointId), Vec<OpId>>>,
     prefs_path: PathBuf,
     prefs: Mutex<Prefs>,
+    awaiting_path: PathBuf,
+    /// For each roster we enrolled in, our `Enroll` until a repeater has confirmed it holds it:
+    /// carried by our own copy, not yet by any machine (§4.4). The settings say "waiting".
+    awaiting: Mutex<BTreeMap<RosterId, OpId>>,
+}
+
+#[derive(Default, Serialize, Deserialize)]
+struct AwaitingState {
+    v: u32,
+    entries: Vec<(RosterId, OpId)>,
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -141,6 +154,14 @@ impl RosterBook {
             .and_then(|raw| postcard::from_bytes::<Prefs>(&raw).ok())
             .filter(|prefs| prefs.v == PREFS_V)
             .unwrap_or_default();
+        let awaiting_path = dir.join(AWAITING_FILE);
+        // Unreadable means "confirmed": the worst case is a waiting state not shown.
+        let awaiting = std::fs::read(&awaiting_path)
+            .ok()
+            .and_then(|raw| postcard::from_bytes::<AwaitingState>(&raw).ok())
+            .filter(|state| state.v == AWAITING_V)
+            .map(|state| state.entries.into_iter().collect())
+            .unwrap_or_default();
         let path = dir.join(BOOK_FILE);
         let mut rosters = BTreeMap::new();
         match std::fs::read(&path) {
@@ -170,7 +191,58 @@ impl RosterBook {
             delivered: Mutex::new(delivered),
             prefs: Mutex::new(prefs),
             prefs_path,
+            awaiting_path,
+            awaiting: Mutex::new(awaiting),
         })
+    }
+
+    /// Whether our `Enroll` in `roster` is still waiting for a repeater to confirm it.
+    pub fn is_awaiting(&self, roster: &RosterId) -> bool {
+        self.awaiting
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .contains_key(roster)
+    }
+
+    /// Wait for `enroll` to reach a repeater of `roster`, or stop waiting (`None`).
+    fn set_awaiting(&self, roster: &RosterId, enroll: Option<OpId>) {
+        let mut awaiting = self.awaiting.lock().unwrap_or_else(|p| p.into_inner());
+        let changed = match enroll {
+            Some(op) => awaiting.insert(*roster, op) != Some(op),
+            None => awaiting.remove(roster).is_some(),
+        };
+        if changed {
+            self.save_awaiting(&awaiting);
+        }
+    }
+
+    /// A repeater of `roster` holds every op in `held`: our awaited `Enroll` is confirmed if it
+    /// is among them.
+    fn confirm(&self, roster: &RosterId, held: &BTreeSet<OpId>) {
+        let mut awaiting = self.awaiting.lock().unwrap_or_else(|p| p.into_inner());
+        if awaiting.get(roster).is_some_and(|op| held.contains(op)) {
+            awaiting.remove(roster);
+            self.save_awaiting(&awaiting);
+        }
+    }
+
+    /// Best-effort, like the delivery record: losing it only loses a "waiting" label.
+    fn save_awaiting(&self, awaiting: &BTreeMap<RosterId, OpId>) {
+        let state = AwaitingState {
+            v: AWAITING_V,
+            entries: awaiting.iter().map(|(r, o)| (*r, *o)).collect(),
+        };
+        let written = postcard::to_allocvec(&state)
+            .map_err(anyhow::Error::from)
+            .and_then(|bytes| {
+                let tmp = self.awaiting_path.with_extension("tmp");
+                std::fs::write(&tmp, bytes)?;
+                std::fs::rename(&tmp, &self.awaiting_path)?;
+                Ok(())
+            });
+        if let Err(e) = written {
+            tracing::warn!(error = %e, "repeater: could not record a waiting enrollment");
+        }
     }
 
     /// Whether new friends are invited, at pairing, to the rosters this phone may invite to.
@@ -406,6 +478,14 @@ impl RosterBook {
 
     pub fn states(&self) -> Vec<RosterState> {
         self.lock().values().map(Roster::state).collect()
+    }
+
+    /// Whether `me` could enroll in `roster` now, by our copy: an open roster, or a standing invite,
+    /// and never after the owner removed us unless an invite was made since (§3.3).
+    pub fn may_enroll(&self, roster: &RosterId, me: &EndpointId) -> bool {
+        self.lock()
+            .get(roster)
+            .is_some_and(|held| held.may_enroll(me))
     }
 
     /// Whether our copy of `roster` says its owner listed `repeater` and has removed it.
@@ -794,9 +874,11 @@ pub async fn claim(
         .state(&roster)
         .is_some_and(|state| state.carried.contains(&me));
     if carry_me && !carried {
-        book.sign(&roster, key, Action::Enroll { invite: None }, now_ms)?;
+        let enroll = book.sign(&roster, key, Action::Enroll { invite: None }, now_ms)?;
+        book.set_awaiting(&roster, Some(enroll.id()));
     }
-    publish_everywhere(endpoint, book, &roster).await;
+    // The machine just claimed holds the log already (it came with the claim); its siblings get
+    // the new ops from the caller's background delivery ([`deliver`]).
     Ok(Claimed { roster, repeater })
 }
 
@@ -852,16 +934,15 @@ pub async fn refresh_names(
             relisted += 1;
         }
     }
-    if relisted > 0 {
-        publish_everywhere(endpoint, book, &roster).await;
-    }
+    // A re-listing reaches the machines through the caller's background delivery ([`deliver`]).
     Ok(relisted)
 }
 
-/// Enroll in (`carry = true`) or withdraw from a roster this phone holds, and tell its repeaters.
-/// Returns whether the roster now carries us, by our own copy.
-pub async fn set_carried(
-    endpoint: &Endpoint,
+/// Enroll in (`carry = true`) or withdraw from a roster this phone holds, in our own copy only.
+/// Returns whether the roster now carries us. Nothing here dials: the op reaches the roster's
+/// repeaters through [`deliver`], which the caller runs in the background, because a repeater is
+/// a computer that may be asleep and a settings switch must not wait on one (§4.4).
+pub fn sign_carried(
     key: &SigningKey,
     book: &RosterBook,
     roster: &RosterId,
@@ -871,15 +952,14 @@ pub async fn set_carried(
     let me = key.verifying_key().to_bytes();
     let state = book.state(roster).ok_or(RepeaterError::UnknownRoster)?;
     if state.carried.contains(&me) != carry {
-        let action = if carry {
-            Action::Enroll {
-                invite: invite_for(book, roster, &me),
-            }
+        if carry {
+            let invite = invite_for(book, roster, &me);
+            let enroll = book.sign(roster, key, Action::Enroll { invite }, now_ms)?;
+            book.set_awaiting(roster, Some(enroll.id()));
         } else {
-            Action::Withdraw
-        };
-        book.sign(roster, key, action, now_ms)?;
-        publish_everywhere(endpoint, book, roster).await;
+            book.sign(roster, key, Action::Withdraw, now_ms)?;
+            book.set_awaiting(roster, None);
+        }
     }
     Ok(book
         .state(roster)
@@ -932,26 +1012,10 @@ pub fn sign_owner_change(
     Ok(before.repeaters.into_keys().collect())
 }
 
-/// Invite `member` to an invite-only roster this phone may invite to (it owns it or holds
-/// `inviter`), and tell its repeaters. An invite carries nobody: `member` still decides, with an
-/// `Enroll` that cites it (§4.5). Returns whether a new invite was signed; a member already
-/// carried, or with an invite still standing, is not invited twice.
-pub async fn invite(
-    endpoint: &Endpoint,
-    key: &SigningKey,
-    book: &RosterBook,
-    roster: &RosterId,
-    member: &EndpointId,
-    now_ms: u64,
-) -> Result<bool, RepeaterError> {
-    if !sign_invite(key, book, roster, member, now_ms)? {
-        return Ok(false);
-    }
-    publish_everywhere(endpoint, book, roster).await;
-    Ok(true)
-}
-
-/// The signing half of [`invite`].
+/// Invite `member` to a roster this phone may invite to (it owns it or holds `inviter`), in our
+/// own copy; [`deliver`] takes it to the repeaters. An invite carries nobody: `member` still
+/// decides, with an `Enroll` that cites it (§4.5). Returns whether a new invite was signed; a
+/// member already carried, or with an invite still standing, is not invited twice.
 pub fn sign_invite(
     key: &SigningKey,
     book: &RosterBook,
@@ -1006,36 +1070,6 @@ pub fn invite_targets(book: &RosterBook, me: &EndpointId, member: &EndpointId) -
         .collect()
 }
 
-/// [`sign_owner_change`], then hand the roster to every repeater it names. A removal takes effect
-/// on each repeater the moment the op reaches it (the daemon releases a removed member's grants
-/// then); one asleep hears it from a sibling, or from us on a later grant pass ([`deliver`]).
-pub async fn change_roster(
-    endpoint: &Endpoint,
-    key: &SigningKey,
-    book: &RosterBook,
-    roster: &RosterId,
-    change: OwnerChange,
-    now_ms: u64,
-) -> Result<usize, RepeaterError> {
-    let targets = sign_owner_change(key, book, roster, change, now_ms)?;
-    Ok(publish_to(endpoint, book, roster, &targets).await)
-}
-
-/// Hand our whole copy of `roster` to each of its repeaters. A repeater that is asleep catches
-/// up from its siblings, or from us on a later grant pass: a delivery is recorded only when the
-/// repeater answers, and [`deliver`] offers whatever is still owed.
-pub async fn publish_everywhere(
-    endpoint: &Endpoint,
-    book: &RosterBook,
-    roster: &RosterId,
-) -> usize {
-    let Some(state) = book.state(roster) else {
-        return 0;
-    };
-    let targets: BTreeSet<EndpointId> = state.repeaters.into_keys().collect();
-    publish_to(endpoint, book, roster, &targets).await
-}
-
 async fn publish_to(
     endpoint: &Endpoint,
     book: &RosterBook,
@@ -1045,6 +1079,7 @@ async fn publish_to(
     let Some((heads, ops)) = book.snapshot(roster) else {
         return 0;
     };
+    let sent: BTreeSet<OpId> = ops.iter().map(SignedOp::id).collect();
     let request = Request::Publish { ops };
     // In parallel: each call is bounded by `CALL_TIMEOUT`, and a sleeping laptop must not hold
     // up the others (one dial at a time cost up to 20 s each).
@@ -1063,6 +1098,7 @@ async fn publish_to(
             // refused again, so it is delivered either way.
             Ok(Response::Published { .. }) => {
                 reached += 1;
+                book.confirm(roster, &sent);
                 if let Err(e) = book.mark_delivered(roster, &repeater, heads.clone()) {
                     tracing::warn!(error = %e, "repeater: could not record a delivery");
                 }
@@ -1082,6 +1118,43 @@ async fn publish_to(
         }
     }
     reached
+}
+
+/// One background [`deliver`] at a time per node, and one more after it when something was signed
+/// while it ran. A change made on the phone is saved at once and delivered here, never on the
+/// caller's await: a repeater is a computer that may be asleep, and a dial to one that is takes
+/// [`CALL_TIMEOUT`] to give up. Without the gate, a person flipping three switches would start
+/// three passes dialling the same sleeping machine.
+#[derive(Debug, Default)]
+pub struct DeliveryGate {
+    state: Mutex<(bool, bool)>,
+}
+
+impl DeliveryGate {
+    /// Ask for a pass. True when the caller should start one; false when one is running, which
+    /// then runs once more ([`Self::finish`]).
+    pub fn begin(&self) -> bool {
+        let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        let (running, again) = &mut *state;
+        if *running {
+            *again = true;
+            return false;
+        }
+        *running = true;
+        true
+    }
+
+    /// A pass ended. True when another was asked for meanwhile and the caller should run it.
+    pub fn finish(&self) -> bool {
+        let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        let (running, again) = &mut *state;
+        if *again {
+            *again = false;
+            return true;
+        }
+        *running = false;
+        false
+    }
 }
 
 /// Offer every roster op this phone still owes a repeater (REPEATERS.md §4.4): for each roster
@@ -1105,27 +1178,44 @@ pub async fn deliver(endpoint: &Endpoint, me: &EndpointId, book: &RosterBook) ->
 /// Bring the rosters we take part in up to date from their repeaters: the one we own and the ones
 /// that carry us, the only ones a repeater lets us `Fetch`. A roster we merely saw on a card, or
 /// withdrew from, is not dialled at all (§11, G7): it would be refused, and the dial alone tells
-/// that roster's machines our endpoint id and address before we opted into anything.
+/// that roster's machines our endpoint id and address before we opted into anything. What changed
+/// on a roster that removed us reaches us on its owner's card, which the stash and the owner's
+/// repeaters hold sealed (`crate::profile_seal`).
 pub async fn refresh(endpoint: &Endpoint, me: &EndpointId, book: &RosterBook) -> usize {
-    let mut fetched = 0;
-    let states = book
+    let rosters: Vec<RosterId> = book
         .states()
         .into_iter()
-        .filter(|state| state.owner == *me || state.carried.contains(me));
-    for state in states {
-        for repeater in state.repeaters.keys() {
-            let Ok(addr) = endpoint_addr(repeater) else {
-                continue;
-            };
-            if let Ok(Response::Roster { ops }) = call(endpoint, addr, &Request::Fetch).await {
-                if book.ingest(ops).is_ok() {
-                    fetched += 1;
-                }
-                break;
-            }
+        .filter(|state| state.owner == *me || state.carried.contains(me))
+        .map(|state| state.id)
+        .collect();
+    let mut fetched = 0;
+    for roster in rosters {
+        if fetch_roster(endpoint, book, &roster).await {
+            fetched += 1;
         }
     }
     fetched
+}
+
+/// Take `roster` from the first of its repeaters that answers a `Fetch`. Whether one did.
+pub async fn fetch_roster(endpoint: &Endpoint, book: &RosterBook, roster: &RosterId) -> bool {
+    let Some(state) = book.state(roster) else {
+        return false;
+    };
+    for repeater in state.repeaters.keys() {
+        let Ok(addr) = endpoint_addr(repeater) else {
+            continue;
+        };
+        if let Ok(Response::Roster { ops }) = call(endpoint, addr, &Request::Fetch).await {
+            // What a machine hands back it holds: our `Enroll` among it is confirmed.
+            book.confirm(
+                roster,
+                &ops.iter().map(SignedOp::id).collect::<BTreeSet<OpId>>(),
+            );
+            return book.ingest(ops).is_ok();
+        }
+    }
+    false
 }
 
 /// How long a push to carriers alone waits for one of them to confirm it holds what was pushed
@@ -1235,6 +1325,47 @@ pub async fn grant(
 mod tests {
     use super::*;
     use streetcryptid_repeater::roster::{CertBody, RepeaterCert};
+
+    #[test]
+    fn an_enrollment_waits_until_a_repeater_holds_it() {
+        let dir = scratch("awaiting");
+        let book = RosterBook::open(&dir).unwrap();
+        let roster = book.create(&key(1), Policy::Open, 1).unwrap();
+        assert!(sign_carried(&key(2), &book, &roster, true, 2).unwrap());
+        assert!(book.is_awaiting(&roster));
+        // A machine that holds an older copy confirms nothing.
+        book.confirm(&roster, &BTreeSet::new());
+        assert!(book.is_awaiting(&roster));
+        // Survives a reopen.
+        let book = RosterBook::open(&dir).unwrap();
+        assert!(book.is_awaiting(&roster));
+        let held: BTreeSet<OpId> = book
+            .export(&roster)
+            .unwrap()
+            .iter()
+            .map(SignedOp::id)
+            .collect();
+        book.confirm(&roster, &held);
+        assert!(!book.is_awaiting(&roster));
+        // Withdrawing stops waiting too.
+        assert!(sign_carried(&key(2), &book, &roster, true, 3).is_ok());
+        assert!(!sign_carried(&key(2), &book, &roster, false, 4).unwrap());
+        assert!(!book.is_awaiting(&roster));
+    }
+
+    #[test]
+    fn a_delivery_asked_for_while_one_runs_runs_once_more() {
+        let gate = DeliveryGate::default();
+        assert!(gate.begin());
+        // Two changes while it runs: one more pass, not two.
+        assert!(!gate.begin());
+        assert!(!gate.begin());
+        assert!(gate.finish());
+        assert!(!gate.finish());
+        // Idle again: the next change starts a pass.
+        assert!(gate.begin());
+        assert!(!gate.finish());
+    }
 
     fn scratch(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(

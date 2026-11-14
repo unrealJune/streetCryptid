@@ -111,9 +111,11 @@ export default function MyRepeatersScreen() {
           first
           title="Carry my location"
           text={
-            mine.carriesMe
-              ? 'On these machines, sealed, for friends to pick up while your phone sleeps.'
-              : 'Off. These machines do not keep your location.'
+            mine.waiting
+              ? 'On. Waiting for one of these machines to come online; it goes to them then.'
+              : mine.carriesMe
+                ? 'On these machines, sealed, for friends to pick up while your phone sleeps.'
+                : 'Off. These machines do not keep your location.'
           }
           right={
             <RowSwitch

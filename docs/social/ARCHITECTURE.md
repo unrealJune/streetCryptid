@@ -462,6 +462,37 @@ bindings, oversized/invalid ASCII art, and non-increasing epochs. Live docs even
 while both devices are online; range reconciliation restores the newest profile after an offline
 period.
 
+### 9a.1 Sealed profiles
+
+A profile namespace is held by more than friends: the hosted stash is granted it beside the trail,
+and the repeaters that carry its owner hold it too, so a profile (and the repeater card beside it,
+REPEATERS.md §4.2) reaches friends while its owner's phone sleeps. Signed alone, every one of those
+holders could read it, so every record is **sealed** (`rust/src/profile_seal.rs`):
+
+- A record stored under `k` is stored under `s/k` as XChaCha20-Poly1305 under the owner's
+  **profile key**, with the namespace id and `k` as associated data. Inside is exactly the signed
+  record it used to be, verified exactly as before. The clear copy an older build wrote is deleted
+  once a sealed one stands beside it.
+- The key reaches friends in the `keyring` entry: one HPKE wrap (RFC 9180, X25519, the suite the
+  envelope uses) per friend, to the receiving key their profile already binds to their endpoint,
+  found by the same 8-byte key id an envelope uses. Nothing new is exchanged at pairing; the
+  keyring is rewritten when the friend list changes (`setRecipientKeys`).
+- The key is derived from the identity seed and a generation; only the generation, who it was
+  wrapped for and when are stored (`profile-key.bin`). **Removing a friend moves to the next
+  generation** and seals everything again, so what is written afterwards is closed to them; what
+  they already read stays read.
+- The stash releases every entry older than its retention window, the profile included, so a
+  phone seals everything again every 12 hours it is awake (`RESEAL_AFTER_MS`, on each stash
+  grant).
+- A pairing `Accept` still carries the record itself, unsealed, over the authenticated pairing
+  channel: a new friend has the persona at once, and the keyring includes them as soon as the app
+  registers their receiving key.
+
+What a non-friend holder still learns: that the namespace exists, when it changes, how large its
+records are, and how many friends the keyring wraps for (one wrap each, with the key id of each
+friend's receiving key, as on every location envelope). A friend on a build that cannot open sealed
+records keeps the last clear record it read.
+
 ## 9b. Nearby and remote exchange
 
 The island's **FRIENDS tab** and **Settings → Pair** open the dedicated pairing screen.
@@ -558,7 +589,7 @@ engine (§5) — two phones syncing the same namespace already exchange each wri
   cannot read fixes not wrapped for them.
 - **Mailbox operator:** sees random lookup ids, ciphertext sizes and request timing, but cannot
   decrypt an invite. Codes are one-time, rate-limited, and short-lived.
-- **Stash operator:** holds sealed envelopes it cannot decrypt, plus metadata — which namespaces
+- **Stash operator:** holds sealed envelopes and sealed profiles (§9a.1) it cannot decrypt, plus metadata — which namespaces
   exist, when entries arrive, and their sizes. It sees a live session as a cadence change from the
   ambient interval to ~4s, which §9 already treats as visible on the wire.
   **Device push tokens are the sharp edge here, and we no longer upload them.** An APNs/FCM token is

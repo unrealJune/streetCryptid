@@ -23,6 +23,7 @@ const ROSTER: RosterView = {
   canInvite: true,
   inviters: [],
   invited: [],
+  waiting: false,
 };
 
 describe('RosterPeople', () => {

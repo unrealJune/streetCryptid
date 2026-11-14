@@ -437,23 +437,22 @@ nothing.
 
 The same cards also tell your phone which repeaters carry a friend, which is what pulls use (§5).
 
-**A card is not always there.** It is an entry in a profile namespace, so a friend has it only
-after their phone has synced that namespace since it was last written:
+**How a card travels.** It is an entry in a profile namespace, and the profile is sealed
+(ARCHITECTURE.md §9a.1), so every holder that is not a friend relays it blind:
 
-- The publisher writes it after a roster change and after each grant pass, to its local replica.
-  It leaves the phone only when something syncs with it.
+- The publisher writes it after a roster change and after each grant pass, to its local replica,
+  sealed under its profile key. The hosted stash is granted the profile namespace beside the
+  trail, and the repeaters that carry the publisher hold it already (§4.3).
 - A reader syncs a friend's profile when the ticket is imported (at pairing, in the app) and,
-  on a native pull, for at most two seconds, **dialling only that friend's own phone**
-  (`sync_known_friends`). The pull plan adds a friend's repeaters for their trail namespace and
-  not for their profile, although those repeaters carry the profile too.
-- So a card written while the two phones were never awake together has not arrived. A friend
-  who claims a repeater today is invisible to you until your phones next overlap, and the same
-  delay applies to learning that they left one.
+  on a native pull, for at most two seconds, from that friend's own phone, the stash, and up to
+  two of the repeaters that carry them (`sync_known_friends`, `profile_relays`).
+- So an invite, a removal, a policy change or a new machine reaches a friend whenever any of
+  those is reachable: the two phones never have to be awake together. A friend who has never
+  received the card at all (paired, and the first sync failed) gets it from the stash.
 - A card holds at most 16 rosters and 256 KiB. Past 16, rosters are dropped by id order.
 
 Nothing breaks when a card is missing: the roster is absent from Available through friends, and
-that friend's repeaters are not pulled from. Pulling a friend's profile from their carriers
-would close most of the gap and is not built.
+that friend's repeaters are not pulled from until it arrives.
 
 ### 4.2.1 What is gated, and by what
 
@@ -515,8 +514,20 @@ moment:
 - the person can enroll days later;
 - whichever repeater wakes first takes the ops, and its siblings converge from it.
 
-**How it is built.** A signed op is saved in the roster book at once and offered to the roster's
-repeaters straight away. Each repeater that answers the `Publish` is recorded against our heads
+**Accepting is local, and the screen says so.** Enrolling signs an `Enroll` into this phone's
+copy and resolves; the roster reads as carrying you from then on. Until a repeater confirms it
+holds that `Enroll` (it answered a `Publish` that carried it, or a `Fetch` returned it), the
+settings show **waiting for a repeater** (`repeaters-awaiting.bin`, `RepeaterRoster.waiting`). The
+`Enroll` also travels on this phone's own card, so the owner's phone, or any other member's,
+hands it to a repeater if this one never meets one awake.
+
+**How it is built.** A signed op is saved in the roster book at once, and the call that signed it
+resolves then: the phone's copy is what every settings screen reads, so a switch or an invite
+lands without waiting on a machine that may be asleep (a dial to one gives up only after
+`CALL_TIMEOUT`, 20 s). The op is offered to the roster's repeaters in the background
+(`repeater.deliver`), one pass at a time with one more if something was signed meanwhile
+(`DeliveryGate`), and the card is republished with it so friends read the change from the
+profile. Each repeater that answers the `Publish` is recorded against our heads
 at that moment (`repeaters-delivered.bin`, beside the book). The grant pass on every start then
 calls `repeater::deliver` **before** it fetches: for each roster this phone has signed an op in
 (owned, enrolled, or withdrawn from), every repeater the roster has ever listed whose recorded
@@ -985,6 +996,13 @@ what is not. What was found, and what changed:
 Found while fixing them, and fixed with them: a member the owner removed could not `Fetch` the
 roster (`NotCarried`), so its phone kept believing it was carried and pushing there. Anyone who
 has signed an op in a roster may now fetch it (§6.2).
+
+Found on two phones: a removed member was offered the switch on an open roster and refused when
+they used it, and invited back they were refused again, because the invite travelled only on the
+owner's card and the card only from the owner's own phone. A phone now asks the roster's own rule
+whether it may enroll (`Roster::may_enroll`), so a removed member sees why instead of a switch;
+and cards are read from the stash and the owner's repeaters too (§4.2), sealed, so an invite
+back arrives whenever any of them is reachable.
 
 What remains is design, not drift: auto-enroll (§4.2), quotas and daemon health (§9), and the
 open questions in §10. None of the fixes above has run against a live daemon from a phone yet.

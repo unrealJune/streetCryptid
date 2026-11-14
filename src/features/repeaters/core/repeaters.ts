@@ -154,6 +154,11 @@ export interface RosterView {
   readonly inviters: readonly RosterPerson[];
   /** Invited and not carried yet. */
   readonly invited: readonly RosterPerson[];
+  /**
+   * Carried by this phone's own copy, but no repeater has confirmed it yet: it goes out the next
+   * time one of them is reachable, and nobody has to be online at the same moment (§4.4).
+   */
+  readonly waiting: boolean;
 }
 
 export interface RosterSections {
@@ -217,6 +222,7 @@ export function rosterSections(
       .map(person)
       .sort(byName),
     invited: (r.invited ?? []).map(person).sort(byName),
+    waiting: r.carriesMe && (r.waiting ?? false),
   });
   const views = rosters.map(view);
   const byLabel = (a: RosterView, b: RosterView) => a.ownerLabel.localeCompare(b.ownerLabel);
@@ -319,16 +325,19 @@ export function rosterLine(roster: RosterView): string {
 
 /**
  * A roster as one row's mono line on Settings → Repeaters: "2 machines · open · 9 people". Your
- * own leaves the policy out (its page says it) and says when it is not carrying you; an offered
- * one names the friends in it; one nobody invited you to says so.
+ * own leaves the policy out (its page says it) and says when it is not carrying you; one you
+ * joined says so until a repeater has confirmed it; an offered one names the friends in it; one
+ * nobody invited you to says so.
  */
 export function rosterRowDetail(roster: RosterView): string {
   const parts = [count(roster.machines.length, 'machine', 'machines')];
   if (!roster.mine) parts.push(roster.open ? 'open' : 'invite only');
   parts.push(count(roster.carried, 'person', 'people'));
   if (roster.mine && !roster.carriesMe) parts.push('not carrying you');
+  if (roster.waiting) parts.push('waiting for a repeater');
   if (!roster.mine && !roster.carriesMe) {
-    if (!roster.canEnroll) parts.push('not invited');
+    // An open roster refuses only someone its owner removed; an invite-only one, anyone uninvited.
+    if (!roster.canEnroll) parts.push(roster.open ? 'removed by the owner' : 'not invited');
     else if (roster.vouchers.length > 0) {
       const names = roster.vouchers.map((v) => v.label);
       parts.push(`${names.join(', ')} ${names.length === 1 ? 'is' : 'are'} in it`);

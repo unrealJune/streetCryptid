@@ -51,6 +51,7 @@ const MINE: RosterView = {
   canInvite: true,
   inviters: [],
   invited: [],
+  waiting: false,
 };
 
 const ok = () => jest.fn(async (..._args: unknown[]): Promise<string | null> => null);
