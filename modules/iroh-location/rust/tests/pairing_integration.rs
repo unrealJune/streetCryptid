@@ -19,12 +19,15 @@ use iroh_location::{LocationNode, PairEventKind, PairState, SasRoleKind};
 const SIGIL: &str = "/\\_/\\\n(o.o)";
 async fn start_node() -> Arc<LocationNode> {
     let node = LocationNode::new(None, None).expect("construct node");
+    // BLE off, as the module docs say: loopback only. On Linux the BLE backend compiles out, but
+    // on a Mac `ble_enabled` attaches CoreBluetooth, and a bare test binary has no
+    // `NSBluetoothAlwaysUsageDescription`, so TCC aborts the whole process (SIGABRT, no panic).
     node.start(
         vec!["https://127.0.0.1:1".into()],
         "test-token".into(),
         true,
         true,
-        true,
+        false,
     )
     .await
     .expect("start node");

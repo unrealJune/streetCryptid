@@ -49,6 +49,11 @@ pub enum LocationRuntimeKind {
     FenceFailed,
     /// Authorization changed. `reason` is the new status.
     Authorization,
+    /// Native publish work did not finish inside its background-task assertion. `reason` is
+    /// `expired` (iOS ran the expiration handler mid-work) or `stranded` (a later process found
+    /// assertions an earlier one never ended: it was killed holding them); `detail` says which
+    /// lane and how long it had been held. The durable `wake.publish_*` counters say the same.
+    PublishAssertion,
 }
 
 impl LocationRuntimeKind {
@@ -65,6 +70,7 @@ impl LocationRuntimeKind {
             Self::LocationError => "location_error",
             Self::FenceFailed => "fence_failed",
             Self::Authorization => "authorization",
+            Self::PublishAssertion => "publish_assertion",
         }
     }
 }

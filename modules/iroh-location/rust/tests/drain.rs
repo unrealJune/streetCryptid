@@ -162,6 +162,8 @@ struct FakeSink {
     no_targets: Mutex<bool>,
     /// Targets were scheduled without a confirmed receipt.
     scheduled: Mutex<bool>,
+    /// The caller's background budget ran out before a push could start (`FlushOutcome::Deferred`).
+    defer_push: Mutex<bool>,
     /// Every recipient is dropped from the wrap set — a mutual lapse. The call succeeds and the
     /// envelope reaches nobody, which is exactly what a phone did for a week on 2026-09-29.
     drop_all: Mutex<bool>,
@@ -260,6 +262,9 @@ impl PublishSink for FakeSink {
         }
         if *self.scheduled.lock().unwrap() {
             return Ok(FlushOutcome::Scheduled);
+        }
+        if *self.defer_push.lock().unwrap() {
+            return Ok(FlushOutcome::Deferred);
         }
         Ok(FlushOutcome::Pushed)
     }
@@ -1177,6 +1182,93 @@ async fn a_scheduled_repeater_is_not_recorded_as_a_confirmed_push() {
     assert_eq!(*h.sink.flushes.lock().unwrap(), 1);
 }
 
+#[tokio::test]
+async fn a_push_deferred_for_time_is_reported_and_not_recorded_as_a_push() {
+    // A budgeted call on a background iOS wake: the seal happened, the push did not fit in what
+    // was left of the OS's allowance. The caller has to be TOLD, because it is the one that can
+    // ask for another wake; and the push watermark must not move, because nothing left the device.
+    let h = Harness::new();
+    *h.sink.defer_push.lock().unwrap() = true;
+    let now = INTERVAL * 10;
+
+    let out = h
+        .engine()
+        .ingest(fix(now, 20.0), healthy_battery(), INTERVAL, now)
+        .await
+        .unwrap();
+
+    assert_eq!(out.published, 1, "the seal is not what the budget bounds");
+    assert!(out.push_deferred, "the caller must learn a push is owed");
+    assert_eq!(
+        iroh_location::publish::drop_reason(&out),
+        None,
+        "a deferred push is not a drop: the envelope is committed and in the replica"
+    );
+    let state = h.gate.get();
+    assert_eq!(state.last_published_at, Some(now));
+    assert_eq!(state.last_pushed_at, None, "nothing left the device");
+}
+
+#[tokio::test]
+async fn a_parked_declaration_is_sealed_even_when_its_push_is_deferred() {
+    // 2026-11-10: a `CLVisit` arrival drove the parked heartbeat, and the process was suspended
+    // before the declaration was sealed or sent. Under a budget the seal still happens first, so a
+    // later push — any later push — carries `parked`.
+    let h = Harness::new();
+    let first = INTERVAL * 10;
+    h.engine()
+        .ingest(fix(first, 20.0), healthy_battery(), INTERVAL, first)
+        .await
+        .unwrap();
+    *h.sink.defer_push.lock().unwrap() = true;
+
+    let out = h
+        .engine()
+        .heartbeat(Motion::Parked, healthy_battery(), INTERVAL, first + 1_000)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        out.published, 1,
+        "the change to parked goes out off the grid"
+    );
+    assert!(out.push_deferred);
+    let stamps = h.sink.stamps.lock().unwrap();
+    assert_eq!(
+        stamps.last().and_then(|(state, _)| *state),
+        Some(iroh_location::FIX_STATE_PARKED),
+        "the sealed envelope says parked"
+    );
+}
+
+#[tokio::test]
+async fn a_drain_that_sealed_nothing_owes_no_push() {
+    // `push_deferred` means "something is waiting for a push", not "the budget was short". A
+    // heartbeat into a covered slot has nothing to send, so nothing is owed whatever the budget.
+    let h = Harness::new();
+    let now = INTERVAL * 10;
+    h.engine()
+        .ingest(fix(now, 20.0), healthy_battery(), INTERVAL, now)
+        .await
+        .unwrap();
+    *h.sink.defer_push.lock().unwrap() = true;
+    let flushes = *h.sink.flushes.lock().unwrap();
+
+    let out = h
+        .engine()
+        .heartbeat(Motion::Unknown, healthy_battery(), INTERVAL, now + 1_000)
+        .await
+        .unwrap();
+
+    assert_eq!(out.published, 0);
+    assert!(!out.push_deferred);
+    assert_eq!(
+        *h.sink.flushes.lock().unwrap(),
+        flushes,
+        "no flush was asked for"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Envelope stamps: telling a parked phone apart from a dead one
 // ---------------------------------------------------------------------------
@@ -2026,6 +2118,7 @@ fn drop_reasons_use_the_js_spellings() {
         slots_skipped: 0,
         overflow_dropped: 0,
         suspended: false,
+        push_deferred: false,
     };
     assert_eq!(
         drop_reason(&base),

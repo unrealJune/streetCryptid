@@ -618,7 +618,10 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
       return (true, nil)
     }
     guard proceed.run else { return }
-    await heartbeat(battery: Self.battery(), parked: proceed.parked)
+    // No `PublishAssertion`: the `BGProcessingTask` that called us is this work's assertion, and
+    // its expiration handler is `NativeRefreshTask`'s.
+    let battery = Self.battery()
+    await heartbeat(battery: battery, parked: proceed.parked, under: nil)
   }
 
   /// Take a stop whose dwell has elapsed without a delivery to confirm it. Returns whether we
@@ -686,16 +689,16 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
         case .stillHere: resumeStop()
         case .left: leaveUnverifiedStop()
         case .undecided:
-          Task { await self.ingest(fix: fix, battery: battery) }
+          publish(.seed) { await self.ingest(fix: fix, battery: battery, under: $0) }
           return
         case .nothingPending: break
         }
         if state == .moving { considerStopping(at: cached) }
       }
       if wasMoving && state == .stopped {
-        Task { await self.heartbeat(battery: battery, parked: true) }
+        publish(.seed) { await self.heartbeat(battery: battery, parked: true, under: $0) }
       } else {
-        settleClaims(ingesting: fix, battery: battery)
+        settleClaims(ingesting: fix, battery: battery, lane: .seed)
       }
     }
   }
@@ -1186,7 +1189,7 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
     // Claims nothing about motion: it fills a due slot from the last accepted fix, so a wake that
     // gets no fresh position still says the phone is alive.
     let battery = Self.battery()
-    Task { await self.heartbeat(battery: battery, parked: nil) }
+    publish(.movingFence) { await self.heartbeat(battery: battery, parked: nil, under: $0) }
   }
 
   // MARK: - Persistence
@@ -1374,7 +1377,7 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
       if stopCandidate != nil {
         considerStopping(at: location)
         if state == .stopped {
-          Task { await self.heartbeat(battery: battery, parked: true) }
+          publish(.redelivery) { await self.heartbeat(battery: battery, parked: true, under: $0) }
           return
         }
         // Never ingested, but a claim the dwell owes still goes out — as a heartbeat.
@@ -1382,7 +1385,9 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
           let parked = owesDeclaration
           owesRetraction = false
           owesDeclaration = false
-          Task { await self.heartbeat(battery: battery, parked: parked) }
+          publish(.redelivery) {
+            await self.heartbeat(battery: battery, parked: parked, under: $0)
+          }
           return
         }
       }
@@ -1396,7 +1401,7 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
         return
       }
       lastRedeliveryHeartbeatAt = now
-      Task { await self.heartbeat(battery: battery, parked: nil) }
+      publish(.redelivery) { await self.heartbeat(battery: battery, parked: nil, under: $0) }
 
     case .moving:
       note(.movement)
@@ -1432,18 +1437,18 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
         leaveUnverifiedStop()
       case .undecided:
         let fix = Self.fix(from: location)
-        Task { await self.ingest(fix: fix, battery: battery) }
+        publish(.delivery) { await self.ingest(fix: fix, battery: battery, under: $0) }
         return
       case .nothingPending:
         break
       }
       if state == .moving { considerStopping(at: location) }
       if state == .stopped {
-        Task { await self.heartbeat(battery: battery, parked: true) }
+        publish(.delivery) { await self.heartbeat(battery: battery, parked: true, under: $0) }
       } else {
         // Only a FRESH delivery may move the fence — a redelivery is a position already left.
         armMovingFence(around: location)
-        settleClaims(ingesting: Self.fix(from: location), battery: battery)
+        settleClaims(ingesting: Self.fix(from: location), battery: battery, lane: .delivery)
       }
 
     case .stopped:
@@ -1456,7 +1461,7 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
       // fix too coarse to publish can still be good enough to prove we are nowhere near the anchor.
       if considerDeparture(from: location) { return }
       note(.periodic)
-      Task { await self.heartbeat(battery: battery, parked: true) }
+      publish(.parkedTick) { await self.heartbeat(battery: battery, parked: true, under: $0) }
     }
   }
 
@@ -1501,7 +1506,7 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
     persistState()
     let battery = Self.battery()
     // No claim either way: the slot this fills keeps `parked` until a precise fix decides.
-    Task { await self.heartbeat(battery: battery, parked: nil) }
+    publish(.departure) { await self.heartbeat(battery: battery, parked: nil, under: $0) }
     return true
   }
 
@@ -1558,13 +1563,25 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
   /// fix has already carried the wire to `live` on its own (it is far from the stop, and the drain
   /// publishes that change at once), and otherwise turns a `parked` the fix could not end — one
   /// still inside the hold radius — into "moving, no fix yet", which is what is true.
-  private func settleClaims(ingesting fix: LocationFix, battery: BatteryState) {
+  ///
+  /// With a claim owed, the fix's push leaves `claimReserveMs` of the wake for the claim's, and the
+  /// friend pull waits until after the claim: the claim is the envelope a friend most needs, and
+  /// until 2026-11 it queued behind both a full push and a full pull inside one ~30 s allowance.
+  private func settleClaims(
+    ingesting fix: LocationFix, battery: BatteryState, lane: PublishAssertion.Lane
+  ) {
     let claim: Bool? = owesDeclaration ? true : (owesRetraction ? false : nil)
     owesRetraction = false
     owesDeclaration = false
-    Task {
-      await self.ingest(fix: fix, battery: battery)
-      if let claim { await self.heartbeat(battery: battery, parked: claim) }
+    publish(lane) { assertion in
+      guard let claim else {
+        await self.ingest(fix: fix, battery: battery, under: assertion)
+        return
+      }
+      await self.ingest(
+        fix: fix, battery: battery, under: assertion,
+        reserveMs: PublishAssertion.claimReserveMs, pull: false)
+      await self.heartbeat(battery: battery, parked: claim, under: assertion)
     }
   }
 
@@ -1585,7 +1602,7 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
     // covers the gap until that lands, so a crossing is never a silent slot.
     enterMoving(reason: .geofenceExit)
     let battery = Self.battery()
-    Task { await self.heartbeat(battery: battery, parked: false) }
+    publish(.fenceExit) { await self.heartbeat(battery: battery, parked: false, under: $0) }
   }
 
   /// The answer to `armMovingFence`'s `requestState`. Only `outside` on the moving fence means
@@ -1682,7 +1699,7 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
         owesRetraction = false
         outcome = "unparked"
         let battery = Self.battery()
-        Task { await self.heartbeat(battery: battery, parked: false) }
+        publish(.visit) { await self.heartbeat(battery: battery, parked: false, under: $0) }
         return
       }
       guard state == .stopped, let anchor = stopAnchor,
@@ -1692,7 +1709,7 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
       enterMoving(reason: .visit)
       outcome = "unparked"
       let battery = Self.battery()
-      Task { await self.heartbeat(battery: battery, parked: false) }
+      publish(.visit) { await self.heartbeat(battery: battery, parked: false, under: $0) }
       return
     }
 
@@ -1753,7 +1770,7 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
     // the arrival is the OS saying the phone has stopped, so the `parked` stamp a heartbeat
     // carries is honest before a fix has placed it, and a fix showing otherwise re-stamps `live`.
     let battery = Self.battery()
-    Task { await self.heartbeat(battery: battery, parked: true) }
+    publish(.visit) { await self.heartbeat(battery: battery, parked: true, under: $0) }
   }
 
   /// Faster than anyone standing somewhere. A negative speed is Core Location's "unknown", which
@@ -1892,7 +1909,13 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
   }
 
   /// Run one captured fix through gate → outbox → seal → send.
-  private func ingest(fix: LocationFix, battery: BatteryState) async {
+  ///
+  /// Under `assertion`, the push is bounded by what is left of it, less `reserveMs` kept for work
+  /// that follows in the same wake; `pull: false` leaves the friend pull to that work.
+  private func ingest(
+    fix: LocationFix, battery: BatteryState, under assertion: PublishAssertion?,
+    reserveMs: UInt64 = 0, pull: Bool = true
+  ) async {
     reporter.noteWorkStarted()
     defer { reporter.noteWorkFinished() }
     guard let node = await ensureStarted() else {
@@ -1900,13 +1923,20 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
       return
     }
     do {
-      let outcome = try await node.ingestFix(
-        fix: fix,
-        battery: battery,
-        intervalMs: slotIntervalMs,
-        nowMs: UInt64(Date().timeIntervalSince1970 * 1000))
+      let nowMs = UInt64(Date().timeIntervalSince1970 * 1000)
+      let outcome: IngestOutcome
+      if let assertion {
+        let budgetMs = await assertion.pushBudgetMs(reserveMs: reserveMs)
+        outcome = try await node.ingestFixWithin(
+          fix: fix, battery: battery, intervalMs: slotIntervalMs, nowMs: nowMs,
+          budgetMs: budgetMs)
+      } else {
+        outcome = try await node.ingestFix(
+          fix: fix, battery: battery, intervalMs: slotIntervalMs, nowMs: nowMs)
+      }
       report("ingest", outcome)
-      await pullFriendFixes()
+      notePushDeferred(outcome)
+      if pull { await pullFriendFixes() }
       // The wake's work is done; fold what it cost into the counters. A window left open is not a
       // measurement error, it is the signal that the process did not survive its own wake.
       BackgroundWakeLedger.closeWindow()
@@ -1926,7 +1956,11 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
   /// dwell, a visit arrival, a parked coarse tick), `false` from a stop just left, `nil` from a
   /// clock that proves neither. Until 2026-10-02 every heartbeat stamped `parked`, and the mounted
   /// timer published four hours of it from an iPhone this file had in `moving`.
-  private func heartbeat(battery: BatteryState, parked: Bool?) async {
+  ///
+  /// Under `assertion` the push is bounded by what is left of it; see `PublishAssertion`.
+  private func heartbeat(
+    battery: BatteryState, parked: Bool?, under assertion: PublishAssertion?
+  ) async {
     reporter.noteWorkStarted()
     defer { reporter.noteWorkFinished() }
     guard let node = await ensureStarted() else {
@@ -1934,17 +1968,66 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
       return
     }
     do {
-      let outcome = try await node.heartbeatFix(
-        battery: battery,
-        intervalMs: slotIntervalMs,
-        nowMs: UInt64(Date().timeIntervalSince1970 * 1000),
-        parked: parked)
+      let nowMs = UInt64(Date().timeIntervalSince1970 * 1000)
+      let outcome: IngestOutcome
+      if let assertion {
+        let budgetMs = await assertion.pushBudgetMs()
+        outcome = try await node.heartbeatFixWithin(
+          battery: battery, intervalMs: slotIntervalMs, nowMs: nowMs, parked: parked,
+          budgetMs: budgetMs)
+      } else {
+        outcome = try await node.heartbeatFix(
+          battery: battery, intervalMs: slotIntervalMs, nowMs: nowMs, parked: parked)
+      }
       report("heartbeat", outcome)
+      notePushDeferred(outcome)
       await pullFriendFixes()
       BackgroundWakeLedger.closeWindow()
     } catch {
       NSLog("[iroh-location] heartbeat failed: \(error.localizedDescription)")
     }
+  }
+
+  // MARK: - Publishing under a background assertion
+
+  /// Start native publish work under a background-task assertion taken NOW, on the calling thread.
+  ///
+  /// Every capture, heartbeat and claim the state machine decides on goes through here, never
+  /// through a bare `Task`: the decision is made in a Core Location callback, and iOS owes a
+  /// process nothing once that callback returns. See `PublishAssertion` for the day that cost.
+  private func publish(
+    _ lane: PublishAssertion.Lane, _ work: @escaping (PublishAssertion) async -> Void
+  ) {
+    let reporter: LocationRuntimeReporter = self.reporter
+    let assertion = PublishAssertion(
+      lane: lane,
+      onStranded: { count in
+        // An earlier process was killed holding assertions — jetsam, a watchdog, a crash.
+        reporter.event(.publishAssertion, reason: "stranded", detail: "count=\(count)")
+        NSLog("[iroh-location] \(count) publish assertion(s) never ended in an earlier process")
+      },
+      onExpire: { expiry in
+        // On main, from iOS, with the work still running: we are about to be suspended inside
+        // a seal or a push. Whatever was sealed is in the replica; ask for a wake to push it.
+        var detail = "lane=\(expiry.lane.rawValue) held_ms=\(Int(expiry.heldMs))"
+        if let start = expiry.remainingStartMs { detail += " remaining_start_ms=\(start)" }
+        reporter.event(.publishAssertion, reason: "expired", detail: detail)
+        NSLog("[iroh-location] background time expired mid-publish (\(detail))")
+        NativeRefreshTask.ensureScheduled()
+      })
+    Task {
+      await work(assertion)
+      assertion.finish()
+    }
+  }
+
+  /// A drain that sealed and had no time to push: count it, and make sure a wake is coming to
+  /// push it — a phone that has just parked gives Core Location no reason to wake it again.
+  private func notePushDeferred(_ outcome: IngestOutcome) {
+    guard outcome.pushDeferred else { return }
+    BackgroundWakeLedger.notePublishPushDeferred()
+    NSLog("[iroh-location] sealed with no background time left to push; the next wake sends it")
+    NativeRefreshTask.ensureScheduled()
   }
 
   /// Pull friends' new fixes, so a JS-free wake RECEIVES as well as sends.
