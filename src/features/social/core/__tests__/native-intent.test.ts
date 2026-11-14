@@ -105,4 +105,30 @@ describe('native dev-command intent rewriting', () => {
       redirectSystemPath({ path: 'streetcryptid://dev?cmd=not-a-command&id=z', initial: false })
     ).toBe('/?dev=not-a-command&devId=z');
   });
+
+  // A repeater's console QR code: the camera opens it as a Universal Link / App Link, and it lands
+  // on the claim screen with the machine scanned (never claimed without a tap).
+  it('routes a scanned repeater claim to the claim screen, filled in', () => {
+    const secret = 'ab'.repeat(32);
+    expect(
+      redirectSystemPath({
+        path: `https://streetcrypt.id/repeater#t=endpointabc&s=${secret}`,
+        initial: true,
+      })
+    ).toBe(
+      `/settings/repeaters/claim?claim=${encodeURIComponent(`streetcryptid-repeater:endpointabc#${secret}`)}`
+    );
+    expect(
+      redirectSystemPath({ path: 'https://streetcrypt.id/repeater#t=cut', initial: true })
+    ).toBe('/settings/repeaters/claim');
+    // The fallback page's custom-scheme hand-off lands in the same place.
+    expect(
+      redirectSystemPath({
+        path: `streetcryptid:///repeater?t=endpointabc&s=${secret}`,
+        initial: false,
+      })
+    ).toBe(
+      `/settings/repeaters/claim?claim=${encodeURIComponent(`streetcryptid-repeater:endpointabc#${secret}`)}`
+    );
+  });
 });

@@ -2971,6 +2971,7 @@ dependencies = [
  "reqwest 0.12.28",
  "serde",
  "serde_json",
+ "streetcryptid-repeater",
  "thiserror 2.0.18",
  "tokio",
  "tokio-stream",

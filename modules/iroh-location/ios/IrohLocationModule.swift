@@ -921,6 +921,110 @@ public final class IrohLocationModule: Module {
       await node.grantStashNow()
     }
 
+    // ── Repeaters — see docs/social/REPEATERS.md ────────────────────────────────────────────
+
+    // Claim the repeater whose console printed `link` into the roster this phone owns, and list it
+    // there. Refused unless its signed cert names this phone, this roster and the machine that
+    // answered (`repeater.rs`).
+    AsyncFunction("claimRepeater") { (link: String, open: Bool, carryMe: Bool) async throws -> [String: Any] in
+      guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
+      let c = try await node.claimRepeater(link: link, open: open, carryMe: carryMe)
+      return ["rosterId": c.rosterId, "repeaterId": c.repeaterId]
+    }
+
+    // Every roster this phone knows, for Settings → Repeaters.
+    AsyncFunction("repeaterRosters") { () async throws -> [[String: Any]] in
+      guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
+      return try await node.repeaterRosters().map { r in
+        [
+          "rosterId": r.rosterId, "owner": r.owner, "mine": r.mine, "open": r.open,
+          "carriesMe": r.carriesMe, "repeaters": r.repeaters, "repeaterNames": r.repeaterNames,
+          "carried": Double(r.carried),
+          "members": r.members, "vouchers": r.vouchers, "canEnroll": r.canEnroll,
+          "inviters": r.inviters, "invited": r.invited, "canInvite": r.canInvite,
+          "waiting": r.waiting,
+        ]
+      }
+    }
+
+    // Invite someone to an invite-only roster we may invite to. Resolves whether a new invite was
+    // signed; an invite carries nobody until they enroll.
+    AsyncFunction("inviteToRepeater") { (rosterId: String, member: String) async throws -> Bool in
+      guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
+      return try await node.inviteToRepeater(rosterId: rosterId, member: member)
+    }
+
+    // Invite a new friend to every invite-only roster we may invite to (the pairing screen's
+    // "also invite them"). Resolves how many invites were signed.
+    AsyncFunction("inviteFriendToRepeaters") { (member: String) async throws -> Double in
+      guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
+      return Double(try await node.inviteFriendToRepeaters(member: member))
+    }
+
+    // Owner only: let someone invite people to our roster, or stop them.
+    AsyncFunction("setRepeaterInviter") { (rosterId: String, member: String, inviter: Bool) async throws in
+      guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
+      try await node.setRepeaterInviter(rosterId: rosterId, member: member, inviter: inviter)
+    }
+
+    AsyncFunction("repeaterAutoInvite") { () async throws -> Bool in
+      guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
+      return try await node.repeaterAutoInvite()
+    }
+
+    AsyncFunction("setRepeaterAutoInvite") { (on: Bool) async throws in
+      guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
+      try await node.setRepeaterAutoInvite(on: on)
+    }
+
+    // What device.health reports about repeaters. A local read.
+    AsyncFunction("repeaterHealth") { () async throws -> [String: Any] in
+      guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
+      let h = try await node.repeaterHealth()
+      return [
+        "enrolled": Double(h.enrolled), "carriers": Double(h.carriers),
+        "lastContactAgeMs": h.lastContactAgeMs.map { Double($0) as Any } ?? NSNull(),
+      ]
+    }
+
+    // Have a roster carry our trail, or stop. Resolves whether it carries us now.
+    AsyncFunction("setRepeaterCarried") { (rosterId: String, carry: Bool) async throws -> Bool in
+      guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
+      return try await node.setRepeaterCarried(rosterId: rosterId, carry: carry)
+    }
+
+    // Owner only: who may enroll in our roster from now on. Never drops anyone already carried.
+    AsyncFunction("setRepeaterPolicy") { (rosterId: String, open: Bool) async throws in
+      guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
+      try await node.setRepeaterPolicy(rosterId: rosterId, open: open)
+    }
+
+    // Owner only: stop carrying a member's trail. Sticky until someone invites them again.
+    AsyncFunction("removeRepeaterMember") { (rosterId: String, member: String) async throws in
+      guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
+      try await node.removeRepeaterMember(rosterId: rosterId, member: member)
+    }
+
+    // Owner only: take a machine out of our roster.
+    AsyncFunction("removeRepeater") { (rosterId: String, repeaterId: String) async throws in
+      guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
+      try await node.removeRepeater(rosterId: rosterId, repeaterId: repeaterId)
+    }
+
+    // Pick up names this phone's own machines were given at their consoles. Dials each machine:
+    // only for Settings → Repeaters, never a background wake. Resolves how many were re-listed.
+    AsyncFunction("refreshRepeaterNames") { () async throws -> Double in
+      guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
+      return Double(try await node.refreshRepeaterNames())
+    }
+
+    // Ask every repeater that carries us to carry our namespaces now. Resolves at once; the dials
+    // run on a native task and report as a `repeater.grant` span.
+    AsyncFunction("grantRepeaters") { () async throws in
+      guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
+      await node.grantRepeatersNow()
+    }
+
     Function("configureTelemetry") { (endpoint: String, instanceId: String) -> Bool in
       TelemetryConfigurator.apply(endpoint: endpoint, instanceId: instanceId, remember: true)
     }

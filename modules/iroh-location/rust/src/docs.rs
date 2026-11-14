@@ -263,6 +263,147 @@ pub fn encode_rsy_key(author: &[u8]) -> Vec<u8> {
     key
 }
 
+/// Decode a key produced by [`encode_rsy_key`] back into the author bytes.
+///
+/// Only [`TrailDocs::stranded_slots`] needs it: a control record whose bytes never landed is a
+/// restart request (or prekey) the leader cannot read, which strands recovery exactly as a missing
+/// fix strands a dot.
+fn decode_rsy_key(key: &[u8]) -> Option<Vec<u8>> {
+    let pos = key.iter().position(|&b| b == KEY_SEP)?;
+    if &key[..pos] != RSY_TAG.as_bytes() {
+        return None;
+    }
+    let author_hex = std::str::from_utf8(&key[pos + 1..]).ok()?;
+    hex_decode(author_hex)
+}
+
+/// The envelope author a friend-lane slot key names (`fix`, `nul` or `rsy`), or `None` for any
+/// other key. The three lanes whose bytes a reader needs; see [`TrailDocs::stranded_slots`].
+fn decode_lane_author(key: &[u8]) -> Option<[u8; 32]> {
+    let author = decode_key(key)
+        .or_else(|| decode_nul_key(key))
+        .or_else(|| decode_rsy_key(key))?;
+    <[u8; 32]>::try_from(author.as_slice()).ok()
+}
+
+/// How long one attempt to fetch a stranded slot's bytes may take when the caller sets no tighter
+/// deadline. The stash's own settle loop uses the same figure (`FETCH_TIMEOUT_SECS`).
+#[cfg(not(target_arch = "wasm32"))]
+const STRANDED_FETCH_TIMEOUT_SECS: u64 = 20;
+
+/// A friend's slot whose newest entry is in the replica while the bytes it names are not.
+///
+/// The state a reader is left in when it reconciles an entry from a peer that does not hold the
+/// content yet — in practice the stash, which receives the record by reconciliation and the bytes
+/// moments later (the writer's HTTP upload, or its own settle loop). iroh-docs gives the reader's
+/// downloader one attempt, against the peer that delivered the record, and then waits for a gossip
+/// `ContentReady` that content landing on the stash out-of-band never produces. Until 2026-11-12
+/// nothing else asked again, and [`TrailDocs::read_latest_sealed`] skips such a slot without a
+/// word, so the friend simply stopped updating: see [`TrailDocs::settle_stranded`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StrandedSlot {
+    pub namespace: [u8; 32],
+    /// The envelope author the slot key names — an `EndpointId`, so also a place to ask.
+    pub author: [u8; 32],
+    pub hash: Hash,
+    /// The entry's record timestamp (iroh-docs microseconds), for the age on the telemetry.
+    pub written_us: u64,
+}
+
+/// What one [`TrailDocs::settle_stranded`] pass found and fixed.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SettleReport {
+    /// Friend slots whose newest entry had no local bytes when the pass began.
+    pub stranded: usize,
+    /// Of those, the ones whose bytes this pass fetched.
+    pub fetched: usize,
+    /// Authors that became readable, each once — what the replica observer was told.
+    pub readable: Vec<[u8; 32]>,
+}
+
+/// Who to ask for one stranded slot's bytes, most likely first, each once, never ourselves.
+///
+/// The pass's dialled peers come first because the stash is among them and it is the one peer
+/// that holds every friend's bytes and is always up. The namespace's own extra sources are next —
+/// the repeaters carrying that friend, which hold their namespaces for exactly the hours the
+/// friend's phone is away. Then the author (the key is its `EndpointId`, so no address book is
+/// needed), then whoever last served that author's entry to us. Asking only the author would
+/// strand exactly the friend whose phone is asleep — the case the stash and the repeaters exist
+/// for. Pure, so the order and the self-exclusion are testable.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn stranded_sources(
+    dialled: &[iroh::EndpointId],
+    namespace_sources: &[iroh::EndpointId],
+    author: Option<[u8; 32]>,
+    served_by: Option<[u8; 32]>,
+    own: iroh::EndpointId,
+) -> Vec<iroh::EndpointId> {
+    let mut out: Vec<iroh::EndpointId> = Vec::new();
+    let candidates = dialled.iter().chain(namespace_sources).copied().chain(
+        [author, served_by]
+            .into_iter()
+            .flatten()
+            .filter_map(|bytes| iroh::EndpointId::from_bytes(&bytes).ok()),
+    );
+    for id in candidates {
+        if id != own && !out.contains(&id) {
+            out.push(id);
+        }
+    }
+    out
+}
+
+/// How long a settle pass may spend on each fetch: the caller's remaining deadline, capped at
+/// [`STRANDED_FETCH_TIMEOUT_SECS`]. Zero means "no time left; dial nobody".
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn stranded_wait(deadline: Option<Instant>) -> Duration {
+    let cap = Duration::from_secs(STRANDED_FETCH_TIMEOUT_SECS);
+    match deadline {
+        Some(deadline) => deadline.saturating_duration_since(Instant::now()).min(cap),
+        None => cap,
+    }
+}
+
+/// Download each `(hash, providers)` concurrently, each bounded by `wait`, and say per job
+/// whether the bytes are now complete in `blobs`.
+///
+/// Shared by the trail's and the profile's settle passes: both are the same missing-bytes state
+/// (iroh-docs gives a record's content one download attempt and never retries), only the slots
+/// differ. A download that reports done is checked against the store, since that is what a read
+/// will see.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) async fn fetch_stranded(
+    blobs: &BlobsStore,
+    endpoint: &iroh::Endpoint,
+    jobs: Vec<(Hash, Vec<iroh::EndpointId>)>,
+    wait: Duration,
+) -> Vec<Result<()>> {
+    let downloader = blobs.downloader(endpoint);
+    let attempts = jobs.into_iter().map(|(hash, providers)| {
+        let downloader = downloader.clone();
+        async move {
+            if providers.is_empty() {
+                return Err(anyhow!("no peer to ask"));
+            }
+            match timeout(
+                wait,
+                downloader.download(iroh_blobs::HashAndFormat::raw(hash), providers),
+            )
+            .await
+            {
+                Ok(Ok(())) if blobs.blobs().has(hash).await.unwrap_or(false) => Ok(()),
+                Ok(Ok(())) => Err(anyhow!(
+                    "download reported done but the bytes are not complete"
+                )),
+                Ok(Err(error)) => Err(anyhow!("{error}")),
+                Err(_) => Err(anyhow!("timed out after {} ms", wait.as_millis())),
+            }
+        }
+    });
+    join_all(attempts).await
+}
+
 /// Explicit-pruning selection: given `(key, entry_ts)` pairs, return the keys whose entry is
 /// **strictly older** than `older_than_ts` and should be pruned.
 pub fn keys_to_prune(entries: &[(Vec<u8>, u64)], older_than_ts: u64) -> Vec<Vec<u8>> {
@@ -409,7 +550,7 @@ struct ServingPeer {
 /// The peers a docs read ticket names, with each address's relays scrubbed to ones this node
 /// knows (a ticket's relay is history, not an address; see `relay::scrub_addr`). Empty for a
 /// ticket that does not parse.
-fn ticket_peers(ticket: &str) -> Vec<EndpointAddr> {
+pub(crate) fn ticket_peers(ticket: &str) -> Vec<EndpointAddr> {
     match ticket.parse::<iroh_docs::DocTicket>() {
         Ok(parsed) => parsed
             .nodes
@@ -748,6 +889,22 @@ impl TrailDocs {
     /// property of one slot — so they are counted and the last one is returned once the loop has
     /// still given every slot a chance. That keeps `trail.content.upload` reporting a genuine stash
     /// outage while no longer reporting a backlog of untracked slots as one.
+    /// The content hashes of the newest entry under every key of our own trail namespace: what a
+    /// repeater is asked about (`Have`) to confirm it holds what we just pushed.
+    pub async fn own_latest_hashes(&self) -> Result<Vec<[u8; 32]>> {
+        let doc = self.doc_for(self.own_ns).await?;
+        let stream = doc.get_many(Query::single_latest_per_key().build()).await?;
+        tokio::pin!(stream);
+        let mut hashes = Vec::new();
+        while let Some(entry) = stream.next().await {
+            let entry = entry?;
+            if entry.content_len() > 0 {
+                hashes.push(*entry.content_hash().as_bytes());
+            }
+        }
+        Ok(hashes)
+    }
+
     #[cfg(not(target_arch = "wasm32"))]
     pub async fn upload_own_latest(
         &self,
@@ -990,11 +1147,160 @@ impl TrailDocs {
                 }
                 match self.blobs.blobs().get_bytes(entry.content_hash()).await {
                     Ok(bytes) => out.push(bytes.to_vec()),
-                    Err(_) => continue, // content not yet available locally
+                    // Content not local. Not counted here — this runs on every read, and a read
+                    // never dials — but it is not left to chance either: every pull settles
+                    // these (`settle_stranded`) and reports them on `trail.sync`.
+                    Err(_) => continue,
                 }
             }
         }
         Ok(out)
+    }
+
+    /// Every friend slot (`fix`, `nul`, `rsy`) whose newest entry is here without its bytes.
+    ///
+    /// Friend namespaces only: we write our own, so its bytes are always local. Presence is asked
+    /// of the blob store directly (`has`), which reads no content.
+    pub async fn stranded_slots(&self) -> Result<Vec<StrandedSlot>> {
+        let mut out = Vec::new();
+        for ns in self.namespaces().await {
+            if ns == self.own_ns {
+                continue;
+            }
+            let doc = self.doc_for(ns).await?;
+            let stream = doc.get_many(Query::single_latest_per_key().build()).await?;
+            tokio::pin!(stream);
+            while let Some(entry) = stream.next().await {
+                let entry = entry?;
+                if entry.content_len() == 0 {
+                    continue; // a tombstone names no bytes
+                }
+                let Some(author) = decode_lane_author(entry.key()) else {
+                    continue;
+                };
+                if self.blobs.blobs().has(entry.content_hash()).await? {
+                    continue;
+                }
+                out.push(StrandedSlot {
+                    namespace: ns.to_bytes(),
+                    author,
+                    hash: entry.content_hash(),
+                    written_us: entry.timestamp(),
+                });
+            }
+        }
+        Ok(out)
+    }
+
+    /// Fetch the bytes of every [stranded](StrandedSlot) friend slot, and announce the authors
+    /// that became readable.
+    ///
+    /// The reader-side twin of the stash's settle loop (`repeater/server` `settle_once`), for the
+    /// same reason: the docs engine's downloader gets one attempt, against whichever peer handed
+    /// the record over, and never retries. On 2026-11-10 an iPhone that kept every friend
+    /// namespace live received a friend's entries from the stash in the moment between the record
+    /// arriving there and its bytes being uploaded. The attempt failed, and the bytes then landed
+    /// on the stash by HTTP, which emits no `ContentReady`. Every later entry raced the same way,
+    /// so for 31 hours that friend's dot froze on one phone while another opened all of it, and
+    /// nothing anywhere recorded a failure: `read_latest_sealed` skips a slot with no bytes, and
+    /// a skipped slot is never offered to the ratchet, so not even a miss was counted.
+    ///
+    /// Sources per slot, most likely first (see [`stranded_sources`]): `sources` (the peers this
+    /// pass dialled — the stash among them), `namespace_sources` for the slot's namespace (the
+    /// repeaters carrying that friend), the slot's author (its `EndpointId` is the key), and
+    /// whoever last served that author to us. Each fetch is bounded by `deadline` when there is
+    /// one and by [`STRANDED_FETCH_TIMEOUT_SECS`] regardless; a slot still stranded is simply
+    /// tried again on the next pull. Failures are expected (a sleeping author, a stash that has
+    /// not received the bytes either) and are reported, not raised.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn settle_stranded(
+        &self,
+        endpoint: &iroh::Endpoint,
+        sources: &[iroh::EndpointId],
+        namespace_sources: &HashMap<[u8; 32], Vec<iroh::EndpointId>>,
+        deadline: Option<Instant>,
+    ) -> Result<SettleReport> {
+        let stranded = self.stranded_slots().await?;
+        let mut report = SettleReport {
+            stranded: stranded.len(),
+            ..SettleReport::default()
+        };
+        if stranded.is_empty() {
+            return Ok(report);
+        }
+        let wait = stranded_wait(deadline);
+        let now_us = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_micros() as u64)
+            .unwrap_or(0);
+        if wait.is_zero() {
+            for slot in &stranded {
+                tracing::debug!(
+                    sc.author = %crate::telemetry::short_hex(&slot.author),
+                    sc.entry_hash = %crate::telemetry::short_hex(slot.hash.as_bytes()),
+                    age_ms = now_us.saturating_sub(slot.written_us) / 1000,
+                    "stranded friend slot left for the next pull: no time left in this one"
+                );
+            }
+            return Ok(report);
+        }
+
+        let mut served_by: HashMap<[u8; 32], [u8; 32]> = HashMap::new();
+        {
+            let peers = self.serving_peers.lock().await;
+            for slot in &stranded {
+                if let Some(peer) = peers.get(&slot.author) {
+                    served_by.insert(slot.author, peer.peer);
+                }
+            }
+        }
+        let own = endpoint.id();
+        let jobs = stranded
+            .iter()
+            .map(|slot| {
+                let providers = stranded_sources(
+                    sources,
+                    namespace_sources
+                        .get(&slot.namespace)
+                        .map(Vec::as_slice)
+                        .unwrap_or(&[]),
+                    Some(slot.author),
+                    served_by.get(&slot.author).copied(),
+                    own,
+                );
+                (slot.hash, providers)
+            })
+            .collect();
+        let outcomes = fetch_stranded(&self.blobs, endpoint, jobs, wait).await;
+        for (slot, outcome) in stranded.iter().zip(outcomes) {
+            match outcome {
+                Ok(()) => {
+                    report.fetched += 1;
+                    if !report.readable.contains(&slot.author) {
+                        report.readable.push(slot.author);
+                    }
+                    tracing::info!(
+                        sc.author = %crate::telemetry::short_hex(&slot.author),
+                        sc.entry_hash = %crate::telemetry::short_hex(slot.hash.as_bytes()),
+                        age_ms = now_us.saturating_sub(slot.written_us) / 1000,
+                        "fetched a stranded friend slot's bytes"
+                    );
+                }
+                Err(error) => {
+                    tracing::debug!(
+                        sc.author = %crate::telemetry::short_hex(&slot.author),
+                        sc.entry_hash = %crate::telemetry::short_hex(slot.hash.as_bytes()),
+                        age_ms = now_us.saturating_sub(slot.written_us) / 1000,
+                        %error,
+                        "stranded friend slot still without bytes; will retry next pull"
+                    );
+                }
+            }
+        }
+        if let (Some(observer), false) = (&self.observer, report.readable.is_empty()) {
+            observer.readable(report.readable.clone());
+        }
+        Ok(report)
     }
 
     /// Write a sealed **resync record** to `ns` under `rsy/hex(author)` (FORWARD-SECRECY §4.6).
@@ -1219,10 +1525,16 @@ impl TrailDocs {
     /// `budget` is a deadline, not a wait: the exchange ends as soon as every dialled peer has
     /// reported. With no peers the namespace is still handed to the live engine, and nothing is
     /// waited for.
+    ///
+    /// `unwaited` peers (our repeater carriers) are handed to the live engine with the rest but
+    /// never waited for: a laptop repeater asleep in a bag would otherwise cost every push the
+    /// whole deadline. They reconcile whenever they next wake, and a carrier that answers while
+    /// the others are awaited is still reported.
     pub async fn push(
         &self,
         ns: NamespaceId,
         peers: Vec<EndpointAddr>,
+        unwaited: Vec<EndpointAddr>,
         budget: Duration,
     ) -> Result<Option<PushReport>> {
         use tracing::Instrument;
@@ -1243,10 +1555,18 @@ impl TrailDocs {
 
         let mut report = PushReport::default();
         let dialled = peers.len();
-        doc.start_sync(peers)
+        let scheduled = unwaited.len();
+        let mut targets = peers;
+        for peer in unwaited {
+            if !pending.contains(peer.id.as_bytes()) && !targets.iter().any(|t| t.id == peer.id) {
+                targets.push(peer);
+            }
+        }
+        doc.start_sync(targets)
             .instrument(tracing::info_span!(
                 "trail.push.start_sync",
-                peers = dialled
+                peers = dialled,
+                unwaited = scheduled
             ))
             .await?;
         if dialled == 0 {
@@ -1467,6 +1787,20 @@ impl TrailDocs {
         Ok(ticket.to_string())
     }
 
+    /// Our own namespace's write key: what proves to a repeater that this trail is ours
+    /// (`streetcryptid_repeater::wire::sign_grant`). It never leaves the phone.
+    pub async fn own_namespace_secret(&self) -> Result<[u8; 32]> {
+        let doc = self.doc_for(self.own_ns).await?;
+        match doc
+            .share(ShareMode::Write, AddrInfoOptions::Id)
+            .await?
+            .capability
+        {
+            iroh_docs::Capability::Write(secret) => Ok(secret.to_bytes()),
+            iroh_docs::Capability::Read(_) => Err(anyhow!("our own trail is open read-only")),
+        }
+    }
+
     /// All namespaces we can read (own + imported friends).
     pub async fn namespaces(&self) -> Vec<NamespaceId> {
         self.handles
@@ -1489,7 +1823,10 @@ impl TrailDocs {
     /// The web replica's refresh; the mobile node goes through [`Self::sync_all_until`].
     #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
     pub async fn sync_all(&self, peers: Vec<EndpointAddr>) -> Result<Vec<([u8; 32], [u8; 32])>> {
-        Ok(self.sync_all_until(peers, None).await?.delivered)
+        Ok(self
+            .sync_all_until(peers, HashMap::new(), None)
+            .await?
+            .delivered)
     }
 
     /// [`Self::sync_all`], stopped at `deadline` when one is given, reporting how each namespace's
@@ -1498,9 +1835,13 @@ impl TrailDocs {
     /// The deadline exists for the background callers: one pass can wait 25 s for a first event
     /// and then 8 s per idle gap, which is the whole of an iOS background window. A pass cut short
     /// keeps everything that had already arrived.
+    ///
+    /// `extra_peers` adds targets for one namespace only: the repeaters carrying that friend's
+    /// trail (`repeater::pull_plan`). Never ours to push to, never asked about anyone else's.
     pub async fn sync_all_until(
         &self,
         peers: Vec<EndpointAddr>,
+        extra_peers: HashMap<[u8; 32], Vec<EndpointAddr>>,
         deadline: Option<Instant>,
     ) -> Result<SyncPass> {
         let namespaces = self.namespaces().await;
@@ -1511,7 +1852,7 @@ impl TrailDocs {
         // pocket. The namespaces are independent replicas reconciled against the same peer set —
         // there is no ordering between them — so the pass now costs ONE timeout, not N.
         let results = join_all(namespaces.iter().map(|ns| {
-            let peers = peers.clone();
+            let peers = namespace_peers(&peers, extra_peers.get(&ns.to_bytes()));
             async move { (*ns, self.sync_ns(*ns, peers, deadline).await) }
         }))
         .await;
@@ -1623,6 +1964,18 @@ fn timeout_end(saw_event: bool, deadline_bound: bool) -> SyncEnd {
     } else {
         SyncEnd::NoAnswer
     }
+}
+
+/// Add only this namespace's extra targets, keeping an explicit address when an id overlaps.
+fn namespace_peers(peers: &[EndpointAddr], extra: Option<&Vec<EndpointAddr>>) -> Vec<EndpointAddr> {
+    let mut result = peers.to_vec();
+    let mut ids: std::collections::HashSet<_> = peers.iter().map(|peer| peer.id).collect();
+    for peer in extra.into_iter().flatten() {
+        if ids.insert(peer.id) {
+            result.push(peer.clone());
+        }
+    }
+    result
 }
 
 #[cfg(test)]
@@ -2202,6 +2555,339 @@ pub(crate) mod tests {
         Arc::new(NamespaceBook::open(state_dir, ns_book::TRAIL_BOOK_FILE).unwrap())
     }
 
+    // ── repeaters: cards, unwaited carriers, pulling from a friend's carrier ─────────────────
+
+    async fn replication_peer() -> Result<(Endpoint, Docs, BlobsStore, iroh::protocol::Router)> {
+        use iroh::protocol::Router;
+        use iroh_blobs::store::mem::MemStore;
+        use iroh_blobs::BlobsProtocol;
+
+        let endpoint = Endpoint::builder(iroh::endpoint::presets::N0)
+            .relay_mode(RelayMode::Disabled)
+            .bind()
+            .await?;
+        let gossip = Gossip::builder().spawn(endpoint.clone());
+        let blobs = MemStore::new();
+        let docs = Docs::memory()
+            .spawn(endpoint.clone(), (*blobs).clone(), gossip.clone())
+            .await?;
+        let router = Router::builder(endpoint.clone())
+            .accept(iroh_gossip::ALPN, gossip)
+            .accept(iroh_docs::ALPN, docs.clone())
+            .accept(iroh_blobs::ALPN, BlobsProtocol::new(&blobs, None))
+            .spawn();
+        Ok((endpoint, docs, (*blobs).clone(), router))
+    }
+
+    #[tokio::test]
+    async fn reopened_friend_profile_schedules_card_sync_only_for_known_friends() -> Result<()> {
+        use crate::ns_book::PROFILE_BOOK_FILE;
+        use crate::profile::ProfileDocs;
+        use std::collections::{BTreeSet, HashMap};
+
+        let state = scratch_dir("profile-card-reader-state");
+        let writer_state = scratch_dir("profile-card-writer-state");
+        let (writer_endpoint, writer_docs, writer_blobs, writer_router) =
+            replication_peer().await?;
+        let (_reader_endpoint, reader_docs, reader_blobs, reader_router) =
+            replication_peer().await?;
+        let writer =
+            ProfileDocs::init(writer_docs, writer_blobs, writer_state.clone(), None).await?;
+        let ticket = writer.ticket().await?;
+        let namespace = crate::ns_book::ticket_namespace(&ticket)?;
+        let profile_book = Arc::new(NamespaceBook::open(&state, PROFILE_BOOK_FILE)?);
+        profile_book.add_friend(namespace, &ticket)?;
+        writer
+            .publish_key(crate::repeater::CARD_KEY, b"new card".to_vec())
+            .await?;
+
+        let reader =
+            ProfileDocs::init(reader_docs, reader_blobs, state.clone(), Some(profile_book)).await?;
+        reader
+            .sync_known_friends(&BTreeSet::new(), &HashMap::new())
+            .await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(reader
+            .read_key_everywhere(crate::repeater::CARD_KEY)
+            .await
+            .is_empty());
+
+        tokio::time::timeout(
+            Duration::from_secs(15),
+            reader.sync_known_friends(
+                &BTreeSet::from([*writer_endpoint.id().as_bytes()]),
+                &HashMap::new(),
+            ),
+        )
+        .await?;
+        assert!(reader
+            .read_key_everywhere(crate::repeater::CARD_KEY)
+            .await
+            .iter()
+            .any(|bytes| bytes == b"new card"));
+        reader_router.shutdown().await?;
+        writer_router.shutdown().await?;
+        let _ = std::fs::remove_dir_all(state);
+        let _ = std::fs::remove_dir_all(writer_state);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_sealed_card_opens_for_a_friend_in_the_keyring_only() -> Result<()> {
+        use crate::ns_book::PROFILE_BOOK_FILE;
+        use crate::profile::{ProfileDocs, Sealer};
+        use std::collections::{BTreeSet, HashMap};
+
+        let writer_state = scratch_dir("sealed-card-writer");
+        let friend_state = scratch_dir("sealed-card-friend");
+        let stranger_state = scratch_dir("sealed-card-stranger");
+        let (writer_endpoint, writer_docs, writer_blobs, writer_router) =
+            replication_peer().await?;
+        let (_friend_endpoint, friend_docs, friend_blobs, friend_router) =
+            replication_peer().await?;
+        let (_stranger_endpoint, stranger_docs, stranger_blobs, stranger_router) =
+            replication_peer().await?;
+        let (friend_secret, friend_pub) = crate::crypto::generate_recv_keypair();
+        let (stranger_secret, _) = crate::crypto::generate_recv_keypair();
+        let (writer_secret, _) = crate::crypto::generate_recv_keypair();
+
+        let writer = ProfileDocs::init(writer_docs, writer_blobs, writer_state.clone(), None)
+            .await?
+            .with_seal(Sealer::new([1; 32], writer_secret, writer_state.clone()));
+        writer
+            .publish_key(crate::repeater::CARD_KEY, b"new card".to_vec())
+            .await?;
+        assert!(writer.reseal(&[([2; 32], friend_pub)], 1).await?);
+        // What the writer holds is sealed: no clear copy under the card's own key.
+        assert!(writer
+            .read_key_everywhere(crate::repeater::CARD_KEY)
+            .await
+            .iter()
+            .any(|bytes| bytes == b"new card"));
+        let ticket = writer.ticket().await?;
+        let namespace = crate::ns_book::ticket_namespace(&ticket)?;
+
+        let writer_id = *writer_endpoint.id().as_bytes();
+        let reader = |docs: Docs, blobs: BlobsStore, state: PathBuf, secret: Vec<u8>| {
+            let ticket = ticket.clone();
+            async move {
+                let book = Arc::new(NamespaceBook::open(&state, PROFILE_BOOK_FILE)?);
+                book.add_friend(namespace, &ticket)?;
+                let docs = ProfileDocs::init(docs, blobs, state.clone(), Some(book))
+                    .await?
+                    .with_seal(Sealer::new([3; 32], secret, state));
+                tokio::time::timeout(
+                    Duration::from_secs(15),
+                    docs.sync_known_friends(&BTreeSet::from([writer_id]), &HashMap::new()),
+                )
+                .await?;
+                Ok::<_, anyhow::Error>(docs.read_key_everywhere(crate::repeater::CARD_KEY).await)
+            }
+        };
+        let friend_reads = reader(
+            friend_docs,
+            friend_blobs,
+            friend_state.clone(),
+            friend_secret,
+        )
+        .await?;
+        assert!(friend_reads.iter().any(|bytes| bytes == b"new card"));
+        let stranger_reads = reader(
+            stranger_docs,
+            stranger_blobs,
+            stranger_state.clone(),
+            stranger_secret,
+        )
+        .await?;
+        assert!(stranger_reads.is_empty());
+
+        for router in [writer_router, friend_router, stranger_router] {
+            router.shutdown().await?;
+        }
+        for dir in [writer_state, friend_state, stranger_state] {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn an_unwaited_carrier_is_scheduled_without_holding_the_push() -> Result<()> {
+        let dir = scratch_dir("unwaited-carrier");
+        let (writer_endpoint, writer_docs, writer_blobs, writer_router) =
+            replication_peer().await?;
+        let (reader_endpoint, reader_docs, reader_blobs, reader_router) =
+            replication_peer().await?;
+        let writer = TrailDocs::init(writer_docs, writer_blobs, dir.clone(), None, None).await?;
+        let ns = writer.own_namespace();
+        let writer_doc = writer.doc_for(ns).await?;
+        let key = encode_key(writer_endpoint.id().as_bytes());
+        writer_doc
+            .set_bytes(writer.author, key.clone(), b"sealed fix".to_vec())
+            .await?;
+        let ticket: iroh_docs::DocTicket = writer.read_ticket(ns).await?.parse()?;
+        let reader_doc = reader_docs.import_namespace(ticket.capability).await?;
+        reader_doc.start_sync(Vec::new()).await?;
+
+        // Nothing is waited for, so the push returns at once with nothing reported...
+        let report = tokio::time::timeout(
+            Duration::from_secs(3),
+            writer.push(
+                ns,
+                Vec::new(),
+                vec![reader_endpoint.addr()],
+                Duration::from_secs(30),
+            ),
+        )
+        .await??
+        .expect("a push with only unwaited carriers still reports");
+        assert!(report.per_peer.is_empty());
+
+        // ...and the carrier still receives the entry and its bytes.
+        tokio::time::timeout(Duration::from_secs(15), async {
+            loop {
+                if let Some(entry) = reader_doc
+                    .get_one(Query::single_latest_per_key().key_exact(&key).build())
+                    .await?
+                {
+                    if reader_blobs
+                        .blobs()
+                        .get_bytes(entry.content_hash())
+                        .await
+                        .is_ok_and(|bytes| bytes.as_ref() == b"sealed fix")
+                    {
+                        return Ok::<(), anyhow::Error>(());
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await??;
+        writer_router.shutdown().await?;
+        reader_router.shutdown().await?;
+        let _ = std::fs::remove_dir_all(dir);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_friend_pulls_its_namespace_from_a_carrier_after_the_writer_goes_offline(
+    ) -> Result<()> {
+        let writer_dir = scratch_dir("carrier-writer");
+        let reader_dir = scratch_dir("carrier-reader");
+        let state_dir = scratch_dir("carrier-state");
+        let (writer_endpoint, writer_docs, writer_blobs, writer_router) =
+            replication_peer().await?;
+        let (carrier_endpoint, carrier_docs, carrier_blobs, carrier_router) =
+            replication_peer().await?;
+        let (reader_endpoint, reader_docs, reader_blobs, reader_router) =
+            replication_peer().await?;
+
+        let writer =
+            TrailDocs::init(writer_docs, writer_blobs, writer_dir.clone(), None, None).await?;
+        let ns = writer.own_namespace();
+        let key = encode_key(writer_endpoint.id().as_bytes());
+        writer
+            .doc_for(ns)
+            .await?
+            .set_bytes(writer.author, key.clone(), b"sealed friend fix".to_vec())
+            .await?;
+        let ticket = writer.read_ticket(ns).await?;
+        let parsed: iroh_docs::DocTicket = ticket.parse()?;
+        let carrier_doc = carrier_docs.import_namespace(parsed.capability).await?;
+        carrier_doc.start_sync(Vec::new()).await?;
+        writer
+            .push(
+                ns,
+                Vec::new(),
+                vec![carrier_endpoint.addr()],
+                Duration::from_secs(30),
+            )
+            .await?;
+        tokio::time::timeout(Duration::from_secs(15), async {
+            loop {
+                if let Some(entry) = carrier_doc
+                    .get_one(Query::single_latest_per_key().key_exact(&key).build())
+                    .await?
+                {
+                    if carrier_blobs
+                        .blobs()
+                        .get_bytes(entry.content_hash())
+                        .await
+                        .is_ok()
+                    {
+                        return Ok::<(), anyhow::Error>(());
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await??;
+        writer_router.shutdown().await?;
+        writer_endpoint.close().await;
+
+        let reader = TrailDocs::init(
+            reader_docs,
+            reader_blobs.clone(),
+            reader_dir.clone(),
+            Some(book(&state_dir)),
+            None,
+        )
+        .await?;
+        reader.import_ticket(&ticket).await?;
+        let extras = HashMap::from([(ns.to_bytes(), vec![carrier_endpoint.addr()])]);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        reader
+            .sync_all_until(Vec::new(), extras, Some(deadline))
+            .await?;
+
+        let entry = reader
+            .doc_for(ns)
+            .await?
+            .get_one(Query::single_latest_per_key().key_exact(&key).build())
+            .await?
+            .expect("the carrier served the friend's fix");
+        assert_eq!(
+            reader_blobs
+                .blobs()
+                .get_bytes(entry.content_hash())
+                .await?
+                .as_ref(),
+            b"sealed friend fix"
+        );
+        assert!(
+            reader
+                .doc_for(reader.own_namespace())
+                .await?
+                .get_one(Query::single_latest_per_key().key_exact(&key).build())
+                .await?
+                .is_none(),
+            "a friend's carrier is not a target for our own namespace"
+        );
+        carrier_router.shutdown().await?;
+        reader_router.shutdown().await?;
+        carrier_endpoint.close().await;
+        reader_endpoint.close().await;
+        for dir in [writer_dir, reader_dir, state_dir] {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn extra_carriers_are_scoped_and_do_not_replace_explicit_addresses() {
+        let first = SecretKey::from_bytes(&[1; 32]).public();
+        let second = SecretKey::from_bytes(&[2; 32]).public();
+        let explicit = EndpointAddr::new(first);
+        let extra = vec![EndpointAddr::new(first), EndpointAddr::new(second)];
+        assert_eq!(
+            namespace_peers(&[explicit.clone()], None),
+            vec![explicit.clone()]
+        );
+        assert_eq!(
+            namespace_peers(&[explicit.clone()], Some(&extra)),
+            vec![explicit, EndpointAddr::new(second)]
+        );
+    }
+
     #[tokio::test]
     async fn own_namespace_survives_a_wiped_replica() {
         let state = scratch_dir("book-wipe-state");
@@ -2679,6 +3365,234 @@ pub(crate) mod tests {
         for dir in [a_dir, b_dir] {
             let _ = std::fs::remove_dir_all(&dir);
         }
+    }
+
+    /// The 2026-11-10 incident, end to end. A reader reconciles a friend's record from a peer
+    /// that does not hold the bytes yet — the stash, between the record reaching it and the
+    /// writer's upload — so the docs engine's single download attempt fails. The bytes then land
+    /// on that peer out-of-band (the stash's HTTP `PUT` imports straight into its blob store),
+    /// which sends no `ContentReady`. Nothing in iroh-docs asks again, so before `settle_stranded`
+    /// the reader never read that friend's slot. Two nodes reproduce it exactly: the author plays
+    /// the stash, writing a record whose bytes it does not have and adding them afterwards.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_slot_reconciled_before_its_bytes_is_fetched_once_they_land() {
+        let a_dir = scratch_dir("stranded-author");
+        let r_dir = scratch_dir("stranded-reader");
+        let author_node = live_replica(&a_dir, None, None).await;
+        let seen = Arc::new(Seen::default());
+        let reader = live_replica(&r_dir, None, Some(seen.clone())).await;
+        let ns = author_node.td.own_namespace();
+
+        // The record, without its bytes: what the stash holds before an upload lands.
+        let sealed = b"sealed: the fix that raced its own upload".to_vec();
+        let hash = Hash::new(&sealed);
+        let doc = author_node.td.doc_for(ns).await.unwrap();
+        doc.set_hash(
+            author_node.td.author,
+            encode_key(&MAYA),
+            hash,
+            sealed.len() as u64,
+        )
+        .await
+        .unwrap();
+
+        let ticket = author_node.td.read_ticket(ns).await.unwrap();
+        reader.td.import_ticket(&ticket).await.unwrap();
+        for _ in 0..600 {
+            if !reader.td.stranded_slots().await.unwrap().is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        let stranded = reader.td.stranded_slots().await.unwrap();
+        assert_eq!(stranded.len(), 1, "the record arrives without its bytes");
+        assert_eq!(stranded[0].author, MAYA);
+        assert_eq!(stranded[0].hash, hash);
+
+        // The bytes land on the serving peer out-of-band, as the stash's HTTP upload does.
+        author_node
+            .td
+            .blobs
+            .add_bytes(sealed.clone())
+            .await
+            .expect("add the uploaded bytes");
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        assert!(
+            reader.td.read_latest_sealed().await.unwrap().is_empty(),
+            "nothing in iroh-docs retries the download: this is the stranded state"
+        );
+        assert_eq!(seen.times_readable(MAYA), 0, "and the app was never told");
+
+        // A pull's settle step asks the peers it dialled and the namespace's own sources. The
+        // serving peer is offered only as the latter here — the role a repeater carrying that
+        // friend plays — so this also proves a namespace source alone is enough.
+        let by_namespace = HashMap::from([(ns.to_bytes(), vec![author_node.endpoint.id()])]);
+        let report = reader
+            .td
+            .settle_stranded(&reader.endpoint, &[], &by_namespace, None)
+            .await
+            .unwrap();
+        assert_eq!(report.stranded, 1);
+        assert_eq!(report.fetched, 1);
+        assert_eq!(report.readable, vec![MAYA]);
+        assert_eq!(
+            reader.td.read_latest_sealed().await.unwrap(),
+            vec![sealed],
+            "the friend's slot reads again"
+        );
+        assert_eq!(seen.times_readable(MAYA), 1, "the app is told once");
+        assert!(reader.td.stranded_slots().await.unwrap().is_empty());
+
+        // Nothing stranded is a cheap no-op, and says so.
+        let again = reader
+            .td
+            .settle_stranded(
+                &reader.endpoint,
+                &[author_node.endpoint.id()],
+                &HashMap::new(),
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(again, SettleReport::default());
+        assert_eq!(seen.times_readable(MAYA), 1);
+
+        for dir in [a_dir, r_dir] {
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    /// A slot whose bytes nobody has yet stays stranded and is reported, not raised — and a pass
+    /// that has no time left does not dial at all.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_slot_nobody_can_serve_stays_stranded_without_failing_the_pass() {
+        let a_dir = scratch_dir("unservable-author");
+        let r_dir = scratch_dir("unservable-reader");
+        let author_node = live_replica(&a_dir, None, None).await;
+        let reader = live_replica(&r_dir, None, None).await;
+        let ns = author_node.td.own_namespace();
+        let sealed = b"sealed: bytes nobody holds".to_vec();
+        let doc = author_node.td.doc_for(ns).await.unwrap();
+        doc.set_hash(
+            author_node.td.author,
+            encode_nul_key(&JUNE),
+            Hash::new(&sealed),
+            sealed.len() as u64,
+        )
+        .await
+        .unwrap();
+        reader
+            .td
+            .import_ticket(&author_node.td.read_ticket(ns).await.unwrap())
+            .await
+            .unwrap();
+        for _ in 0..600 {
+            if !reader.td.stranded_slots().await.unwrap().is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let report = reader
+            .td
+            .settle_stranded(
+                &reader.endpoint,
+                &[author_node.endpoint.id()],
+                &HashMap::new(),
+                Some(deadline),
+            )
+            .await
+            .unwrap();
+        assert_eq!(report.stranded, 1, "the null lane counts too");
+        assert_eq!(report.fetched, 0);
+        assert!(report.readable.is_empty());
+
+        let spent = reader
+            .td
+            .settle_stranded(
+                &reader.endpoint,
+                &[author_node.endpoint.id()],
+                &HashMap::new(),
+                Some(Instant::now()),
+            )
+            .await
+            .unwrap();
+        assert_eq!((spent.stranded, spent.fetched), (1, 0));
+
+        for dir in [a_dir, r_dir] {
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    #[test]
+    fn stranded_sources_ask_the_dialled_peers_first_then_the_author_never_ourselves() {
+        let stash = SecretKey::generate().public();
+        let own = SecretKey::generate().public();
+        let author = SecretKey::generate().public();
+        let relay = SecretKey::generate().public();
+        let repeater = SecretKey::generate().public();
+
+        assert_eq!(
+            stranded_sources(
+                &[stash, own],
+                &[],
+                Some(*author.as_bytes()),
+                Some(*relay.as_bytes()),
+                own
+            ),
+            vec![stash, author, relay],
+        );
+        // The repeaters carrying that friend come before the friend's own (likely asleep) phone,
+        // and a repeater that is also a dialled peer is asked once.
+        assert_eq!(
+            stranded_sources(
+                &[stash],
+                &[repeater, stash, own],
+                Some(*author.as_bytes()),
+                None,
+                own
+            ),
+            vec![stash, repeater, author],
+        );
+        // The stash that served the record is also a dialled peer: asked once.
+        assert_eq!(
+            stranded_sources(
+                &[stash],
+                &[],
+                Some(*author.as_bytes()),
+                Some(*stash.as_bytes()),
+                own
+            ),
+            vec![stash, author],
+        );
+        // A profile slot names no author: only the other sources are asked.
+        assert_eq!(
+            stranded_sources(&[stash], &[repeater], None, None, own),
+            vec![stash, repeater],
+        );
+        // An author key that is not a valid endpoint id is simply not a source.
+        let mut not_a_point = [0u8; 32];
+        for candidate in 0u8..=255 {
+            not_a_point = [candidate; 32];
+            if iroh::EndpointId::from_bytes(&not_a_point).is_err() {
+                break;
+            }
+        }
+        assert_eq!(
+            stranded_sources(&[], &[], Some(not_a_point), None, own),
+            Vec::new()
+        );
+    }
+
+    #[test]
+    fn every_friend_lane_names_its_author_and_nothing_else_does() {
+        assert_eq!(decode_lane_author(&encode_key(&MAYA)), Some(MAYA));
+        assert_eq!(decode_lane_author(&encode_nul_key(&MAYA)), Some(MAYA));
+        assert_eq!(decode_lane_author(&encode_rsy_key(&MAYA)), Some(MAYA));
+        assert_eq!(decode_lane_author(b"ctl/0202"), None);
+        assert_eq!(decode_lane_author(b"rsy/not-hex"), None);
+        assert_eq!(decode_lane_author(b"no-separator"), None);
     }
 
     /// `leave` alone already stops the namespace syncing; the watch is aborted as well so an entry

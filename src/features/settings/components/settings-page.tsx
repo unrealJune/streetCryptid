@@ -93,7 +93,9 @@ export function SettingsPage({
           accessibilityLabel={`Back to ${backLabel.toLowerCase()}`}
           accessibilityRole="button"
           hitSlop={8}
-          onPress={() => router.back()}
+          // A link can open a page with nothing under it (a repeater's QR code cold-launches
+          // straight into Settings → Repeaters), where `back()` is a silent no-op.
+          onPress={() => (router.canGoBack() ? router.back() : router.replace('/settings'))}
           style={({ pressed }) => [styles.back, { opacity: pressed ? 0.55 : 1 }]}
         >
           <SymbolView
@@ -121,7 +123,7 @@ export function SettingsPage({
             accessibilityLabel="Close settings"
             accessibilityRole="button"
             hitSlop={6}
-            onPress={() => router.back()}
+            onPress={() => (router.canGoBack() ? router.back() : router.replace('/'))}
             style={({ pressed }) => [
               styles.close,
               { borderColor: theme.backgroundSelected, opacity: pressed ? 0.55 : 1 },

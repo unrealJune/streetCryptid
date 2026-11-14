@@ -43,14 +43,19 @@ export const DEFAULT_DELIVERY_MODE: DeliveryMode = 'mutual';
 export const NEW_USER_DELIVERY_MODE: DeliveryMode = 'stash';
 
 /**
- * How long the stash holds a sealed envelope before dropping it.
+ * The longest the stash holds a sealed envelope before dropping it.
  *
- * MUST match the deployed trail-stash's own retention setting — this is a promise made in the
- * UI about someone else's data, and the countdown on the delivery diagram renders from it. It
- * lives here so the copy and the animation cannot drift apart, not because the client enforces
- * it: the client cannot. Changing the server means changing this.
+ * MUST match the deployed trail-stash's own retention setting (buttercup
+ * `apps/trail-stash/helmrelease.yaml`, `retentionHours: 48`) — this is a promise made in the UI
+ * about someone else's data, and the delivery diagram's countdown and Settings → Repeaters both
+ * render from it. It lives here so they cannot drift apart, not because the client enforces it:
+ * the client cannot. Changing the server means changing this. It said 30 minutes until
+ * 2026-11-08 while the stash kept 48 hours.
+ *
+ * It is the backstop, not the usual case: the stash keeps only each author's latest fix, so a
+ * newer one replaces the last long before the window ends (trail-stash `retention.rs`).
  */
-export const STASH_RETENTION_MS = 30 * 60 * 1000;
+export const STASH_RETENTION_MS = 48 * 60 * 60 * 1000;
 
 /** What the runtime can actually offer right now. Availability is not a preference. */
 export interface DeliveryAvailability {
@@ -62,8 +67,6 @@ export interface DeliveryModeCopy {
   readonly id: DeliveryMode;
   /** Sentence case, two to four words — the Shoreline rule for every headline and label. */
   readonly title: string;
-  /** Uppercase micro-label for the segmented control. */
-  readonly segment: string;
   readonly body: string;
   /** A second, quieter line. Present only where the mode has a real caveat to state. */
   readonly note: string | null;
@@ -85,14 +88,12 @@ export const DELIVERY_MODE_COPY: Readonly<Record<DeliveryMode, DeliveryModeCopy>
   mutual: {
     id: 'mutual',
     title: 'Mutual Friends',
-    segment: 'MUTUAL FRIENDS',
     body: mutualFriendRelayExplanation('unknown'),
     note: null,
   },
   stash: {
     id: 'stash',
     title: 'Mutuals + Stash Server',
-    segment: 'STASH',
     body: 'If your friends are offline and can’t receive your location updates, using stash will allow friends to catch up with your location updates when they come back online. Stash entries are encrypted and can only be read by your friends, and are auto deleted after a short period of time.',
     note: null,
   },

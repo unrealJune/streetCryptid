@@ -486,7 +486,7 @@ async fn desktop_multiple_writers_forward_to_multiple_readers_after_all_writers_
     for seed in 203..206 {
         let payload = vec![seed; 8192];
         let phone = Phone::spawn(seed, &payload).await?;
-        enrol_and_grant(&node, &mut roster, &phone, seed, vec![]).await?;
+        enroll_and_grant(&node, &mut roster, &phone, seed, vec![]).await?;
         tickets.push((phone.ticket.clone(), payload));
         phone.doc.start_sync(vec![node.endpoint_addr()]).await?;
         phones.push(phone);
@@ -857,7 +857,7 @@ async fn only_a_carried_member_can_have_their_own_namespace_carried() -> Result<
     let early = call(&phone.endpoint, node.endpoint_addr(), &grant).await?;
     assert_eq!(refused(&early), Some(&Refusal::NotCarried));
 
-    // Enrol (signed by the phone itself), on the heads the owner's card would name.
+    // Enroll (signed by the phone itself), on the heads the owner's card would name.
     let enroll = sign_onto(&mut roster, 93, Action::Enroll { invite: None });
     call(
         &phone.endpoint,
@@ -942,6 +942,264 @@ async fn only_a_carried_member_can_have_their_own_namespace_carried() -> Result<
 }
 
 #[tokio::test]
+async fn a_repeater_its_owner_removed_releases_itself_and_waits_for_a_new_claim() -> Result<()> {
+    let node = spawn_repeater(&scratch("removed"), 121).await?;
+    let (owner, mut roster) = claim(&node, 122, None, Policy::Open).await?;
+    let repeater = node.repeater().expect("persistent").clone();
+    let repeater_id = *node.endpoint_addr().id.as_bytes();
+    let phone = Phone::spawn(123, b"sealed-envelope-on-a-removed-repeater").await?;
+    enroll_and_grant(&node, &mut roster, &phone, 123, vec![]).await?;
+    let namespace = ticket_namespace(&phone.ticket)?;
+    assert!(node.handle(namespace).await.is_some());
+    assert!(!repeater.is_removed());
+
+    // The owner removes the machine. The member is still carried by the roster, but not here.
+    let cert_op = roster
+        .export()
+        .into_iter()
+        .find(|op| {
+            matches!(
+                op.verify().map(|b| b.action),
+                Ok(Action::AddRepeater { .. })
+            )
+        })
+        .expect("listed");
+    let Ok(Action::AddRepeater { cert }) = cert_op.verify().map(|b| b.action) else {
+        unreachable!()
+    };
+    let remove = sign_onto(
+        &mut roster,
+        122,
+        Action::RemoveRepeater {
+            repeater: repeater_id,
+        },
+    );
+    call(
+        &owner,
+        node.endpoint_addr(),
+        &Request::Publish { ops: vec![remove] },
+    )
+    .await?;
+    // It released itself: belongs to nobody, carries nothing, and shows a new claim code.
+    assert!(!repeater.is_claimed());
+    assert!(!repeater.is_removed());
+    assert!(repeater.claim_secret().is_some());
+    assert!(node.handle(namespace).await.is_none(), "still carried");
+    assert!(repeater.siblings().is_empty());
+    let grant = Request::Grant {
+        ticket: phone.ticket.clone(),
+        proof: sign_grant(
+            &phone.ns_secret,
+            &repeater_id,
+            phone.endpoint.id().as_bytes(),
+        ),
+        carriers: vec![],
+    };
+    // Unclaimed now, so it refuses as a machine that belongs to nobody, not as one carrying others.
+    let refused_grant = call(&phone.endpoint, node.endpoint_addr(), &grant).await?;
+    assert_eq!(refused(&refused_grant), Some(&Refusal::NotClaimed));
+
+    // Listing it again is not enough: it is unclaimed, so a re-add is refused as `NotClaimed`
+    // (which the owner's phone counts as delivered for a machine it removed). A new claim, with
+    // the new code, is how it comes back.
+    let readd = sign_onto(&mut roster, 122, Action::AddRepeater { cert });
+    let answer = call(
+        &owner,
+        node.endpoint_addr(),
+        &Request::Publish { ops: vec![readd] },
+    )
+    .await?;
+    assert_eq!(refused(&answer), Some(&Refusal::NotClaimed));
+    assert!(!repeater.is_claimed());
+
+    phone.vanish().await;
+    node.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_machine_signs_its_name_into_every_cert_and_a_repeated_claim_carries_a_rename(
+) -> Result<()> {
+    let node = spawn_repeater(&scratch("named"), 151).await?;
+    let repeater = node.repeater().expect("persistent").clone();
+    repeater.set_name(Some("  Attic   Pi "));
+    assert_eq!(repeater.name().as_deref(), Some("Attic Pi"));
+    let owner = bare_endpoint(152).await?;
+    let ops = vec![genesis(152, Policy::Open)];
+    let secret = repeater.claim_secret().expect("unclaimed");
+    let first = call(
+        &owner,
+        node.endpoint_addr(),
+        &Request::Claim {
+            secret,
+            ops: ops.clone(),
+        },
+    )
+    .await?;
+    let Response::Claimed { cert } = first else {
+        return Err(anyhow!("claim refused: {first:?}"));
+    };
+    assert_eq!(cert.verify()?.name.as_deref(), Some("Attic Pi"));
+
+    // Renamed at the console: the owner's phone asks again, with no secret (it is spent, and
+    // the phone sends zeros), and gets a cert with the new name to list.
+    repeater.set_name(Some("Hall closet"));
+    let again = call(
+        &owner,
+        node.endpoint_addr(),
+        &Request::Claim {
+            secret: [0; 32],
+            ops: ops.clone(),
+        },
+    )
+    .await?;
+    let Response::Claimed { cert } = again else {
+        return Err(anyhow!("repeated claim refused: {again:?}"));
+    };
+    assert_eq!(cert.verify()?.name.as_deref(), Some("Hall closet"));
+
+    // A name that would not show is no name at all.
+    repeater.set_name(Some(&"x".repeat(41)));
+    assert_eq!(repeater.name(), None);
+
+    node.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_owner_whose_claim_reply_was_lost_claims_again_and_a_release_frees_the_machine(
+) -> Result<()> {
+    let dir = scratch("reclaim");
+    let node = spawn_repeater(&dir, 131).await?;
+    let repeater = node.repeater().expect("persistent").clone();
+    let owner = bare_endpoint(132).await?;
+    let ops = vec![genesis(132, Policy::Open)];
+    let secret = repeater.claim_secret().expect("unclaimed");
+    let first = call(
+        &owner,
+        node.endpoint_addr(),
+        &Request::Claim {
+            secret,
+            ops: ops.clone(),
+        },
+    )
+    .await?;
+    assert!(matches!(first, Response::Claimed { .. }), "{first:?}");
+
+    // Pretend that reply never arrived: the owner tries again, with a spent secret.
+    let again = call(
+        &owner,
+        node.endpoint_addr(),
+        &Request::Claim {
+            secret,
+            ops: ops.clone(),
+        },
+    )
+    .await?;
+    let Response::Claimed { cert } = again else {
+        return Err(anyhow!("the owner's repeated claim was refused: {again:?}"));
+    };
+    assert_eq!(cert.verify()?.roster, ops[0].id());
+    // Anyone else, or the owner with a different roster, is still refused.
+    let other = bare_endpoint(133).await?;
+    let stolen = call(
+        &other,
+        node.endpoint_addr(),
+        &Request::Claim {
+            secret,
+            ops: ops.clone(),
+        },
+    )
+    .await?;
+    assert_eq!(refused(&stolen), Some(&Refusal::AlreadyClaimed));
+    let second_roster = call(
+        &owner,
+        node.endpoint_addr(),
+        &Request::Claim {
+            secret,
+            ops: vec![SignedOp::sign(
+                &signer(132),
+                &OpBody {
+                    roster: None,
+                    parents: vec![],
+                    ts_ms: now_ms(),
+                    action: Action::Genesis {
+                        owner: id_of(132),
+                        policy: Policy::Open,
+                        nonce: [9; 16],
+                    },
+                },
+            )],
+        },
+    )
+    .await?;
+    assert_eq!(refused(&second_roster), Some(&Refusal::AlreadyClaimed));
+
+    // List it, carry a member, then release it from the console.
+    let mut roster = Roster::from_ops(ops)?;
+    let add = sign_onto(&mut roster, 132, Action::AddRepeater { cert });
+    call(
+        &owner,
+        node.endpoint_addr(),
+        &Request::Publish { ops: vec![add] },
+    )
+    .await?;
+    let phone = Phone::spawn(134, b"sealed-envelope-on-a-released-repeater").await?;
+    enroll_and_grant(&node, &mut roster, &phone, 134, vec![]).await?;
+    let namespace = ticket_namespace(&phone.ticket)?;
+    assert!(node.handle(namespace).await.is_some());
+
+    assert!(repeater.release().await?);
+    assert!(!repeater.is_claimed());
+    assert!(node.handle(namespace).await.is_none(), "still carried");
+    assert!(
+        repeater.claim_secret().is_some(),
+        "a released repeater offers a claim"
+    );
+    // And it stays released across a restart.
+    phone.vanish().await;
+    node.shutdown().await;
+    drop(node);
+    drop(repeater);
+    let node = reopen_repeater(&dir, 131).await?;
+    assert!(!node.repeater().expect("persistent").is_claimed());
+    node.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_removed_member_can_read_its_removal() -> Result<()> {
+    let node = spawn_repeater(&scratch("removed-member"), 141).await?;
+    let (owner, mut roster) = claim(&node, 142, None, Policy::Open).await?;
+    let phone = bare_endpoint(143).await?;
+    let enroll = sign_onto(&mut roster, 143, Action::Enroll { invite: None });
+    call(
+        &phone,
+        node.endpoint_addr(),
+        &Request::Publish { ops: vec![enroll] },
+    )
+    .await?;
+    let remove = sign_onto(&mut roster, 142, Action::Remove { member: id_of(143) });
+    call(
+        &owner,
+        node.endpoint_addr(),
+        &Request::Publish { ops: vec![remove] },
+    )
+    .await?;
+    let Response::Roster { ops } = call(&phone, node.endpoint_addr(), &Request::Fetch).await?
+    else {
+        return Err(anyhow!("a removed member could not fetch"));
+    };
+    assert!(!Roster::from_ops(ops)?.is_carried(&id_of(143)));
+    // Someone who never signed anything still cannot.
+    let stranger = bare_endpoint(144).await?;
+    let refused_fetch = call(&stranger, node.endpoint_addr(), &Request::Fetch).await?;
+    assert_eq!(refused(&refused_fetch), Some(&Refusal::NotCarried));
+    node.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test]
 async fn sibling_repeaters_share_the_roster() -> Result<()> {
     let first = spawn_repeater(&scratch("roster-a"), 101).await?;
     let second = spawn_repeater(&scratch("roster-b"), 102).await?;
@@ -952,7 +1210,7 @@ async fn sibling_repeaters_share_the_roster() -> Result<()> {
     let ops = roster.export();
     call(&owner, first.endpoint_addr(), &Request::Publish { ops }).await?;
 
-    // A member enrols through the first repeater alone.
+    // A member enrolls through the first repeater alone.
     let member = bare_endpoint(104).await?;
     let enroll = sign_onto(&mut roster, 104, Action::Enroll { invite: None });
     call(
@@ -988,8 +1246,8 @@ async fn sibling_repeaters_share_the_roster() -> Result<()> {
     Ok(())
 }
 
-/// Enrol `phone` in `node`'s roster and have the node carry its namespace, naming `carriers`.
-async fn enrol_and_grant(
+/// Enroll `phone` in `node`'s roster and have the node carry its namespace, naming `carriers`.
+async fn enroll_and_grant(
     node: &StashNode,
     roster: &mut Roster,
     phone: &Phone,
@@ -1033,11 +1291,11 @@ async fn repeaters_in_different_rosters_converge_on_a_trail_they_both_carry() ->
         *b.endpoint_addr().id.as_bytes(),
     );
 
-    // One phone enrols in both, and names each repeater to the other as a co-carrier.
+    // One phone enrolls in both, and names each repeater to the other as a co-carrier.
     let payload = b"sealed-envelope-carried-across-rosters";
     let phone = Phone::spawn(115, payload).await?;
-    enrol_and_grant(&a, &mut roster_a, &phone, 115, vec![b_id]).await?;
-    enrol_and_grant(&b, &mut roster_b, &phone, 115, vec![a_id]).await?;
+    enroll_and_grant(&a, &mut roster_a, &phone, 115, vec![b_id]).await?;
+    enroll_and_grant(&b, &mut roster_b, &phone, 115, vec![a_id]).await?;
 
     // The phone reaches only the first, then is gone.
     phone.doc.start_sync(vec![a.endpoint_addr()]).await?;

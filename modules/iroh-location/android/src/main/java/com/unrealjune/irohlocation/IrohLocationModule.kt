@@ -1048,6 +1048,135 @@ class IrohLocationModule : Module() {
         n.grantStashNow()
       }
 
+    // ── Repeaters — see docs/social/REPEATERS.md ──────────────────────────────────────────
+
+    /// Claim the repeater whose console printed `link` into the roster this phone owns, and list
+    /// it there. Refused unless its signed cert names this phone, this roster and the machine that
+    /// answered (`repeater.rs`).
+    AsyncFunction("claimRepeater") Coroutine
+      { link: String, open: Boolean, carryMe: Boolean ->
+        val n = node ?: throw IllegalStateException("call createNode first")
+        val c = n.claimRepeater(link, open, carryMe)
+        mapOf("rosterId" to c.rosterId, "repeaterId" to c.repeaterId)
+      }
+
+    /// Every roster this phone knows, for Settings → Repeaters.
+    AsyncFunction("repeaterRosters") Coroutine
+      { ->
+        val n = node ?: throw IllegalStateException("call createNode first")
+        n.repeaterRosters().map { r ->
+          mapOf(
+            "rosterId" to r.rosterId,
+            "owner" to r.owner,
+            "mine" to r.mine,
+            "open" to r.open,
+            "carriesMe" to r.carriesMe,
+            "repeaters" to r.repeaters,
+            "repeaterNames" to r.repeaterNames,
+            "carried" to r.carried.toLong(),
+            "members" to r.members,
+            "vouchers" to r.vouchers,
+            "canEnroll" to r.canEnroll,
+            "inviters" to r.inviters,
+            "invited" to r.invited,
+            "canInvite" to r.canInvite,
+            "waiting" to r.waiting,
+          )
+        }
+      }
+
+    /// Invite someone to an invite-only roster we may invite to. Resolves whether a new invite
+    /// was signed; an invite carries nobody until they enroll.
+    AsyncFunction("inviteToRepeater") Coroutine
+      { rosterId: String, member: String ->
+        val n = node ?: throw IllegalStateException("call createNode first")
+        n.inviteToRepeater(rosterId, member)
+      }
+
+    /// Invite a new friend to every invite-only roster we may invite to (the pairing screen's
+    /// "also invite them"). Resolves how many invites were signed.
+    AsyncFunction("inviteFriendToRepeaters") Coroutine
+      { member: String ->
+        val n = node ?: throw IllegalStateException("call createNode first")
+        n.inviteFriendToRepeaters(member).toLong()
+      }
+
+    /// Owner only: let someone invite people to our roster, or stop them.
+    AsyncFunction("setRepeaterInviter") Coroutine
+      { rosterId: String, member: String, inviter: Boolean ->
+        val n = node ?: throw IllegalStateException("call createNode first")
+        n.setRepeaterInviter(rosterId, member, inviter)
+      }
+
+    AsyncFunction("repeaterAutoInvite") Coroutine
+      { ->
+        val n = node ?: throw IllegalStateException("call createNode first")
+        n.repeaterAutoInvite()
+      }
+
+    AsyncFunction("setRepeaterAutoInvite") Coroutine
+      { on: Boolean ->
+        val n = node ?: throw IllegalStateException("call createNode first")
+        n.setRepeaterAutoInvite(on)
+      }
+
+    /// What device.health reports about repeaters. A local read.
+    AsyncFunction("repeaterHealth") Coroutine
+      { ->
+        val n = node ?: throw IllegalStateException("call createNode first")
+        val h = n.repeaterHealth()
+        mapOf(
+          "enrolled" to h.enrolled.toLong(),
+          "carriers" to h.carriers.toLong(),
+          "lastContactAgeMs" to h.lastContactAgeMs?.toLong(),
+        )
+      }
+
+    /// Have a roster carry our trail, or stop. Resolves whether it carries us now.
+    AsyncFunction("setRepeaterCarried") Coroutine
+      { rosterId: String, carry: Boolean ->
+        val n = node ?: throw IllegalStateException("call createNode first")
+        n.setRepeaterCarried(rosterId, carry)
+      }
+
+    /// Owner only: who may enroll in our roster from now on. Never drops anyone already carried.
+    AsyncFunction("setRepeaterPolicy") Coroutine
+      { rosterId: String, open: Boolean ->
+        val n = node ?: throw IllegalStateException("call createNode first")
+        n.setRepeaterPolicy(rosterId, open)
+      }
+
+    /// Owner only: stop carrying a member's trail. Sticky until someone invites them again.
+    AsyncFunction("removeRepeaterMember") Coroutine
+      { rosterId: String, member: String ->
+        val n = node ?: throw IllegalStateException("call createNode first")
+        n.removeRepeaterMember(rosterId, member)
+      }
+
+    /// Owner only: take a machine out of our roster.
+    AsyncFunction("removeRepeater") Coroutine
+      { rosterId: String, repeaterId: String ->
+        val n = node ?: throw IllegalStateException("call createNode first")
+        n.removeRepeater(rosterId, repeaterId)
+      }
+
+    /// Pick up names this phone's own machines were given at their consoles. Dials each
+    /// machine: only for Settings → Repeaters, never a background wake. Resolves how many were
+    /// re-listed.
+    AsyncFunction("refreshRepeaterNames") Coroutine
+      { ->
+        val n = node ?: throw IllegalStateException("call createNode first")
+        n.refreshRepeaterNames().toLong()
+      }
+
+    /// Ask every repeater that carries us to carry our namespaces now. Resolves at once; the
+    /// dials run on a native task and report as a `repeater.grant` span.
+    AsyncFunction("grantRepeaters") Coroutine
+      { ->
+        val n = node ?: throw IllegalStateException("call createNode first")
+        n.grantRepeatersNow()
+      }
+
     // ── Profiles — see docs/social/ARCHITECTURE.md §3 ─────────────────────────────────────
 
     AsyncFunction("publishProfile") Coroutine

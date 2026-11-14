@@ -3,6 +3,9 @@ import { NativeModule, requireNativeModule } from 'expo-modules-core';
 import { requireIrohRelayRuntimeConfig } from './relay-config';
 import type {
   NativeIngestOutcome,
+  NativeRepeaterClaim,
+  NativeRepeaterHealth,
+  NativeRepeaterRoster,
   NativeTelemetryPush,
   IrohLocationEvents,
   IrohLocationApi,
@@ -356,6 +359,49 @@ export declare class IrohLocationNativeModule
    * where the JS HTTP grant is still the only one.
    */
   grantStash?(): Promise<void>;
+
+  // ── Repeaters (docs/social/REPEATERS.md). Optional: absent on binaries that predate them. ───
+  /**
+   * Claim the repeater whose console printed `link` (`streetcryptid-repeater:…`) into the roster
+   * this phone owns, creating it (`open` or invite-only) if there is none. `carryMe` also enrolls
+   * this phone. Rejects unless the repeater's signed cert names this phone, this roster and the
+   * machine that answered.
+   */
+  claimRepeater?(link: string, open: boolean, carryMe: boolean): Promise<NativeRepeaterClaim>;
+  /** Every roster this phone knows. */
+  repeaterRosters?(): Promise<NativeRepeaterRoster[]>;
+  /**
+   * Pick up names this phone's own machines were given at their consoles since they were listed.
+   * Dials each machine, so only for a screen someone is looking at. Resolves how many changed.
+   */
+  refreshRepeaterNames?(): Promise<number>;
+  /** Have a roster carry our trail, or stop. Resolves whether it carries us now. */
+  setRepeaterCarried?(rosterId: string, carry: boolean): Promise<boolean>;
+  /** Owner only: who may enroll from now on (`open`, or invite-only). Never retroactive. */
+  setRepeaterPolicy?(rosterId: string, open: boolean): Promise<void>;
+  /** Owner only: stop carrying `member`'s trail. Sticky until someone invites them again. */
+  removeRepeaterMember?(rosterId: string, member: string): Promise<void>;
+  /** Owner only: take a machine out of the roster. */
+  removeRepeater?(rosterId: string, repeaterId: string): Promise<void>;
+  /** Ask every repeater that carries us to carry our namespaces now. Resolves at once. */
+  grantRepeaters?(): Promise<void>;
+  /**
+   * Invite `member` to an invite-only roster this phone may invite to. Resolves whether a new
+   * invite was signed. An invite carries nobody until they enroll.
+   */
+  inviteToRepeater?(rosterId: string, member: string): Promise<boolean>;
+  /**
+   * Invite a new friend to every invite-only roster this phone may invite to and has not yet (the
+   * pairing screen's "also invite them"). Resolves how many invites were signed.
+   */
+  inviteFriendToRepeaters?(member: string): Promise<number>;
+  /** Owner only: let `member` invite people to the roster, or stop them. */
+  setRepeaterInviter?(rosterId: string, member: string, inviter: boolean): Promise<void>;
+  /** Whether new friends are invited, at pairing, to the rosters this phone may invite to. */
+  repeaterAutoInvite?(): Promise<boolean>;
+  setRepeaterAutoInvite?(on: boolean): Promise<void>;
+  /** What `device.health` reports about repeaters. A local read. */
+  repeaterHealth?(): Promise<NativeRepeaterHealth>;
 
   // Optional for compatibility with installed iOS binaries built before the telemetry API.
   configureTelemetry?(endpoint: string, instanceId: string): Promise<boolean>;

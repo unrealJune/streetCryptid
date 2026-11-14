@@ -14,6 +14,8 @@
                     <SolidColorBrush x:Key="CryptidInk" Color="#152633" />
                     <SolidColorBrush x:Key="CryptidLine" Color="#D6DEE4" />
                     <SolidColorBrush x:Key="CryptidSignal" Color="#28794F" />
+                    <SolidColorBrush x:Key="CryptidDanger" Color="#C42B1C" />
+                    <SolidColorBrush x:Key="CryptidDangerInk" Color="White" />
                 </ResourceDictionary>
                 <ResourceDictionary x:Key="Dark">
                     <SolidColorBrush x:Key="CryptidGround" Color="#0A1420" />
@@ -21,6 +23,8 @@
                     <SolidColorBrush x:Key="CryptidInk" Color="#DCEBF0" />
                     <SolidColorBrush x:Key="CryptidLine" Color="#263C49" />
                     <SolidColorBrush x:Key="CryptidSignal" Color="#6FD08A" />
+                    <SolidColorBrush x:Key="CryptidDanger" Color="#C42B1C" />
+                    <SolidColorBrush x:Key="CryptidDangerInk" Color="White" />
                 </ResourceDictionary>
                 <ResourceDictionary x:Key="HighContrast">
                     <SolidColorBrush x:Key="ToggleSwitchFillOn" Color="{ThemeResource SystemColorHighlightColor}" />
@@ -31,6 +35,8 @@
                     <SolidColorBrush x:Key="CryptidInk" Color="{ThemeResource SystemColorWindowTextColor}" />
                     <SolidColorBrush x:Key="CryptidLine" Color="{ThemeResource SystemColorWindowTextColor}" />
                     <SolidColorBrush x:Key="CryptidSignal" Color="{ThemeResource SystemColorHighlightColor}" />
+                    <SolidColorBrush x:Key="CryptidDanger" Color="{ThemeResource SystemColorHighlightColor}" />
+                    <SolidColorBrush x:Key="CryptidDangerInk" Color="{ThemeResource SystemColorHighlightTextColor}" />
                 </ResourceDictionary>
             </ResourceDictionary.ThemeDictionaries>
             <SolidColorBrush x:Key="ToggleSwitchFillOn" Color="#39875C" />
@@ -43,6 +49,12 @@
                 <Setter Property="BorderThickness" Value="1" />
                 <Setter Property="Padding" Value="20,10" />
                 <Setter Property="BorderBrush" Value="{ThemeResource CryptidInk}" />
+            </Style>
+            <!-- Hover and pressed come from the button's own resources (lightweight styling). -->
+            <Style x:Key="CryptidDangerButton" TargetType="Button" BasedOn="{StaticResource CryptidButton}">
+                <Setter Property="Background" Value="{ThemeResource CryptidDanger}" />
+                <Setter Property="BorderBrush" Value="{ThemeResource CryptidDanger}" />
+                <Setter Property="Foreground" Value="{ThemeResource CryptidDangerInk}" />
             </Style>
         </ResourceDictionary>
     </Application.Resources>

@@ -22,6 +22,12 @@ interface SettingsMenuRowProps {
   readonly value?: string | null;
   /** Tints the readout. Steel when omitted: a fact is not a signal. */
   readonly accent?: string;
+  /**
+   * Something behind this row is waiting on the person (a roster a friend offers): a count in the
+   * accent, before the chevron. Zero or absent shows nothing.
+   */
+  readonly badge?: number;
+  readonly badgeColor?: string;
 }
 
 /**
@@ -35,7 +41,15 @@ interface SettingsMenuRowProps {
  * Shaped to match {@link IdentityRow}, which was the first row in the app to behave this
  * way and is the reason the rest of Settings now does too.
  */
-export function SettingsMenuRow({ href, label, detail, value, accent }: SettingsMenuRowProps) {
+export function SettingsMenuRow({
+  href,
+  label,
+  detail,
+  value,
+  accent,
+  badge,
+  badgeColor,
+}: SettingsMenuRowProps) {
   const theme = useTheme();
   const router = useRouter();
 
@@ -44,7 +58,11 @@ export function SettingsMenuRow({ href, label, detail, value, accent }: Settings
       accessibilityHint={detail}
       accessibilityLabel={label}
       accessibilityRole="button"
-      accessibilityValue={value ? { text: value } : undefined}
+      accessibilityValue={
+        value || badge
+          ? { text: [value, badge ? `${badge} waiting` : null].filter(Boolean).join(', ') }
+          : undefined
+      }
       onPress={() => router.push(href)}
       style={({ pressed }) => [
         styles.row,
@@ -62,6 +80,13 @@ export function SettingsMenuRow({ href, label, detail, value, accent }: Settings
           </ThemedText>
         ) : null}
       </View>
+      {badge ? (
+        <View style={[styles.badge, { backgroundColor: badgeColor ?? theme.text }]}>
+          <ThemedText style={[styles.badgeLabel, { color: theme.background }]}>
+            {String(badge)}
+          </ThemedText>
+        </View>
+      ) : null}
       <SymbolView
         name={{ ios: 'chevron.right', android: 'chevron_right', web: 'chevron_right' }}
         size={13}
@@ -92,6 +117,20 @@ const styles = StyleSheet.create({
     // resolves weight separately and will synthesise a bold over an already-bold face.
     fontWeight: '700',
     lineHeight: 24,
+  },
+  badge: {
+    alignItems: 'center',
+    borderRadius: 9,
+    height: 18,
+    justifyContent: 'center',
+    minWidth: 18,
+    paddingHorizontal: 6,
+  },
+  badgeLabel: {
+    fontFamily: BrandFonts.data,
+    fontSize: 10,
+    fontWeight: '700',
+    lineHeight: 13,
   },
   value: {
     fontFamily: BrandFonts.data,

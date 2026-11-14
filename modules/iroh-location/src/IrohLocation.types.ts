@@ -4,6 +4,67 @@
  * sources). Keys cross the bridge as lowercase hex strings.
  */
 
+/** A repeater this phone just claimed, and the roster it joined. Lowercase hex ids. */
+export interface NativeRepeaterClaim {
+  rosterId: string;
+  repeaterId: string;
+}
+
+/** One roster this phone knows. Mirrors Rust's `RepeaterRoster`; ids are lowercase hex. */
+export interface NativeRepeaterRoster {
+  rosterId: string;
+  /** The owner's endpoint id: a phone, and so possibly a friend. */
+  owner: string;
+  /** This phone owns it. */
+  mine: boolean;
+  /** Anyone may enroll, rather than only whoever an inviter invited. */
+  open: boolean;
+  /** It carries this phone's own trail: the one opt-in there is. */
+  carriesMe: boolean;
+  /** Endpoint ids of the machines in it. */
+  repeaters: string[];
+  /**
+   * What each machine in `repeaters` is called, in the same order; `""` for one with no name.
+   * Optional: absent from binaries built before repeater names.
+   */
+  repeaterNames?: string[];
+  /** How many people's trails it carries. */
+  carried: number;
+  /**
+   * Whose trails it carries (endpoint ids). Optional: absent from binaries built before it, which
+   * report only the count.
+   */
+  members?: string[];
+  /**
+   * Friends whose repeater cards list this roster and who are in it (endpoint ids). Optional, as
+   * above: absent from binaries built before the cards.
+   */
+  vouchers?: string[];
+  /** Enrolling would be accepted, as far as this phone can tell: open, or an invite naming us. */
+  canEnroll?: boolean;
+  /** Who may invite people (endpoint ids), the owner included. Optional: newer binaries only. */
+  inviters?: string[];
+  /** Who holds a standing invite and is not carried yet (endpoint ids). Optional, as above. */
+  invited?: string[];
+  /** This phone may invite people: it owns the roster or holds `inviter` in it. */
+  canInvite?: boolean;
+  /**
+   * Carried by this phone's own copy, and no repeater has confirmed the enrollment yet; it goes
+   * out the next time one is reachable. Optional: newer binaries only.
+   */
+  waiting?: boolean;
+}
+
+/** What `device.health` reports about repeaters. Mirrors Rust's `RepeaterHealth`. */
+export interface NativeRepeaterHealth {
+  /** How many rosters carry this phone's trail. */
+  enrolled: number;
+  /** How many repeaters carry it, across those rosters. */
+  carriers: number;
+  /** Since this process last exchanged anything with a repeater; null if it has not. */
+  lastContactAgeMs: number | null;
+}
+
 /** What one {@link IrohLocationApi.pushTelemetryNow} did. Mirrors Rust's `TelemetryPush`. */
 export interface NativeTelemetryPush {
   /** An exporter is configured; `false` in a build without telemetry. */
@@ -924,6 +985,49 @@ export interface IrohLocationApi {
    * where the JS HTTP grant is still the only one.
    */
   grantStash?(): Promise<void>;
+
+  // ── Repeaters (docs/social/REPEATERS.md). Optional: absent on binaries that predate them. ───
+  /**
+   * Claim the repeater whose console printed `link` (`streetcryptid-repeater:…`) into the roster
+   * this phone owns, creating it (`open` or invite-only) if there is none. `carryMe` also enrolls
+   * this phone. Rejects unless the repeater's signed cert names this phone, this roster and the
+   * machine that answered.
+   */
+  claimRepeater?(link: string, open: boolean, carryMe: boolean): Promise<NativeRepeaterClaim>;
+  /** Every roster this phone knows. */
+  repeaterRosters?(): Promise<NativeRepeaterRoster[]>;
+  /**
+   * Pick up names this phone's own machines were given at their consoles since they were listed.
+   * Dials each machine, so only for a screen someone is looking at. Resolves how many changed.
+   */
+  refreshRepeaterNames?(): Promise<number>;
+  /** Have a roster carry our trail, or stop. Resolves whether it carries us now. */
+  setRepeaterCarried?(rosterId: string, carry: boolean): Promise<boolean>;
+  /** Owner only: who may enroll from now on (`open`, or invite-only). Never retroactive. */
+  setRepeaterPolicy?(rosterId: string, open: boolean): Promise<void>;
+  /** Owner only: stop carrying `member`'s trail. Sticky until someone invites them again. */
+  removeRepeaterMember?(rosterId: string, member: string): Promise<void>;
+  /** Owner only: take a machine out of the roster. */
+  removeRepeater?(rosterId: string, repeaterId: string): Promise<void>;
+  /** Ask every repeater that carries us to carry our namespaces now. Resolves at once. */
+  grantRepeaters?(): Promise<void>;
+  /**
+   * Invite `member` to an invite-only roster this phone may invite to. Resolves whether a new
+   * invite was signed. An invite carries nobody until they enroll.
+   */
+  inviteToRepeater?(rosterId: string, member: string): Promise<boolean>;
+  /**
+   * Invite a new friend to every invite-only roster this phone may invite to and has not yet (the
+   * pairing screen's "also invite them"). Resolves how many invites were signed.
+   */
+  inviteFriendToRepeaters?(member: string): Promise<number>;
+  /** Owner only: let `member` invite people to the roster, or stop them. */
+  setRepeaterInviter?(rosterId: string, member: string, inviter: boolean): Promise<void>;
+  /** Whether new friends are invited, at pairing, to the rosters this phone may invite to. */
+  repeaterAutoInvite?(): Promise<boolean>;
+  setRepeaterAutoInvite?(on: boolean): Promise<void>;
+  /** What `device.health` reports about repeaters. A local read. */
+  repeaterHealth?(): Promise<NativeRepeaterHealth>;
 
   // ── Developer telemetry (dev/preview builds; see src/features/dev/telemetry in the app) ─────
   /**

@@ -43,15 +43,15 @@
 //! * an op counts only if its signer held the needed role **in the op's own causal past**; an op
 //!   that does not is refused at insert, because its past can never change;
 //! * a **removal beats anything concurrent with it**: an invite concurrent with its inviter's
-//!   revocation does not stand, and an enrolment concurrent with (or followed by) a removal or a
+//!   revocation does not stand, and an enrollment concurrent with (or followed by) a removal or a
 //!   withdrawal ends; a revocation made *after* an invite stops later invites, not that one;
-//! * a `Remove` is sticky against re-enrolment, until an invitation made *after* it;
+//! * a `Remove` is sticky against re-enrollment, until an invitation made *after* it;
 //! * a `SetPolicy` applies to ops that have seen it, never retroactively; two concurrent ones
 //!   resolve to `Invite`, the stricter;
-//! * an **uninvited** enrolment concurrent with a `SetPolicy { Invite }` does not stand. Without
+//! * an **uninvited** enrollment concurrent with a `SetPolicy { Invite }` does not stand. Without
 //!   this, closing a roster closed nothing: anyone holding the genesis (which friends' cards
 //!   publish) could sign an `Enroll` on the open genesis alone, and its past would say "open".
-//!   An enrolment the owner had SEEN when closing is in that op's past, so it is not concurrent
+//!   An enrollment the owner had SEEN when closing is in that op's past, so it is not concurrent
 //!   and keeps standing — closing is still never retroactive.
 //!
 //! Pure: no iroh, no tokio. ed25519 is ed25519-dalek 2, the same as the app's core, so the phone
@@ -76,9 +76,26 @@ const CERT_CTX: &[u8] = b"streetcryptid/repeater/cert/v1";
 /// Domain separation for op ids.
 const OP_ID_CTX: &str = "streetcryptid repeater roster op id v1";
 
-/// The most ops one roster holds, pending included. A roster is a handful of people and a few
-/// machines; this bounds what a hostile member of an open roster can make every repeater store.
+/// The most accepted ops one roster holds. A roster is a handful of people and a few machines;
+/// this bounds what a hostile member of an open roster can make every repeater store.
+///
+/// The last [`OWNER_RESERVE`] of them are the owner's alone, so a roster that strangers have
+/// filled can still be closed and cleaned by the one person entitled to: a flood of valid
+/// `Enroll`s from throwaway keys in an `open` roster stops further enrollments, never the owner's
+/// `SetPolicy` or `Remove`. Ops held aside for a missing parent are bounded separately
+/// ([`MAX_PENDING`]) and never count here, because they cost their sender nothing to mint.
 pub const MAX_OPS: usize = 4096;
+/// The share of [`MAX_OPS`] only the owner's ops may use.
+pub const OWNER_RESERVE: usize = 512;
+/// The most accepted ops any one signer other than the owner may have in a roster. A member
+/// enrolls, withdraws and enrolls again a handful of times in a lifetime; an inviter invites
+/// people. Without it one key could spend the whole non-owner share by itself.
+pub const MAX_OPS_PER_SIGNER: usize = 128;
+/// The most ops held aside for a missing parent, per class (the owner's, and everyone else's).
+/// Pending ops are in memory only and are dropped on a restart; a full queue refuses a new one,
+/// which its sender offers again later. The owner's class cannot be filled by anyone else,
+/// because only the owner's key signs an op the owner's queue will hold.
+pub const MAX_PENDING: usize = 256;
 /// The largest signed op body accepted.
 pub const MAX_OP_BYTES: usize = 1024;
 /// The most parents one op may name.
@@ -101,18 +118,99 @@ pub enum Role {
 }
 
 /// What a repeater attests about itself when it is claimed. Signed by the repeater.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// Its bytes are the four fields postcard-encoded in order, then, **only when the repeater has a
+/// name**, `Option<String>` (`Some(name)`). An unnamed cert is therefore byte-identical to one
+/// from before names existed, and older readers, which decode with `postcard::from_bytes` and
+/// ignore what follows, read a named cert as the same four fields. The signature covers the raw
+/// bytes, so verification never depends on how a reader decodes them. Append any later field the
+/// same way: after this one, and only when present.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CertBody {
     pub roster: RosterId,
     pub owner: EndpointId,
     pub repeater: EndpointId,
     pub issued_ms: u64,
+    /// What the person at the machine called it ("Living room PC"), shown in the app wherever
+    /// the machine is. Set by the machine and signed by it, so neither its owner nor anyone
+    /// relaying the roster can put words in its mouth. At most [`MAX_REPEATER_NAME`] characters,
+    /// with no control characters ([`repeater_name`]).
+    pub name: Option<String>,
+}
+
+/// The longest repeater name, in characters.
+pub const MAX_REPEATER_NAME: usize = 40;
+
+/// A name as a repeater may carry it: trimmed, inner whitespace collapsed to single spaces,
+/// control characters refused, at most [`MAX_REPEATER_NAME`] characters. `None` for an empty
+/// or unusable name, which means "no name".
+pub fn repeater_name(text: &str) -> Option<String> {
+    if text.chars().any(|c| c.is_control() && !c.is_whitespace()) {
+        return None;
+    }
+    let name = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let count = name.chars().count();
+    (count > 0 && count <= MAX_REPEATER_NAME).then_some(name)
+}
+
+/// The fields every cert has had since v0.3.0, exactly as they are encoded.
+#[derive(Serialize, Deserialize)]
+struct CertFields {
+    roster: RosterId,
+    owner: EndpointId,
+    repeater: EndpointId,
+    issued_ms: u64,
+}
+
+impl CertBody {
+    fn encode(&self) -> Vec<u8> {
+        let mut bytes = postcard::to_allocvec(&CertFields {
+            roster: self.roster,
+            owner: self.owner,
+            repeater: self.repeater,
+            issued_ms: self.issued_ms,
+        })
+        .expect("a cert body always serializes");
+        if let Some(name) = &self.name {
+            bytes.extend(
+                postcard::to_allocvec(&Some(name.as_str())).expect("a name always serializes"),
+            );
+        }
+        bytes
+    }
+
+    fn decode(bytes: &[u8]) -> Result<Self, RosterError> {
+        let malformed = RosterError::Malformed("cert body");
+        let (fields, rest): (CertFields, _) =
+            postcard::take_from_bytes(bytes).map_err(|_| malformed.clone())?;
+        // Nothing after the fields: a cert from before names, or an unnamed one. Something after
+        // them that is not a valid name is refused rather than shown: the machine signed it, but
+        // the app should never display what `repeater_name` would not have let it set.
+        let name = if rest.is_empty() {
+            None
+        } else {
+            let (name, _): (Option<String>, _) =
+                postcard::take_from_bytes(rest).map_err(|_| malformed.clone())?;
+            match name {
+                Some(name) if repeater_name(&name).as_deref() == Some(name.as_str()) => Some(name),
+                Some(_) => return Err(malformed),
+                None => None,
+            }
+        };
+        Ok(Self {
+            roster: fields.roster,
+            owner: fields.owner,
+            repeater: fields.repeater,
+            issued_ms: fields.issued_ms,
+            name,
+        })
+    }
 }
 
 /// A repeater's signed statement that it belongs to `roster`, claimed by `owner`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RepeaterCert {
-    /// `postcard(CertBody)`, exactly as signed.
+    /// [`CertBody`]'s bytes, exactly as signed.
     pub body: Vec<u8>,
     pub sig: Vec<u8>,
 }
@@ -120,7 +218,7 @@ pub struct RepeaterCert {
 impl RepeaterCert {
     /// Issue a certificate with the repeater's own key.
     pub fn issue(repeater_key: &SigningKey, body: &CertBody) -> Self {
-        let body = postcard::to_allocvec(body).expect("a cert body always serializes");
+        let body = body.encode();
         let sig = repeater_key.sign(&signing_input(CERT_CTX, &body));
         Self {
             body,
@@ -130,8 +228,7 @@ impl RepeaterCert {
 
     /// Check the signature against the repeater named inside, and return what it attests.
     pub fn verify(&self) -> Result<CertBody, RosterError> {
-        let body: CertBody =
-            postcard::from_bytes(&self.body).map_err(|_| RosterError::Malformed("cert body"))?;
+        let body = CertBody::decode(&self.body)?;
         verify_sig(&body.repeater, CERT_CTX, &self.body, &self.sig)?;
         Ok(body)
     }
@@ -343,6 +440,8 @@ pub struct Roster {
     nodes: Vec<Node>,
     index: HashMap<OpId, usize>,
     pending: HashMap<OpId, (SignedOp, OpBody)>,
+    /// Accepted ops per signer, for [`MAX_OPS_PER_SIGNER`].
+    per_signer: HashMap<EndpointId, usize>,
 }
 
 impl Roster {
@@ -376,6 +475,7 @@ impl Roster {
             }],
             index,
             pending: HashMap::new(),
+            per_signer: HashMap::new(),
         })
     }
 
@@ -439,9 +539,8 @@ impl Roster {
         if self.index.contains_key(&id) || self.pending.contains_key(&id) {
             return Ok(Inserted::Known);
         }
-        if self.nodes.len() + self.pending.len() >= MAX_OPS {
-            return Err(RosterError::Full);
-        }
+        // The signature first: nothing unsigned may count toward any limit, or anyone could
+        // spend them with garbage.
         let body = op.verify()?;
         if body.roster != Some(self.id) {
             return Err(RosterError::WrongRoster);
@@ -457,6 +556,15 @@ impl Roster {
             return Err(RosterError::BadParents("duplicate parent"));
         }
         if body.parents.iter().any(|p| !self.index.contains_key(p)) {
+            let owners = op.signer == self.owner;
+            let held = self
+                .pending
+                .values()
+                .filter(|(held, _)| (held.signer == self.owner) == owners)
+                .count();
+            if held >= MAX_PENDING {
+                return Err(RosterError::Full);
+            }
             self.pending.insert(id, (op, body));
             return Ok(Inserted::Pending);
         }
@@ -465,7 +573,20 @@ impl Roster {
         Ok(Inserted::Accepted)
     }
 
+    /// Whether one more op by `signer` fits: [`MAX_OPS`] for the owner, the non-reserved share
+    /// and [`MAX_OPS_PER_SIGNER`] for everyone else.
+    fn has_room_for(&self, signer: &EndpointId) -> bool {
+        if *signer == self.owner {
+            return self.nodes.len() < MAX_OPS;
+        }
+        self.nodes.len() < MAX_OPS - OWNER_RESERVE
+            && self.per_signer.get(signer).copied().unwrap_or(0) < MAX_OPS_PER_SIGNER
+    }
+
     fn accept(&mut self, op: SignedOp, body: OpBody) -> Result<(), RosterError> {
+        if !self.has_room_for(&op.signer) {
+            return Err(RosterError::Full);
+        }
         let mut ancestors = Bits::default();
         for parent in &body.parents {
             let i = self.index[parent];
@@ -479,6 +600,7 @@ impl Roster {
         }
         let id = op.id();
         self.index.insert(id, self.nodes.len());
+        *self.per_signer.entry(op.signer).or_insert(0) += 1;
         self.nodes.push(Node {
             op,
             body,
@@ -737,7 +859,7 @@ impl Roster {
                 match &node.body.action {
                     Action::Remove { member: m } => m == member && self.unseen_by(w, e),
                     Action::Withdraw => node.op.signer == *member && self.unseen_by(w, e),
-                    // Closing beats an uninvited enrolment it had not seen, like a removal does.
+                    // Closing beats an uninvited enrollment it had not seen, like a removal does.
                     Action::SetPolicy {
                         policy: Policy::Invite,
                     } => uninvited && self.concurrent(w, e),
@@ -808,6 +930,52 @@ impl Roster {
             repeaters,
         }
     }
+
+    /// The newest invite naming `member` that an `Enroll` could cite now: one whose inviter was
+    /// not revoked concurrently with it, made after every `Remove` of `member` (a removal is
+    /// sticky until an invitation made after it, §3.3). What a phone cites, and what an owner's
+    /// screen lists as "invited".
+    pub fn standing_invite(&self, member: &EndpointId) -> Option<OpId> {
+        let scope = Scope::All;
+        self.indices(scope)
+            .filter(|&i| {
+                matches!(&self.nodes[i].body.action, Action::Invite { member: m } if m == member)
+                    && self.invite_survives(i, scope)
+                    && self
+                        .removals_of(member, None, scope)
+                        .all(|r| self.nodes[i].ancestors.has(r))
+            })
+            .last()
+            .map(|i| self.nodes[i].op.id())
+    }
+
+    /// Whether an `Enroll` signed by `member` now, citing [`Self::standing_invite`], would be
+    /// accepted: what a phone checks before offering to carry them. False for a member the owner
+    /// removed, even in an open roster, until someone invites them again.
+    pub fn may_enroll(&self, member: &EndpointId) -> bool {
+        self.enroll_allowed(member, self.standing_invite(member), Scope::All)
+            .is_ok()
+    }
+
+    /// Whether `who` signed any accepted op here: the owner, and everyone who ever enrolled,
+    /// withdrew or invited. A repeater lets them `Fetch`, so a member the owner removed can read
+    /// that it was (the same log is on every member's card anyway, §3.3).
+    pub fn has_signed(&self, who: &EndpointId) -> bool {
+        *who == self.owner || self.per_signer.contains_key(who)
+    }
+
+    /// Whether `repeater` was listed by the owner and is no longer: an `AddRepeater` for it is in
+    /// the log and the derived state does not list it. A machine that was claimed but whose
+    /// `AddRepeater` has not arrived yet is *not* removed — that is the ordinary window between
+    /// `Claim` and the owner publishing the cert — so this, not "absent from the state", is what
+    /// a repeater stops serving on.
+    pub fn is_removed_repeater(&self, repeater: &EndpointId) -> bool {
+        let ever_added = self.nodes.iter().any(|node| {
+            matches!(&node.body.action, Action::AddRepeater { cert }
+                if cert.verify().is_ok_and(|body| body.repeater == *repeater))
+        });
+        ever_added && !self.state().repeaters.contains_key(repeater)
+    }
 }
 
 #[cfg(test)]
@@ -820,6 +988,72 @@ mod tests {
 
     fn id_of(key: &SigningKey) -> EndpointId {
         key.verifying_key().to_bytes()
+    }
+
+    fn cert_fields() -> CertFields {
+        CertFields {
+            roster: [7; 32],
+            owner: id_of(&key(1)),
+            repeater: id_of(&key(9)),
+            issued_ms: 5,
+        }
+    }
+
+    fn cert_body(name: Option<&str>) -> CertBody {
+        CertBody {
+            roster: [7; 32],
+            owner: id_of(&key(1)),
+            repeater: id_of(&key(9)),
+            issued_ms: 5,
+            name: name.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn a_named_cert_carries_its_name_and_an_unnamed_one_is_the_old_bytes() {
+        let named = RepeaterCert::issue(&key(9), &cert_body(Some("Living room PC")));
+        assert_eq!(
+            named.verify().unwrap().name.as_deref(),
+            Some("Living room PC")
+        );
+
+        // Unnamed: exactly the four fields every older reader expects, nothing after them.
+        let unnamed = RepeaterCert::issue(&key(9), &cert_body(None));
+        assert_eq!(unnamed.body, postcard::to_allocvec(&cert_fields()).unwrap());
+        assert_eq!(unnamed.verify().unwrap().name, None);
+    }
+
+    #[test]
+    fn a_named_cert_reads_as_the_old_fields_to_an_older_reader() {
+        let named = RepeaterCert::issue(&key(9), &cert_body(Some("Attic Pi")));
+        // What a reader from before names does: decode the four fields, ignore the rest.
+        let old: CertFields = postcard::from_bytes(&named.body).unwrap();
+        assert_eq!(old.repeater, id_of(&key(9)));
+        assert_eq!(old.issued_ms, 5);
+    }
+
+    #[test]
+    fn a_cert_whose_name_the_app_would_refuse_does_not_verify() {
+        let mut body = postcard::to_allocvec(&cert_fields()).unwrap();
+        body.extend(postcard::to_allocvec(&Some("bell\u{7}")).unwrap());
+        let sig = key(9).sign(&signing_input(CERT_CTX, &body));
+        let cert = RepeaterCert {
+            body,
+            sig: sig.to_bytes().to_vec(),
+        };
+        assert!(cert.verify().is_err());
+    }
+
+    #[test]
+    fn names_are_trimmed_bounded_and_free_of_control_characters() {
+        assert_eq!(
+            repeater_name("  Living   room\tPC "),
+            Some("Living room PC".into())
+        );
+        assert_eq!(repeater_name("   "), None);
+        assert_eq!(repeater_name("a\u{0}b"), None);
+        assert!(repeater_name(&"x".repeat(MAX_REPEATER_NAME)).is_some());
+        assert_eq!(repeater_name(&"x".repeat(MAX_REPEATER_NAME + 1)), None);
     }
 
     const OWNER: u8 = 1;
@@ -885,6 +1119,7 @@ mod tests {
                     owner,
                     repeater: id_of(&key(repeater)),
                     issued_ms: 3,
+                    name: None,
                 },
             )
         }
@@ -1053,7 +1288,9 @@ mod tests {
         )
         .unwrap();
         assert!(!f.carried(ALICE));
-        // Open roster, but removed: enrolling again is refused.
+        // Open roster, but removed: enrolling again is refused, and a phone can tell first.
+        assert!(!f.roster.may_enroll(&member(ALICE)));
+        assert!(f.roster.may_enroll(&member(BOB)));
         assert!(f.act(ALICE, Action::Enroll { invite: None }).is_err());
         // The owner changes their mind.
         let invite = f
@@ -1064,6 +1301,8 @@ mod tests {
                 },
             )
             .unwrap();
+        assert!(f.roster.may_enroll(&member(ALICE)));
+        assert_eq!(f.roster.standing_invite(&member(ALICE)), Some(invite));
         f.act(
             ALICE,
             Action::Enroll {
@@ -1075,7 +1314,7 @@ mod tests {
     }
 
     #[test]
-    fn a_removal_beats_a_concurrent_enrolment() {
+    fn a_removal_beats_a_concurrent_enrollment() {
         let mut f = Fixture::new(Policy::Open);
         let base = f.roster.heads();
         let enroll = f.op_on(ALICE, base.clone(), Action::Enroll { invite: None });
@@ -1194,7 +1433,7 @@ mod tests {
                 }
             )
             .is_err());
-        // Revoking Alice does not undo an enrolment her invite had already produced.
+        // Revoking Alice does not undo an enrollment her invite had already produced.
         assert!(f.carried(BOB));
         assert!(!f.roster.state().inviters.contains(&member(ALICE)));
     }
@@ -1228,7 +1467,7 @@ mod tests {
             },
         );
         f.roster.insert(invite).unwrap();
-        // Bob enrols having seen the invite but not the revocation.
+        // Bob enrolls having seen the invite but not the revocation.
         let enroll = f.op_on(
             BOB,
             vec![invite_id],
@@ -1290,7 +1529,7 @@ mod tests {
     }
 
     #[test]
-    fn an_enrolment_concurrent_with_closing_does_not_stand() {
+    fn an_enrollment_concurrent_with_closing_does_not_stand() {
         // Concurrent and backdated look the same: neither was seen by the close. So a genuine
         // race costs the enrollee an invite, which is the price of closing meaning anything.
         let mut f = Fixture::new(Policy::Open);
@@ -1307,12 +1546,12 @@ mod tests {
         f.roster.insert(enroll).unwrap();
         assert!(
             !f.carried(ALICE),
-            "closing beats an uninvited enrolment it had not seen"
+            "closing beats an uninvited enrollment it had not seen"
         );
     }
 
     #[test]
-    fn closing_a_roster_keeps_out_an_enrolment_backdated_onto_the_open_genesis() {
+    fn closing_a_roster_keeps_out_an_enrollment_backdated_onto_the_open_genesis() {
         let mut f = Fixture::new(Policy::Open);
         let genesis = f.roster.heads();
         f.act(ALICE, Action::Enroll { invite: None }).unwrap();
@@ -1388,9 +1627,9 @@ mod tests {
         // A cert claiming to be repeater 12 but signed by 13: the signature is checked against
         // the repeater it names.
         let mut forged = f.cert(13, roster, owner);
-        let mut body: CertBody = postcard::from_bytes(&forged.body).unwrap();
+        let mut body = CertBody::decode(&forged.body).unwrap();
         body.repeater = member(12);
-        forged.body = postcard::to_allocvec(&body).unwrap();
+        forged.body = body.encode();
         assert!(f.act(OWNER, Action::AddRepeater { cert: forged }).is_err());
 
         // Only the owner may list a repeater, even with a good cert.
@@ -1428,6 +1667,199 @@ mod tests {
         f.roster.insert(readd).unwrap();
         f.roster.insert(remove).unwrap();
         assert!(f.roster.state().repeaters.is_empty());
+    }
+
+    #[test]
+    fn a_repeater_is_removed_only_once_it_was_listed() {
+        let mut f = Fixture::new(Policy::Open);
+        // Claimed, cert not yet published: absent from the state, and not removed.
+        assert!(!f.roster.is_removed_repeater(&member(REPEATER)));
+        let cert = f.cert(REPEATER, f.roster.id(), member(OWNER));
+        f.act(OWNER, Action::AddRepeater { cert }).unwrap();
+        assert!(!f.roster.is_removed_repeater(&member(REPEATER)));
+        f.act(
+            OWNER,
+            Action::RemoveRepeater {
+                repeater: member(REPEATER),
+            },
+        )
+        .unwrap();
+        assert!(f.roster.is_removed_repeater(&member(REPEATER)));
+        // A sibling that was never listed is not "removed" either.
+        assert!(!f.roster.is_removed_repeater(&member(10)));
+    }
+
+    #[test]
+    fn a_standing_invite_is_one_made_after_any_removal() {
+        let mut f = Fixture::new(Policy::Invite);
+        assert_eq!(f.roster.standing_invite(&member(ALICE)), None);
+        let first = f
+            .act(
+                OWNER,
+                Action::Invite {
+                    member: member(ALICE),
+                },
+            )
+            .unwrap();
+        assert_eq!(f.roster.standing_invite(&member(ALICE)), Some(first));
+        f.act(
+            ALICE,
+            Action::Enroll {
+                invite: Some(first),
+            },
+        )
+        .unwrap();
+        f.act(
+            OWNER,
+            Action::Remove {
+                member: member(ALICE),
+            },
+        )
+        .unwrap();
+        // The removal voids the invite before it.
+        assert_eq!(f.roster.standing_invite(&member(ALICE)), None);
+        let second = f
+            .act(
+                OWNER,
+                Action::Invite {
+                    member: member(ALICE),
+                },
+            )
+            .unwrap();
+        assert_eq!(f.roster.standing_invite(&member(ALICE)), Some(second));
+        f.act(
+            ALICE,
+            Action::Enroll {
+                invite: Some(second),
+            },
+        )
+        .unwrap();
+        assert!(f.carried(ALICE));
+    }
+
+    // ---- limits ------------------------------------------------------------------------------
+
+    /// A throwaway key, distinct for each `n`.
+    fn stranger(n: u32) -> SigningKey {
+        let mut seed = [0xEE; 32];
+        seed[..4].copy_from_slice(&n.to_le_bytes());
+        SigningKey::from_bytes(&seed)
+    }
+
+    #[test]
+    fn unsigned_junk_never_counts_toward_a_limit() {
+        let mut f = Fixture::new(Policy::Open);
+        for n in 0..(MAX_PENDING as u32 + 10) {
+            let mut op = f.op_on(ALICE, vec![[n as u8; 32]], Action::Withdraw);
+            op.sig[0] ^= 1;
+            assert_eq!(f.roster.insert(op), Err(RosterError::BadSignature));
+        }
+        assert_eq!(f.roster.pending_len(), 0);
+        f.act(ALICE, Action::Enroll { invite: None }).unwrap();
+    }
+
+    #[test]
+    fn a_flood_of_orphans_cannot_block_the_owner_or_an_accepted_op() {
+        let mut f = Fixture::new(Policy::Open);
+        // Valid signatures on parents nobody has: they cost the sender nothing.
+        let mut n = 0u32;
+        loop {
+            let key = stranger(n);
+            let body = OpBody {
+                roster: Some(f.roster.id()),
+                parents: vec![blake3::hash(&n.to_le_bytes()).into()],
+                ts_ms: 2,
+                action: Action::Enroll { invite: None },
+            };
+            n += 1;
+            match f.roster.insert(SignedOp::sign(&key, &body)) {
+                Ok(Inserted::Pending) => {}
+                Err(RosterError::Full) => break,
+                other => panic!("unexpected {other:?}"),
+            }
+        }
+        assert_eq!(f.roster.pending_len(), MAX_PENDING);
+        // An op with its parents present is not held, so the queue being full does not touch it.
+        f.act(ALICE, Action::Enroll { invite: None }).unwrap();
+        // The owner's own held-aside ops have their own queue.
+        let early = f.op_on(
+            OWNER,
+            f.roster.heads(),
+            Action::SetPolicy {
+                policy: Policy::Invite,
+            },
+        );
+        let late = f.op_on(
+            OWNER,
+            vec![early.id()],
+            Action::Remove {
+                member: member(ALICE),
+            },
+        );
+        assert_eq!(f.roster.insert(late), Ok(Inserted::Pending));
+        assert_eq!(f.roster.insert(early), Ok(Inserted::Accepted));
+        assert!(!f.carried(ALICE));
+    }
+
+    #[test]
+    fn one_signer_cannot_spend_the_roster_alone() {
+        let mut f = Fixture::new(Policy::Open);
+        let mut accepted = 0;
+        loop {
+            let action = if accepted % 2 == 0 {
+                Action::Enroll { invite: None }
+            } else {
+                Action::Withdraw
+            };
+            match f.act(ALICE, action) {
+                Ok(_) => accepted += 1,
+                Err(RosterError::Full) => break,
+                Err(e) => panic!("unexpected {e:?}"),
+            }
+        }
+        assert_eq!(accepted, MAX_OPS_PER_SIGNER);
+        // Someone else still gets in.
+        f.act(BOB, Action::Enroll { invite: None }).unwrap();
+    }
+
+    #[test]
+    fn a_roster_full_of_strangers_still_takes_the_owners_ops() {
+        let mut f = Fixture::new(Policy::Open);
+        let mut n = 0u32;
+        loop {
+            let body = OpBody {
+                roster: Some(f.roster.id()),
+                parents: vec![f.roster.id()],
+                ts_ms: 2,
+                action: Action::Enroll { invite: None },
+            };
+            match f.roster.insert(SignedOp::sign(&stranger(n), &body)) {
+                Ok(Inserted::Accepted) => n += 1,
+                Err(RosterError::Full) => break,
+                other => panic!("unexpected {other:?}"),
+            }
+        }
+        assert_eq!(f.roster.len(), MAX_OPS - OWNER_RESERVE);
+        // Thousands of heads now; name the genesis alone so MAX_PARENTS is not what refuses.
+        let genesis = f.roster.id();
+        let late = f.op_on(ALICE, vec![genesis], Action::Enroll { invite: None });
+        assert_eq!(f.roster.insert(late), Err(RosterError::Full));
+        // The owner closes the roster and removes someone: both fit in the reserve.
+        let close = f.op_on(
+            OWNER,
+            vec![genesis],
+            Action::SetPolicy {
+                policy: Policy::Invite,
+            },
+        );
+        let close_id = close.id();
+        assert_eq!(f.roster.insert(close), Ok(Inserted::Accepted));
+        let first = id_of(&stranger(0));
+        let remove = f.op_on(OWNER, vec![close_id], Action::Remove { member: first });
+        assert_eq!(f.roster.insert(remove), Ok(Inserted::Accepted));
+        assert!(!f.roster.is_carried(&first));
+        // A close that had not seen the flood ends every uninvited enrollment in it (§3.3).
+        assert!(!f.roster.is_carried(&id_of(&stranger(1))));
     }
 
     // ---- replication -------------------------------------------------------------------------
@@ -1497,7 +1929,7 @@ mod tests {
 
     /// The property everything else rests on: replicas that hold the same ops agree, whatever
     /// order the ops reached them in. Builds a log with concurrent branches (a revocation racing
-    /// an invite, a removal racing an enrolment, an enrolment backdated past a close), then
+    /// an invite, a removal racing an enrollment, an enrollment backdated past a close), then
     /// feeds it to fresh rosters in many orders.
     #[test]
     fn order_does_not_matter() {
@@ -1513,7 +1945,7 @@ mod tests {
         );
         let alice_in = f.op_on(ALICE, root.clone(), Action::Enroll { invite: None });
         let carol_in = f.op_on(CAROL, root.clone(), Action::Enroll { invite: None });
-        // The owner had seen Alice's enrolment when closing, so it keeps standing.
+        // The owner had seen Alice's enrollment when closing, so it keeps standing.
         let close = f.op_on(
             OWNER,
             vec![grant.id(), alice_in.id()],
@@ -1599,7 +2031,7 @@ mod tests {
         );
         assert!(
             !state.carried.contains(&member(CAROL)),
-            "her enrolment raced her removal"
+            "her enrollment raced her removal"
         );
         assert!(
             !state.carried.contains(&member(5)),

@@ -488,9 +488,11 @@ location lane the docs-only transport removed; series before that date carry it.
 
 Attributes, all spanmetrics dimensions (so they keep for 90 days, not 7):
 
-- `contact.role` — `friend` | `stash` | `other`. Friends come from the native recipient store
-  (sharing + watching); the stash is the first delivery ticket when the stash is opted into. A
-  friend is checked first, so it can never be filed as the stash.
+- `contact.role` — `friend` | `stash` | `repeater` | `other`. Friends come from the native
+  recipient store (sharing + watching); the stash is the first delivery ticket when the stash is
+  opted into; a repeater is any machine in a roster this phone knows (`repeaters.bin`, including
+  rosters learned from friends' cards). A friend is checked first, then the stash, so neither can
+  be filed as anything else.
 - `contact.from_author` (receive only) — the peer handed over **its own** envelope. `friend` +
   `from_author=true` is the strongest statement there is: the author's phone was on the other end.
 - `contact.path` — `ble` | `lan` | `direct` | `relay` | `unknown`, the closest open path to that
@@ -517,6 +519,54 @@ sum by (service_instance_id, sc_peer) (
 # How friends' fixes reach us: the author directly, another friend, or the stash.
 sum by (contact_role, contact_from_author) (
   rate(traces_span_metrics_calls_total{span_name="peer.contact", contact_dir="recv"}[1h])) * 3600
+```
+
+**Production had none of these dimensions until 2026-11-08.** buttercup's
+`helmrelease-public.yaml` carried only the first six, so every panel above read empty there while
+working against this file's dev collector. Keep the two lists in step.
+
+## Where did this fix come from? (`fix.provenance`)
+
+`peer.contact` counts exchanges per peer. `fix.provenance` (Rust, `contact.rs`) counts **fixes**:
+one span for every friend's fix that reached this phone, at the moment it arrived, saying who
+handed it over. It fires from the replica watch beside the receive-side `peer.contact` (one per
+author a peer delivered), whichever pass carried it — a live broadcast, a pull, or a sync a peer
+opened to us — so JS-free background pulls are counted too, and none twice.
+
+| attribute                   | values                                                                                         |
+| --------------------------- | ---------------------------------------------------------------------------------------------- |
+| `fix.source`                | `author` (their own phone), `friend` (another friend relayed it), `stash`, `repeater`, `other` |
+| `fix.path`                  | `ble` \| `lan` \| `direct` \| `relay` \| `unknown`, as on `peer.contact`                       |
+| `fix.repeater_owner`        | short id of the roster owner, when `fix.source = repeater` (span attribute, not a metric)      |
+| `sc.author` / `sc.via_peer` | whose fix, and who handed it over                                                              |
+
+`fix.source` and `fix.path` are spanmetrics dimensions. A slot that was already in the
+replica produces nothing: this is delivery, never presence.
+
+```promql
+# Where this phone's friends' fixes come from, per hour.
+sum by (fix_source) (
+  rate(traces_span_metrics_calls_total{span_name="fix.provenance"}[1h])) * 3600
+```
+
+```traceql
+# Fixes a repeater delivered, and whose repeater it was.
+{ name = "fix.provenance" && span.fix.source = "repeater" } | select(span.fix.repeater_owner, span.sc.author)
+```
+
+**Repeaters from the phone's side** (`docs/social/REPEATERS.md` §4.4, §5). `repeater.grant`
+(Rust, every start) carries `delivered` (repeaters that took a roster op they were owed),
+`refreshed` (rosters fetched), `granted` and `failed`. `repeater.receipt` follows a push that
+reached repeaters alone (no stash, no awake friend): it asks them `Have` for up to 8 s, and
+`confirmed=true` with `sc.peer` is the only evidence such a phone has that a fix landed anywhere;
+it is what turns the flush into `Pushed` rather than `Scheduled`. `device.health` reports
+`repeaters.enrolled` (rosters carrying this phone), `repeaters.carriers` (machines across them)
+and `repeaters.last_contact_age_ms`, which is per process and absent until a repeater answers
+after a relaunch.
+
+```traceql
+# Phones relying on repeaters alone whose pushes no repeater confirmed.
+{ name = "repeater.receipt" && span.confirmed = false } | select(span.carriers, span.sc.author)
 ```
 
 ```traceql
@@ -641,7 +691,25 @@ clamped to what `backgroundTimeRemaining` leaves after a 5 s margin) and is reco
 `NativeBackgroundRuntime` records the same span, without the allowance). The network side of the
 same pass is its `trail.sync`, which now carries `sync.budget_ms`, `sync.entries` and how each
 namespace's wait ended (`sync.ns_content_ready` / `_idle` / `_no_answer` / `_deadline` /
-`_closed`).
+`_closed`), plus `sync.stranded` / `sync.stranded_fetched`: friend slots whose newest record had
+no local bytes when the reconciliation finished, and how many of those the pass then fetched
+(`TrailDocs::settle_stranded`). `sync.profile_stranded` / `sync.profile_stranded_fetched` count the
+same for entries in friends' profile namespaces (`ProfileDocs::settle_stranded`); a stuck one logs
+`fetched a stranded friend profile entry's bytes` (or `… still without bytes`) with `sc.namespace`
+and `profile.key`.
+
+**`sync.stranded` that stays above zero is a friend whose dot is frozen on this phone**, however
+healthy the rest of the pass looks. A record and its bytes travel separately. The docs engine
+tries the download once, against whichever peer handed the record over, and never retries. When
+the bytes later reach that peer out-of-band (the stash's HTTP upload) no `ContentReady` follows.
+The replica read skips a slot with no bytes without a span, so before 2026-11-12 this state was
+invisible: one iPhone missed a friend for 31 h while the Pixel beside it read every envelope. Each
+fetch logs `fetched a stranded friend slot's bytes` (or `… still without bytes`) with `sc.author`,
+`sc.entry_hash` and `age_ms`, so a stuck author can be followed across pulls:
+
+```
+{ name = "trail.sync" && span.sync.stranded > 0 } | select(resource.service.instance.id, span.sync.stranded, span.sync.stranded_fetched)
+```
 
 | `pull.outcome` | Means                                                                                                                                    |
 | -------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
@@ -845,9 +913,10 @@ restarted session` / `asked the leader to restart our session` (`sc_restart` lab
    woken. Follow
    `trail.sync` / `friend.pull` (`sync.entries`) → a `peer.contact{dir=recv}` from the serving
    peer → `trail.sync.app` (`recovered`) → `fix.received.app`. An entry that landed but never
-   surfaced is either unopenable (`ratcheted envelope not opened` in Loki) or from an author B no
-   longer counts as a friend, which the replica read skips without a span. A gap of up to a pull
-   interval between steps 5 and 6 is normal.
+   surfaced is unopenable (`ratcheted envelope not opened` in Loki), from an author B no longer
+   counts as a friend (the replica read skips it without a span), or **stranded**: the record is
+   in B's replica but its bytes are not, which B's next `trail.sync` reports as `sync.stranded`
+   and tries to fetch. A gap of up to a pull interval between steps 5 and 6 is normal.
 
 ## Which build is this phone running?
 

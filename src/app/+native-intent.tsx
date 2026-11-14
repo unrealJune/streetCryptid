@@ -1,3 +1,4 @@
+import { checkClaimLink, isWebClaimLink } from '@/features/repeaters/core/repeaters';
 import { decodePairLink, isWebPairLink } from '@/features/social/core/pair-link';
 
 interface NativeIntentOptions {
@@ -23,11 +24,21 @@ interface NativeIntentOptions {
  * The `id` nonce is what lets an identical command be issued twice and observed
  * twice; see `useDevCommand`.
  *
+ * `https://streetcrypt.id/repeater#t=…&s=…` is a repeater's claim link, as its console's QR code
+ * carries it. It opens the claim screen (Settings → Repeaters → Add) on the scanned machine;
+ * claiming still takes a tap, because the claim is where the roster's policy is chosen.
+ *
  * Pure by contract: this is a sync path mapper, so it decides the route and
  * nothing else. Running the command is the map screen's job.
  */
 export function redirectSystemPath({ path }: NativeIntentOptions): string {
   const trimmed = path.trim();
+  if (isWebClaimLink(trimmed)) {
+    const claim = checkClaimLink(trimmed);
+    return claim.ok
+      ? `/settings/repeaters/claim?claim=${encodeURIComponent(claim.link)}`
+      : '/settings/repeaters/claim';
+  }
   if (isWebPairLink(trimmed)) {
     try {
       return `/pairing?token=${encodeURIComponent(decodePairLink(trimmed))}`;
@@ -51,6 +62,17 @@ export function redirectSystemPath({ path }: NativeIntentOptions): string {
       // nonce with no command names nothing to run.
       if (!cmd || !id) return '/';
       return `/?dev=${encodeURIComponent(cmd)}&devId=${encodeURIComponent(id)}`;
+    }
+
+    // The streetcrypt.id/repeater fallback page's "Open in app": the same claim, for a build or an
+    // install where the App Link has not verified.
+    if (route === 'repeater') {
+      const claim = checkClaimLink(
+        `https://streetcrypt.id/repeater?t=${url.searchParams.get('t') ?? ''}&s=${url.searchParams.get('s') ?? ''}`
+      );
+      return claim.ok
+        ? `/settings/repeaters/claim?claim=${encodeURIComponent(claim.link)}`
+        : '/settings/repeaters/claim';
     }
 
     if (route !== 'social' && route !== 'pair') return path;

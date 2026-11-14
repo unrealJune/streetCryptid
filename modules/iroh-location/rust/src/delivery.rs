@@ -29,9 +29,9 @@
 //!
 //! Unlike [`crate::transport`], "nothing to push to" is a real configuration — a user with the
 //! stash opted out and no friends yet — not a bootstrap that has not happened. So this store
-//! returns an empty config rather than failing, and the drain treats an empty peer list as "no
-//! push to make" rather than as an error to retry. The distinction matters because the alternative
-//! is a warning on every wake for a user who has done nothing wrong.
+//! returns an empty config rather than failing. The drain also checks the separately stored
+//! repeater roster: only when both have no targets is there no push to make. This is not an error
+//! to retry or a warning on every wake for a user who has done nothing wrong.
 //!
 //! # On storing the stash PSK
 //!
@@ -65,8 +65,7 @@ pub struct DeliveryConfig {
 }
 
 impl DeliveryConfig {
-    /// Whether there is anywhere at all to send. An empty peer list makes a push a no-op that still
-    /// costs a native round trip and a span, so the drain checks this first.
+    /// Whether the persisted stash/friend list is empty. Repeater carriers live in the roster book.
     pub fn is_empty(&self) -> bool {
         self.peer_tickets.is_empty()
     }

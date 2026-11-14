@@ -92,6 +92,11 @@ x25519-dalek = { version = "2", default-features = false, features = [
 serde = { version = "1", features = ["derive"] }
 postcard = { version = "1", features = ["alloc"] }
 thiserror = "2"
+# Repeaters (docs/social/REPEATERS.md): the roster, the attestation chain and the repeater wire,
+# shared byte for byte with every repeater (repeater/server, repeater/windows), which link the same
+# crate from the same tree. Pure (no iroh, no I/O), so it brings no second iroh into the build. Its
+# golden vectors (repeater/protocol/tests) hold the wire for phones already in the field.
+streetcryptid-repeater = { path = "../../../repeater/protocol" }
 # SCB3 map tiles arrive as per-tile gzip members (src/mvt.rs `decode_tile`). The pure-Rust
 # backend keeps iOS, Android and host builds free of a C toolchain.
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }

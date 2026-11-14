@@ -1,4 +1,5 @@
 import { useMemo, useState } from 'react';
+import type { Href } from 'expo-router';
 import { useColorScheme } from '@/hooks/use-color-scheme';
 import { ThemedText } from '@/components/themed-text';
 import { CryptidThemes } from '@/constants/theme';
@@ -7,6 +8,7 @@ import { useLocationSharing } from '@/features/social/hooks/use-location-sharing
 
 import { DeliveryOptions } from '../components/delivery-options';
 import { LocationAccessRow } from '../components/location-access-row';
+import { SettingsMenuRow } from '../components/settings-menu-row';
 import { SettingsPage, SettingsSection } from '../components/settings-page';
 
 export default function DeliveryScreen() {
@@ -41,6 +43,13 @@ export default function DeliveryScreen() {
         availability={availability}
         disabled={pending !== null}
         onSelect={(mode) => void select(mode)}
+        footnote={
+          <SettingsMenuRow
+            href={'/settings/repeaters' as Href}
+            label="Repeaters"
+            value="Your own, and friends'"
+          />
+        }
       />
       {error ? (
         <ThemedText accessibilityRole="alert" type="small">

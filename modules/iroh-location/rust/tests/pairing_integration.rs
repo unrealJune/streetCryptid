@@ -520,6 +520,22 @@ async fn two_node_pair_and_profile_sync() {
     assert_eq!(b_got.handle, "alice");
     assert_eq!(b_got.endpoint_id, a_id);
 
+    // What the app does once the pair is acknowledged: each side registers the other as a friend
+    // with their receiving key. That is what puts the other in its profile keyring
+    // (ARCHITECTURE.md §9a.1); profiles are sealed, and a peer nobody registered is a stranger.
+    for (node, peer) in [(&a, &b), (&b, &a)] {
+        let peer_hex = hex(&peer.endpoint_id());
+        node.set_sharing_recipients(vec![peer_hex.clone()], vec![])
+            .await
+            .expect("register the friend");
+        node.set_recipient_keys(vec![iroh_location::RecipientKey {
+            endpoint_id: peer_hex,
+            recv_public: hex(&peer.recv_public()),
+        }])
+        .await
+        .expect("register the friend's receiving key");
+    }
+
     // Initial profile sync: each side eventually reads the other's verified profile over the
     // profile namespace imported during pair completion.
     let a_sees_b = poll_until!(30, {

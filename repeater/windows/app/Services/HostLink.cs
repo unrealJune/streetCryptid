@@ -33,7 +33,7 @@ public abstract class HostLink : IAsyncDisposable
     public abstract void Start();
     protected abstract Task WriteLineAsync(string line, CancellationToken token);
     protected abstract Task CloseAsync();
-    protected virtual string StoppedMessage => "Repeater stopped. Retry.";
+    protected virtual string StoppedMessage => "The repeater stopped.";
 
     protected void Fail(string message, bool incompatible = false) => Failed?.Invoke(message, incompatible);
 
@@ -50,7 +50,7 @@ public abstract class HostLink : IAsyncDisposable
                 try { message = HostProtocol.Parse(line); }
                 catch (InvalidDataException) when (runId is null)
                 {
-                    Fail("The repeater service is from another version of this app. Update it to continue.", true);
+                    Fail("This repeater needs to finish updating.", true);
                     onLost();
                     return;
                 }
@@ -88,7 +88,7 @@ public abstract class HostLink : IAsyncDisposable
         catch (OperationCanceledException) when (token.IsCancellationRequested) { }
         catch
         {
-            if (!Stopping) Fail("Repeater connection lost. Retry.");
+            if (!Stopping) Fail("Lost the connection to the repeater.");
             onLost();
         }
         finally
@@ -98,10 +98,28 @@ public abstract class HostLink : IAsyncDisposable
         }
     }
 
-    public async Task<bool> ApplySettingsAsync(HostSettings settings)
+    public Task<bool> ApplySettingsAsync(HostSettings settings)
     {
         string id = Guid.NewGuid().ToString("N");
-        string command = HostProtocol.SettingsCommand(id, settings);
+        return SendCommandAsync(id, HostProtocol.SettingsCommand(id, settings));
+    }
+
+    /// <summary>Name this repeater (empty clears it); true once the host has saved it.</summary>
+    public Task<bool> SetNameAsync(string name)
+    {
+        string id = Guid.NewGuid().ToString("N");
+        return SendCommandAsync(id, HostProtocol.NameCommand(id, name));
+    }
+
+    /// <summary>Release this repeater from its roster; true once the host confirms.</summary>
+    public Task<bool> ReleaseAsync()
+    {
+        string id = Guid.NewGuid().ToString("N");
+        return SendCommandAsync(id, HostProtocol.ReleaseCommand(id));
+    }
+
+    private async Task<bool> SendCommandAsync(string id, string command)
+    {
         var completion = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         commands[id] = completion;
         try
@@ -167,7 +185,7 @@ public sealed class ChildLink(string directory) : HostLink
         catch
         {
             if (process is not null) TryKill(process);
-            Fail("Repeater could not start. Retry.");
+            Fail("The repeater could not start.");
         }
     }
 
@@ -216,8 +234,6 @@ public sealed class ServiceLink : HostLink
     private NamedPipeClientStream? pipe;
     private Task? pump;
 
-    protected override string StoppedMessage => "The repeater service stopped. Retry.";
-
     public override void Start()
     {
         if (pipe is not null) return;
@@ -248,7 +264,7 @@ public sealed class ServiceLink : HostLink
         }
         catch
         {
-            if (!Stopping) Fail("The repeater service is not answering. Retry.");
+            if (!Stopping) Fail("The repeater is not answering.");
         }
     }
 

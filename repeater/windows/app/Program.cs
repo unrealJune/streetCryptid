@@ -9,6 +9,8 @@ public static class Program
 {
     public static event Action? OpenRequested;
     public static bool Startup { get; private set; }
+    /// <summary>This run was restarted by an update, and finishes it (the service's copy) if needed.</summary>
+    public static bool FinishingUpdate { get; private set; }
 
     [STAThread]
     public static void Main(string[] args)
@@ -24,6 +26,7 @@ public static class Program
             })
             .Run();
         Startup = args.Contains("--startup");
+        FinishingUpdate = args.Contains(Services.Updates.FinishArgument);
         string name = @"Local\streetCryptid.Repeater." + WindowsIdentity.GetCurrent().User!.Value;
         using var activate = new EventWaitHandle(false, EventResetMode.AutoReset, name + ".activate");
         using var mutex = new Mutex(true, name, out bool first);
