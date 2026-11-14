@@ -92,14 +92,32 @@ jobs:
           set -euo pipefail
           head_sha="$(git rev-parse HEAD)"
           subject="$(git log -1 --format=%s)"
+          resolved="$(bash scripts/next-version.sh)"
+          unreleased="$(sed -n 's/^unreleased=//p' <<<"$resolved")"
           proceed=true
           reason=''
           if [[ -n "$TESTED_SHA" && "$head_sha" != "$TESTED_SHA" ]]; then
             proceed=false
             reason="main moved to $head_sha after CI passed on $TESTED_SHA; the newer commit's own CI run will release it."
-          elif [[ "$subject" == 'chore(release):'* ]]; then
+          elif [[ -n "$unreleased" && "$GITHUB_EVENT_NAME" != 'workflow_dispatch' ]]; then
+            # An earlier run committed a version bump and never tagged it (v3.0.0, 2026-11-10: the
+            # tag push was refused after main took the commit). Which version ships next is then a
+            # human's call, so this fails -- visibly, on main -- rather than ship it on whatever
+            # push comes next, and a dispatch picks it up from here.
+            previous_tag="$(sed -n 's/^previous_tag=//p' <<<"$resolved")"
+            if [[ "$(sed -n 's/^release=//p' <<<"$resolved")" == 'true' ]]; then
+              auto="ships $(sed -n 's/^tag=//p' <<<"$resolved") ($(sed -n 's/^bump=//p' <<<"$resolved") from the commits since $previous_tag)"
+            else
+              auto="ships nothing (only housekeeping since $previous_tag)"
+            fi
+            message="app.json declares $unreleased, but the last release tag is $previous_tag: an earlier run committed that bump and never tagged it, so nothing was built. Run this workflow by hand to choose what ships: bump=auto $auto, or patch/minor/major bumps from $previous_tag instead."
+            printf '::error title=Unfinished release::%s\n' "$message"
+            printf '%s\n' "$message" >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          elif [[ -z "$unreleased" && "$subject" == 'chore(release):'* ]]; then
             # Pushes made with GITHUB_TOKEN start no workflow runs at all, but a RELEASE_TOKEN push
-            # does; this stops the loop.
+            # does; this stops the loop. A bump commit whose tag never landed is not skipped: a
+            # dispatch on it resumes the release.
             proceed=false
             reason="HEAD is this workflow's own bump commit."
           fi
@@ -137,8 +155,10 @@ jobs:
         run: |
           set -euo pipefail
           delimiter="what-to-test-$RANDOM$RANDOM"
+          # A resumed release's range holds the unfinished run's own bump commit; testers do not
+          # need it.
           if [[ -n "$PREVIOUS_TAG" ]]; then
-            subjects="$(git log --no-merges --format='- %s' "$PREVIOUS_TAG..HEAD")"
+            subjects="$(git log --no-merges --invert-grep --grep='^chore(release):' --format='- %s' "$PREVIOUS_TAG..HEAD")"
           else
             subjects="$(git log --no-merges --format='- %s' --max-count=20 HEAD)"
           fi
@@ -173,7 +193,20 @@ jobs:
           # The branch has to land before the tag: if someone pushed to main mid-run this fails
           # here, leaving no dangling tag behind.
           git push origin HEAD:main
-          git push origin "$TAG"
+          # The tag push can still be refused after main took the commit -- it was for v3.0.0 on
+          # 2026-11-10 ("remote rejected ... (failed)", no rule in the way) -- which leaves main
+          # declaring a version that was never built. Retry, and if it still does not land, say
+          # how to finish: the next automatic run stops at the gate until someone does.
+          for attempt in 1 2 3 4 5; do
+            if git push origin "$TAG"; then
+              break
+            fi
+            if ((attempt == 5)); then
+              printf '::error title=Tag push failed::main now declares %s, but %s could not be pushed, so nothing was built. Run this workflow by hand (bump=auto) to tag and ship it.\n' "$VERSION" "$TAG"
+              exit 1
+            fi
+            sleep $((attempt * 15))
+          done
           printf 'sha=%s\n' "$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
   release_ios:
@@ -442,21 +475,38 @@ jobs:
       # signal" 10-32 minutes in, while the arm64-only pull-request builds of the same commits
       # passed. Three ABIs means three sets of CMake builds side by side under Gradle's parallel
       # workers, on a 16 GB runner already giving Gradle 5 GB; the runner's own resource lines in the
-      # build step (scripts/build-profile.sh) say whether memory is what ran out. Swap on the
-      # ephemeral disk turns a short compile peak into slowness instead of a dead runner.
+      # build step (scripts/build-profile.sh) say whether memory is what ran out -- they did, with
+      # available memory under 250 MB and the image's 3 GB of swap full. Swap turns a short compile
+      # peak into slowness instead of a dead runner. It used to go only on the ephemeral /mnt disk,
+      # which the ubuntu-24.04 image no longer mounts, so it was skipped on every run; the root disk
+      # has room for it (~89 GB free after the setup action prunes it, ~12 GB used by the build).
+      # Best effort: a release is not failed for want of swap.
       - name: Add swap for the three-ABI native build
         run: |
           set -euo pipefail
-          if ! mountpoint -q /mnt; then
-            echo "::notice::No ephemeral /mnt on this runner; building without extra swap."
+          swap_gb=12
+          headroom_gb=30
+          dir=/
+          if mountpoint -q /mnt; then
+            dir=/mnt
+          fi
+          swapfile="${dir%/}/sc-build.swap"
+          avail_gb=$(($(df --output=avail -k "$dir" | tail -n 1) / 1024 / 1024))
+          if ((avail_gb < swap_gb + headroom_gb)); then
+            echo "::warning::Only ${avail_gb} GB free on $dir; building without extra swap."
             exit 0
           fi
-          sudo fallocate -l 12G /mnt/sc-build.swap
-          sudo chmod 600 /mnt/sc-build.swap
-          sudo mkswap /mnt/sc-build.swap > /dev/null
-          sudo swapon /mnt/sc-build.swap
-          swapon --show
-          free -m
+          if sudo fallocate -l "${swap_gb}G" "$swapfile" &&
+            sudo chmod 600 "$swapfile" &&
+            sudo mkswap "$swapfile" > /dev/null &&
+            sudo swapon "$swapfile"; then
+            swapon --show
+            free -m
+          else
+            echo "::warning::Could not enable swap at $swapfile; building without it."
+            sudo swapoff "$swapfile" 2> /dev/null || true
+            sudo rm -f "$swapfile"
+          fi
 
       - name: Build the store bundle locally
         id: build
@@ -588,8 +638,9 @@ jobs:
   publish:
     name: Publish the GitHub release
     # The tag exists as soon as the version job pushes it, so the release notes are published even
-    # when one store submission fails; the summary records which half shipped.
-    if: always() && needs.version.outputs.release == 'true'
+    # when one store submission fails; the summary records which half shipped. A version job that
+    # failed may not have pushed the tag at all, and then there is nothing to publish.
+    if: always() && needs.version.result == 'success' && needs.version.outputs.release == 'true'
     needs:
       - version
       - release_ios

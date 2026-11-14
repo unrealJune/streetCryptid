@@ -81,6 +81,14 @@ If a submission fails, the version commit and tag still stand; fix the problem a
 releases the following patch. To reship the same code, dispatch the workflow with an explicit
 bump.
 
+If the version job commits its bump but cannot push the tag (it retries first), `main` declares a
+version nothing was built from — v3.0.0 on 2026-11-10. The bump is always applied to the last
+tag's version, never to `app.json`'s, so that state cannot skip a version. `next-version.sh`
+reports it as `unreleased`, and every automatic run then fails at the gate with an
+"Unfinished release" error rather than ship a version nobody chose. Dispatch the workflow to
+finish it: `bump=auto` ships what the commits since the last tag call for, and an explicit bump
+ships that bump from the last tag instead, rewriting `app.json` to match.
+
 The release and PR build jobs prepare their runners through the same composite action,
 `.github/actions/eas-local-build-setup` (Node, Bun, the JavaScript and Cargo caches, the NDK or
 Xcode toolchain, the CocoaPods/Gradle caches, and the EAS CLI). Almost every one of those inputs

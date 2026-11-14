@@ -78,6 +78,24 @@ assert_bump() {
   expect "$label version" "$expected_version" "$(field version "$output")"
 }
 
+assert_unreleased() {
+  local label="$1" expected="$2"
+  expect "$label unreleased" "$expected" "$(field unreleased "$(next_version)")"
+}
+
+# What the version job does: rewrite both manifests, commit the bump, then tag it.
+commit_bump() {
+  local version="$1"
+  (cd "$work" && bash scripts/apply-version.sh "$version" >/dev/null)
+  git -C "$work" add app.json package.json
+  commit "chore(release): v$version"
+}
+
+release() {
+  commit_bump "$1"
+  git -C "$work" tag "v$1"
+}
+
 git -C "$work" init --quiet
 git -C "$work" config user.email "release-test@example.com"
 git -C "$work" config user.name "Release Test"
@@ -86,9 +104,11 @@ git -C "$work" add -A
 commit "chore: initial commit"
 
 assert_bump "untagged repository" true initial 1.0.0
+assert_unreleased "untagged repository" ''
 git -C "$work" tag v1.0.0
 
 assert_bump "no releasable commits" false none 1.0.0
+assert_unreleased "app.json matches the tag" ''
 commit "docs: describe the release workflow"
 commit "chore(deps): bump a dependency"
 commit "ci: pin an action"
@@ -110,20 +130,41 @@ assert_bump "forced patch" true forced-patch 1.0.1 --force patch
 commit "refactor(net)!: drop the legacy relay handshake"
 assert_bump "exclamation mark breaking change" true major 2.0.0
 
-git -C "$work" tag v1.1.0
-assert_bump "range starts at the newest tag" false none 1.0.0
+release 2.0.0
+assert_bump "range starts at the newest tag" false none 2.0.0
 
 commit "$(printf 'fix(net): retry relay dials\n\nBREAKING CHANGE: relay URLs must include a port.')"
-assert_bump "breaking change footer" true major 2.0.0
+assert_bump "breaking change footer" true major 3.0.0
+
+# A run that commits its bump and then fails to push the tag leaves app.json ahead of every
+# release. The next run must finish that version, not bump again from it (2026-11-10: v3.0.0 was
+# committed, never tagged, and the next push would have released 4.0.0).
+commit_bump 3.0.0
+assert_unreleased "bump committed, tag missing" 3.0.0
+assert_bump "unfinished major is finished, not re-bumped" true major 3.0.0
+assert_bump "forced bump starts from the last tag" true forced-minor 2.1.0 --force minor
+commit "fix(map): keep labels upright"
+assert_bump "newer commits keep the unfinished major" true major 3.0.0
+# The resumed run finds app.json already at 3.0.0 and tags without a second bump commit.
+git -C "$work" tag v3.0.0
+assert_unreleased "unfinished release tagged" ''
+assert_bump "nothing left after the resumed release" false none 3.0.0
+
+commit "fix(net): retry relay dials once more"
+commit_bump 3.0.1
+commit "fix(net): and once more"
+assert_bump "a fix after an unfinished patch stays on it" true patch 3.0.1
+commit "feat(map): draw ferries"
+assert_bump "a feat after an unfinished patch" true minor 3.1.0
+release 3.1.0
 
 # Merge commits carry a branch description rather than a Conventional Commit subject, so a merge
 # must not be able to promote a release on its own.
-git -C "$work" tag v1.2.0
 git -C "$work" checkout --quiet -b topic
 commit "chore: shuffle comments"
 git -C "$work" checkout --quiet -
 git -C "$work" merge --quiet --no-ff -m "feat: merge the topic branch" topic
-assert_bump "merge subject ignored" false none 1.0.0
+assert_bump "merge subject ignored" false none 3.1.0
 
 # The repeater products release under their own tags. A server tag is never the app's previous
 # release, and a commit confined to repeater/server or repeater/windows never cuts a store release.
