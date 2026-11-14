@@ -33,7 +33,7 @@ public abstract class HostLink : IAsyncDisposable
     public abstract void Start();
     protected abstract Task WriteLineAsync(string line, CancellationToken token);
     protected abstract Task CloseAsync();
-    protected virtual string StoppedMessage => "Repeater stopped. Retry.";
+    protected virtual string StoppedMessage => "The repeater stopped.";
 
     protected void Fail(string message, bool incompatible = false) => Failed?.Invoke(message, incompatible);
 
@@ -50,7 +50,7 @@ public abstract class HostLink : IAsyncDisposable
                 try { message = HostProtocol.Parse(line); }
                 catch (InvalidDataException) when (runId is null)
                 {
-                    Fail("The repeater service is from another version of this app. Update it to continue.", true);
+                    Fail("This repeater needs to finish updating.", true);
                     onLost();
                     return;
                 }
@@ -88,7 +88,7 @@ public abstract class HostLink : IAsyncDisposable
         catch (OperationCanceledException) when (token.IsCancellationRequested) { }
         catch
         {
-            if (!Stopping) Fail("Repeater connection lost. Retry.");
+            if (!Stopping) Fail("Lost the connection to the repeater.");
             onLost();
         }
         finally
@@ -185,7 +185,7 @@ public sealed class ChildLink(string directory) : HostLink
         catch
         {
             if (process is not null) TryKill(process);
-            Fail("Repeater could not start. Retry.");
+            Fail("The repeater could not start.");
         }
     }
 
@@ -234,8 +234,6 @@ public sealed class ServiceLink : HostLink
     private NamedPipeClientStream? pipe;
     private Task? pump;
 
-    protected override string StoppedMessage => "The repeater service stopped. Retry.";
-
     public override void Start()
     {
         if (pipe is not null) return;
@@ -266,7 +264,7 @@ public sealed class ServiceLink : HostLink
         }
         catch
         {
-            if (!Stopping) Fail("The repeater service is not answering. Retry.");
+            if (!Stopping) Fail("The repeater is not answering.");
         }
     }
 
