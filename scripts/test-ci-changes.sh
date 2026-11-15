@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 
 # Exercise scripts/ci-changes.sh: the path rules, and the fallbacks that must run every lane.
+# `lanes app server windows [linux]`: linux defaults to windows's value.
 
 set -euo pipefail
 
@@ -16,7 +17,7 @@ expect() {
 }
 
 lanes() {
-  printf 'app=%s\nserver=%s\nwindows=%s' "$1" "$2" "$3"
+  printf 'app=%s\nserver=%s\nwindows=%s\nlinux=%s' "$1" "$2" "$3" "${4:-$3}"
 }
 
 paths() {
@@ -29,9 +30,9 @@ expect "mobile crate" "$(lanes true false false)" "$(paths modules/iroh-location
 expect "docs still format-checked" "$(lanes true false false)" "$(paths docs/MONOREPO.md)"
 expect "server only" "$(lanes false true false)" "$(paths repeater/server/src/lib.rs repeater/server/charts/trail-stash/values.yaml)"
 expect "the image's ignore file" "$(lanes false true false)" "$(paths .dockerignore)"
-expect "the Windows icon's source" "$(lanes true false true)" "$(paths assets/images/mothman-logo.svg)"
-expect "windows only" "$(lanes false false true)" "$(paths repeater/windows/app/App.xaml.cs)"
-expect "server and windows" "$(lanes false true true)" "$(paths repeater/server/Dockerfile repeater/windows/justfile)"
+expect "the Windows icon's source" "$(lanes true false true false)" "$(paths assets/images/mothman-logo.svg)"
+expect "windows only" "$(lanes false false true false)" "$(paths repeater/windows/app/App.xaml.cs)"
+expect "server and windows" "$(lanes false true true false)" "$(paths repeater/server/Dockerfile repeater/windows/justfile)"
 expect "protocol" "$(lanes true true true)" "$(paths repeater/protocol/src/roster.rs)"
 expect "root lockfile" "$(lanes true true true)" "$(paths Cargo.lock)"
 expect "toolchain" "$(lanes true true true)" "$(paths rust-toolchain.toml)"
@@ -39,6 +40,8 @@ expect "shared third_party" "$(lanes true true true)" "$(paths third_party/noq/s
 expect "workflows" "$(lanes true true true)" "$(paths .github/workflows/ci-repeater-server.yml)"
 expect "the gate itself" "$(lanes true true true)" "$(paths scripts/ci-changes.sh)"
 expect "unknown repeater path" "$(lanes true true true)" "$(paths repeater/README.md)"
+expect "linux only" "$(lanes false false false true)" "$(paths repeater/linux/src/daemon.rs)"
+expect "the desktop host" "$(lanes false false true true)" "$(paths repeater/host/src/lib.rs)"
 expect "mixed" "$(lanes true true false)" "$(paths repeater/server/src/lib.rs package.json)"
 
 # Against a real history: the merge base decides, and an unknown base runs everything.

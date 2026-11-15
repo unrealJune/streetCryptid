@@ -7,7 +7,8 @@ Read `README.md` first; `PLAN.md` holds the roadmap.
 This directory was the separate `unrealJune/trail-stash` repository until 2026-11-11
 (`docs/MONOREPO.md`); its history came with it. The crate is a member of the repository's root
 Cargo workspace, beside the roster/wire crate it shares with the phone (`../protocol`) and the
-Windows repeater's host that embeds it (`../windows/host`). The root `AGENTS.md` still applies.
+desktop repeater host that embeds it (`../host`, run by the Windows and Linux repeaters). The root
+`AGENTS.md` still applies.
 
 ## Build & test
 

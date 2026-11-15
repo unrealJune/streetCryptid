@@ -1,12 +1,15 @@
 #!/usr/bin/env bash
 
-# Decide which CI lanes a change needs: the app, the repeater server, the Windows repeater.
+# Decide which CI lanes a change needs: the app, the repeater server, the Windows repeater, the
+# Linux repeater.
 #
 # A path-filtered workflow that does not run leaves a required check pending forever, so `ci.yml`
 # always runs and asks this script instead. The rules (docs/MONOREPO.md, "CI"):
 #
 #   repeater/server/**, .dockerignore (the server image's)   -> server
 #   repeater/windows/**                                      -> windows
+#   repeater/linux/**                                        -> linux
+#   repeater/host/** (the desktop host both link)            -> windows + linux
 #   assets/images/mothman-logo*.svg (the Windows icon's source) -> app + windows
 #   repeater/protocol/**, Cargo.toml, Cargo.lock,
 #   rust-toolchain.toml, third_party/**, .github/**,
@@ -24,21 +27,26 @@
 # A base that is empty, all zeros (a new branch) or not in the local history runs every lane:
 # not knowing what changed must never skip a check.
 #
-# Prints `app=`, `server=`, `windows=` (true|false) on stdout, for $GITHUB_OUTPUT.
+# Prints `app=`, `server=`, `windows=`, `linux=` (true|false) on stdout, for $GITHUB_OUTPUT.
 
 set -euo pipefail
 
 all() {
-  printf 'app=true\nserver=true\nwindows=true\n'
+  printf 'app=true\nserver=true\nwindows=true\nlinux=true\n'
 }
 
 classify() {
-  local app=false server=false windows=false path
+  local app=false server=false windows=false linux=false path
   while IFS= read -r path; do
     [[ -z "$path" ]] && continue
     case "$path" in
       repeater/server/* | .dockerignore) server=true ;;
       repeater/windows/*) windows=true ;;
+      repeater/linux/*) linux=true ;;
+      repeater/host/*)
+        windows=true
+        linux=true
+        ;;
       assets/images/mothman-logo*.svg)
         app=true
         windows=true
@@ -48,11 +56,12 @@ classify() {
         app=true
         server=true
         windows=true
+        linux=true
         ;;
       *) app=true ;;
     esac
   done
-  printf 'app=%s\nserver=%s\nwindows=%s\n' "$app" "$server" "$windows"
+  printf 'app=%s\nserver=%s\nwindows=%s\nlinux=%s\n' "$app" "$server" "$windows" "$linux"
 }
 
 if [[ "${1:-}" == '--paths' ]]; then

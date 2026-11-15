@@ -108,7 +108,7 @@ members = [
   "modules/iroh-location/rust-wasm",
   "repeater/protocol",
   "repeater/server",
-  "repeater/windows/host",
+  "repeater/windows/host",   # since moved to repeater/host, shared with repeater/linux
 ]
 exclude = [
   "modules/iroh-location/rust/third_party/iroh-ble-transport",

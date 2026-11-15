@@ -154,9 +154,36 @@ assert_windows "the icon's source" true patch 0.2.1-preview.1
 assert_windows "forced minor" true forced-minor 0.3.0-preview.1 --force minor
 expect "windows previous tag" windows-v0.2.0-preview.1 "$(field previous_tag "$(next_windows)")"
 
+next_linux() {
+  (cd "$work" && bash scripts/next-repeater-version.sh linux "$@")
+}
+
+assert_linux() {
+  local label="$1" release="$2" bump="$3" version="$4"
+  shift 4
+  local output
+  output="$(next_linux "$@")"
+  expect "linux $label release" "$release" "$(field release "$output")"
+  expect "linux $label bump" "$bump" "$(field bump "$output")"
+  expect "linux $label version" "$version" "$(field version "$output")"
+  expect "linux $label tag" "linux-v$version" "$(field tag "$output")"
+}
+
+assert_linux "no linux tag yet" true initial 0.1.0
+git -C "$work" tag linux-v0.1.0
+assert_linux "nothing since the tag" false none 0.1.0
+commit_in "$work" repeater/windows/app/App.cs "feat(windows): a Windows-only feature"
+assert_linux "a Windows-only commit" false none 0.1.0
+commit_in "$work" repeater/linux/src/cli.rs "fix(linux): a CLI fix"
+assert_linux "a CLI fix" true patch 0.1.1
+git -C "$work" tag linux-v0.1.1
+commit_in "$work" repeater/host/src/lib.rs "feat(host): a desktop host feature"
+assert_linux "the desktop host is linked" true minor 0.2.0
+expect "windows takes the desktop host too" minor "$(field bump "$(next_windows)")"
+
 if (cd "$work" && bash scripts/next-repeater-version.sh desktop >/dev/null 2>&1); then
   echo "An unknown product was accepted." >&2
   exit 1
 fi
 
-echo "Repeater versioning resolved every release scenario, for the server and for Windows."
+echo "Repeater versioning resolved every release scenario, for the server, Windows and Linux."

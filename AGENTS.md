@@ -1,6 +1,6 @@
 # Repository map
 
-One repository, three products, one Cargo workspace (`Cargo.toml`, `docs/MONOREPO.md`):
+One repository, four products, one Cargo workspace (`Cargo.toml`, `docs/MONOREPO.md`):
 
 - **The app** — the Expo app at the root (`src/`, `modules/`, `app.json`, …) and its Rust core
   (`modules/iroh-location/rust`, plus the browser bridge in `rust-wasm`). Releases as `v*` to the
@@ -8,13 +8,18 @@ One repository, three products, one Cargo workspace (`Cargo.toml`, `docs/MONOREP
 - **The repeater server** — `repeater/server` (crate `trail-stash`): the hosted stash and the
   Linux/Docker repeater, with its Helm chart. Releases as `server-v*` plus the image and chart on
   GHCR. Its own notes: `repeater/server/AGENTS.md`.
+- **The Linux repeater** — `repeater/linux` (binary `streetcryptid-repeater`): CLI and opt-in
+  systemd daemon, serving the Windows management plane on a Unix socket. Releases as `linux-v*`
+  tarballs. Its own notes: `repeater/linux/AGENTS.md`.
 - **The Windows repeater** — `repeater/windows`: WinUI app, Windows service, Rust host. Releases as
   `windows-v*-preview.N`. Its own notes: `repeater/windows/AGENTS.md`.
-- **Shared** — `repeater/protocol` (the roster and wire the phone and every repeater agree on, with
-  golden vectors) and `third_party/noq` (patched for every crate).
+- **Shared** — `repeater/host` (the desktop repeater both Windows and Linux run: node, identity,
+  settings, the line protocol), `repeater/protocol` (the roster and wire the phone and every
+  repeater agree on, with golden vectors) and `third_party/noq` (patched for every crate).
 
 CI runs a lane per product (`ci.yml` → `ci-app.yml`, `ci-repeater-server.yml`,
-`ci-repeater-windows.yml`, chosen by `scripts/ci-changes.sh`); `Required` passes skipped lanes.
+`ci-repeater-windows.yml`, `ci-repeater-linux.yml`, chosen by `scripts/ci-changes.sh`); `Required`
+passes skipped lanes.
 Every product releases from Conventional Commits on its own paths
 (`scripts/lib/conventional-commits.sh`), so a commit's type and the files it touches decide what
 ships: `feat`/`fix` release, `docs`/`chore`/`ci`/`build`/`test`/`refactor`/`style` do not. Build

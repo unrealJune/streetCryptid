@@ -178,6 +178,10 @@ pub struct Snapshot {
     pub bytes_sent: u64,
     pub settings: HostSettings,
     pub telemetry_available: bool,
+    /// Whether the machine is actually being kept awake right now, as opposed to the setting
+    /// asking for it: not on battery, and not where the OS refused (logind without polkit
+    /// permission). Snapshot readers that predate it ignore it.
+    pub keep_awake_held: bool,
 }
 
 /// What the snapshot says about the host itself, as opposed to the node.
@@ -186,6 +190,7 @@ pub struct HostInfo {
     pub mode: &'static str,
     pub settings: HostSettings,
     pub telemetry_available: bool,
+    pub keep_awake_held: bool,
 }
 
 pub fn snapshot(node: &StashNode, host: HostInfo) -> Snapshot {
@@ -227,6 +232,7 @@ pub fn snapshot(node: &StashNode, host: HostInfo) -> Snapshot {
         bytes_sent: socket.send_ipv4.get() + socket.send_ipv6.get() + socket.send_relay.get(),
         settings: host.settings,
         telemetry_available: host.telemetry_available,
+        keep_awake_held: host.keep_awake_held,
     }
 }
 
@@ -234,9 +240,208 @@ pub fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// The one command a supervisor may send: the person's [`HostSettings`]. Anything else — another
+/// kind, another protocol, an unknown field — is refused, and the Windows host and the Linux
+/// daemon both drop the connection that sent it.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Command {
+    pub protocol: u32,
+    pub kind: String,
+    pub request_id: String,
+    pub telemetry: bool,
+    pub keep_awake: bool,
+}
+
+impl Command {
+    pub fn settings(&self) -> Result<HostSettings> {
+        if self.protocol != PROTOCOL
+            || self.kind != "settings"
+            || self.request_id.is_empty()
+            || self.request_id.len() > 64
+        {
+            bail!("Invalid command");
+        }
+        Ok(HostSettings {
+            telemetry: self.telemetry,
+            keep_awake: self.keep_awake,
+        })
+    }
+}
+
+/// The longest command line a host reads, newline included. A settings command is ~120 bytes.
+pub const MAX_COMMAND_LINE: usize = 4096;
+
+/// The lines a host writes, one JSON object each. `runId` changes with every host process, so a
+/// client can tell a restart from a pause.
+pub mod message {
+    use super::{Snapshot, PROTOCOL};
+    use serde_json::{json, Value};
+
+    pub fn snapshot(run_id: &str, snapshot: &Snapshot) -> Value {
+        json!({"protocol": PROTOCOL, "kind": "snapshot", "runId": run_id, "snapshot": snapshot})
+    }
+
+    pub fn arrival(run_id: &str, sequence: u64) -> Value {
+        json!({"protocol": PROTOCOL, "kind": "arrival", "runId": run_id, "sequence": sequence})
+    }
+
+    pub fn result(run_id: &str, request_id: &str, ok: bool) -> Value {
+        json!({"protocol": PROTOCOL, "kind": "result", "runId": run_id,
+            "requestId": request_id, "ok": ok})
+    }
+
+    /// What supervises the host, as the Windows service tells each app that connects. `host` is
+    /// `starting`, `running`, `restarting` or `stopped`.
+    pub fn service(version: &str, host: &str, restarts: u32) -> Value {
+        json!({"protocol": PROTOCOL, "kind": "service",
+            "service": {"version": version, "host": host, "restarts": restarts}})
+    }
+}
+
+/// A fresh id for this host process (`runId`).
+pub fn run_id() -> String {
+    hex(SecretKey::generate().public().as_bytes())
+}
+
+/// iroh logs per packet path at debug and keeps endpoint-lifetime spans open for days; on a
+/// machine that runs for weeks only its warnings are worth shipping.
+pub const TELEMETRY_FILTER: &str = "info,iroh=warn,iroh_relay=warn,iroh_docs=warn,\
+iroh_blobs=warn,iroh_gossip=warn,noq=warn,noq_proto=warn,noq_udp=warn";
+pub const TELEMETRY_SERVICE: &str = "streetcryptid-repeater";
+
+/// Install the OTLP exporter when this build was given an endpoint, behind the person's consent.
+/// Without an endpoint nothing is installed and no setting can turn it on. Call it before any
+/// other thread exists: it writes the exporter's environment.
+pub fn init_telemetry(endpoint: Option<&str>, secret: &SecretKey, consent: Arc<AtomicBool>) {
+    use tracing_subscriber::filter::{filter_fn, EnvFilter};
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
+    use tracing_subscriber::Layer;
+
+    type Base = tracing_subscriber::layer::Layered<EnvFilter, tracing_subscriber::Registry>;
+
+    let Some(endpoint) = endpoint.filter(|e| !e.trim().is_empty()) else {
+        return;
+    };
+    std::env::set_var("OTEL_EXPORTER_OTLP_ENDPOINT", endpoint);
+    std::env::set_var("OTEL_SERVICE_NAME", TELEMETRY_SERVICE);
+    let Some(layers) = trail_stash::telemetry::otel_layers::<Base>(
+        &trail_stash::telemetry::instance_id(&secret.public()),
+    ) else {
+        return;
+    };
+    // Each exporter is behind the person's choice, read on every span and event, so turning
+    // diagnostics off takes effect at once and nothing recorded while off is ever sent.
+    let layers: Vec<_> = layers
+        .into_iter()
+        .map(|layer| {
+            let consent = consent.clone();
+            layer.with_filter(filter_fn(move |_| consent.load(Ordering::Relaxed)))
+        })
+        .collect();
+    tracing_subscriber::registry()
+        .with(EnvFilter::new(TELEMETRY_FILTER))
+        .with(layers)
+        .init();
+}
+
+/// What the pulse reports about keeping the machine awake; each platform holds it its own way.
+pub trait PowerState: Send + Sync {
+    fn on_ac(&self) -> bool;
+    fn holding(&self) -> bool;
+}
+
+/// Who is running the host, for the pulse.
+#[derive(Debug, Clone, Copy)]
+pub struct PulseInfo {
+    /// `windows` or `linux`.
+    pub platform: &'static str,
+    /// `user` or `service`.
+    pub mode: &'static str,
+    pub version: &'static str,
+}
+
+/// How often the host reports on itself. A host that stops reporting is the signal: a desktop
+/// repeater that is asleep, powered off or wedged emits nothing, and a gap between pulses is the
+/// only way that absence can be measured (the phones' `device.health` exists for the same reason).
+pub const PULSE_INTERVAL: Duration = Duration::from_secs(5 * 60);
+
+/// One `repeater.host.pulse` span every [`PULSE_INTERVAL`]: what the node holds, what it has
+/// moved, and whether it is keeping the machine awake. Spans, not events: Loki keeps an event's
+/// message and drops its fields.
+pub async fn run_pulse(
+    node: Arc<StashNode>,
+    info: PulseInfo,
+    power: Arc<dyn PowerState>,
+    started_at: std::time::Instant,
+) {
+    let mut interval = tokio::time::interval(PULSE_INTERVAL);
+    interval.tick().await;
+    loop {
+        interval.tick().await;
+        let (missing, tracked) = node.content_stats();
+        let members = node
+            .repeater()
+            .and_then(|r| r.roster_state())
+            .map(|s| s.carried.len())
+            .unwrap_or(0);
+        let metrics = node.endpoint().metrics();
+        let socket = &metrics.socket;
+        let span = tracing::info_span!(
+            "repeater.host.pulse",
+            host.platform = info.platform,
+            host.mode = info.mode,
+            host.version = info.version,
+            uptime_s = started_at.elapsed().as_secs(),
+            roster.claimed = node.repeater().is_some_and(|r| r.is_claimed()),
+            roster.members = members as u64,
+            content.tracked = tracked as u64,
+            content.missing = missing as u64,
+            fix.received = node.arrival_count(),
+            net.connections = socket
+                .num_conns_opened
+                .get()
+                .saturating_sub(socket.num_conns_closed.get()),
+            net.bytes_in = socket.recv_data_ipv4.get()
+                + socket.recv_data_ipv6.get()
+                + socket.recv_data_relay.get(),
+            net.bytes_out =
+                socket.send_ipv4.get() + socket.send_ipv6.get() + socket.send_relay.get(),
+            power.on_ac = power.on_ac(),
+            power.keep_awake = power.holding(),
+        );
+        drop(span);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn settings_commands_validate_the_protocol_and_shape() {
+        let command: Command = serde_json::from_str(
+            r#"{"protocol":2,"kind":"settings","requestId":"one","telemetry":true,"keepAwake":false}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            command.settings().unwrap(),
+            HostSettings {
+                telemetry: true,
+                keep_awake: false
+            }
+        );
+        let old: Command = serde_json::from_str(
+            r#"{"protocol":1,"kind":"settings","requestId":"one","telemetry":true,"keepAwake":false}"#,
+        )
+        .unwrap();
+        assert!(old.settings().is_err());
+        assert!(serde_json::from_str::<Command>(
+            r#"{"protocol":2,"kind":"subscription","requestId":"one","member":"ab","receiving":false}"#,
+        )
+        .is_err());
+    }
 
     #[test]
     fn identity_survives_restart_and_corruption_is_never_replaced() {
@@ -346,6 +551,7 @@ mod tests {
                 mode: "user",
                 settings: HostSettings::default(),
                 telemetry_available: false,
+                keep_awake_held: false,
             },
         );
         assert_eq!((state.tracked, state.missing), (1, 0));
