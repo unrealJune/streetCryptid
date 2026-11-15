@@ -25,6 +25,33 @@ public static class ServiceLayout
     public static readonly string[] InstalledFiles =
         [ServiceExecutable, HostExecutable, "NOTICE", "LICENSE"];
 
+    /// <summary>
+    /// The unattended updater: the installed service executable's <c>update</c> verb, registered as
+    /// a second, demand-start service running as LocalSystem. Only the owner (and administrators)
+    /// may start it, and the one thing a caller chooses is the version, which must be newer than
+    /// the installed one. What it installs comes from <see cref="ServiceArchiveUrl"/> and nowhere
+    /// else — never from a directory the person can write.
+    /// </summary>
+    public const string UpdaterName = "StreetCryptidRepeaterUpdate";
+    public const string UpdaterDisplayName = "streetCryptid repeater updater";
+    public const string UpdaterDescription =
+        "Brings the streetCryptid repeater service up to the version of the app, from the project's releases.";
+
+    public const string Repository = "https://github.com/unrealJune/streetCryptid";
+
+    /// <summary>The release asset holding <see cref="InstalledFiles"/> for one architecture.</summary>
+    public static string ServiceArchive(string rid) => $"StreetCryptid.Repeater.Service-{rid}.zip";
+
+    public static string ServiceArchiveUrl(ReleaseVersion version, string rid) =>
+        $"{Repository}/releases/download/windows-v{Uri.EscapeDataString(version.Text)}/{ServiceArchive(rid)}";
+
+    /// <summary>
+    /// Where the updater unpacks a download. Under Program Files, so only SYSTEM and administrators
+    /// can write it: the service's own account must not be able to swap a file between unpacking
+    /// and installing, because the next update runs the installed executable as LocalSystem.
+    /// </summary>
+    public static string UpdateStagingDirectory => Path.Combine(InstallDirectory, "staging");
+
     /// <summary>Must match the Rust host's <c>SERVICE_MARKER</c>.</summary>
     public const string MovedMarker = "moved-to-service";
 
@@ -68,6 +95,10 @@ public enum ServiceVerbResult
     BadArguments = 3,
     /// <summary>The service did not stop, so its files could not be moved or replaced.</summary>
     StillRunning = 4,
+    /// <summary>The updater was asked for a version that is not newer than the installed one.</summary>
+    NotNewer = 5,
+    /// <summary>The updater could not fetch the release; nothing was changed.</summary>
+    DownloadFailed = 6,
 }
 
 /// <summary>

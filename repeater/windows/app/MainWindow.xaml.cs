@@ -52,16 +52,18 @@ public sealed partial class MainWindow : Window
     /// <summary>A name saved while the service was too old to take it; sent once it has been updated.</summary>
     private string? pendingName;
     private bool dialogOpen;
-    /// <summary>The card is showing the update's steps.</summary>
-    private bool updateView = Program.FinishingUpdate;
+    /// <summary>The card is showing the update's steps — not after one the app applied on its own.</summary>
+    private bool updateView = Program.FinishingUpdate && !Program.BackgroundUpdate;
+    /// <summary>This run already tried bringing a lagging service up to date without asking.</summary>
+    private bool unattendedServiceTried;
     /// <summary>This process is the new version an update restarted into.</summary>
     private readonly bool restartedForUpdate = Program.FinishingUpdate;
     private bool updatingService;
     private bool restarting;
     private string? serviceUpdateFailure;
     private bool updateCloseArmed;
-    public bool ShouldStartHidden => tray is not null && Program.Startup &&
-        preferences.SetupComplete && preferences.StartInTray;
+    public bool ShouldStartHidden => tray is not null && preferences.SetupComplete &&
+        (Program.BackgroundUpdate || Program.Startup && preferences.StartInTray);
 
     /// <summary>
     /// The service runs its own copy of the app's binaries, replaced only by an elevated install.
@@ -130,6 +132,7 @@ public sealed partial class MainWindow : Window
             {
                 AppWindow.Hide();
                 UpdateAnimation();
+                ApplyUpdateIfUnattended();
             }
             else _ = QuitAsync();
         };
@@ -316,6 +319,7 @@ public sealed partial class MainWindow : Window
             }
             Render();
             FinishUpdateIfDue();
+            UpdateServiceIfUnattended();
         });
         link.Arrival += () => DispatcherQueue.TryEnqueue(() =>
         {
@@ -331,6 +335,7 @@ public sealed partial class MainWindow : Window
             if (incompatible)
             {
                 FinishUpdateIfDue();
+                UpdateServiceIfUnattended();
                 return;
             }
             if (retryCount < 3)
@@ -351,7 +356,35 @@ public sealed partial class MainWindow : Window
     {
         if (!finishUpdate || !ServiceBehind || switching || quitting) return;
         finishUpdate = false;
-        _ = UpdateServiceAsync();
+        unattendedServiceTried = true;
+        // An update nobody watched never raises a prompt; it leaves UPDATE for the person instead.
+        _ = UpdateServiceAsync(prompt: !Program.BackgroundUpdate, quiet: Program.BackgroundUpdate);
+    }
+
+    /// <summary>
+    /// With automatic updates on, a service found behind the app (say, after an update applied
+    /// while the service's updater could not run) is brought up to date without asking, once per
+    /// run. A service installed before the updater existed cannot be, and keeps the UPDATE button.
+    /// </summary>
+    private void UpdateServiceIfUnattended()
+    {
+        if (unattendedServiceTried || finishUpdate || !preferences.SetupComplete || !preferences.AutoUpdate ||
+            !ServiceBehind || switching || quitting || restarting) return;
+        unattendedServiceTried = true;
+        _ = UpdateServiceAsync(prompt: false, quiet: true);
+    }
+
+    /// <summary>
+    /// With automatic updates on, a downloaded app update is applied the moment the window is off
+    /// screen: the app restarts into the new version in the tray, and that version brings the
+    /// service along with no prompt. While the window is open it waits, behind the UPDATE button.
+    /// </summary>
+    private void ApplyUpdateIfUnattended()
+    {
+        if (!preferences.SetupComplete || !preferences.AutoUpdate || !updates.CanRestart || tray is null ||
+            AppWindow.IsVisible || switching || quitting || restarting || dialogOpen) return;
+        restarting = true;
+        _ = RestartToUpdateAsync(background: true);
     }
 
     /// <summary>
@@ -743,13 +776,19 @@ public sealed partial class MainWindow : Window
         return result == ServiceVerbResult.Ok;
     }
 
-    /// <summary>Replace the service's copy with this app's version. One administrator prompt.</summary>
-    private async Task<bool> UpdateServiceAsync()
+    /// <summary>
+    /// Replace the service's copy with this app's version: through the unattended updater when the
+    /// service has one, otherwise (or if it fails) with one administrator prompt, unless
+    /// <paramref name="prompt"/> is false. A <paramref name="quiet"/> update shows no update page
+    /// and reports no failure; the UPDATE button is what is left if it did not work.
+    /// </summary>
+    private async Task<bool> UpdateServiceAsync(bool prompt = true, bool quiet = false)
     {
-        if (switching) return false;
+        // Nothing to try without a prompt: leave the running service alone rather than reconnect.
+        if (switching || !prompt && !ServiceControl.HasUpdater()) return false;
         switching = true;
         updatingService = true;
-        updateView = true;
+        if (!quiet) updateView = true;
         serviceUpdateFailure = null;
         StatusText.Text = "UPDATING";
         Render();
@@ -759,7 +798,8 @@ public sealed partial class MainWindow : Window
             if (host is not null) await host.DisposeAsync();
             host = null;
             snapshot = null;
-            result = await ServiceControl.InstallAsync(stateDirectory);
+            result = await ServiceControl.UpdateUnattendedAsync(TimeSpan.FromMinutes(15));
+            if (result != ServiceVerbResult.Ok && prompt) result = await ServiceControl.InstallAsync(stateDirectory);
             if (result == ServiceVerbResult.Ok) serviceIncompatible = false;
         }
         finally
@@ -769,7 +809,7 @@ public sealed partial class MainWindow : Window
             if (result != ServiceVerbResult.Ok)
             {
                 pendingName = null;
-                serviceUpdateFailure = ServiceControl.Describe(result);
+                if (!quiet) serviceUpdateFailure = ServiceControl.Describe(result);
             }
             StartHost();
             Render();
@@ -895,11 +935,16 @@ public sealed partial class MainWindow : Window
             checkingUpdates = false;
             if (!quitting) Render();
         }
+        ApplyUpdateIfUnattended();
     }
 
-    private async Task RestartToUpdateAsync()
+    private async Task RestartToUpdateAsync(bool background = false)
     {
-        if (!updates.CanRestart || quitting) return;
+        if (!updates.CanRestart || quitting)
+        {
+            restarting = false;
+            return;
+        }
         quitting = true;
         retryTimer.Stop();
         updateTimer.Stop();
@@ -907,7 +952,7 @@ public sealed partial class MainWindow : Window
         if (host is not null) await host.DisposeAsync();
         tray?.Dispose();
         tray = null;
-        try { updates.Restart(); }
+        try { updates.Restart(background); }
         catch
         {
             quitting = false;

@@ -125,6 +125,24 @@ try {
                     throw "Package is missing $required."
                 }
             }
+            # The service's own files, for its unattended updater (service/Updater.cs), which
+            # fetches this one asset rather than the whole app. Taken from the package, so they are
+            # byte for byte what the app installs (signed, once releases are). Keep the names in
+            # step with ServiceLayout.InstalledFiles and ServiceLayout.ServiceArchive.
+            $serviceZip = Join-Path $root "artifacts\$rid\releases\StreetCryptid.Repeater.Service-$rid.zip"
+            if (Test-Path -LiteralPath $serviceZip) { Remove-Item -LiteralPath $serviceZip -Force }
+            $bundle = [System.IO.Compression.ZipFile]::Open($serviceZip, [System.IO.Compression.ZipArchiveMode]::Create)
+            try {
+                foreach ($name in 'StreetCryptid.Repeater.Service.exe', 'streetcryptid-repeater-host.exe', 'NOTICE', 'LICENSE') {
+                    $source = $archive.Entries | Where-Object {
+                        $_.FullName.Replace([char]47, [char]92) -eq "lib\app\$name"
+                    }
+                    if ($null -eq $source) { throw "Package is missing lib\app\$name." }
+                    $from = $source.Open()
+                    $to = $bundle.CreateEntry($name, [System.IO.Compression.CompressionLevel]::Optimal).Open()
+                    try { $from.CopyTo($to) } finally { $to.Dispose(); $from.Dispose() }
+                }
+            } finally { $bundle.Dispose() }
         } finally { $archive.Dispose() }
     }
 } finally { Pop-Location }

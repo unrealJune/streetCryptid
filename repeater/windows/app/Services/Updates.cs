@@ -7,7 +7,8 @@ public enum UpdateCheck { Unavailable, Busy, UpToDate, Ready, Failed }
 
 /// <summary>
 /// The app's half of an update. The service's half (its copy under Program Files) is finished by
-/// the app that restarts with <see cref="FinishArgument"/>, so a person sees one update.
+/// the app that restarts with <see cref="FinishArgument"/>, so a person sees one update. With
+/// automatic updates on, a downloaded update is applied as soon as the window is not on screen.
 /// </summary>
 public sealed class Updates
 {
@@ -42,6 +43,13 @@ public sealed class Updates
         finally { gate.Release(); }
     }
 
-    public void Restart() =>
-        manager.ApplyUpdatesAndRestart(manager.UpdatePendingRestart, [FinishArgument]);
+    /// <summary>
+    /// Passed with <see cref="FinishArgument"/> when nobody asked for the update: the app applied
+    /// it on its own from the tray, so the new version comes back to the tray rather than opening.
+    /// </summary>
+    public const string BackgroundArgument = "--background-update";
+
+    public void Restart(bool background = false) =>
+        manager.ApplyUpdatesAndRestart(manager.UpdatePendingRestart,
+            background ? [FinishArgument, BackgroundArgument] : [FinishArgument]);
 }

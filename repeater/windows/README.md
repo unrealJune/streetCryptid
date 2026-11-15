@@ -181,10 +181,26 @@ metadata file). Never describe them as signed production releases or bypass Wind
 automatically. Because updates replace binaries on a machine that holds an identity key, signing
 is a gate for any release beyond our own preview group; the workflow refuses non-preview tags.
 
-Automatic updates download in the background and apply on restart; manual checks are available in
-Settings and the tray. Restart stops a per-user host before replacement; the service keeps running
-until the restarted app updates it. Installation does not opt users into startup. Upgrade state lives
+Automatic updates download in the background every six hours. While the window is open the app
+waits behind its UPDATE button; once it is closed to the tray, it applies the update and restarts into
+the tray (`--background-update`). Manual checks are available in Settings and the tray. Restart stops
+a per-user host before replacement. Installation does not opt users into startup. Upgrade state lives
 outside the installation directory.
+
+The service's copy under Program Files follows the app with no administrator prompt.
+`install` registers a second service beside it, `StreetCryptidRepeaterUpdate`: the installed
+service executable's `update` verb, demand-start, LocalSystem, startable only by the owner (and
+administrators). The app that restarted into a new version starts it with that version; it refuses
+anything not newer than itself (`NotNewer`), downloads
+`windows-v<version>/StreetCryptid.Repeater.Service-<rid>.zip` from this repository's releases over
+HTTPS into an admin-only staging directory under Program Files, stops the service, swaps the files
+(renaming the running ones aside), and starts it again, putting the old files back if it will not
+start. Its exit code comes back through the SCM. It never reads from a directory the person can
+write, so a process in their session cannot hand SYSTEM a binary. A service installed before the
+updater existed, or an updater that fails, leaves the UPDATE button, which falls back to the
+elevated `install`; an unattended run never raises a prompt. Until releases are signed, the
+updater's trust is HTTPS to GitHub, the same as the app's own update; once they are, it should also
+check the download's publisher against the installed copy's.
 
 ## Release acceptance still required
 

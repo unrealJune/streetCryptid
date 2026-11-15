@@ -10,6 +10,19 @@ $user = Join-Path ([System.IO.Path]::GetTempPath()) "streetcryptid-service-test-
 $sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
 New-Item -ItemType Directory $user | Out-Null
 
+# The unattended updater: start it with one argument, wait for it to stop, return its exit code.
+function Invoke-Updater([string]$Version) {
+    & sc.exe start StreetCryptidRepeaterUpdate $Version | Out-Null
+    $deadline = [DateTime]::UtcNow.AddSeconds(60)
+    do {
+        Start-Sleep -Milliseconds 500
+        $svc = Get-CimInstance Win32_Service -Filter "Name='StreetCryptidRepeaterUpdate'"
+    } while ($svc.State -ne 'Stopped' -and [DateTime]::UtcNow -lt $deadline)
+    if ($svc.State -ne 'Stopped') { throw 'The updater did not stop.' }
+    if ($svc.ExitCode -eq 1066) { return [int]$svc.ServiceSpecificExitCode }
+    return [int]$svc.ExitCode
+}
+
 function Invoke-Verb([string[]]$Arguments) {
     $process = Start-Process -FilePath $service -ArgumentList $Arguments -Wait -PassThru -NoNewWindow
     return $process.ExitCode
@@ -83,14 +96,33 @@ try {
     }
     $pipe.Dispose()
 
+    # The updater is registered beside the service: LocalSystem, started on demand, and startable
+    # by its owner. It only moves forward and only takes a release version; neither refusal may
+    # touch the running service.
+    $updater = Get-CimInstance Win32_Service -Filter "Name='StreetCryptidRepeaterUpdate'"
+    if (!$updater) { throw 'The updater was not registered.' }
+    if ($updater.StartMode -ne 'Manual' -or $updater.StartName -ne 'LocalSystem') {
+        throw "The updater is $($updater.StartMode) as $($updater.StartName)."
+    }
+    $sddl = (& sc.exe sdshow StreetCryptidRepeaterUpdate | Where-Object { $_ }) -join ''
+    if ($sddl -notmatch [regex]::Escape(";;;$sid)")) { throw "The owner may not start the updater: $sddl" }
+    if ($sddl -match ';;;(IU|AU|BU|WD)\)') { throw "The updater is startable beyond its owner: $sddl" }
+    $before = (Get-Service StreetCryptidRepeater).Status
+    $code = Invoke-Updater '0.0.1'
+    if ($code -ne 5) { throw "An older version was not refused as not newer (got $code)." }
+    $code = Invoke-Updater '..\..\x'
+    if ($code -ne 3) { throw "A malformed version was not refused (got $code)." }
+    if ((Get-Service StreetCryptidRepeater).Status -ne $before) { throw 'A refused update touched the service.' }
+
     $code = Invoke-Verb @('uninstall', '--to', $user)
     if ($code -ne 0) { throw "Uninstall failed with $code." }
     if (Get-Service StreetCryptidRepeater -ErrorAction SilentlyContinue) { throw 'The service is still installed.' }
+    if (Get-Service StreetCryptidRepeaterUpdate -ErrorAction SilentlyContinue) { throw 'The updater is still installed.' }
     $back = [System.IO.File]::ReadAllBytes((Join-Path $user 'secret.key'))
     if ([Convert]::ToHexString($back) -ne [Convert]::ToHexString($key)) { throw 'The identity changed on the way back.' }
     if (Test-Path (Join-Path $user 'moved-to-service')) { throw 'The per-user directory is still marked.' }
     if (!(Test-Path (Join-Path $user 'host-settings.json'))) { throw 'The settings did not come back with the identity.' }
-    Write-Output 'Service installs, carries the same identity, relays only settings, and hands the identity back.'
+    Write-Output 'Service installs with its updater, carries the same identity, relays only settings, refuses a stale update, and hands the identity back.'
 } finally {
     if (Get-Service StreetCryptidRepeater -ErrorAction SilentlyContinue) { Invoke-Verb @('uninstall', '--to', $user) | Out-Null }
     Remove-Item -LiteralPath $user -Recurse -Force -ErrorAction SilentlyContinue
