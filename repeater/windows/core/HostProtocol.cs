@@ -57,7 +57,7 @@ public static class HostProtocol
             if (snapshot.ClaimUrl is { } claim &&
                 (!Uri.TryCreate(claim, UriKind.Absolute, out var uri) ||
                  uri.Scheme != "https" || uri.Host != "streetcrypt.id" ||
-                 uri.AbsolutePath != "/repeater" || uri.Query.Length != 0 ||
+                 !IsClaimPath(uri.AbsolutePath) || uri.Query.Length != 0 ||
                  uri.Fragment.Length == 0))
                 throw new InvalidDataException("Invalid claim link.");
         }
@@ -69,6 +69,13 @@ public static class HostProtocol
         else if (message.Kind != "arrival") throw new InvalidDataException("Unknown host message.");
         return message;
     }
+
+    /// <summary>
+    /// <c>/repeater/claim</c>, what <c>wire::claim_url</c> prints, or <c>/repeater</c>, what it
+    /// printed before that path became the setup guide: the service's host can be older than the
+    /// app reading it.
+    /// </summary>
+    public static bool IsClaimPath(string path) => path is "/repeater/claim" or "/repeater";
 
     public static string SettingsCommand(string requestId, HostSettings settings)
     {

@@ -36,6 +36,21 @@ public class HostProtocolTests
         Assert.True(tracker.Observe(4, false));
     }
 
+    [Theory]
+    [InlineData("https://streetcrypt.id/repeater/claim#t=abc&s=00", true)]
+    [InlineData("https://streetcrypt.id/repeater#t=abc&s=00", true)]
+    [InlineData("https://streetcrypt.id/repeater/install.ps1#t=abc", false)]
+    [InlineData("https://streetcrypt.id/repeater/claim", false)]
+    [InlineData("https://example.com/repeater/claim#t=abc", false)]
+    public void SnapshotClaimLinksAreTheRepeaterClaimUrl(string claim, bool valid)
+    {
+        var line = "{\"protocol\":2,\"kind\":\"snapshot\",\"runId\":\"run\",\"sequence\":1,\"snapshot\":" +
+            "{\"endpointId\":\"e\",\"claimed\":false,\"claimUrl\":\"" + claim + "\",\"members\":[]," +
+            "\"tracked\":0,\"missing\":0,\"received\":0}}";
+        if (valid) Assert.Equal(claim, HostProtocol.Parse(line).Snapshot!.ClaimUrl);
+        else Assert.Throws<InvalidDataException>(() => HostProtocol.Parse(line));
+    }
+
     [Fact]
     public void SettingsCommandIsCorrelatedAndRepliesAreChecked()
     {

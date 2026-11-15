@@ -10,10 +10,15 @@ import type { NativeRepeaterRoster } from 'iroh-location';
 export const CLAIM_SCHEME = 'streetcryptid-repeater:';
 
 /**
- * The same link as a URL any camera can open: `https://streetcrypt.id/repeater#t=<ticket>&s=<secret>`.
- * Claimed as a Universal Link / App Link beside `/pair`, so scanning the repeater's QR code with
- * the phone's own camera opens Settings → Repeaters with the link filled in. The ticket and the
- * secret ride in the fragment, which is never sent to streetcrypt.id when the app is missing.
+ * The same link as a URL any camera can open:
+ * `https://streetcrypt.id/repeater/claim#t=<ticket>&s=<secret>` (`wire::claim_url`). Claimed as a
+ * Universal Link / App Link beside `/pair`, so scanning the repeater's QR code with the phone's own
+ * camera opens Settings → Repeaters with the link filled in. The ticket and the secret ride in the
+ * fragment, which is never sent to streetcrypt.id when the app is missing.
+ *
+ * Only `/repeater/claim` is claimed: bare `/repeater` is the setup guide, which has to open in the
+ * browser on a phone that has the app. Repeaters built before 2026-11-15 print the bare path; those
+ * links still parse here, and in a browser streetcrypt.id hands them to the app.
  */
 export const CLAIM_WEB_HOST = 'streetcrypt.id';
 export const CLAIM_WEB_PATH = 'repeater';
@@ -21,12 +26,15 @@ const CLAIM_WEB_PREFIX = `https://${CLAIM_WEB_HOST}/${CLAIM_WEB_PATH}`;
 
 export type ClaimLinkCheck = { ok: true; link: string } | { ok: false; reason: string };
 
-/** True when `s` is the https claim URL (possibly without its fragment). */
+/** True when `s` is the https claim URL, either path (possibly without its fragment). */
 export function isWebClaimLink(s: string): boolean {
   if (!s.startsWith(CLAIM_WEB_PREFIX)) return false;
-  // Only a boundary may follow, so `/repeaters-guide` is never mistaken for a claim.
-  const rest = s.slice(CLAIM_WEB_PREFIX.length);
-  return rest === '' || rest.startsWith('/') || rest.startsWith('?') || rest.startsWith('#');
+  // Only a boundary may follow, so `/repeaters-guide` or `/repeater/install.ps1` is never mistaken
+  // for a claim.
+  let rest = s.slice(CLAIM_WEB_PREFIX.length);
+  if (rest === '/claim' || /^\/claim[/?#]/.test(rest)) rest = rest.slice('/claim'.length);
+  if (rest.startsWith('/')) rest = rest.slice(1);
+  return rest === '' || rest.startsWith('?') || rest.startsWith('#');
 }
 
 const CUT_SHORT = 'That link is cut short. Copy the whole line from the console.';

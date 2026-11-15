@@ -24,8 +24,9 @@ interface NativeIntentOptions {
  * The `id` nonce is what lets an identical command be issued twice and observed
  * twice; see `useDevCommand`.
  *
- * `https://streetcrypt.id/repeater#t=…&s=…` is a repeater's claim link, as its console's QR code
- * carries it. It opens the claim screen (Settings → Repeaters → Add) on the scanned machine;
+ * `https://streetcrypt.id/repeater/claim#t=…&s=…` is a repeater's claim link, as its console's QR
+ * code carries it (`/repeater#…` from repeaters built before 2026-11-15, which arrive through the
+ * web page's hand-off below, since only `/repeater/claim` is claimed now). It opens the claim screen (Settings → Repeaters → Add) on the scanned machine;
  * claiming still takes a tap, because the claim is where the roster's policy is chosen.
  *
  * Pure by contract: this is a sync path mapper, so it decides the route and

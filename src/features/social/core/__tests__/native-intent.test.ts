@@ -121,6 +121,15 @@ describe('native dev-command intent rewriting', () => {
     expect(
       redirectSystemPath({ path: 'https://streetcrypt.id/repeater#t=cut', initial: true })
     ).toBe('/settings/repeaters/claim');
+    // What repeaters print since /repeater became the setup guide.
+    expect(
+      redirectSystemPath({
+        path: `https://streetcrypt.id/repeater/claim#t=endpointabc&s=${secret}`,
+        initial: true,
+      })
+    ).toBe(
+      `/settings/repeaters/claim?claim=${encodeURIComponent(`streetcryptid-repeater:endpointabc#${secret}`)}`
+    );
     // The fallback page's custom-scheme hand-off lands in the same place.
     expect(
       redirectSystemPath({

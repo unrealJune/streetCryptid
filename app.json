@@ -71,7 +71,7 @@
             {
               "scheme": "https",
               "host": "streetcrypt.id",
-              "pathPrefix": "/repeater"
+              "path": "/repeater/claim"
             }
           ]
         }

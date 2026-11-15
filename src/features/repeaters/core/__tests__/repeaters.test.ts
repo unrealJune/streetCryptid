@@ -60,6 +60,21 @@ describe('checkClaimLink', () => {
     expect(isWebClaimLink('https://streetcrypt.id/pair#token=x')).toBe(false);
   });
 
+  it('reads the /repeater/claim path repeaters print now, and nothing else under /repeater', () => {
+    const link = `streetcryptid-repeater:endpointabc#${SECRET}`;
+    expect(
+      checkClaimLink(`https://streetcrypt.id/repeater/claim#t=endpointabc&s=${SECRET}`)
+    ).toEqual({ ok: true, link });
+    expect(
+      checkClaimLink(`https://streetcrypt.id/repeater/claim/?t=endpointabc&s=${SECRET}`)
+    ).toEqual({ ok: true, link });
+    expect(isWebClaimLink('https://streetcrypt.id/repeater/claim')).toBe(true);
+    expect(isWebClaimLink('https://streetcrypt.id/repeater/')).toBe(true);
+    // The setup guide's own files are not claims.
+    expect(isWebClaimLink('https://streetcrypt.id/repeater/install.ps1')).toBe(false);
+    expect(isWebClaimLink('https://streetcrypt.id/repeater/claimed#t=x')).toBe(false);
+  });
+
   it('refuses anything the core would refuse, before dialling', () => {
     expect(checkClaimLink('https://streetcrypt.id/pair#token=x').ok).toBe(false);
     expect(checkClaimLink('streetcryptid-repeater:endpointabc').ok).toBe(false);

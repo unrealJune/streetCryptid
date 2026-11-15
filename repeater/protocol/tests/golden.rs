@@ -444,7 +444,7 @@ fn claim_links_keep_their_shape() {
     assert_eq!(
         url,
         format!(
-            "https://streetcrypt.id/repeater#t=endpointabc&s={}",
+            "https://streetcrypt.id/repeater/claim#t=endpointabc&s={}",
             "ab".repeat(32)
         )
     );

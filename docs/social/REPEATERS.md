@@ -346,10 +346,12 @@ roster, or a roster on someone's machine.
 The claim works like this:
 
 1. An unclaimed repeater prints a **claim link** on its own console, as a QR code and as text:
-   `https://streetcrypt.id/repeater#t=<endpoint ticket>&s=<secret>`. streetcrypt.id claims
-   `/repeater` as a Universal Link / App Link, so the phone's own camera opens Settings →
+   `https://streetcrypt.id/repeater/claim#t=<endpoint ticket>&s=<secret>`. streetcrypt.id claims
+   `/repeater/claim` as a Universal Link / App Link, so the phone's own camera opens Settings →
    Repeaters with the link filled in; without the app, the page there hands off or offers the
-   link to paste. Both halves ride in the fragment, which is never sent to the server. The older
+   link to paste. Bare `/repeater` is the setup guide and deliberately not claimed, so it opens
+   in a browser even where the app is installed; repeaters built before 2026-11-15 print it with
+   the fragment, and the guide's page hands those to the app. Both halves ride in the fragment, which is never sent to the server. The older
    `streetcryptid-repeater:<endpoint ticket>#<secret>` shape still parses, on both sides. The
    endpoint ticket carries the repeater's full endpoint id, so scanning it is as strong as an SAS
    check.
