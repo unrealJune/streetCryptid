@@ -661,12 +661,27 @@ answer. Any `peer.contact` is an answer.
 | `network_change`         | the node called `Endpoint::network_change()` on itself — on entry, then every 30 min while it lasts                            |
 | `rebuild`                | the node was rebuilt inside an episode (`trigger` = `heal`, native with no app; `restart`, the app's `rebindNode('isolated')`) |
 | `recovered`              | someone answered: `isolated_ms`, the steps taken, `last_step` and `since_last_step_ms`                                         |
+| `docs_dead`              | this node's iroh-docs engine is gone (`error`, `rebuild_due`, `since_rebuild_ms`); once per node, and a rebuild is due at once |
 
 A rebuild is due 10 min after a network change that did not help, at most once an hour (any rebuild,
 a settings change included, starts the cooldown). With no app holding the node the core heals it
 itself (`node.host.heal`); a mounted app reads `isolationStatus().rebuildDue` on its heartbeat and
 calls `rebindNode('isolated')`, because only it can rewire its subscriptions. `device.health`
 carries the state as `isolation.*`.
+
+**`docs_dead` is not isolation, and peers answering does not end it.** iroh-docs never restarts its
+engine: once the live actor stops, its teardown shuts the replica store down too, and every docs
+call on that node fails with `sending to iroh_docs actor failed` — no push, no pull, no profile
+reseal — while everything else about the node looks fine. On 2026-11-15 one panicking accept task
+(since patched, `third_party/iroh-docs`) did that to a Pixel 10 for 17 hours. The node now probes
+its replica store on every drain and pull, and a dead engine makes a rebuild due at once, through
+the same paths (`node.host.heal` with no app, `rebindNode('isolated')` with one), floored at 10 min
+since the last rebuild so an engine that dies again cannot loop. `session.recover` reports
+`error = docs engine gone` meanwhile.
+
+```traceql
+{ name = "node.isolation" && span.event = "docs_dead" } | select(resource.service.instance.id, span.error, span.rebuild_due)
+```
 
 **Read `recovered{last_step}` before tuning anything.** `none` means it came back on its own (as it
 did twice on 2026-10-22), `network_change` / `rebuild` with a small `since_last_step_ms` means that

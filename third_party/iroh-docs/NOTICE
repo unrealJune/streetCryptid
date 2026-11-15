@@ -1,0 +1,36 @@
+iroh-docs — vendored, modified copy
+===================================
+
+Upstream : https://github.com/n0-computer/iroh-docs (crates.io `iroh-docs` 0.101.0)
+License  : MIT OR Apache-2.0 (LICENSE-MIT, LICENSE-APACHE in this directory)
+
+Used through `[patch.crates-io]` in ../../Cargo.toml so the phone's core, the web bridge and the
+trail stash all get this copy. Drop the patch and this directory once an iroh-docs release fixes
+the bug below (upstream `main` still had it on 2026-11-15).
+
+Modifications by the streetCryptid project
+------------------------------------------
+
+2026-11-15 — a failed accepted sync panicked, and the panic stopped the whole engine:
+
+  * src/net/codec.rs
+      - `BobState::into_outcome` returns `progress.unwrap_or_default()` instead of
+        `progress.unwrap()`. `BobState::run` takes `progress` out before each
+        `sync_process_message` and returns early through `?` when it fails, leaving `None`;
+        `net::handle_connection` calls `into_outcome` unconditionally afterwards, so any accepted
+        sync whose message processing failed (e.g. the namespace closed under it because the
+        friend was just removed) panicked with "called `Option::unwrap()` on a `None` value".
+      - Test `a_failed_accept_has_an_empty_outcome_not_a_panic`.
+
+  * src/engine/live.rs
+      - A `JoinError` from `running_sync_accept` / `running_sync_connect` (a panicked or
+        cancelled sync task) is logged and the actor carries on. It was `?`, which returned from
+        `LiveActor::run`, whose teardown shuts the replica store actor down: every later docs call
+        on the node failed with "sending to iroh_docs actor failed" until the process restarted.
+        On 2026-11-15 a Pixel 10 spent 17 hours that way — no push, no pull, no profile reseal —
+        after one accept task panicked. The panicked task's (namespace, peer) state may stay
+        marked running, which costs that one pair its syncs, not the node.
+
+The crate's Cargo.lock, Cargo.toml.orig, .cargo_vcs_info.json, CI config, examples, tests and
+proptest regressions were not vendored, and the [[example]] / [[test]] entries are removed from
+Cargo.toml. No other file differs from the published 0.101.0 crate.

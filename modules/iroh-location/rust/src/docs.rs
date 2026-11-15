@@ -88,6 +88,21 @@ pub const PUSH_TIMEOUT_SECS: u64 = 30;
 /// Key separator between the hex author and the zero-padded sequence number.
 pub const KEY_SEP: u8 = b'/';
 
+/// The key [`TrailDocs::probe_store`] reads. Nothing writes it; the read only has to reach the
+/// replica store.
+const ENGINE_PROBE_KEY: &[u8] = b"sc/engine-probe";
+
+/// What iroh-docs says, through every call, once its replica store actor is gone
+/// (`iroh_docs::actor::SyncHandle::send`). That happens when the live engine stops: its teardown
+/// shuts the store down, and nothing in iroh-docs starts either again, so the node is deaf and mute
+/// for the rest of its life. See `isolation.rs`.
+const ENGINE_GONE: &str = "iroh_docs actor";
+
+/// Whether `error` (any `Display` of it, chain included) says the docs engine is gone.
+pub fn engine_gone(error: &str) -> bool {
+    error.contains(ENGINE_GONE)
+}
+
 /// Filename (under `data_dir`) holding the persisted trail `NamespaceId`, so our own trail
 /// namespace is stable across [`crate::LocationNode`] restarts even though iroh-docs mints a
 /// fresh namespace on `create()`. Mirrors [`crate::profile::PROFILE_NS_FILE`]; without it a
@@ -867,6 +882,19 @@ impl TrailDocs {
     /// Our own trail namespace id.
     pub fn own_namespace(&self) -> NamespaceId {
         self.own_ns
+    }
+
+    /// One local read through the replica store: `Ok` whenever the docs engine is alive, whatever
+    /// the namespace holds. Its error is what [`engine_gone`] reads. Never dials.
+    pub async fn probe_store(&self) -> Result<()> {
+        let doc = self.doc_for(self.own_ns).await?;
+        doc.get_one(
+            Query::single_latest_per_key()
+                .key_exact(ENGINE_PROBE_KEY)
+                .build(),
+        )
+        .await?;
+        Ok(())
     }
 
     /// Upload every current slot in our namespace to the stash's authenticated opaque-content API.

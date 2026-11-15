@@ -2177,6 +2177,14 @@ impl LocationNode {
             friends.sort();
             friends.dedup();
             let live = self.live().await.ok();
+            // Once per drain is the probe's cadence: a node whose docs engine is gone gets rebuilt
+            // rather than failing every read below until the process ends (`isolation.rs`).
+            if let Some(live) = live.as_ref() {
+                if !self.check_docs_engine(live).await {
+                    span.record("error", "docs engine gone");
+                    return publish::RecoveryOutcome::default();
+                }
+            }
 
             // What the replica holds: our leaders' latest envelopes (a restart may ride on them),
             // and the control records of the friends we lead.
@@ -4615,6 +4623,35 @@ impl LocationNode {
         }
     }
 
+    /// Whether this node's docs engine is still alive, and if not, have it rebuilt (`isolation.rs`,
+    /// "A node whose docs engine is gone"). One local read; called on every drain and every pull,
+    /// which is how often a dead engine would otherwise fail silently.
+    ///
+    /// Only the host's CURRENT node counts: a superseded one, still finishing a call after a
+    /// rebuild, would report a dead engine that is not this process's problem any more. The
+    /// rebuild is taken here when no app holds the node; a mounted app reads `rebuild_due` on its
+    /// heartbeat and goes through `rebindNode`, as for isolation.
+    async fn check_docs_engine(&self, live: &Live) -> bool {
+        let Err(err) = live.trail.probe_store().await else {
+            return true;
+        };
+        let error = format!("{err:#}");
+        if !docs::engine_gone(&error) {
+            return true;
+        }
+        let me = self as *const Self as usize;
+        if !host::node_host().is_current(me) {
+            return false;
+        }
+        let due = isolation::note_docs_dead(&error);
+        if due && host::node_host().snapshot().app_leases == 0 {
+            tokio::spawn(async move {
+                host::node_host().heal_isolated(me).await;
+            });
+        }
+        false
+    }
+
     /// The body of [`Self::sync_latest`] and [`Self::pull_latest`]. Kept out of the exported block
     /// so UniFFI does not see it.
     async fn pull_inner(
@@ -4676,6 +4713,11 @@ impl LocationNode {
                 );
             }
             let started = self.live().await?;
+            if !self.check_docs_engine(&started).await {
+                return Err(LocationError::Network(
+                    "the docs engine is gone; the node is due a rebuild".into(),
+                ));
+            }
             let trail = started.trail.clone();
 
             // No sink and no `recovered` count here any more: with one overwritten slot per author
