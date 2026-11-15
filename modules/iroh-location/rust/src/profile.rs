@@ -990,6 +990,20 @@ impl ProfileDocs {
         let rec = verify(bytes, Some(expected_endpoint))?;
         let arr = rec.endpoint_arr().ok_or(ProfileError::Decode)?;
         if !self.accept_if_newer(&rec).await {
+            // Not new, but still kept when it IS the newest we accepted. A re-pair hands back the
+            // epoch this process already read from the old friendship, and since profiles are
+            // sealed the namespace can no longer stand in for it: the peer moved to a new key
+            // when they removed us, and wraps it for us only once they acknowledge again. Dropping
+            // the handed copy there left the reveal churning into "persona unavailable" while the
+            // record that would have answered it sat in this function. An OLDER epoch is still
+            // refused, which is all the rollback rule ever asked.
+            let current = self.epochs.lock().await.get(&arr).copied();
+            if current == Some(rec.epoch) {
+                let mut handed = self.handed.lock().await;
+                if handed.get(&arr).is_none_or(|held| held.epoch <= rec.epoch) {
+                    handed.insert(arr, rec);
+                }
+            }
             return Ok(None);
         }
         self.handed.lock().await.insert(arr, rec.clone());
@@ -1580,6 +1594,48 @@ mod tests {
                 .unwrap()
                 .map(|r| r.epoch),
             Some(8)
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A re-pair: this process already accepted the peer's epoch during the old friendship, and
+    /// their namespace is sealed under a key we no longer hold. The Accept's copy is the only one
+    /// we can read, so it must be what the pair result finds, though it is not an update.
+    #[tokio::test]
+    async fn a_re_pair_hands_back_the_epoch_we_already_saw() {
+        let (docs, dir) = live_profile("handed-repair").await;
+        let (seed, endpoint) = identity();
+        let record = signed_record(&seed, &endpoint, 5);
+        let rec = verify(&record, Some(&endpoint)).unwrap();
+        // What reading their namespace during the first friendship left behind.
+        assert!(docs.accept_if_newer(&rec).await);
+        assert!(docs.read_for_endpoint(&endpoint).await.unwrap().is_none());
+
+        assert!(
+            docs.ingest_handed_record(&record, &endpoint)
+                .await
+                .unwrap()
+                .is_none(),
+            "the same epoch again is not news for the sink"
+        );
+        assert_eq!(
+            docs.read_for_endpoint(&endpoint)
+                .await
+                .unwrap()
+                .map(|r| r.epoch),
+            Some(5),
+            "but the pair result must find it, or the reveal times out"
+        );
+        // An older epoch is still refused outright.
+        docs.ingest_handed_record(&signed_record(&seed, &endpoint, 4), &endpoint)
+            .await
+            .unwrap();
+        assert_eq!(
+            docs.read_for_endpoint(&endpoint)
+                .await
+                .unwrap()
+                .map(|r| r.epoch),
+            Some(5)
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
