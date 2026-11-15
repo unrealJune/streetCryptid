@@ -3698,39 +3698,6 @@ impl LocationNode {
         Ok(carried)
     }
 
-    /// Invite a friend to every invite-only roster this phone may invite to and has not yet: what
-    /// the pairing screen's "also invite them to my repeaters" does, pre-checked when auto-invite
-    /// is on (§4.4). Resolves how many invites were signed. Every roster is offered to its
-    /// repeaters by the grant pass that follows, so nothing here waits on a machine.
-    pub async fn invite_friend_to_repeaters(&self, member: String) -> Result<u32, LocationError> {
-        let member = decode_id32(&member, "member id")?;
-        let book = self.roster_book().await?;
-        let key = self.roster_key();
-        let me = key.verifying_key().to_bytes();
-        let mut signed = 0u32;
-        for roster in repeater::invite_targets(&book, &me, &member) {
-            match repeater::sign_invite(&key, &book, &roster, &member, now_ms()) {
-                Ok(true) => signed += 1,
-                Ok(false) => {}
-                Err(error) => tracing::warn!(%error, "repeater: could not invite a new friend"),
-            }
-        }
-        let answered = self
-            .outgoing_offers
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .remove(&member)
-            .is_some();
-        if answered {
-            self.publish_repeater_offers().await;
-        }
-        if signed > 0 {
-            // Offers the new ops to every repeater (`repeater::deliver`), then republishes the card.
-            self.grant_repeaters("invite").await;
-        }
-        Ok(signed)
-    }
-
     /// Owner only: let `member` invite people to our roster (`inviter`), or stop them. Invites they
     /// already made stand (§3.3).
     pub async fn set_repeater_inviter(
@@ -3746,18 +3713,6 @@ impl LocationNode {
             repeater::OwnerChange::RevokeInviter(member)
         };
         self.change_roster(&roster_id, change).await
-    }
-
-    /// Whether new friends are invited, at pairing, to the rosters this phone may invite to.
-    pub async fn repeater_auto_invite(&self) -> Result<bool, LocationError> {
-        Ok(self.roster_book().await?.auto_invite())
-    }
-
-    pub async fn set_repeater_auto_invite(&self, on: bool) -> Result<(), LocationError> {
-        self.roster_book()
-            .await?
-            .set_auto_invite(on)
-            .map_err(|e| LocationError::Decode(e.to_string()))
     }
 
     /// What `device.health` reports about repeaters: how many rosters and machines carry us, and

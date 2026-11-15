@@ -1095,14 +1095,6 @@ class IrohLocationModule : Module() {
         n.inviteToRepeater(rosterId, member)
       }
 
-    /// Invite a new friend to every invite-only roster we may invite to (the pairing screen's
-    /// "also invite them"). Resolves how many invites were signed.
-    AsyncFunction("inviteFriendToRepeaters") Coroutine
-      { member: String ->
-        val n = node ?: throw IllegalStateException("call createNode first")
-        n.inviteFriendToRepeaters(member).toLong()
-      }
-
     /// The rosters to offer whoever we pair with next, chosen before the shake.
     AsyncFunction("setPairingRepeaterOffer") Coroutine
       { rosterIds: List<String> ->
@@ -1123,18 +1115,6 @@ class IrohLocationModule : Module() {
       { rosterId: String, member: String, inviter: Boolean ->
         val n = node ?: throw IllegalStateException("call createNode first")
         n.setRepeaterInviter(rosterId, member, inviter)
-      }
-
-    AsyncFunction("repeaterAutoInvite") Coroutine
-      { ->
-        val n = node ?: throw IllegalStateException("call createNode first")
-        n.repeaterAutoInvite()
-      }
-
-    AsyncFunction("setRepeaterAutoInvite") Coroutine
-      { on: Boolean ->
-        val n = node ?: throw IllegalStateException("call createNode first")
-        n.setRepeaterAutoInvite(on)
       }
 
     /// What device.health reports about repeaters. A local read.

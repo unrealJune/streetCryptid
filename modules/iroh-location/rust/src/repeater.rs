@@ -48,9 +48,6 @@ const BOOK_V: u32 = 1;
 /// roster once more.
 pub const DELIVERED_FILE: &str = "repeaters-delivered.bin";
 const DELIVERED_V: u32 = 1;
-/// This phone's repeater preferences (today only auto-invite, §3.2). Lost or torn means the
-/// defaults, which invite nobody.
-pub const PREFS_FILE: &str = "repeaters-prefs.bin";
 /// Our `Enroll`s no repeater has confirmed yet ([`RosterBook::is_awaiting`]), beside the book.
 pub const AWAITING_FILE: &str = "repeaters-awaiting.bin";
 const AWAITING_V: u32 = 1;
@@ -58,14 +55,6 @@ const AWAITING_V: u32 = 1;
 /// ([`want`], [`fulfil_wanted`]). Durable, because the invite it waits for may come days later.
 pub const WANTED_FILE: &str = "repeaters-wanted.bin";
 const WANTED_V: u32 = 1;
-const PREFS_V: u32 = 1;
-
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-struct Prefs {
-    v: u32,
-    /// Invite each new friend, at pairing, to every invite-only roster this phone may invite to.
-    auto_invite: bool,
-}
 
 /// How long one request may take, dial included. Nothing a user waits on is bounded by this
 /// except a claim, which they started at a repeater's console and are watching.
@@ -115,8 +104,6 @@ pub struct RosterBook {
     /// For each (roster, repeater), our heads when that repeater last answered a `Publish` of
     /// it. A roster whose heads have moved since is owed to that repeater ([`deliver`]).
     delivered: Mutex<BTreeMap<(RosterId, EndpointId), Vec<OpId>>>,
-    prefs_path: PathBuf,
-    prefs: Mutex<Prefs>,
     awaiting_path: PathBuf,
     /// For each roster we enrolled in, our `Enroll` until a repeater has confirmed it holds it:
     /// carried by our own copy, not yet by any machine (§4.4). The settings say "waiting".
@@ -161,12 +148,6 @@ impl RosterBook {
                     .collect()
             })
             .unwrap_or_default();
-        let prefs_path = dir.join(PREFS_FILE);
-        let prefs = std::fs::read(&prefs_path)
-            .ok()
-            .and_then(|raw| postcard::from_bytes::<Prefs>(&raw).ok())
-            .filter(|prefs| prefs.v == PREFS_V)
-            .unwrap_or_default();
         let awaiting_path = dir.join(AWAITING_FILE);
         // Unreadable means "confirmed": the worst case is a waiting state not shown.
         let awaiting = std::fs::read(&awaiting_path)
@@ -210,8 +191,6 @@ impl RosterBook {
             rosters: Mutex::new(rosters),
             delivered_path,
             delivered: Mutex::new(delivered),
-            prefs: Mutex::new(prefs),
-            prefs_path,
             awaiting_path,
             awaiting: Mutex::new(awaiting),
             wanted_path,
@@ -311,25 +290,6 @@ impl RosterBook {
         if let Err(e) = written {
             tracing::warn!(error = %e, "repeater: could not record a waiting enrollment");
         }
-    }
-
-    /// Whether new friends are invited, at pairing, to the rosters this phone may invite to.
-    pub fn auto_invite(&self) -> bool {
-        self.prefs
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .auto_invite
-    }
-
-    pub fn set_auto_invite(&self, on: bool) -> anyhow::Result<()> {
-        let mut prefs = self.prefs.lock().unwrap_or_else(|p| p.into_inner());
-        let next = Prefs {
-            v: PREFS_V,
-            auto_invite: on,
-        };
-        std::fs::write(&self.prefs_path, postcard::to_allocvec(&next)?)?;
-        *prefs = next;
-        Ok(())
     }
 
     /// The rosters this phone has signed an op in: the one it owns, and every one it enrolled
@@ -1247,22 +1207,6 @@ pub fn pending_invites(book: &RosterBook, roster: &RosterId) -> BTreeSet<Endpoin
         .collect()
 }
 
-/// The invite-only rosters `me` may invite `member` to and has not yet: what auto-invite, and
-/// the pairing screen's "also invite them", act on (§4.4).
-pub fn invite_targets(book: &RosterBook, me: &EndpointId, member: &EndpointId) -> Vec<RosterId> {
-    book.states()
-        .into_iter()
-        .filter(|state| {
-            state.policy == Policy::Invite
-                && state.inviters.contains(me)
-                && *member != state.owner
-                && !state.carried.contains(member)
-        })
-        .map(|state| state.id)
-        .filter(|roster| !pending_invites(book, roster).contains(member))
-        .collect()
-}
-
 async fn publish_to(
     endpoint: &Endpoint,
     book: &RosterBook,
@@ -2153,20 +2097,16 @@ mod tests {
     }
 
     #[test]
-    fn an_inviter_invites_new_friends_once_and_only_to_invite_rosters() {
+    fn an_inviter_invites_each_friend_once_while_the_owner_lets_them() {
         let dir = scratch("invite-plan");
         let book = RosterBook::open(&dir).unwrap();
         let closed = book.create(&key(1), Policy::Invite, 1).unwrap();
-        let open = book.create(&key(1), Policy::Open, 1).unwrap();
         // Someone else's invite-only roster, where I am not an inviter.
         let theirs = book.create(&key(5), Policy::Invite, 1).unwrap();
-        assert_eq!(invite_targets(&book, &id(1), &id(2)), vec![closed]);
-        assert!(!invite_targets(&book, &id(1), &id(2)).contains(&open));
-        assert!(!invite_targets(&book, &id(1), &id(2)).contains(&theirs));
+        assert!(sign_invite(&key(1), &book, &theirs, &id(2), 2).is_err());
 
         assert!(sign_invite(&key(1), &book, &closed, &id(2), 2).unwrap());
         assert_eq!(pending_invites(&book, &closed), BTreeSet::from([id(2)]));
-        assert!(invite_targets(&book, &id(1), &id(2)).is_empty());
         assert!(
             !sign_invite(&key(1), &book, &closed, &id(2), 3).unwrap(),
             "not twice"
@@ -2174,7 +2114,7 @@ mod tests {
 
         // An inviter the owner granted may invite too; once revoked, not any more.
         sign_owner_change(&key(1), &book, &closed, OwnerChange::GrantInviter(id(3)), 4).unwrap();
-        assert_eq!(invite_targets(&book, &id(3), &id(4)), vec![closed]);
+        assert!(offerable(&book, &id(3)).contains(&closed));
         assert!(sign_invite(&key(3), &book, &closed, &id(4), 5).unwrap());
         sign_owner_change(
             &key(1),
@@ -2184,14 +2124,8 @@ mod tests {
             6,
         )
         .unwrap();
-        assert!(invite_targets(&book, &id(3), &id(6)).is_empty());
+        assert!(!offerable(&book, &id(3)).contains(&closed));
         assert!(sign_invite(&key(3), &book, &closed, &id(6), 7).is_err());
-
-        // Auto-invite is off until set, and survives a reopen.
-        assert!(!book.auto_invite());
-        book.set_auto_invite(true).unwrap();
-        drop(book);
-        assert!(RosterBook::open(&dir).unwrap().auto_invite());
     }
 
     #[test]

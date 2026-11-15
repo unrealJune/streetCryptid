@@ -4,7 +4,6 @@ import { useLocalSearchParams } from 'expo-router';
 import { ThemedText } from '@/components/themed-text';
 import { SettingsPage, SettingsSection } from '@/features/settings/components/settings-page';
 
-import { AutoInviteSwitch } from '../components/auto-invite-switch';
 import { useRepeaterChrome } from '../components/repeater-chrome';
 import { RosterPeople } from '../components/roster-people';
 import { inviteCandidates, rosterLine, type RosterView } from '../core/repeaters';
@@ -15,7 +14,7 @@ import { useRepeaters } from '../hooks/use-repeaters';
  * Opened from a carrier's card on Settings → Repeaters (INVITE FRIENDS), as `?roster=<id>`;
  * without one, your own roster, whose people Your repeaters already lists in place.
  *
- * "Invite new friends" (auto-invite) is here, beside the invite lists it pre-fills at pairing.
+ * New friends are offered repeaters on the pairing screen itself (REPEATERS.md §4.4).
  */
 export default function RosterPeopleScreen() {
   const { chrome } = useRepeaterChrome();
@@ -40,10 +39,6 @@ export default function RosterPeopleScreen() {
     const failure = await outcome;
     if (failure) setError(failure);
   }
-
-  const mayAutoInvite = [sections.mine, ...sections.carryingMe].some(
-    (r) => r?.canInvite && !r.open
-  );
 
   return (
     <SettingsPage
@@ -90,16 +85,6 @@ export default function RosterPeopleScreen() {
         <ThemedText type="small" themeColor="textSecondary">
           This phone does not know that roster any more.
         </ThemedText>
-      ) : null}
-
-      {mayAutoInvite && repeaters.autoInvite !== null ? (
-        <SettingsSection label="NEW FRIENDS">
-          <AutoInviteSwitch
-            value={repeaters.autoInvite}
-            accent={chrome.green}
-            onChange={(on) => void run(repeaters.setAutoInvite(on))}
-          />
-        </SettingsSection>
       ) : null}
     </SettingsPage>
   );

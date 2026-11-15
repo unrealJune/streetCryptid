@@ -28,10 +28,8 @@ export interface UseRepeaters {
   readonly busyRoster: string | null;
   /** Whether this binary has the owner's controls (policy, removing members and machines). */
   readonly ownerControls: boolean;
-  /** Whether this binary can invite, grant `inviter`, and auto-invite. */
+  /** Whether this binary can invite and grant `inviter`. */
   readonly inviteControls: boolean;
-  /** Invite each new friend at pairing (REPEATERS.md §3.2); `null` until read or unsupported. */
-  readonly autoInvite: boolean | null;
   refresh(): Promise<void>;
   claim(link: string, open: boolean, carryMe: boolean): Outcome;
   setCarried(rosterId: string, carry: boolean): Outcome;
@@ -45,7 +43,6 @@ export interface UseRepeaters {
   removeMachine(rosterId: string, repeaterId: string): Outcome;
   invite(rosterId: string, member: string): Outcome;
   setInviter(rosterId: string, member: string, inviter: boolean): Outcome;
-  setAutoInvite(on: boolean): Outcome;
 }
 
 const UNSUPPORTED = 'Repeaters need the installed app.';
@@ -72,7 +69,6 @@ export function useRepeaters({
   const [status, setStatus] = useState<RepeatersStatus>(client ? 'loading' : 'unsupported');
   const [error, setError] = useState<string | null>(null);
   const [busyRoster, setBusyRoster] = useState<string | null>(null);
-  const [autoInvite, setAutoInviteState] = useState<boolean | null>(null);
   const reads = useRef(0);
   const invites = client?.invites ?? null;
 
@@ -81,10 +77,8 @@ export function useRepeaters({
     const read = ++reads.current;
     try {
       const next = await client.rosters();
-      const auto = invites ? await invites.autoInvite().catch(() => null) : null;
       if (read !== reads.current) return;
       setRosters(next);
-      setAutoInviteState(auto);
       setError(null);
       setStatus('ready');
     } catch (e) {
@@ -162,8 +156,6 @@ export function useRepeaters({
         setInviterCall
           ? change(rosterId, () => setInviterCall(rosterId, member, inviter))
           : Promise.resolve(UNSUPPORTED),
-      setAutoInvite: (on: boolean) =>
-        invites ? change(null, () => invites.setAutoInvite(on)) : Promise.resolve(UNSUPPORTED),
     }),
     [client, owner, invites, setInviterCall, change]
   );
@@ -184,7 +176,6 @@ export function useRepeaters({
     busyRoster,
     ownerControls: owner !== null,
     inviteControls: invites !== null && setInviterCall !== null,
-    autoInvite,
     refresh,
     ...actions,
   };

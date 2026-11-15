@@ -214,7 +214,7 @@ The roster is the only list. Nobody keeps an allowlist by hand.
 | role        | may                                                                                       |
 | ----------- | ----------------------------------------------------------------------------------------- |
 | **owner**   | everything; the root of trust. Adds and removes repeaters, grants roles, sets the policy. |
-| **inviter** | invite people; turn on auto-invite for their own new friends (§4.4).                      |
+| **inviter** | invite people, and offer the roster to new friends at pairing (§4.4).                     |
 | **member**  | have their trail carried; withdraw.                                                       |
 
 Each roster has one **policy**, set by the owner:
@@ -226,16 +226,15 @@ Each roster has one **policy**, set by the owner:
   friend who sets up a repeater later and lets anyone use it. The owner can `Remove` anyone.
   Per-member limits bound the rest: at most four namespaces each today, with quotas in phase 3.
 
-Granting `inviter` is how an `invite` roster grows without the owner approving every person.
-Auto-invite is a per-inviter setting: it decides whether _my_ new friends are invited, at pairing
-time, to the repeaters I can invite people to.
+Granting `inviter` is how an `invite` roster grows without the owner approving every person. An
+inviter offers the roster to their own new friends at pairing, as the owner does (§4.4).
 
 **How it is built.** The owner invites from Settings → Repeaters → People (a friend list under
 INVITE) and grants or revokes `inviter` on a carried member's row (LET INVITE / NO INVITES); an
 inviter reaches the same INVITE list from the owner's roster (Invite friends). An invite is also how a member the
 owner removed comes back, in either policy, so the owner can invite in an `open` roster too.
-"Invite new friends" on the same page is auto-invite: it pre-checks "Also invite them" at
-pairing (§4.4). The core is `repeater::invite`, `invite_targets` and
+New friends are offered the roster on the pairing screen itself, from a drawer of every roster I
+may invite to (§4.4). The core is `repeater::invite`, `offerable` and
 `pending_invites`; which invite stands is `Roster::standing_invite`, the same rule an `Enroll`
 is judged by (an invite made before a `Remove` of that person does not).
 
@@ -631,11 +630,11 @@ Behind it (`src/app/settings/repeaters/`):
   REACHING is the claim in flight, bounded at 20 s, so it has no cancel; CLAIMED or REFUSED.
 - **Your repeaters** (`mine`): the roster this phone owns on one page, in the order a person
   decides about it: carrying me, its machines (each REMOVE confirmed once; _Add a repeater_), who
-  can join (the policy), and its people with invites and auto-invite. People are the roster's, so
+  can join (the policy), and its people with invites. People are the roster's, so
   they live here rather than on a page of their own. Rosters that carry me or are offered stay as
   cards on the list itself: switching one off is a Withdraw (never "remove": §2.2), and switching
   an offered one on asks first in a sheet. There is no "deny": nothing refuses an offer.
-- **People** (`people?roster=`): members, inviters, invites, and auto-invite, for another person's
+- **People** (`people?roster=`): members, inviters and invites, for another person's
   roster this phone may invite to.
 
 No pairing-wire change is needed, and none should be made: `PairMsg` is signed over a re-encode,
@@ -943,8 +942,9 @@ The repeater work landed as trail-stash#8 and #9 before that repository moved in
    - Built: `RepeaterCard` (whole signed logs, vouching checked against the log), Available
      through friends in Settings → Repeaters, enrolling with a cited invite, and
      `fix.provenance` / `contact.role = repeater` telemetry (`infra/otel/README.md`).
-   - Built: the Enroll and invite question on the pairing result screen, inviting, granting
-     `inviter`, and auto-invite (§3.2, §4.4). Not yet: auto-enroll.
+   - Built: offering and accepting repeaters at pairing, inviting, granting `inviter`, and a yes
+     that enrolls once invited (§3.2, §4.4). Auto-invite was removed when the pairing screen
+     started offering every roster by default. Not yet: auto-enroll.
    - Built: vouches only from the friend whose profile namespace a card was read from (§4.2).
    - Delivery, built: unwaited pushes to rosters I am enrolled in, capped and rotated pulls from
      friends' repeaters, `contact.role` / `fix.provenance`. Isolation needed no change (any
@@ -997,7 +997,7 @@ what is not. What was found, and what changed:
 | G1  | roster ops were offered to a repeater once                     | offered on every grant pass until the repeater answers (`repeater::deliver`, §4.4)       |
 | G2  | a removed machine kept carrying                                | it releases everything and refuses `Grant` (`Roster::is_removed_repeater`, §6.2)         |
 | G3  | `StashNode::release` described disk GC                         | rewritten for in-memory ciphertext                                                       |
-| G4  | no call signed `Invite`, `Grant` or `Revoke`                   | invite, grant and revoke `inviter`, auto-invite (§3.2)                                   |
+| G4  | no call signed `Invite`, `Grant` or `Revoke`                   | invite, grant and revoke `inviter`, offers at pairing (§3.2, §4.4)                       |
 | G5  | no phone asked a repeater `Have`                               | a push to carriers alone waits up to 8 s for a receipt (`repeater::receipt`, §5)         |
 | G6  | anyone holding a roster id could fill it                       | signatures first, a separate pending queue, per-signer cap, owner reserve (§8)           |
 | G7  | every roster in the book was fetched on every start            | only rosters this phone owns or is carried by; a phone that signed nothing dials nothing |

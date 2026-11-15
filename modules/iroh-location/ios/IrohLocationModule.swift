@@ -956,13 +956,6 @@ public final class IrohLocationModule: Module {
       return try await node.inviteToRepeater(rosterId: rosterId, member: member)
     }
 
-    // Invite a new friend to every invite-only roster we may invite to (the pairing screen's
-    // "also invite them"). Resolves how many invites were signed.
-    AsyncFunction("inviteFriendToRepeaters") { (member: String) async throws -> Double in
-      guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
-      return Double(try await node.inviteFriendToRepeaters(member: member))
-    }
-
     // The rosters to offer whoever we pair with next, chosen before the shake.
     AsyncFunction("setPairingRepeaterOffer") { (rosterIds: [String]) async throws in
       guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
@@ -980,16 +973,6 @@ public final class IrohLocationModule: Module {
     AsyncFunction("setRepeaterInviter") { (rosterId: String, member: String, inviter: Bool) async throws in
       guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
       try await node.setRepeaterInviter(rosterId: rosterId, member: member, inviter: inviter)
-    }
-
-    AsyncFunction("repeaterAutoInvite") { () async throws -> Bool in
-      guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
-      return try await node.repeaterAutoInvite()
-    }
-
-    AsyncFunction("setRepeaterAutoInvite") { (on: Bool) async throws in
-      guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
-      try await node.setRepeaterAutoInvite(on: on)
     }
 
     // What device.health reports about repeaters. A local read.

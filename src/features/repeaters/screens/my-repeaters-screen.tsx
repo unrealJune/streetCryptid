@@ -298,20 +298,6 @@ export default function MyRepeatersScreen() {
                 }
               />
             ))}
-            {!mine.open && repeaters.autoInvite !== null ? (
-              <GroupRow
-                title="Invite new friends"
-                text="Everyone you pair with from now on. They still choose whether their location is carried."
-                right={
-                  <RowSwitch
-                    value={repeaters.autoInvite}
-                    accent={chrome.green}
-                    accessibilityLabel="Invite new friends to my repeaters"
-                    onChange={(on) => void run(repeaters.setAutoInvite(on))}
-                  />
-                }
-              />
-            ) : null}
           </GroupCard>
         </Group>
       ) : null}

@@ -391,11 +391,6 @@ export declare class IrohLocationNativeModule
    */
   inviteToRepeater?(rosterId: string, member: string): Promise<boolean>;
   /**
-   * Invite a new friend to every invite-only roster this phone may invite to and has not yet (the
-   * pairing screen's "also invite them"). Resolves how many invites were signed.
-   */
-  inviteFriendToRepeaters?(member: string): Promise<number>;
-  /**
    * The rosters to offer whoever this phone pairs with next, chosen on the pairing screen before
    * the shake; also applied to pairs completed and waiting on ACKNOWLEDGE. Newer binaries only.
    */
@@ -407,9 +402,6 @@ export declare class IrohLocationNativeModule
   wantRepeater?(rosterId: string, want: boolean): Promise<boolean>;
   /** Owner only: let `member` invite people to the roster, or stop them. */
   setRepeaterInviter?(rosterId: string, member: string, inviter: boolean): Promise<void>;
-  /** Whether new friends are invited, at pairing, to the rosters this phone may invite to. */
-  repeaterAutoInvite?(): Promise<boolean>;
-  setRepeaterAutoInvite?(on: boolean): Promise<void>;
   /** What `device.health` reports about repeaters. A local read. */
   repeaterHealth?(): Promise<NativeRepeaterHealth>;
 

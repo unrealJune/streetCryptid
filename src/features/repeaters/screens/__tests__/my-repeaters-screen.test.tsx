@@ -65,14 +65,12 @@ const mockRepeaters = {
   busyRoster: null,
   ownerControls: true,
   inviteControls: true,
-  autoInvite: false as boolean | null,
   setCarried: ok(),
   setPolicy: ok(),
   removeMachine: ok(),
   removeMember: ok(),
   setInviter: ok(),
   invite: ok(),
-  setAutoInvite: ok(),
 };
 jest.mock('../../hooks/use-repeaters', () => ({ useRepeaters: () => mockRepeaters }));
 
@@ -141,15 +139,6 @@ describe('MyRepeatersScreen', () => {
     act(() => byLabel('CANCEL')[0].props.onPress());
     expect(byLabel('Confirm: Remove machine Living room PC')).toHaveLength(0);
     expect(mockRepeaters.removeMachine).not.toHaveBeenCalled();
-  });
-
-  it('offers auto-invite while the roster is invite only', () => {
-    render();
-    expect(byLabel('Invite new friends to my repeaters')).not.toHaveLength(0);
-    act(() => renderer.unmount());
-    mockRepeaters.sections.mine = { ...MINE, open: true };
-    render();
-    expect(byLabel('Invite new friends to my repeaters')).toHaveLength(0);
   });
 
   it('leaves out what an older binary cannot do', () => {

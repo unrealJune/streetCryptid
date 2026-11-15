@@ -18,10 +18,6 @@ export interface RepeaterOwnerCalls {
 export interface RepeaterInviteCalls {
   /** Invite one person to one roster. Resolves whether a new invite was signed. */
   invite(rosterId: string, member: string): Promise<boolean>;
-  /** Invite a new friend to every roster this phone may invite to. Resolves how many. */
-  inviteFriend(member: string): Promise<number>;
-  autoInvite(): Promise<boolean>;
-  setAutoInvite(on: boolean): Promise<void>;
 }
 
 /** The repeater choices made at pairing (REPEATERS.md §4.4). */
@@ -87,19 +83,12 @@ export function getRepeaterClient(): RepeaterClient | null {
               : null,
         }
       : null;
-  const { inviteToRepeater, inviteFriendToRepeaters, repeaterAutoInvite, setRepeaterAutoInvite } =
-    mod;
+  const { inviteToRepeater } = mod;
   const invites =
-    typeof inviteToRepeater === 'function' &&
-    typeof inviteFriendToRepeaters === 'function' &&
-    typeof repeaterAutoInvite === 'function' &&
-    typeof setRepeaterAutoInvite === 'function'
+    typeof inviteToRepeater === 'function'
       ? {
           invite: (rosterId: string, member: string) =>
             inviteToRepeater.call(mod, rosterId, member),
-          inviteFriend: (member: string) => inviteFriendToRepeaters.call(mod, member),
-          autoInvite: () => repeaterAutoInvite.call(mod),
-          setAutoInvite: (on: boolean) => setRepeaterAutoInvite.call(mod, on),
         }
       : null;
   const { setPairingRepeaterOffer, wantRepeater } = mod;
