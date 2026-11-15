@@ -10,6 +10,7 @@ default:
 # `just windows::build x64`, `just windows::package x64 <version>` (`just --list server`).
 mod server 'repeater/server'
 mod windows 'repeater/windows'
+mod website 'website'
 
 # --- Setup -------------------------------------------------------------------
 

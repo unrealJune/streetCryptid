@@ -1,0 +1,113 @@
+name: Release / website
+
+# Deploys streetcrypt.id. Every push to main that touches `website/` runs CI's website lane on that
+# commit, then publishes:
+#   - image ghcr.io/<owner>/streetcrypt-id:0.1.<run> (+ :sha-<short>, :latest)
+#   - chart oci://ghcr.io/<owner>/charts/streetcrypt-id 0.1.<run>, appVersion 0.1.<run>
+# Buttercup's HelmRelease follows the chart by semver range, so publishing IS deploying: Flux rolls
+# the site out within its interval. There are no tags and no Conventional Commit gate, because a
+# website has nothing to version for anyone else; the run number only has to grow, which a
+# `0.0.0-<sha>` prerelease does not (those sort lexically). See website/README.md.
+#
+# Both packages need to be public for Buttercup to pull them anonymously. The first publish
+# creates them private; flip each one under the package's settings once.
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - website/**
+      - .github/workflows/ci-website.yml
+      - .github/workflows/release-website.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  # Moves :latest; never overlap, never drop a queued run (its version would still be newer).
+  group: release-website
+  cancel-in-progress: false
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  ci:
+    name: CI
+    uses: ./.github/workflows/ci-website.yml
+
+  publish:
+    name: Publish
+    needs: ci
+    # A dispatch on another branch would put an unreviewed site in front of the cluster.
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Resolve the version
+        id: ver
+        run: |
+          set -euo pipefail
+          owner="${GITHUB_REPOSITORY_OWNER,,}" # GHCR requires a lowercase path
+          version="0.1.${GITHUB_RUN_NUMBER}"
+          short="${GITHUB_SHA::7}"
+          image="${REGISTRY}/${owner}/streetcrypt-id"
+          {
+            echo "owner=${owner}"
+            echo "version=${version}"
+            echo "image=${image}"
+            echo "tags=${image}:${version},${image}:sha-${short},${image}:latest"
+          } >> "$GITHUB_OUTPUT"
+          echo "### Website ${version} at \`${short}\`" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+
+      - name: Log in to GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push image
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        with:
+          context: website
+          file: website/Dockerfile
+          push: true
+          platforms: linux/amd64
+          tags: ${{ steps.ver.outputs.tags }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ steps.ver.outputs.version }}
+            org.opencontainers.image.licenses=AGPL-3.0-or-later
+            org.opencontainers.image.description=streetcrypt.id: link association files, fallback pages and repeater setup
+
+      - name: Install Helm
+        uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4.3.1
+
+      # The chart goes out only after its image exists, so Flux never sees a chart it cannot pull.
+      - name: Package and push the chart
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GHCR_USER: ${{ github.actor }}
+          OWNER: ${{ steps.ver.outputs.owner }}
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          set -euo pipefail
+          echo "$GHCR_TOKEN" | helm registry login "$REGISTRY" -u "$GHCR_USER" --password-stdin
+          helm package website/charts/streetcrypt-id \
+            --version "$VERSION" --app-version "$VERSION" --destination "$RUNNER_TEMP"
+          helm push "$RUNNER_TEMP/streetcrypt-id-${VERSION}.tgz" "oci://${REGISTRY}/${OWNER}/charts"

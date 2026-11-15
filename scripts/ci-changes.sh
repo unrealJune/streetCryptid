@@ -7,15 +7,19 @@
 #
 #   repeater/server/**, .dockerignore (the server image's)   -> server
 #   repeater/windows/**                                      -> windows
+#   website/**                                               -> website
 #   assets/images/mothman-logo*.svg (the Windows icon's source) -> app + windows
 #   repeater/protocol/**, Cargo.toml, Cargo.lock,
 #   rust-toolchain.toml, third_party/**, .github/**,
-#   this script, any other repeater/ path                    -> every lane
+#   this script, any other repeater/ path                    -> every repeater lane + app
+#                                                               (.github/** and this script:
+#                                                               the website too)
 #   anything else                                            -> app
 #
 # "Anything else" is deliberately the app: Prettier checks Markdown and YAML wherever they live,
 # so a docs-only change still needs the app lane's Format job. Only a change confined to one
-# repeater product skips the mobile suite.
+# repeater product, or to the website (whose lane runs Prettier over website/ itself), skips the
+# mobile suite.
 #
 # Usage:
 #   scripts/ci-changes.sh <base-sha> [<head-sha>]   diff from the merge base of base and head
@@ -24,27 +28,33 @@
 # A base that is empty, all zeros (a new branch) or not in the local history runs every lane:
 # not knowing what changed must never skip a check.
 #
-# Prints `app=`, `server=`, `windows=` (true|false) on stdout, for $GITHUB_OUTPUT.
+# Prints `app=`, `server=`, `windows=`, `website=` (true|false) on stdout, for $GITHUB_OUTPUT.
 
 set -euo pipefail
 
 all() {
-  printf 'app=true\nserver=true\nwindows=true\n'
+  printf 'app=true\nserver=true\nwindows=true\nwebsite=true\n'
 }
 
 classify() {
-  local app=false server=false windows=false path
+  local app=false server=false windows=false website=false path
   while IFS= read -r path; do
     [[ -z "$path" ]] && continue
     case "$path" in
       repeater/server/* | .dockerignore) server=true ;;
       repeater/windows/*) windows=true ;;
+      website/*) website=true ;;
       assets/images/mothman-logo*.svg)
         app=true
         windows=true
         ;;
-      repeater/protocol/* | Cargo.toml | Cargo.lock | rust-toolchain.toml | third_party/* | \
-        .github/* | scripts/ci-changes.sh | repeater/*)
+      .github/* | scripts/ci-changes.sh)
+        app=true
+        server=true
+        windows=true
+        website=true
+        ;;
+      repeater/protocol/* | Cargo.toml | Cargo.lock | rust-toolchain.toml | third_party/* | repeater/*)
         app=true
         server=true
         windows=true
@@ -52,7 +62,7 @@ classify() {
       *) app=true ;;
     esac
   done
-  printf 'app=%s\nserver=%s\nwindows=%s\n' "$app" "$server" "$windows"
+  printf 'app=%s\nserver=%s\nwindows=%s\nwebsite=%s\n' "$app" "$server" "$windows" "$website"
 }
 
 if [[ "${1:-}" == '--paths' ]]; then

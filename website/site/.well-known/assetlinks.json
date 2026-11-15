@@ -1,0 +1,12 @@
+[
+  {
+    "relation": ["delegate_permission/common.handle_all_urls"],
+    "target": {
+      "namespace": "android_app",
+      "package_name": "com.unrealjune.streetcryptid",
+      "sha256_cert_fingerprints": [
+        "EF:D1:CF:63:B4:2D:9F:B2:BF:A8:88:59:27:90:FD:9D:E5:CE:60:A2:15:8C:6D:5E:49:5F:EB:8E:62:A2:06:97"
+      ]
+    }
+  }
+]
