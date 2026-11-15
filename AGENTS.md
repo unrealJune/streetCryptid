@@ -1,6 +1,6 @@
 # Repository map
 
-One repository, three products, one Cargo workspace (`Cargo.toml`, `docs/MONOREPO.md`):
+One repository, three products and their website, one Cargo workspace (`Cargo.toml`, `docs/MONOREPO.md`):
 
 - **The app** — the Expo app at the root (`src/`, `modules/`, `app.json`, …) and its Rust core
   (`modules/iroh-location/rust`, plus the browser bridge in `rust-wasm`). Releases as `v*` to the
@@ -10,11 +10,16 @@ One repository, three products, one Cargo workspace (`Cargo.toml`, `docs/MONOREP
   GHCR. Its own notes: `repeater/server/AGENTS.md`.
 - **The Windows repeater** — `repeater/windows`: WinUI app, Windows service, Rust host. Releases as
   `windows-v*-preview.N`. Its own notes: `repeater/windows/AGENTS.md`.
+- **The website** — `website/`: streetcrypt.id (the App Link / Universal Link association files,
+  the `/pair` and `/repeater` fallbacks, the repeater setup guide and `install.ps1`). Every push to
+  main that touches it deploys to Buttercup (`release-website.yml`, image + chart on GHCR); no tags.
+  Its own notes: `website/README.md`. A new repeater platform or install step changes
+  `website/site/repeater/` in the same pull request.
 - **Shared** — `repeater/protocol` (the roster and wire the phone and every repeater agree on, with
   golden vectors) and `third_party/noq` (patched for every crate).
 
 CI runs a lane per product (`ci.yml` → `ci-app.yml`, `ci-repeater-server.yml`,
-`ci-repeater-windows.yml`, chosen by `scripts/ci-changes.sh`); `Required` passes skipped lanes.
+`ci-repeater-windows.yml`, `ci-website.yml`, chosen by `scripts/ci-changes.sh`); `Required` passes skipped lanes.
 Every product releases from Conventional Commits on its own paths
 (`scripts/lib/conventional-commits.sh`), so a commit's type and the files it touches decide what
 ships: `feat`/`fix` release, `docs`/`chore`/`ci`/`build`/`test`/`refactor`/`style` do not. Build

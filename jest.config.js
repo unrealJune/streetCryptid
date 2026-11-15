@@ -16,7 +16,8 @@ module.exports = {
   // Only CI sets this, to a directory it caches between runs; locally Jest keeps its default.
   ...(process.env.JEST_CACHE_DIRECTORY ? { cacheDirectory: process.env.JEST_CACHE_DIRECTORY } : {}),
   setupFiles: ['@shopify/react-native-skia/jestSetup.js', '<rootDir>/jest.setup.js'],
-  testPathIgnorePatterns: ['/node_modules/', '/.expo/', '/docs/', '/.claude/'],
+  // website/ has its own suite, run with `bun test` by CI's website lane.
+  testPathIgnorePatterns: ['/node_modules/', '/.expo/', '/docs/', '/.claude/', '/website/'],
   modulePathIgnorePatterns: ['<rootDir>/.claude/'],
   transformIgnorePatterns: [
     'node_modules/(?!(.pnpm|react-native|@react-native|@react-native-community|expo|@expo|@expo-google-fonts|react-navigation|@react-navigation|@sentry/react-native|native-base|standard-navigation|@mapbox|pbf|geojson-vt))',

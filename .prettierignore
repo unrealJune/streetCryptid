@@ -43,6 +43,7 @@ modules/iroh-location/android/src/main/java/uniffi/
 # The repeater server's Helm templates are Go templates, which are not YAML until rendered; the
 # protocol's golden vectors are compared byte for byte.
 repeater/server/charts/*/templates/
+website/charts/*/templates/
 repeater/protocol/tests/fixtures/
 
 # Windows repeater build outputs and NuGet-generated lockfiles
