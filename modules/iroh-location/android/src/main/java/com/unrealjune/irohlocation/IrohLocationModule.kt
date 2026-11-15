@@ -1081,6 +1081,8 @@ class IrohLocationModule : Module() {
             "invited" to r.invited,
             "canInvite" to r.canInvite,
             "waiting" to r.waiting,
+            "offeredBy" to r.offeredBy,
+            "wanted" to r.wanted,
           )
         }
       }
@@ -1099,6 +1101,21 @@ class IrohLocationModule : Module() {
       { member: String ->
         val n = node ?: throw IllegalStateException("call createNode first")
         n.inviteFriendToRepeaters(member).toLong()
+      }
+
+    /// The rosters to offer whoever we pair with next, chosen before the shake.
+    AsyncFunction("setPairingRepeaterOffer") Coroutine
+      { rosterIds: List<String> ->
+        val n = node ?: throw IllegalStateException("call createNode first")
+        n.setPairingRepeaterOffer(rosterIds)
+      }
+
+    /// Say yes to a roster offered to us (enrolled at once, or once the invite arrives), or take
+    /// the yes back. Resolves whether it carries us now.
+    AsyncFunction("wantRepeater") Coroutine
+      { rosterId: String, want: Boolean ->
+        val n = node ?: throw IllegalStateException("call createNode first")
+        n.wantRepeater(rosterId, want)
       }
 
     /// Owner only: let someone invite people to our roster, or stop them.

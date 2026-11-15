@@ -46,6 +46,10 @@ export interface NativeRepeaterRoster {
   inviters?: string[];
   /** Who holds a standing invite and is not carried yet (endpoint ids). Optional, as above. */
   invited?: string[];
+  /** Who offered it to this phone at pairing (endpoint ids). Optional: newer binaries only. */
+  offeredBy?: string[];
+  /** This phone said yes and enrolls the moment an invite arrives. Optional, as above. */
+  wanted?: boolean;
   /** This phone may invite people: it owns the roster or holds `inviter` in it. */
   canInvite?: boolean;
   /**
@@ -1021,6 +1025,16 @@ export interface IrohLocationApi {
    * pairing screen's "also invite them"). Resolves how many invites were signed.
    */
   inviteFriendToRepeaters?(member: string): Promise<number>;
+  /**
+   * The rosters to offer whoever this phone pairs with next, chosen on the pairing screen before
+   * the shake; also applied to pairs completed and waiting on ACKNOWLEDGE. Newer binaries only.
+   */
+  setPairingRepeaterOffer?(rosterIds: string[]): Promise<void>;
+  /**
+   * Say yes to a roster offered to us, or take the yes back. Enrolls at once where the roster
+   * would accept us, otherwise the moment an invite arrives. Resolves whether it carries us now.
+   */
+  wantRepeater?(rosterId: string, want: boolean): Promise<boolean>;
   /** Owner only: let `member` invite people to the roster, or stop them. */
   setRepeaterInviter?(rosterId: string, member: string, inviter: boolean): Promise<void>;
   /** Whether new friends are invited, at pairing, to the rosters this phone may invite to. */

@@ -24,6 +24,17 @@ export interface RepeaterInviteCalls {
   setAutoInvite(on: boolean): Promise<void>;
 }
 
+/** The repeater choices made at pairing (REPEATERS.md §4.4). */
+export interface RepeaterPairingCalls {
+  /** The rosters to offer whoever this phone pairs with next. */
+  setOffer(rosterIds: readonly string[]): Promise<void>;
+  /**
+   * Say yes to a roster offered to me (enrolled at once, or the moment an invite arrives), or
+   * take the yes back. Resolves whether it carries me now.
+   */
+  want(rosterId: string, want: boolean): Promise<boolean>;
+}
+
 /**
  * The native repeater calls (`modules/iroh-location/rust/src/repeater.rs`), or `null` where the
  * binary has none: web, Expo Go, and an installed build older than this bundle. Every call is
@@ -37,6 +48,8 @@ export interface RepeaterClient {
   owner: RepeaterOwnerCalls | null;
   /** `null` on a binary that predates invites. */
   invites: RepeaterInviteCalls | null;
+  /** `null` on a binary that predates offers made at pairing. */
+  pairing: RepeaterPairingCalls | null;
   /**
    * Pick up names this phone's own machines were given at their consoles; resolves how many
    * changed. Dials each machine. `null` on a binary that predates repeater names.
@@ -89,12 +102,22 @@ export function getRepeaterClient(): RepeaterClient | null {
           setAutoInvite: (on: boolean) => setRepeaterAutoInvite.call(mod, on),
         }
       : null;
+  const { setPairingRepeaterOffer, wantRepeater } = mod;
+  const pairing =
+    typeof setPairingRepeaterOffer === 'function' && typeof wantRepeater === 'function'
+      ? {
+          setOffer: (rosterIds: readonly string[]) =>
+            setPairingRepeaterOffer.call(mod, [...rosterIds]),
+          want: (rosterId: string, want: boolean) => wantRepeater.call(mod, rosterId, want),
+        }
+      : null;
   return {
     rosters: () => repeaterRosters.call(mod),
     claim: (link, open, carryMe) => claimRepeater.call(mod, link, open, carryMe),
     setCarried: (rosterId, carry) => setRepeaterCarried.call(mod, rosterId, carry),
     owner,
     invites,
+    pairing,
     refreshNames:
       typeof mod.refreshRepeaterNames === 'function'
         ? () => mod.refreshRepeaterNames!.call(mod)

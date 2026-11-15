@@ -54,6 +54,10 @@ pub const PREFS_FILE: &str = "repeaters-prefs.bin";
 /// Our `Enroll`s no repeater has confirmed yet ([`RosterBook::is_awaiting`]), beside the book.
 pub const AWAITING_FILE: &str = "repeaters-awaiting.bin";
 const AWAITING_V: u32 = 1;
+/// Rosters this phone said yes to before it could enroll in them: "enroll once invited"
+/// ([`want`], [`fulfil_wanted`]). Durable, because the invite it waits for may come days later.
+pub const WANTED_FILE: &str = "repeaters-wanted.bin";
+const WANTED_V: u32 = 1;
 const PREFS_V: u32 = 1;
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -117,6 +121,15 @@ pub struct RosterBook {
     /// For each roster we enrolled in, our `Enroll` until a repeater has confirmed it holds it:
     /// carried by our own copy, not yet by any machine (§4.4). The settings say "waiting".
     awaiting: Mutex<BTreeMap<RosterId, OpId>>,
+    wanted_path: PathBuf,
+    /// Rosters to enroll in as soon as the roster would accept us ([`want`]).
+    wanted: Mutex<BTreeSet<RosterId>>,
+}
+
+#[derive(Default, Serialize, Deserialize)]
+struct WantedState {
+    v: u32,
+    rosters: Vec<RosterId>,
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -162,6 +175,14 @@ impl RosterBook {
             .filter(|state| state.v == AWAITING_V)
             .map(|state| state.entries.into_iter().collect())
             .unwrap_or_default();
+        let wanted_path = dir.join(WANTED_FILE);
+        // Unreadable means "nothing wanted": the roster still shows as offered, and asks again.
+        let wanted = std::fs::read(&wanted_path)
+            .ok()
+            .and_then(|raw| postcard::from_bytes::<WantedState>(&raw).ok())
+            .filter(|state| state.v == WANTED_V)
+            .map(|state| state.rosters.into_iter().collect())
+            .unwrap_or_default();
         let path = dir.join(BOOK_FILE);
         let mut rosters = BTreeMap::new();
         match std::fs::read(&path) {
@@ -193,7 +214,54 @@ impl RosterBook {
             prefs_path,
             awaiting_path,
             awaiting: Mutex::new(awaiting),
+            wanted_path,
+            wanted: Mutex::new(wanted),
         })
+    }
+
+    /// Whether we said yes to `roster` and are waiting until it would accept our `Enroll`.
+    pub fn is_wanted(&self, roster: &RosterId) -> bool {
+        self.wanted
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .contains(roster)
+    }
+
+    /// Every roster we are waiting to enroll in.
+    pub fn wanted(&self) -> Vec<RosterId> {
+        self.wanted
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .iter()
+            .copied()
+            .collect()
+    }
+
+    fn set_wanted(&self, roster: &RosterId, want: bool) {
+        let mut wanted = self.wanted.lock().unwrap_or_else(|p| p.into_inner());
+        let changed = if want {
+            wanted.insert(*roster)
+        } else {
+            wanted.remove(roster)
+        };
+        if !changed {
+            return;
+        }
+        let state = WantedState {
+            v: WANTED_V,
+            rosters: wanted.iter().copied().collect(),
+        };
+        let written = postcard::to_allocvec(&state)
+            .map_err(anyhow::Error::from)
+            .and_then(|bytes| {
+                let tmp = self.wanted_path.with_extension("tmp");
+                std::fs::write(&tmp, bytes)?;
+                std::fs::rename(&tmp, &self.wanted_path)?;
+                Ok(())
+            });
+        if let Err(e) = written {
+            tracing::warn!(error = %e, "repeater: could not record a wanted enrollment");
+        }
     }
 
     /// Whether our `Enroll` in `roster` is still waiting for a repeater to confirm it.
@@ -581,6 +649,74 @@ pub fn open_card(bytes: &[u8]) -> Result<(EndpointId, Vec<Vec<SignedOp>>), Repea
     Ok((card.signer, body.rosters))
 }
 
+// ---- offers made at pairing (pure) ------------------------------------------------------------
+
+/// The key, in its publisher's profile namespace, of the rosters offered to people mid-pairing:
+/// for each peer whose pair completed, the rosters this phone chose before the shake to offer them
+/// (REPEATERS.md §4.4). Sealed like everything in that namespace, and readable by the peer from
+/// the moment the pair completes, because a completed pair is in the keyring before ACKNOWLEDGE.
+///
+/// A statement of intent and nothing more: it grants nothing, since only an `Invite` op lets an
+/// invite-only roster accept someone, and that is signed at ACKNOWLEDGE. Not signed itself, since
+/// only the namespace's owner can write in it. Its own key, so readers that predate it never see it.
+pub const OFFERS_KEY: &[u8] = b"offers";
+const OFFERS_V: u32 = 1;
+/// Peers on one record. A record holds only pairs in flight, so this is generous.
+pub const MAX_OFFER_PEERS: usize = 32;
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct OffersBody {
+    v: u32,
+    offers: Vec<(EndpointId, Vec<RosterId>)>,
+}
+
+/// The record for `offers`, capped at [`MAX_OFFER_PEERS`] peers and [`MAX_CARD_ROSTERS`] rosters
+/// each. Deterministic, so an unchanged set is the same bytes and writes nothing.
+pub fn encode_offers(offers: &BTreeMap<EndpointId, Vec<RosterId>>) -> anyhow::Result<Vec<u8>> {
+    let body = OffersBody {
+        v: OFFERS_V,
+        offers: offers
+            .iter()
+            .take(MAX_OFFER_PEERS)
+            .map(|(peer, rosters)| {
+                let mut rosters = rosters.clone();
+                rosters.sort_unstable();
+                rosters.dedup();
+                rosters.truncate(MAX_CARD_ROSTERS);
+                (*peer, rosters)
+            })
+            .collect(),
+    };
+    Ok(postcard::to_allocvec(&body)?)
+}
+
+/// The rosters a record offers `me`. Empty for a record that does not decode or does not name us.
+pub fn offers_for(bytes: &[u8], me: &EndpointId) -> Vec<RosterId> {
+    if bytes.len() > MAX_CARD_BYTES {
+        return Vec::new();
+    }
+    let Ok(body) = postcard::from_bytes::<OffersBody>(bytes) else {
+        return Vec::new();
+    };
+    if body.v != OFFERS_V || body.offers.len() > MAX_OFFER_PEERS {
+        return Vec::new();
+    }
+    body.offers
+        .into_iter()
+        .find(|(peer, _)| peer == me)
+        .map(|(_, rosters)| rosters.into_iter().take(MAX_CARD_ROSTERS).collect())
+        .unwrap_or_default()
+}
+
+/// The rosters `me` may offer anyone: those it may invite to, open or invite-only.
+pub fn offerable(book: &RosterBook, me: &EndpointId) -> BTreeSet<RosterId> {
+    book.states()
+        .into_iter()
+        .filter(|state| state.inviters.contains(me))
+        .map(|state| state.id)
+        .collect()
+}
+
 fn card_signing_input(body: &[u8]) -> Vec<u8> {
     let mut msg = Vec::with_capacity(CARD_CTX.len() + body.len());
     msg.extend_from_slice(CARD_CTX);
@@ -964,6 +1100,63 @@ pub fn sign_carried(
     Ok(book
         .state(roster)
         .is_some_and(|state| state.carried.contains(&me)))
+}
+
+/// Say yes to `roster` (`want`), or take the yes back. A roster that would accept our `Enroll`
+/// now is enrolled in at once, exactly as [`sign_carried`]; one that would not yet (invite-only,
+/// and the invite has not reached us) is remembered, and [`fulfil_wanted`] enrolls the moment it
+/// would. That is what lets someone answer at pairing without waiting on the other phone's
+/// ACKNOWLEDGE, which is what signs the invite (REPEATERS.md §4.4). Taking the yes back never
+/// withdraws: that is the carry switch's job. Returns whether the roster carries us now.
+pub fn want(
+    key: &SigningKey,
+    book: &RosterBook,
+    roster: &RosterId,
+    want: bool,
+    now_ms: u64,
+) -> Result<bool, RepeaterError> {
+    let me = key.verifying_key().to_bytes();
+    let state = book.state(roster).ok_or(RepeaterError::UnknownRoster)?;
+    if !want {
+        book.set_wanted(roster, false);
+        return Ok(state.carried.contains(&me));
+    }
+    if state.carried.contains(&me) {
+        book.set_wanted(roster, false);
+        return Ok(true);
+    }
+    if book.may_enroll(roster, &me) {
+        let carried = sign_carried(key, book, roster, true, now_ms)?;
+        book.set_wanted(roster, false);
+        return Ok(carried);
+    }
+    book.set_wanted(roster, true);
+    Ok(false)
+}
+
+/// Enroll in every wanted roster that would accept us now, and forget the ones that carry us
+/// already. Run after friends' cards are read, since a card is how an invite arrives. Returns how
+/// many `Enroll`s were signed; a roster we do not know yet stays wanted.
+pub fn fulfil_wanted(key: &SigningKey, book: &RosterBook, now_ms: u64) -> usize {
+    let me = key.verifying_key().to_bytes();
+    let mut signed = 0;
+    for roster in book.wanted() {
+        let Some(state) = book.state(&roster) else {
+            continue;
+        };
+        if state.carried.contains(&me) {
+            book.set_wanted(&roster, false);
+        } else if book.may_enroll(&roster, &me) {
+            match sign_carried(key, book, &roster, true, now_ms) {
+                Ok(_) => {
+                    book.set_wanted(&roster, false);
+                    signed += 1;
+                }
+                Err(error) => tracing::warn!(%error, "repeater: could not enroll once invited"),
+            }
+        }
+    }
+    signed
 }
 
 /// What an owner may change about their roster from the phone.
@@ -1999,6 +2192,60 @@ mod tests {
         book.set_auto_invite(true).unwrap();
         drop(book);
         assert!(RosterBook::open(&dir).unwrap().auto_invite());
+    }
+
+    #[test]
+    fn a_yes_given_before_the_invite_enrolls_when_it_arrives() {
+        let dir = scratch("want");
+        let book = RosterBook::open(&dir).unwrap();
+        let closed = book.create(&key(1), Policy::Invite, 1).unwrap();
+        let open = book.create(&key(1), Policy::Open, 1).unwrap();
+
+        // An open roster takes the yes at once.
+        assert!(want(&key(2), &book, &open, true, 2).unwrap());
+        assert!(!book.is_wanted(&open));
+
+        // An invite-only one waits for the invite, across a restart.
+        assert!(!want(&key(2), &book, &closed, true, 2).unwrap());
+        assert!(book.is_wanted(&closed));
+        assert_eq!(fulfil_wanted(&key(2), &book, 3), 0, "nothing to cite yet");
+        drop(book);
+        let book = RosterBook::open(&dir).unwrap();
+        assert!(book.is_wanted(&closed));
+
+        // The owner's ACKNOWLEDGE signs the invite; the next read of their card fulfils the yes.
+        assert!(sign_invite(&key(1), &book, &closed, &id(2), 4).unwrap());
+        assert_eq!(fulfil_wanted(&key(2), &book, 5), 1);
+        assert!(book.state(&closed).unwrap().carried.contains(&id(2)));
+        assert!(!book.is_wanted(&closed));
+        assert_eq!(fulfil_wanted(&key(2), &book, 6), 0, "once");
+
+        // Taking a yes back forgets it and withdraws nothing.
+        let other = book.create(&key(1), Policy::Invite, 7).unwrap();
+        want(&key(2), &book, &other, true, 8).unwrap();
+        assert!(!want(&key(2), &book, &other, false, 9).unwrap());
+        assert!(!book.is_wanted(&other));
+        assert!(want(&key(2), &book, &open, false, 10).unwrap());
+    }
+
+    #[test]
+    fn an_offer_names_each_peer_and_only_rosters_i_may_invite_to() {
+        let book = RosterBook::open(&scratch("offers")).unwrap();
+        let mine = book.create(&key(1), Policy::Open, 1).unwrap();
+        let closed = book.create(&key(1), Policy::Invite, 1).unwrap();
+        let theirs = book.create(&key(5), Policy::Invite, 1).unwrap();
+        assert_eq!(offerable(&book, &id(1)), BTreeSet::from([mine, closed]));
+        assert!(!offerable(&book, &id(1)).contains(&theirs));
+
+        let offers = BTreeMap::from([(id(2), vec![closed, mine, mine]), (id(3), vec![mine])]);
+        let bytes = encode_offers(&offers).unwrap();
+        let mut expected = vec![closed, mine];
+        expected.sort_unstable();
+        assert_eq!(offers_for(&bytes, &id(2)), expected);
+        assert_eq!(offers_for(&bytes, &id(3)), vec![mine]);
+        assert!(offers_for(&bytes, &id(4)).is_empty());
+        assert!(offers_for(b"garbage", &id(2)).is_empty());
+        assert_eq!(encode_offers(&offers).unwrap(), bytes, "deterministic");
     }
 
     #[test]

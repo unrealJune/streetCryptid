@@ -395,6 +395,16 @@ export declare class IrohLocationNativeModule
    * pairing screen's "also invite them"). Resolves how many invites were signed.
    */
   inviteFriendToRepeaters?(member: string): Promise<number>;
+  /**
+   * The rosters to offer whoever this phone pairs with next, chosen on the pairing screen before
+   * the shake; also applied to pairs completed and waiting on ACKNOWLEDGE. Newer binaries only.
+   */
+  setPairingRepeaterOffer?(rosterIds: string[]): Promise<void>;
+  /**
+   * Say yes to a roster offered to us, or take the yes back. Enrolls at once where the roster
+   * would accept us, otherwise the moment an invite arrives. Resolves whether it carries us now.
+   */
+  wantRepeater?(rosterId: string, want: boolean): Promise<boolean>;
   /** Owner only: let `member` invite people to the roster, or stop them. */
   setRepeaterInviter?(rosterId: string, member: string, inviter: boolean): Promise<void>;
   /** Whether new friends are invited, at pairing, to the rosters this phone may invite to. */

@@ -573,26 +573,34 @@ What follows from that shape:
 The same question, _"Replicate your trail on June's repeaters?"_ (Enroll / Not now), appears in two
 places.
 
-**At pairing.** The two questions are asked at two moments, because one is about the friend and
-the other about your location.
+**At pairing.** Friending goes both ways, so each phone does both halves, and both are settled
+before ACKNOWLEDGE.
 
-- **Above ACKNOWLEDGE / REJECT**, the inviting side sees _"Also invite them to my repeaters"_:
-  one switch per roster I may invite to and they are not in, `open` ones included (there the
-  invite is the offer, and it brings back someone the owner once removed), each pre-checked when
-  my auto-invite is on. Acknowledging signs those invites (`inviteToRepeater`, per roster), not
-  awaited, like everything else at ACKNOWLEDGE (`connectNewFriend`); the grant pass offers them
-  to the repeaters (§4.4).
-- **After ACKNOWLEDGE**, if this phone knows rosters of the new friend's it may enroll in (an
-  `open` one, or an `invite` one where they invited me), the screen stays to ask _"Replicate your
-  location on their repeaters?"_, with what that gives, what it never does and who will see it
-  (`enrollFacts`), then ENROLL / NOT NOW. The radio is stood down first exactly as leaving would
-  (`stopPairing`), and ENROLL goes through `setRepeaterCarried`, not awaited. When the friend has
-  an `invite` roster that has not invited me YET, the screen stays too and waits for it: their
-  ACKNOWLEDGE is what signs it, and it can land after mine. The rosters it lists are the live
-  offer, read again every 1.5 s, so an invite that arrives is asked about switched on; after 20 s
-  the screen says the invite will turn up under Settings → Repeaters.
+- **Before the shake**, the pairing screen shows a _MY REPEATERS_ card. It opens a drawer listing
+  every roster this phone may invite people to (owned, or holding `inviter`; `open` ones included,
+  where the invite is the offer and brings back someone the owner once removed), every one
+  switched on until switched off. The selection goes to the core (`setPairingRepeaterOffer`).
+- **The moment a pair completes**, the core writes that selection for the peer into our sealed
+  profile under `offers` (`repeater::OFFERS_KEY`): a record of peer → rosters. Because a
+  completed pair is in the keyring before ACKNOWLEDGE (ARCHITECTURE.md §9a.1), the peer can open
+  it while the reveal is up. It is a statement of intent and grants nothing: only an `Invite`
+  opens an invite-only roster, and that is signed at ACKNOWLEDGE. An entry goes when its peer is
+  invited, leaves the pair, or after 10 minutes; changing the selection on the reveal rewrites it.
+- **On the reveal**, a _THEIR REPEATERS_ card appears once the friend's offer has arrived (the
+  offer is read again every 1.5 s). It opens the same drawer over the rosters they offered, with
+  what carrying means (`enrollFacts`), all switched on until switched off.
+- **ACKNOWLEDGE** invites the friend to what I offered (`inviteToRepeater`, per roster) and says
+  yes to what I accepted (`wantRepeater`), neither awaited, like everything else at ACKNOWLEDGE
+  (`connectNewFriend`). A yes is durable (`repeaters-wanted.bin`): an `open` roster enrolls at
+  once, an invite-only one the moment the friend's invite reaches us on their card
+  (`repeater::fulfil_wanted`, run whenever cards are read). So neither side waits on the other's
+  ACKNOWLEDGE, and nothing is asked after it.
+- **In Settings**, a roster offered to me is listed under Offered ("offered by @sam"), and a yes
+  still waiting on its invite reads "waiting for their invite". An offered roster I cannot join
+  yet has a switch there too: on is the same durable yes.
 
-Built: `usePairingRepeaterOffer` and `pairingOffers` (`src/features/repeaters`).
+Built: `usePairingRepeaterOffer`, `PairingRepeaterCards`, `RosterPickSheet` and `pairingOffers`
+(`src/features/repeaters`).
 
 The cards arrive with the pair: the v4 `Accept` carries the profile record, and the cards follow on
 the profile namespace, readable at once because a completed pair is in the keyring before anyone

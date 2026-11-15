@@ -28,8 +28,10 @@ import { useRepeaters } from '../hooks/use-repeaters';
  * - WHO CARRIES YOUR LOCATION: the stash (its switch is the delivery mode, so this page and
  *   Settings → Delivery are one setting), your own roster (opening Your repeaters, where its
  *   machines, policy and people live), and every other roster that carries you. Off is a Withdraw.
- * - OFFERED: rosters on friends' cards (§4.2). On asks first, in a sheet that says what enrolling
- *   means; an invite-only roster nobody invited you to shows a lock instead of a switch.
+ * - OFFERED: rosters on friends' cards (§4.2) or offered at pairing. On asks first, in a sheet that
+ *   says what enrolling means. One offered at pairing that is invite-only and not yet invited has
+ *   a switch too: on is a yes that enrolls the moment the invite arrives. Any other invite-only
+ *   roster nobody invited you to shows a lock instead of a switch.
  * - KNOWN TO THIS PHONE: everything else it has heard of.
  *
  * Nothing here gates reading: any phone may pull from any repeater (§2.1). What you opt into is
@@ -120,9 +122,19 @@ export default function RepeatersScreen() {
       first={first}
       title={r.ownerLabel}
       detail={rosterRowDetail(r)}
-      dimmed={!r.canEnroll}
+      dimmed={!r.canEnroll && r.offeredBy.length === 0 && !r.wanted}
       right={
-        r.canEnroll ? (
+        !r.canEnroll && (r.offeredBy.length > 0 || r.wanted) ? (
+          // Offered at pairing, and not joinable yet: a yes here enrolls the moment their
+          // invite arrives (REPEATERS.md §4.4).
+          <RowSwitch
+            value={r.wanted}
+            accent={chrome.green}
+            disabled={busyRoster === r.rosterId}
+            accessibilityLabel={`Carry my location on ${r.ownerLabel} once invited`}
+            onChange={(on) => void run(repeaters.want(r.rosterId, on))}
+          />
+        ) : r.canEnroll ? (
           <RowSwitch
             value={false}
             accent={chrome.green}

@@ -943,6 +943,8 @@ public final class IrohLocationModule: Module {
           "members": r.members, "vouchers": r.vouchers, "canEnroll": r.canEnroll,
           "inviters": r.inviters, "invited": r.invited, "canInvite": r.canInvite,
           "waiting": r.waiting,
+          "offeredBy": r.offeredBy,
+          "wanted": r.wanted,
         ]
       }
     }
@@ -959,6 +961,19 @@ public final class IrohLocationModule: Module {
     AsyncFunction("inviteFriendToRepeaters") { (member: String) async throws -> Double in
       guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
       return Double(try await node.inviteFriendToRepeaters(member: member))
+    }
+
+    // The rosters to offer whoever we pair with next, chosen before the shake.
+    AsyncFunction("setPairingRepeaterOffer") { (rosterIds: [String]) async throws in
+      guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
+      try await node.setPairingRepeaterOffer(rosterIds: rosterIds)
+    }
+
+    // Say yes to a roster offered to us (enrolled at once, or once the invite arrives), or take
+    // the yes back. Resolves whether it carries us now.
+    AsyncFunction("wantRepeater") { (rosterId: String, want: Bool) async throws -> Bool in
+      guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
+      return try await node.wantRepeater(rosterId: rosterId, want: want)
     }
 
     // Owner only: let someone invite people to our roster, or stop them.

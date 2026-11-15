@@ -359,6 +359,10 @@ pub struct RepeaterRoster {
     /// Carried by our own copy, and no repeater has confirmed our `Enroll` yet: it goes out the
     /// next time one of them is reachable (REPEATERS.md §4.4).
     pub waiting: bool,
+    /// Who offered it to us at pairing (endpoint ids), from their offers record (§4.4).
+    pub offered_by: Vec<String>,
+    /// We said yes and are waiting for it to accept us: enrolled the moment an invite arrives.
+    pub wanted: bool,
 }
 
 /// What `device.health` says about repeaters (REPEATERS.md §5).
@@ -1570,12 +1574,118 @@ impl LocationNode {
             }
         }
         if !gone.is_empty() {
-            let mut map = self.pending_peers.lock().unwrap_or_else(|p| p.into_inner());
-            for sid in gone {
-                map.remove(&sid);
+            let dropped: Vec<[u8; 32]> = {
+                let mut map = self.pending_peers.lock().unwrap_or_else(|p| p.into_inner());
+                gone.iter()
+                    .filter_map(|sid| map.remove(sid))
+                    .map(|peer| peer.endpoint)
+                    .filter(|id| !friends.contains(&encode_hex(id)))
+                    .filter(|id| !keep.iter().any(|(kept, _)| kept == id))
+                    .collect()
+            };
+            // Someone who left without becoming a friend is offered nothing any more.
+            let withdrawn = {
+                let mut offers = self
+                    .outgoing_offers
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner());
+                dropped
+                    .iter()
+                    .fold(false, |any, id| offers.remove(id).is_some() || any)
+            };
+            if withdrawn {
+                self.publish_repeater_offers().await;
             }
         }
         keep
+    }
+
+    /// Write what we offer each peer mid-pairing under `repeater::OFFERS_KEY`, sealed like the
+    /// rest of the profile (REPEATERS.md §4.4). An entry lasts until its peer is invited (at our
+    /// ACKNOWLEDGE), leaves, or [`PENDING_PEER_TTL_MS`] passes; an empty record is still written,
+    /// so what was offered stops being offered.
+    async fn publish_repeater_offers(&self) {
+        let Some(live) = self.live_opt().await else {
+            return;
+        };
+        let now = now_ms();
+        let current: BTreeMap<[u8; 32], Vec<[u8; 32]>> = {
+            let mut offers = self
+                .outgoing_offers
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            offers.retain(|_, (rosters, at)| {
+                !rosters.is_empty() && now.saturating_sub(*at) < PENDING_PEER_TTL_MS
+            });
+            offers
+                .iter()
+                .map(|(peer, (rosters, _))| (*peer, rosters.clone()))
+                .collect()
+        };
+        let span = tracing::info_span!(
+            "repeater.offers",
+            sc.author = %telemetry::short_hex(&self.author),
+            peers = current.len(),
+            written = tracing::field::Empty,
+            error = tracing::field::Empty,
+        );
+        let outcome = match repeater::encode_offers(&current) {
+            Ok(bytes) => live.profile.publish_key(repeater::OFFERS_KEY, bytes).await,
+            Err(e) => Err(e),
+        };
+        match outcome {
+            Ok(written) => span.record("written", written),
+            Err(e) => span.record("error", tracing::field::display(e)),
+        };
+    }
+
+    /// Offer `peer` the rosters chosen on the pairing screen, those we may still invite to.
+    /// Returns whether the offer changed.
+    async fn offer_repeaters_to(&self, peer: [u8; 32]) -> bool {
+        let chosen = self
+            .pairing_offer
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone();
+        let Ok(book) = self.roster_book().await else {
+            return false;
+        };
+        let me = self.roster_key().verifying_key().to_bytes();
+        let offerable = repeater::offerable(&book, &me);
+        let rosters: Vec<[u8; 32]> = chosen
+            .into_iter()
+            .filter(|roster| offerable.contains(roster))
+            .collect();
+        let mut offers = self
+            .outgoing_offers
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let at = offers.get(&peer).map(|(_, at)| *at).unwrap_or_else(now_ms);
+        if rosters.is_empty() {
+            return offers.remove(&peer).is_some();
+        }
+        offers.insert(peer, (rosters.clone(), at)) != Some((rosters, at))
+    }
+
+    /// Who offered us which roster at pairing: each friend's (or pending peer's) offers record,
+    /// read like their card, keeping what names us.
+    async fn read_repeater_offers(&self) -> BTreeMap<[u8; 32], BTreeSet<[u8; 32]>> {
+        let Some(live) = self.live_opt().await else {
+            return BTreeMap::new();
+        };
+        let friends = self.known_friends().await;
+        let me = self.roster_key().verifying_key().to_bytes();
+        let mut offered: BTreeMap<[u8; 32], BTreeSet<[u8; 32]>> = BTreeMap::new();
+        for (owner, bytes) in live
+            .profile
+            .read_key_from_friends(repeater::OFFERS_KEY, &friends)
+            .await
+        {
+            for roster in repeater::offers_for(&bytes, &me) {
+                offered.entry(roster).or_default().insert(owner);
+            }
+        }
+        offered
     }
 
     /// Where else each friend's profile can be read while their phone is away: the stash, when it
@@ -1621,8 +1731,14 @@ impl LocationNode {
             .profile
             .read_key_from_friends(repeater::CARD_KEY, &friends)
             .await;
-        let me = self.roster_key().verifying_key().to_bytes();
-        repeater::ingest_cards(&book, &cards, &me)
+        let key = self.roster_key();
+        let me = key.verifying_key().to_bytes();
+        let vouchers = repeater::ingest_cards(&book, &cards, &me);
+        // A card is how an invite arrives: enroll wherever we said yes before it could.
+        if repeater::fulfil_wanted(&key, &book, now_ms()) > 0 {
+            self.grant_repeaters("wanted").await;
+        }
+        vouchers
     }
 
     /// Clone this node's live handles and RELEASE the node lock. See [`Live`].
@@ -1669,6 +1785,12 @@ pub struct LocationNode {
     /// Peers whose pair completed and who are waiting on a human's ACKNOWLEDGE, by pairing
     /// session. See [`Self::pending_peers`].
     pending_peers: StdMutex<HashMap<[u8; 16], PendingPeer>>,
+    /// The rosters chosen on the pairing screen, before the shake, to offer whoever we pair with
+    /// next (`set_pairing_repeater_offer`). In memory: the screen sets it whenever it shows.
+    pairing_offer: StdMutex<Vec<[u8; 32]>>,
+    /// What we have offered each peer whose pair completed and who has not been invited yet, and
+    /// when: the record under `repeater::OFFERS_KEY` (see `publish_repeater_offers`).
+    outgoing_offers: StdMutex<BTreeMap<[u8; 32], (Vec<[u8; 32]>, u64)>>,
     /// Every repeater roster this phone knows (see [`repeater`]), opened from `state_dir` on first
     /// use. It claims nothing, so it has no part in `start` or `shutdown`.
     repeater_book: Mutex<Option<Arc<repeater::RosterBook>>>,
@@ -2577,6 +2699,8 @@ fn new_location_node_at(
         ordinal,
         stash_grant_at: AtomicU64::new(0),
         pending_peers: StdMutex::new(HashMap::new()),
+        pairing_offer: StdMutex::new(Vec::new()),
+        outgoing_offers: StdMutex::new(BTreeMap::new()),
         repeater_book: Mutex::new(None),
         repeater_delivery: Arc::default(),
         repeater_pull_cursor: AtomicU64::new(0),
@@ -3380,6 +3504,7 @@ impl LocationNode {
         let book = self.roster_book().await?;
         // Friends' cards first, so a roster a friend joined since we last looked is listed.
         let vouchers = self.read_repeater_cards().await;
+        let offered = self.read_repeater_offers().await;
         let me = self.roster_key().verifying_key().to_bytes();
         Ok(book
             .states()
@@ -3417,6 +3542,11 @@ impl LocationNode {
                     invited: invited.iter().map(|id| encode_hex(id)).collect(),
                     can_invite,
                     waiting: carries_me && book.is_awaiting(&state.id),
+                    offered_by: offered
+                        .get(&state.id)
+                        .map(|ids| ids.iter().map(|id| encode_hex(id)).collect())
+                        .unwrap_or_default(),
+                    wanted: !carries_me && book.is_wanted(&state.id),
                 }
             })
             .collect())
@@ -3505,7 +3635,67 @@ impl LocationNode {
         if signed {
             self.roster_changed("invite").await;
         }
+        // The invite is what an offer promised: the offer has done its job.
+        let answered = {
+            let mut offers = self
+                .outgoing_offers
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            match offers.get_mut(&member) {
+                Some((rosters, _)) => {
+                    rosters.retain(|r| *r != roster);
+                    true
+                }
+                None => false,
+            }
+        };
+        if answered {
+            self.publish_repeater_offers().await;
+        }
         Ok(signed)
+    }
+
+    /// The rosters to offer whoever we pair with next, chosen on the pairing screen before the
+    /// shake (REPEATERS.md §4.4). Applied as well to every pair already completed and waiting on
+    /// ACKNOWLEDGE, so a change made on the reveal reaches the peer it is about.
+    pub async fn set_pairing_repeater_offer(
+        &self,
+        roster_ids: Vec<String>,
+    ) -> Result<(), LocationError> {
+        let rosters = roster_ids
+            .iter()
+            .map(|id| decode_id32(id, "roster id"))
+            .collect::<Result<Vec<_>, _>>()?;
+        *self.pairing_offer.lock().unwrap_or_else(|p| p.into_inner()) = rosters;
+        let mut changed = false;
+        for (peer, _) in self.pending_peers().await {
+            changed |= self.offer_repeaters_to(peer).await;
+        }
+        if changed {
+            self.publish_repeater_offers().await;
+        }
+        Ok(())
+    }
+
+    /// Say yes to a roster offered to us, or take the yes back. Enrolls at once where the roster
+    /// would accept us; otherwise remembers it and enrolls the moment the invite arrives
+    /// (`repeater::want`). Returns whether the roster carries us now.
+    pub async fn want_repeater(
+        &self,
+        roster_id: String,
+        want: bool,
+    ) -> Result<bool, LocationError> {
+        let roster = decode_id32(&roster_id, "roster id")?;
+        let book = self.roster_book().await?;
+        let me = self.roster_key().verifying_key().to_bytes();
+        let before = book
+            .state(&roster)
+            .is_some_and(|state| state.carried.contains(&me));
+        let carried = repeater::want(&self.roster_key(), &book, &roster, want, now_ms())?;
+        if carried && !before {
+            self.grant_repeaters("enroll").await;
+        }
+        Ok(carried)
     }
 
     /// Invite a friend to every invite-only roster this phone may invite to and has not yet: what
@@ -3524,6 +3714,15 @@ impl LocationNode {
                 Ok(false) => {}
                 Err(error) => tracing::warn!(%error, "repeater: could not invite a new friend"),
             }
+        }
+        let answered = self
+            .outgoing_offers
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(&member)
+            .is_some();
+        if answered {
+            self.publish_repeater_offers().await;
         }
         if signed > 0 {
             // Offers the new ops to every repeater (`repeater::deliver`), then republishes the card.
@@ -4173,6 +4372,11 @@ impl LocationNode {
             }
         };
         if fresh {
+            // What we chose to offer before the shake, written before the reseal that wraps our
+            // key for them, so the first thing they can open already says it.
+            if self.offer_repeaters_to(data.peer_endpoint).await {
+                self.publish_repeater_offers().await;
+            }
             self.reseal_profile("pair").await;
         }
         // `live_opt` rather than the guard: this runs the instant a pair completes, and a profile

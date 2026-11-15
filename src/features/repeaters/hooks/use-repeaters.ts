@@ -35,6 +35,11 @@ export interface UseRepeaters {
   refresh(): Promise<void>;
   claim(link: string, open: boolean, carryMe: boolean): Outcome;
   setCarried(rosterId: string, carry: boolean): Outcome;
+  /**
+   * Say yes to a roster offered at pairing, or take the yes back: enrolls at once where it would
+   * accept me, otherwise the moment an invite arrives. Unsupported on older binaries.
+   */
+  want(rosterId: string, want: boolean): Outcome;
   setPolicy(rosterId: string, open: boolean): Outcome;
   removeMember(rosterId: string, member: string): Outcome;
   removeMachine(rosterId: string, repeaterId: string): Outcome;
@@ -131,6 +136,12 @@ export function useRepeaters({
         client
           ? change(rosterId, () => client.setCarried(rosterId, carry))
           : Promise.resolve(UNSUPPORTED),
+      want: (rosterId: string, want: boolean) => {
+        const pairing = client?.pairing;
+        return pairing
+          ? change(rosterId, () => pairing.want(rosterId, want))
+          : Promise.resolve(UNSUPPORTED);
+      },
       setPolicy: (rosterId: string, open: boolean) =>
         owner
           ? change(rosterId, () => owner.setPolicy(rosterId, open))

@@ -24,6 +24,8 @@ const ROSTER: RosterView = {
   inviters: [],
   invited: [],
   waiting: false,
+  offeredBy: [],
+  wanted: false,
 };
 
 describe('RosterPeople', () => {

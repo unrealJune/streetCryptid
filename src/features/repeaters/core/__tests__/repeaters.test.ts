@@ -128,68 +128,52 @@ describe('rosterSections', () => {
 });
 
 describe('pairingOffers', () => {
-  it('asks to enroll in the new friend’s own rosters, and offers to invite them to mine', () => {
+  it('offers every roster I may invite to, open or not, mine or not', () => {
     const sections = rosterSections(
       [
-        roster({ rosterId: 'sams', owner: SAM, open: true, vouchers: [SAM], canEnroll: true }),
-        roster({ rosterId: 'theirs', owner: STRANGER, vouchers: [STRANGER], canEnroll: true }),
-        roster({ rosterId: 'mine', owner: ME, mine: true, canInvite: true, inviters: [ME] }),
-      ],
-      [{ endpointId: SAM, handle: '@sam' }],
-      ME
-    );
-    const offers = pairingOffers(sections, SAM.toUpperCase());
-    expect(offers.enroll.map((r) => r.rosterId)).toEqual(['sams']);
-    expect(offers.invite.map((r) => r.rosterId)).toEqual(['mine']);
-  });
-
-  it('offers nothing to invite them to once they are in it or invited', () => {
-    const invited = rosterSections(
-      [roster({ rosterId: 'mine', mine: true, canInvite: true, invited: [SAM] })],
-      []
-    );
-    expect(pairingOffers(invited, SAM).invite).toEqual([]);
-    expect(pairingOffers(rosterSections([], []), SAM)).toEqual({
-      enroll: [],
-      invite: [],
-      awaiting: [],
-    });
-  });
-
-  it('waits for an invite to their invite-only roster, never for one that removed me', () => {
-    const sections = rosterSections(
-      [
-        roster({ rosterId: 'closed', owner: SAM, vouchers: [SAM], canEnroll: false }),
-        roster({ rosterId: 'gone', owner: SAM, open: true, vouchers: [SAM], canEnroll: false }),
-        roster({ rosterId: 'open', owner: SAM, open: true, vouchers: [SAM], canEnroll: true }),
-      ],
-      [{ endpointId: SAM, handle: '@sam' }],
-      ME
-    );
-    const offers = pairingOffers(sections, SAM);
-    expect(offers.awaiting.map((r) => r.rosterId)).toEqual(['closed']);
-    expect(offers.enroll.map((r) => r.rosterId)).toEqual(['open']);
-  });
-
-  it('offers an open roster too, since anyone may join but the invite is the offer', () => {
-    const open = rosterSections(
-      [roster({ rosterId: 'mine', mine: true, open: true, canInvite: true })],
-      []
-    );
-    expect(pairingOffers(open, SAM).invite.map((r) => r.rosterId)).toEqual(['mine']);
-  });
-
-  it('offers each roster I may invite to, not only my own', () => {
-    const sections = rosterSections(
-      [
-        roster({ rosterId: 'mine', mine: true, canInvite: true }),
+        roster({ rosterId: 'mine', mine: true, open: true, canInvite: true }),
         roster({ rosterId: 'kits', owner: STRANGER, carriesMe: true, canInvite: true }),
         roster({ rosterId: 'nope', owner: STRANGER, carriesMe: true, canInvite: false }),
       ],
       [],
       ME
     );
-    expect(pairingOffers(sections, SAM).invite.map((r) => r.rosterId)).toEqual(['mine', 'kits']);
+    // Before the shake there is no friend yet, and still a list to choose from.
+    const offers = pairingOffers(sections, null);
+    expect(offers.mine.map((r) => r.rosterId)).toEqual(['mine', 'kits']);
+    expect(offers.theirs).toEqual([]);
+  });
+
+  it('answers only what this friend offered, not every roster they are in', () => {
+    const sections = rosterSections(
+      [
+        roster({ rosterId: 'offered', owner: SAM, vouchers: [SAM], offeredBy: [SAM] }),
+        roster({ rosterId: 'vouched', owner: SAM, open: true, vouchers: [SAM], canEnroll: true }),
+        roster({ rosterId: 'other', owner: STRANGER, offeredBy: [STRANGER] }),
+        roster({ rosterId: 'in', owner: SAM, carriesMe: true, offeredBy: [SAM] }),
+      ],
+      [{ endpointId: SAM, handle: '@sam' }],
+      ME
+    );
+    expect(pairingOffers(sections, SAM.toUpperCase()).theirs.map((r) => r.rosterId)).toEqual([
+      'offered',
+    ]);
+  });
+
+  it('lists an offered roster under Offered, saying who offered it or that I said yes', () => {
+    const sections = rosterSections(
+      [
+        roster({ rosterId: 'a', owner: SAM, offeredBy: [SAM], canEnroll: false }),
+        roster({ rosterId: 'b', owner: SAM, wanted: true, canEnroll: false }),
+      ],
+      [{ endpointId: SAM, handle: '@sam' }],
+      ME
+    );
+    expect(sections.throughFriends.map((r) => r.rosterId)).toEqual(['a', 'b']);
+    expect(rosterRowDetail(sections.throughFriends[0])).toContain('offered by @sam');
+    expect(rosterRowDetail(sections.throughFriends[1])).toContain('waiting for their invite');
+    // Undecided offers count toward the badge; a yes waiting on its invite does not.
+    expect(offeredCount(sections)).toBe(1);
   });
 });
 

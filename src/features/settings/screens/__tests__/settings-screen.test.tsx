@@ -121,7 +121,10 @@ describe('SettingsScreen', () => {
     repeaters.sections = {
       mine: { machines: ['aaaaaa', 'bbbbbb'], carriesMe: true },
       carryingMe: [{ machines: ['cccccc'], carriesMe: true }],
-      throughFriends: [{ canEnroll: true }, { canEnroll: false }],
+      throughFriends: [
+        { canEnroll: true, offeredBy: [], wanted: false },
+        { canEnroll: false, offeredBy: [], wanted: false },
+      ],
       others: [],
     };
     expect(rows().find((row) => row.href === '/settings/repeaters')?.value).toBe(

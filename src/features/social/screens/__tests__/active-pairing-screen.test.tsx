@@ -32,16 +32,11 @@ jest.mock('../../components/pairing-figure-view', () => ({
   PairingFigureChoices: () => null,
 }));
 jest.mock('../../components/persona-reveal', () => ({ PersonaReveal: () => null }));
-const mockRepeaterOffer: {
-  apply: jest.Mock;
-  enroll: jest.Mock;
-  offers: { enroll: { rosterId: string }[]; invite: unknown[]; awaiting: { rosterId: string }[] };
-} = { apply: jest.fn(), enroll: jest.fn(), offers: { enroll: [], invite: [], awaiting: [] } };
+const mockRepeaterOffer: { apply: jest.Mock } = { apply: jest.fn() };
+const mockRepeaterCards = jest.fn((_props: { friendLabel: string | null }) => null);
 jest.mock('@/features/repeaters/components/pairing-repeater-offer', () => ({
   usePairingRepeaterOffer: () => mockRepeaterOffer,
-  PairingInviteOfferView: () => null,
-  PairingEnrollQuestion: () => null,
-  PairingAwaitingInvite: ({ gaveUp }: { gaveUp: boolean }) => (gaveUp ? 'GAVE UP' : 'AWAITING'),
+  PairingRepeaterCards: (props: { friendLabel: string | null }) => mockRepeaterCards(props),
 }));
 jest.mock('@/features/social/net/bluetooth-settings', () => ({ openBluetoothSettings: jest.fn() }));
 jest.mock('@/features/social/net/location-sharing', () => ({
@@ -147,7 +142,7 @@ describe('ActivePairingScreen', () => {
     mockSharing.createPairInvite.mockResolvedValue(LINK);
     mockSharing.acknowledgeDiscoveredFriend.mockResolvedValue(undefined);
     mockSharing.rejectDiscoveredFriend.mockResolvedValue(undefined);
-    mockRepeaterOffer.offers = { enroll: [], invite: [], awaiting: [] };
+    mockRepeaterCards.mockClear();
     jest
       .spyOn(Share, 'share')
       .mockResolvedValue({ action: Share.sharedAction, activityType: undefined });
@@ -264,58 +259,25 @@ describe('ActivePairingScreen', () => {
     expect(mockRouter.back).toHaveBeenCalledTimes(1);
   });
 
-  it('asks about their repeaters after acknowledging, with the radio already stood down', async () => {
-    mockRepeaterOffer.offers = { enroll: [{ rosterId: 'theirs' }], invite: [], awaiting: [] };
+  /**
+   * The repeater choices are made before ACKNOWLEDGE — mine before the shake, theirs on the
+   * reveal — so ACKNOWLEDGE applies them and leaves. There is no question after it any more.
+   */
+  it('applies the repeater choices on acknowledge and leaves at once', async () => {
     await renderDiscovery();
+    expect(mockRepeaterCards).toHaveBeenLastCalledWith(
+      expect.objectContaining({ friendLabel: expect.any(String) })
+    );
     await act(async () => action('acknowledge').props.onPress());
     expect(mockSharing.acknowledgeDiscoveredFriend).toHaveBeenCalledTimes(1);
     expect(mockRepeaterOffer.apply).toHaveBeenCalledTimes(1);
-    // Kept, and the radio latched off exactly as leaving would, but still on screen to ask.
-    expect(mockSharing.standDownPairing).toHaveBeenCalled();
-    expect(mockRouter.back).not.toHaveBeenCalled();
-    await act(async () => action('enroll').props.onPress());
-    expect(mockRepeaterOffer.enroll).toHaveBeenCalledWith(new Set(['theirs']));
     expect(mockRouter.back).toHaveBeenCalledTimes(1);
   });
 
-  /**
-   * An invite-only roster opens only when the friend's ACKNOWLEDGE signs our invite, which can
-   * land after ours: the screen waits for it rather than closing, and asks once it arrives.
-   */
-  it('waits for an invite their acknowledge has yet to sign, then asks', async () => {
-    mockRepeaterOffer.offers = { enroll: [], invite: [], awaiting: [{ rosterId: 'theirs' }] };
+  it('applies nothing on reject', async () => {
     await renderDiscovery();
-    await act(async () => action('acknowledge').props.onPress());
-    expect(mockRouter.back).not.toHaveBeenCalled();
-    expect(JSON.stringify(renderer.toJSON())).toContain('AWAITING');
-    // The invite lands: the live offer now has it, and it starts switched on.
-    mockRepeaterOffer.offers = { enroll: [{ rosterId: 'theirs' }], invite: [], awaiting: [] };
-    await act(async () => renderer.update(<ActivePairingScreen />));
-    expect(JSON.stringify(renderer.toJSON())).not.toContain('AWAITING');
-    await act(async () => action('enroll').props.onPress());
-    expect(mockRepeaterOffer.enroll).toHaveBeenCalledWith(new Set(['theirs']));
-  });
-
-  it('says where the invite will turn up when it does not come', async () => {
-    mockRepeaterOffer.offers = { enroll: [], invite: [], awaiting: [{ rosterId: 'theirs' }] };
-    await renderDiscovery();
-    await act(async () => action('acknowledge').props.onPress());
-    await act(async () => {
-      jest.advanceTimersByTime(20_000);
-    });
-    expect(JSON.stringify(renderer.toJSON())).toContain('GAVE UP');
-    await act(async () => action('not now').props.onPress());
-    expect(mockRepeaterOffer.enroll).not.toHaveBeenCalled();
-    expect(mockRouter.back).toHaveBeenCalledTimes(1);
-  });
-
-  it('leaves without enrolling on NOT NOW', async () => {
-    mockRepeaterOffer.offers = { enroll: [{ rosterId: 'theirs' }], invite: [], awaiting: [] };
-    await renderDiscovery();
-    await act(async () => action('acknowledge').props.onPress());
-    await act(async () => action('not now').props.onPress());
-    expect(mockRepeaterOffer.enroll).not.toHaveBeenCalled();
-    expect(mockRouter.back).toHaveBeenCalledTimes(1);
+    await act(async () => action('reject').props.onPress());
+    expect(mockRepeaterOffer.apply).not.toHaveBeenCalled();
   });
 
   it('treats closing an unconfirmed discovery as rejection, not silent acceptance', async () => {

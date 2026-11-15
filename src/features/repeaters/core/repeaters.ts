@@ -159,6 +159,10 @@ export interface RosterView {
    * time one of them is reachable, and nobody has to be online at the same moment (§4.4).
    */
   readonly waiting: boolean;
+  /** Friends who offered it to me at pairing (REPEATERS.md §4.4). */
+  readonly offeredBy: readonly RosterPerson[];
+  /** I said yes and enroll the moment an invite arrives; not carried yet. */
+  readonly wanted: boolean;
 }
 
 export interface RosterSections {
@@ -166,7 +170,10 @@ export interface RosterSections {
   readonly mine: RosterView | null;
   /** Other people's rosters that carry this phone's trail. */
   readonly carryingMe: readonly RosterView[];
-  /** Rosters friends' cards vouch for that do not carry me (REPEATERS.md §4.4). */
+  /**
+   * Rosters friends' cards vouch for, or friends offered me at pairing, that do not carry me
+   * (REPEATERS.md §4.4).
+   */
   readonly throughFriends: readonly RosterView[];
   /** Everything else this phone knows and is not enrolled in. */
   readonly others: readonly RosterView[];
@@ -223,17 +230,21 @@ export function rosterSections(
       .sort(byName),
     invited: (r.invited ?? []).map(person).sort(byName),
     waiting: r.carriesMe && (r.waiting ?? false),
+    offeredBy: r.carriesMe ? [] : (r.offeredBy ?? []).map(person).sort(byName),
+    wanted: !r.carriesMe && (r.wanted ?? false),
   });
   const views = rosters.map(view);
   const byLabel = (a: RosterView, b: RosterView) => a.ownerLabel.localeCompare(b.ownerLabel);
   return {
     mine: views.find((v) => v.mine) ?? null,
     carryingMe: views.filter((v) => !v.mine && v.carriesMe).sort(byLabel),
-    throughFriends: views
-      .filter((v) => !v.mine && !v.carriesMe && v.vouchers.length > 0)
-      .sort(byLabel),
-    others: views.filter((v) => !v.mine && !v.carriesMe && v.vouchers.length === 0).sort(byLabel),
+    throughFriends: views.filter((v) => !v.mine && !v.carriesMe && throughFriend(v)).sort(byLabel),
+    others: views.filter((v) => !v.mine && !v.carriesMe && !throughFriend(v)).sort(byLabel),
   };
+}
+
+function throughFriend(roster: RosterView): boolean {
+  return roster.vouchers.length > 0 || roster.offeredBy.length > 0 || roster.wanted;
 }
 
 /** Friends who could be invited to `roster`: not its owner, not in it, not already invited. */
@@ -251,55 +262,40 @@ export function inviteCandidates(
     .sort((a, b) => a.label.localeCompare(b.label));
 }
 
-/** What the pairing screen can offer about a friend just found (REPEATERS.md §4.4). */
+/**
+ * The repeater choices at pairing (REPEATERS.md §4.4). Friending goes both ways, so each phone
+ * offers its own and answers the other's: `mine` is chosen before the shake and offered to whoever
+ * the pair turns out to be, `theirs` is what that friend chose to offer me.
+ */
 export interface PairingOffers {
-  /** Their rosters (owned or vouched for by them) that I may enroll in and am not carried by. */
-  readonly enroll: readonly RosterView[];
-  /** Rosters I may invite them to, open or invite-only, that they are not in or invited to. */
-  readonly invite: readonly RosterView[];
-  /**
-   * Their invite-only rosters I cannot enroll in yet: what an invite they sign at ACKNOWLEDGE
-   * would open. The pairing screen waits a moment for it rather than closing on nothing.
-   */
-  readonly awaiting: readonly RosterView[];
+  /** Every roster I may invite people to, open or invite-only. */
+  readonly mine: readonly RosterView[];
+  /** What this friend offered me at pairing, that does not carry me yet. */
+  readonly theirs: readonly RosterView[];
 }
 
-/**
- * The Enroll question and the "also invite them" choices for `friendId`, from rosters this phone
- * already knows. Their card may not have arrived yet; then there is nothing to ask here, and the
- * roster turns up under Available through friends once it does.
- */
-export function pairingOffers(sections: RosterSections, friendId: string): PairingOffers {
-  const friend = friendId.toLowerCase();
+export function pairingOffers(sections: RosterSections, friendId: string | null): PairingOffers {
+  const friend = friendId?.toLowerCase() ?? null;
   const all = [
     ...(sections.mine ? [sections.mine] : []),
     ...sections.carryingMe,
     ...sections.throughFriends,
     ...sections.others,
   ];
-  const isFriend = (p: RosterPerson) => p.id.toLowerCase() === friend;
-  const theirs = (r: RosterView) =>
-    !r.mine && !r.carriesMe && (r.owner.toLowerCase() === friend || r.vouchers.some(isFriend));
   return {
-    enroll: all.filter((r) => theirs(r) && r.canEnroll),
-    // Open and refusing me means the owner removed me: no invite is on its way there.
-    awaiting: all.filter((r) => theirs(r) && !r.canEnroll && !r.open),
-    // Open rosters too. They need no invite to join, but an invite is how the owner says "these
-    // are yours to use" at the moment it means most, it names the friend in the roster before
-    // they enroll, and it is what lets someone the owner once removed back in (§3.3).
-    invite: all.filter(
-      (r) =>
-        r.canInvite &&
-        r.owner.toLowerCase() !== friend &&
-        !r.members.some(isFriend) &&
-        !r.invited.some(isFriend)
-    ),
+    mine: all.filter((r) => r.canInvite),
+    theirs: friend
+      ? all.filter(
+          (r) => !r.mine && !r.carriesMe && r.offeredBy.some((p) => p.id.toLowerCase() === friend)
+        )
+      : [],
   };
 }
 
 /** Rosters friends offer that I could enroll in now: what the Settings menu's badge counts. */
 export function offeredCount(sections: RosterSections): number {
-  return sections.throughFriends.filter((r) => r.canEnroll).length;
+  return sections.throughFriends.filter((r) => (r.canEnroll || r.offeredBy.length > 0) && !r.wanted)
+    .length;
 }
 
 /** The Settings menu's one-line answer to "what do repeaters do for me right now". */
@@ -340,9 +336,14 @@ export function rosterRowDetail(roster: RosterView): string {
   if (roster.mine && !roster.carriesMe) parts.push('not carrying you');
   if (roster.waiting) parts.push('waiting for a repeater');
   if (!roster.mine && !roster.carriesMe) {
-    // An open roster refuses only someone its owner removed; an invite-only one, anyone uninvited.
-    if (!roster.canEnroll) parts.push(roster.open ? 'removed by the owner' : 'not invited');
-    else if (roster.vouchers.length > 0) {
+    if (roster.wanted) parts.push('waiting for their invite');
+    else if (roster.offeredBy.length > 0) {
+      parts.push(`offered by ${roster.offeredBy.map((p) => p.label).join(', ')}`);
+    } else if (!roster.canEnroll) {
+      // An open roster refuses only someone its owner removed; an invite-only one, anyone
+      // uninvited.
+      parts.push(roster.open ? 'removed by the owner' : 'not invited');
+    } else if (roster.vouchers.length > 0) {
       const names = roster.vouchers.map((v) => v.label);
       parts.push(`${names.join(', ')} ${names.length === 1 ? 'is' : 'are'} in it`);
     }

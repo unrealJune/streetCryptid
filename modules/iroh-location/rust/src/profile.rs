@@ -794,7 +794,11 @@ impl ProfileDocs {
         }
         // What we hold now, opened with the key it was sealed under, before the key moves on.
         let mut records = Vec::new();
-        for key in [PROFILE_KEY, crate::repeater::CARD_KEY] {
+        for key in [
+            PROFILE_KEY,
+            crate::repeater::CARD_KEY,
+            crate::repeater::OFFERS_KEY,
+        ] {
             if let Some(bytes) = self.latest_key_bytes(self.own_ns, key).await? {
                 records.push((key, bytes));
             }
