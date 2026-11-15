@@ -1125,14 +1125,6 @@ public protocol LocationNodeProtocol: AnyObject, Sendable {
     func initiatePairNearby(peerEndpointId: Data) async throws  -> Data
     
     /**
-     * Invite a friend to every invite-only roster this phone may invite to and has not yet: what
-     * the pairing screen's "also invite them to my repeaters" does, pre-checked when auto-invite
-     * is on (§4.4). Resolves how many invites were signed. Every roster is offered to its
-     * repeaters by the grant pass that follows, so nothing here waits on a machine.
-     */
-    func inviteFriendToRepeaters(member: String) async throws  -> UInt32
-    
-    /**
      * Invite `member` to an invite-only roster this phone may invite to (it owns it, or holds
      * `inviter`), and tell its repeaters. Resolves whether a new invite was signed: a member
      * already carried, or already holding an invite that stands, is not invited twice. An invite
@@ -1334,11 +1326,6 @@ public protocol LocationNodeProtocol: AnyObject, Sendable {
     func removeRepeaterMember(rosterId: String, member: String) async throws 
     
     /**
-     * Whether new friends are invited, at pairing, to the rosters this phone may invite to.
-     */
-    func repeaterAutoInvite() async throws  -> Bool
-    
-    /**
      * What `device.health` reports about repeaters: how many rosters and machines carry us, and
      * how long since this process last heard from one. A local read; dials nothing.
      */
@@ -1420,6 +1407,13 @@ public protocol LocationNodeProtocol: AnyObject, Sendable {
     func setPairingReady(ready: Bool) 
     
     /**
+     * The rosters to offer whoever we pair with next, chosen on the pairing screen before the
+     * shake (REPEATERS.md §4.4). Applied as well to every pair already completed and waiting on
+     * ACKNOWLEDGE, so a change made on the reveal reaches the peer it is about.
+     */
+    func setPairingRepeaterOffer(rosterIds: [String]) async throws 
+    
+    /**
      * Mirror each friend's X25519 receiving key, so the native drain can run §4.6 recovery.
      *
      * Push next to [`Self::set_sharing_recipients`], every friend (sharing and watch-only). The
@@ -1427,8 +1421,6 @@ public protocol LocationNodeProtocol: AnyObject, Sendable {
      * a friend with no key here falls back to their verified profile.
      */
     func setRecipientKeys(keys: [RecipientKey]) async throws 
-    
-    func setRepeaterAutoInvite(on: Bool) async throws 
     
     /**
      * Have a roster carry our trail, or stop (`carry`), and tell its repeaters. Returns whether
@@ -1572,6 +1564,13 @@ public protocol LocationNodeProtocol: AnyObject, Sendable {
      * Stop announcing friend-replica changes. Replication carries on regardless.
      */
     func unwatchReplica() 
+    
+    /**
+     * Say yes to a roster offered to us, or take the yes back. Enrolls at once where the roster
+     * would accept us; otherwise remembers it and enrolls the moment the invite arrives
+     * (`repeater::want`). Returns whether the roster carries us now.
+     */
+    func wantRepeater(rosterId: String, want: Bool) async throws  -> Bool
     
     /**
      * Announce friend-replica changes to `listener` from now on, replacing any listener before
@@ -2383,29 +2382,6 @@ open func initiatePairNearby(peerEndpointId: Data)async throws  -> Data  {
 }
     
     /**
-     * Invite a friend to every invite-only roster this phone may invite to and has not yet: what
-     * the pairing screen's "also invite them to my repeaters" does, pre-checked when auto-invite
-     * is on (§4.4). Resolves how many invites were signed. Every roster is offered to its
-     * repeaters by the grant pass that follows, so nothing here waits on a machine.
-     */
-open func inviteFriendToRepeaters(member: String)async throws  -> UInt32  {
-    return
-        try  await uniffiRustCallAsync(
-            rustFutureFunc: {
-                uniffi_iroh_location_fn_method_locationnode_invite_friend_to_repeaters(
-                    self.uniffiCloneHandle(),
-                    FfiConverterString.lower(member)
-                )
-            },
-            pollFunc: ffi_iroh_location_rust_future_poll_u32,
-            completeFunc: ffi_iroh_location_rust_future_complete_u32,
-            freeFunc: ffi_iroh_location_rust_future_free_u32,
-            liftFunc: FfiConverterUInt32.lift,
-            errorHandler: FfiConverterTypeLocationError_lift
-        )
-}
-    
-    /**
      * Invite `member` to an invite-only roster this phone may invite to (it owns it, or holds
      * `inviter`), and tell its repeaters. Resolves whether a new invite was signed: a member
      * already carried, or already holding an invite that stands, is not invited twice. An invite
@@ -3022,26 +2998,6 @@ open func removeRepeaterMember(rosterId: String, member: String)async throws   {
 }
     
     /**
-     * Whether new friends are invited, at pairing, to the rosters this phone may invite to.
-     */
-open func repeaterAutoInvite()async throws  -> Bool  {
-    return
-        try  await uniffiRustCallAsync(
-            rustFutureFunc: {
-                uniffi_iroh_location_fn_method_locationnode_repeater_auto_invite(
-                    self.uniffiCloneHandle()
-                    
-                )
-            },
-            pollFunc: ffi_iroh_location_rust_future_poll_i8,
-            completeFunc: ffi_iroh_location_rust_future_complete_i8,
-            freeFunc: ffi_iroh_location_rust_future_free_i8,
-            liftFunc: FfiConverterBool.lift,
-            errorHandler: FfiConverterTypeLocationError_lift
-        )
-}
-    
-    /**
      * What `device.health` reports about repeaters: how many rosters and machines carry us, and
      * how long since this process last heard from one. A local read; dials nothing.
      */
@@ -3250,6 +3206,28 @@ open func setPairingReady(ready: Bool)  {try! rustCall() {
 }
     
     /**
+     * The rosters to offer whoever we pair with next, chosen on the pairing screen before the
+     * shake (REPEATERS.md §4.4). Applied as well to every pair already completed and waiting on
+     * ACKNOWLEDGE, so a change made on the reveal reaches the peer it is about.
+     */
+open func setPairingRepeaterOffer(rosterIds: [String])async throws   {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_iroh_location_fn_method_locationnode_set_pairing_repeater_offer(
+                    self.uniffiCloneHandle(),
+                    FfiConverterSequenceString.lower(rosterIds)
+                )
+            },
+            pollFunc: ffi_iroh_location_rust_future_poll_void,
+            completeFunc: ffi_iroh_location_rust_future_complete_void,
+            freeFunc: ffi_iroh_location_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: FfiConverterTypeLocationError_lift
+        )
+}
+    
+    /**
      * Mirror each friend's X25519 receiving key, so the native drain can run §4.6 recovery.
      *
      * Push next to [`Self::set_sharing_recipients`], every friend (sharing and watch-only). The
@@ -3263,23 +3241,6 @@ open func setRecipientKeys(keys: [RecipientKey])async throws   {
                 uniffi_iroh_location_fn_method_locationnode_set_recipient_keys(
                     self.uniffiCloneHandle(),
                     FfiConverterSequenceTypeRecipientKey.lower(keys)
-                )
-            },
-            pollFunc: ffi_iroh_location_rust_future_poll_void,
-            completeFunc: ffi_iroh_location_rust_future_complete_void,
-            freeFunc: ffi_iroh_location_rust_future_free_void,
-            liftFunc: { $0 },
-            errorHandler: FfiConverterTypeLocationError_lift
-        )
-}
-    
-open func setRepeaterAutoInvite(on: Bool)async throws   {
-    return
-        try  await uniffiRustCallAsync(
-            rustFutureFunc: {
-                uniffi_iroh_location_fn_method_locationnode_set_repeater_auto_invite(
-                    self.uniffiCloneHandle(),
-                    FfiConverterBool.lower(on)
                 )
             },
             pollFunc: ffi_iroh_location_rust_future_poll_void,
@@ -3661,6 +3622,28 @@ open func unwatchReplica()  {try! rustCall() {
             self.uniffiCloneHandle(),$0
     )
 }
+}
+    
+    /**
+     * Say yes to a roster offered to us, or take the yes back. Enrolls at once where the roster
+     * would accept us; otherwise remembers it and enrolls the moment the invite arrives
+     * (`repeater::want`). Returns whether the roster carries us now.
+     */
+open func wantRepeater(rosterId: String, want: Bool)async throws  -> Bool  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_iroh_location_fn_method_locationnode_want_repeater(
+                    self.uniffiCloneHandle(),
+                    FfiConverterString.lower(rosterId),FfiConverterBool.lower(want)
+                )
+            },
+            pollFunc: ffi_iroh_location_rust_future_poll_i8,
+            completeFunc: ffi_iroh_location_rust_future_complete_i8,
+            freeFunc: ffi_iroh_location_rust_future_free_i8,
+            liftFunc: FfiConverterBool.lift,
+            errorHandler: FfiConverterTypeLocationError_lift
+        )
 }
     
     /**
@@ -7791,6 +7774,14 @@ public struct RepeaterRoster: Equatable, Hashable {
      * next time one of them is reachable (REPEATERS.md §4.4).
      */
     public var waiting: Bool
+    /**
+     * Who offered it to us at pairing (endpoint ids), from their offers record (§4.4).
+     */
+    public var offeredBy: [String]
+    /**
+     * We said yes and are waiting for it to accept us: enrolled the moment an invite arrives.
+     */
+    public var wanted: Bool
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
@@ -7834,7 +7825,13 @@ public struct RepeaterRoster: Equatable, Hashable {
         /**
          * Carried by our own copy, and no repeater has confirmed our `Enroll` yet: it goes out the
          * next time one of them is reachable (REPEATERS.md §4.4).
-         */waiting: Bool) {
+         */waiting: Bool, 
+        /**
+         * Who offered it to us at pairing (endpoint ids), from their offers record (§4.4).
+         */offeredBy: [String], 
+        /**
+         * We said yes and are waiting for it to accept us: enrolled the moment an invite arrives.
+         */wanted: Bool) {
         self.rosterId = rosterId
         self.owner = owner
         self.mine = mine
@@ -7850,6 +7847,8 @@ public struct RepeaterRoster: Equatable, Hashable {
         self.invited = invited
         self.canInvite = canInvite
         self.waiting = waiting
+        self.offeredBy = offeredBy
+        self.wanted = wanted
     }
 
     
@@ -7882,7 +7881,9 @@ public struct FfiConverterTypeRepeaterRoster: FfiConverterRustBuffer {
                 inviters: FfiConverterSequenceString.read(from: &buf), 
                 invited: FfiConverterSequenceString.read(from: &buf), 
                 canInvite: FfiConverterBool.read(from: &buf), 
-                waiting: FfiConverterBool.read(from: &buf)
+                waiting: FfiConverterBool.read(from: &buf), 
+                offeredBy: FfiConverterSequenceString.read(from: &buf), 
+                wanted: FfiConverterBool.read(from: &buf)
         )
     }
 
@@ -7902,6 +7903,8 @@ public struct FfiConverterTypeRepeaterRoster: FfiConverterRustBuffer {
         FfiConverterSequenceString.write(value.invited, into: &buf)
         FfiConverterBool.write(value.canInvite, into: &buf)
         FfiConverterBool.write(value.waiting, into: &buf)
+        FfiConverterSequenceString.write(value.offeredBy, into: &buf)
+        FfiConverterBool.write(value.wanted, into: &buf)
     }
 }
 
@@ -10917,9 +10920,6 @@ private let initializationResult: InitializationResult = {
     if (uniffi_iroh_location_checksum_method_locationnode_initiate_pair_nearby() != 64589) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_iroh_location_checksum_method_locationnode_invite_friend_to_repeaters() != 45606) {
-        return InitializationResult.apiChecksumMismatch
-    }
     if (uniffi_iroh_location_checksum_method_locationnode_invite_to_repeater() != 26208) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -11007,9 +11007,6 @@ private let initializationResult: InitializationResult = {
     if (uniffi_iroh_location_checksum_method_locationnode_remove_repeater_member() != 31577) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_iroh_location_checksum_method_locationnode_repeater_auto_invite() != 10935) {
-        return InitializationResult.apiChecksumMismatch
-    }
     if (uniffi_iroh_location_checksum_method_locationnode_repeater_health() != 12626) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -11037,10 +11034,10 @@ private let initializationResult: InitializationResult = {
     if (uniffi_iroh_location_checksum_method_locationnode_set_pairing_ready() != 55937) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_iroh_location_checksum_method_locationnode_set_recipient_keys() != 16037) {
+    if (uniffi_iroh_location_checksum_method_locationnode_set_pairing_repeater_offer() != 8292) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_iroh_location_checksum_method_locationnode_set_repeater_auto_invite() != 60425) {
+    if (uniffi_iroh_location_checksum_method_locationnode_set_recipient_keys() != 16037) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_method_locationnode_set_repeater_carried() != 33375) {
@@ -11089,6 +11086,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_method_locationnode_unwatch_replica() != 40665) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_iroh_location_checksum_method_locationnode_want_repeater() != 26896) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_method_locationnode_watch_replica() != 20728) {

@@ -809,8 +809,6 @@ external fun uniffi_iroh_location_checksum_method_locationnode_initiate_pair_by_
 ): Int
 external fun uniffi_iroh_location_checksum_method_locationnode_initiate_pair_nearby(
 ): Int
-external fun uniffi_iroh_location_checksum_method_locationnode_invite_friend_to_repeaters(
-): Int
 external fun uniffi_iroh_location_checksum_method_locationnode_invite_to_repeater(
 ): Int
 external fun uniffi_iroh_location_checksum_method_locationnode_is_desynced(
@@ -869,8 +867,6 @@ external fun uniffi_iroh_location_checksum_method_locationnode_remove_repeater(
 ): Int
 external fun uniffi_iroh_location_checksum_method_locationnode_remove_repeater_member(
 ): Int
-external fun uniffi_iroh_location_checksum_method_locationnode_repeater_auto_invite(
-): Int
 external fun uniffi_iroh_location_checksum_method_locationnode_repeater_health(
 ): Int
 external fun uniffi_iroh_location_checksum_method_locationnode_repeater_rosters(
@@ -889,9 +885,9 @@ external fun uniffi_iroh_location_checksum_method_locationnode_set_delivery_conf
 ): Int
 external fun uniffi_iroh_location_checksum_method_locationnode_set_pairing_ready(
 ): Int
-external fun uniffi_iroh_location_checksum_method_locationnode_set_recipient_keys(
+external fun uniffi_iroh_location_checksum_method_locationnode_set_pairing_repeater_offer(
 ): Int
-external fun uniffi_iroh_location_checksum_method_locationnode_set_repeater_auto_invite(
+external fun uniffi_iroh_location_checksum_method_locationnode_set_recipient_keys(
 ): Int
 external fun uniffi_iroh_location_checksum_method_locationnode_set_repeater_carried(
 ): Int
@@ -924,6 +920,8 @@ external fun uniffi_iroh_location_checksum_method_locationnode_trail_replica_sta
 external fun uniffi_iroh_location_checksum_method_locationnode_transport_diagnostics(
 ): Int
 external fun uniffi_iroh_location_checksum_method_locationnode_unwatch_replica(
+): Int
+external fun uniffi_iroh_location_checksum_method_locationnode_want_repeater(
 ): Int
 external fun uniffi_iroh_location_checksum_method_locationnode_watch_replica(
 ): Int
@@ -1065,8 +1063,6 @@ external fun uniffi_iroh_location_fn_method_locationnode_initiate_pair_by_ticket
 ): Long
 external fun uniffi_iroh_location_fn_method_locationnode_initiate_pair_nearby(`ptr`: Long,`peerEndpointId`: RustBuffer.ByValue,
 ): Long
-external fun uniffi_iroh_location_fn_method_locationnode_invite_friend_to_repeaters(`ptr`: Long,`member`: RustBuffer.ByValue,
-): Long
 external fun uniffi_iroh_location_fn_method_locationnode_invite_to_repeater(`ptr`: Long,`rosterId`: RustBuffer.ByValue,`member`: RustBuffer.ByValue,
 ): Long
 external fun uniffi_iroh_location_fn_method_locationnode_is_desynced(`ptr`: Long,`peerEndpointHex`: RustBuffer.ByValue,
@@ -1125,8 +1121,6 @@ external fun uniffi_iroh_location_fn_method_locationnode_remove_repeater(`ptr`: 
 ): Long
 external fun uniffi_iroh_location_fn_method_locationnode_remove_repeater_member(`ptr`: Long,`rosterId`: RustBuffer.ByValue,`member`: RustBuffer.ByValue,
 ): Long
-external fun uniffi_iroh_location_fn_method_locationnode_repeater_auto_invite(`ptr`: Long,
-): Long
 external fun uniffi_iroh_location_fn_method_locationnode_repeater_health(`ptr`: Long,
 ): Long
 external fun uniffi_iroh_location_fn_method_locationnode_repeater_rosters(`ptr`: Long,
@@ -1145,9 +1139,9 @@ external fun uniffi_iroh_location_fn_method_locationnode_set_delivery_config(`pt
 ): Long
 external fun uniffi_iroh_location_fn_method_locationnode_set_pairing_ready(`ptr`: Long,`ready`: Byte,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
-external fun uniffi_iroh_location_fn_method_locationnode_set_recipient_keys(`ptr`: Long,`keys`: RustBuffer.ByValue,
+external fun uniffi_iroh_location_fn_method_locationnode_set_pairing_repeater_offer(`ptr`: Long,`rosterIds`: RustBuffer.ByValue,
 ): Long
-external fun uniffi_iroh_location_fn_method_locationnode_set_repeater_auto_invite(`ptr`: Long,`on`: Byte,
+external fun uniffi_iroh_location_fn_method_locationnode_set_recipient_keys(`ptr`: Long,`keys`: RustBuffer.ByValue,
 ): Long
 external fun uniffi_iroh_location_fn_method_locationnode_set_repeater_carried(`ptr`: Long,`rosterId`: RustBuffer.ByValue,`carry`: Byte,
 ): Long
@@ -1181,6 +1175,8 @@ external fun uniffi_iroh_location_fn_method_locationnode_transport_diagnostics(`
 ): Long
 external fun uniffi_iroh_location_fn_method_locationnode_unwatch_replica(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
+external fun uniffi_iroh_location_fn_method_locationnode_want_repeater(`ptr`: Long,`rosterId`: RustBuffer.ByValue,`want`: Byte,
+): Long
 external fun uniffi_iroh_location_fn_method_locationnode_watch_replica(`ptr`: Long,`listener`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
 external fun uniffi_iroh_location_fn_clone_meshcapsulestore(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
@@ -1570,9 +1566,6 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_iroh_location_checksum_method_locationnode_initiate_pair_nearby() != 64589) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_iroh_location_checksum_method_locationnode_invite_friend_to_repeaters() != 45606) {
-        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    }
     if (lib.uniffi_iroh_location_checksum_method_locationnode_invite_to_repeater() != 26208) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1660,9 +1653,6 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_iroh_location_checksum_method_locationnode_remove_repeater_member() != 31577) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_iroh_location_checksum_method_locationnode_repeater_auto_invite() != 10935) {
-        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    }
     if (lib.uniffi_iroh_location_checksum_method_locationnode_repeater_health() != 12626) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1690,10 +1680,10 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_iroh_location_checksum_method_locationnode_set_pairing_ready() != 55937) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_iroh_location_checksum_method_locationnode_set_recipient_keys() != 16037) {
+    if (lib.uniffi_iroh_location_checksum_method_locationnode_set_pairing_repeater_offer() != 8292) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_iroh_location_checksum_method_locationnode_set_repeater_auto_invite() != 60425) {
+    if (lib.uniffi_iroh_location_checksum_method_locationnode_set_recipient_keys() != 16037) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_iroh_location_checksum_method_locationnode_set_repeater_carried() != 33375) {
@@ -1742,6 +1732,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_iroh_location_checksum_method_locationnode_unwatch_replica() != 40665) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_iroh_location_checksum_method_locationnode_want_repeater() != 26896) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_iroh_location_checksum_method_locationnode_watch_replica() != 20728) {
@@ -2980,14 +2973,6 @@ public interface LocationNodeInterface {
     suspend fun `initiatePairNearby`(`peerEndpointId`: kotlin.ByteArray): kotlin.ByteArray
     
     /**
-     * Invite a friend to every invite-only roster this phone may invite to and has not yet: what
-     * the pairing screen's "also invite them to my repeaters" does, pre-checked when auto-invite
-     * is on (§4.4). Resolves how many invites were signed. Every roster is offered to its
-     * repeaters by the grant pass that follows, so nothing here waits on a machine.
-     */
-    suspend fun `inviteFriendToRepeaters`(`member`: kotlin.String): kotlin.UInt
-    
-    /**
      * Invite `member` to an invite-only roster this phone may invite to (it owns it, or holds
      * `inviter`), and tell its repeaters. Resolves whether a new invite was signed: a member
      * already carried, or already holding an invite that stands, is not invited twice. An invite
@@ -3189,11 +3174,6 @@ public interface LocationNodeInterface {
     suspend fun `removeRepeaterMember`(`rosterId`: kotlin.String, `member`: kotlin.String)
     
     /**
-     * Whether new friends are invited, at pairing, to the rosters this phone may invite to.
-     */
-    suspend fun `repeaterAutoInvite`(): kotlin.Boolean
-    
-    /**
      * What `device.health` reports about repeaters: how many rosters and machines carry us, and
      * how long since this process last heard from one. A local read; dials nothing.
      */
@@ -3275,6 +3255,13 @@ public interface LocationNodeInterface {
     fun `setPairingReady`(`ready`: kotlin.Boolean)
     
     /**
+     * The rosters to offer whoever we pair with next, chosen on the pairing screen before the
+     * shake (REPEATERS.md §4.4). Applied as well to every pair already completed and waiting on
+     * ACKNOWLEDGE, so a change made on the reveal reaches the peer it is about.
+     */
+    suspend fun `setPairingRepeaterOffer`(`rosterIds`: List<kotlin.String>)
+    
+    /**
      * Mirror each friend's X25519 receiving key, so the native drain can run §4.6 recovery.
      *
      * Push next to [`Self::set_sharing_recipients`], every friend (sharing and watch-only). The
@@ -3282,8 +3269,6 @@ public interface LocationNodeInterface {
      * a friend with no key here falls back to their verified profile.
      */
     suspend fun `setRecipientKeys`(`keys`: List<RecipientKey>)
-    
-    suspend fun `setRepeaterAutoInvite`(`on`: kotlin.Boolean)
     
     /**
      * Have a roster carry our trail, or stop (`carry`), and tell its repeaters. Returns whether
@@ -3427,6 +3412,13 @@ public interface LocationNodeInterface {
      * Stop announcing friend-replica changes. Replication carries on regardless.
      */
     fun `unwatchReplica`()
+    
+    /**
+     * Say yes to a roster offered to us, or take the yes back. Enrolls at once where the roster
+     * would accept us; otherwise remembers it and enrolls the moment the invite arrives
+     * (`repeater::want`). Returns whether the roster carries us now.
+     */
+    suspend fun `wantRepeater`(`rosterId`: kotlin.String, `want`: kotlin.Boolean): kotlin.Boolean
     
     /**
      * Announce friend-replica changes to `listener` from now on, replacing any listener before
@@ -4358,33 +4350,6 @@ open class LocationNode: Disposable, AutoCloseable, LocationNodeInterface
 
     
     /**
-     * Invite a friend to every invite-only roster this phone may invite to and has not yet: what
-     * the pairing screen's "also invite them to my repeaters" does, pre-checked when auto-invite
-     * is on (§4.4). Resolves how many invites were signed. Every roster is offered to its
-     * repeaters by the grant pass that follows, so nothing here waits on a machine.
-     */
-    @Throws(LocationException::class)
-    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `inviteFriendToRepeaters`(`member`: kotlin.String) : kotlin.UInt {
-        return uniffiRustCallAsync(
-        callWithHandle { uniffiHandle ->
-            UniffiLib.uniffi_iroh_location_fn_method_locationnode_invite_friend_to_repeaters(
-                uniffiHandle,
-                FfiConverterString.lower(`member`),
-            )
-        },
-        { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_u32(future, callback, continuation) },
-        { future, continuation -> UniffiLib.ffi_iroh_location_rust_future_complete_u32(future, continuation) },
-        { future -> UniffiLib.ffi_iroh_location_rust_future_free_u32(future) },
-        // lift function
-        { FfiConverterUInt.lift(it) },
-        // Error FFI converter
-        LocationException.ErrorHandler,
-    )
-    }
-
-    
-    /**
      * Invite `member` to an invite-only roster this phone may invite to (it owns it, or holds
      * `inviter`), and tell its repeaters. Resolves whether a new invite was signed: a member
      * already carried, or already holding an invite that stands, is not invited twice. An invite
@@ -5111,30 +5076,6 @@ open class LocationNode: Disposable, AutoCloseable, LocationNodeInterface
 
     
     /**
-     * Whether new friends are invited, at pairing, to the rosters this phone may invite to.
-     */
-    @Throws(LocationException::class)
-    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `repeaterAutoInvite`() : kotlin.Boolean {
-        return uniffiRustCallAsync(
-        callWithHandle { uniffiHandle ->
-            UniffiLib.uniffi_iroh_location_fn_method_locationnode_repeater_auto_invite(
-                uniffiHandle,
-                
-            )
-        },
-        { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_i8(future, callback, continuation) },
-        { future, continuation -> UniffiLib.ffi_iroh_location_rust_future_complete_i8(future, continuation) },
-        { future -> UniffiLib.ffi_iroh_location_rust_future_free_i8(future) },
-        // lift function
-        { FfiConverterBoolean.lift(it) },
-        // Error FFI converter
-        LocationException.ErrorHandler,
-    )
-    }
-
-    
-    /**
      * What `device.health` reports about repeaters: how many rosters and machines carry us, and
      * how long since this process last heard from one. A local read; dials nothing.
      */
@@ -5379,20 +5320,18 @@ open class LocationNode: Disposable, AutoCloseable, LocationNodeInterface
 
     
     /**
-     * Mirror each friend's X25519 receiving key, so the native drain can run §4.6 recovery.
-     *
-     * Push next to [`Self::set_sharing_recipients`], every friend (sharing and watch-only). The
-     * resync record is sealed to these keys, and a headless wake has no pool to read them from;
-     * a friend with no key here falls back to their verified profile.
+     * The rosters to offer whoever we pair with next, chosen on the pairing screen before the
+     * shake (REPEATERS.md §4.4). Applied as well to every pair already completed and waiting on
+     * ACKNOWLEDGE, so a change made on the reveal reaches the peer it is about.
      */
     @Throws(LocationException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `setRecipientKeys`(`keys`: List<RecipientKey>) {
+    override suspend fun `setPairingRepeaterOffer`(`rosterIds`: List<kotlin.String>) {
         return uniffiRustCallAsync(
         callWithHandle { uniffiHandle ->
-            UniffiLib.uniffi_iroh_location_fn_method_locationnode_set_recipient_keys(
+            UniffiLib.uniffi_iroh_location_fn_method_locationnode_set_pairing_repeater_offer(
                 uniffiHandle,
-                FfiConverterSequenceTypeRecipientKey.lower(`keys`),
+                FfiConverterSequenceString.lower(`rosterIds`),
             )
         },
         { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_void(future, callback, continuation) },
@@ -5407,14 +5346,21 @@ open class LocationNode: Disposable, AutoCloseable, LocationNodeInterface
     }
 
     
+    /**
+     * Mirror each friend's X25519 receiving key, so the native drain can run §4.6 recovery.
+     *
+     * Push next to [`Self::set_sharing_recipients`], every friend (sharing and watch-only). The
+     * resync record is sealed to these keys, and a headless wake has no pool to read them from;
+     * a friend with no key here falls back to their verified profile.
+     */
     @Throws(LocationException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `setRepeaterAutoInvite`(`on`: kotlin.Boolean) {
+    override suspend fun `setRecipientKeys`(`keys`: List<RecipientKey>) {
         return uniffiRustCallAsync(
         callWithHandle { uniffiHandle ->
-            UniffiLib.uniffi_iroh_location_fn_method_locationnode_set_repeater_auto_invite(
+            UniffiLib.uniffi_iroh_location_fn_method_locationnode_set_recipient_keys(
                 uniffiHandle,
-                FfiConverterBoolean.lower(`on`),
+                FfiConverterSequenceTypeRecipientKey.lower(`keys`),
             )
         },
         { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_void(future, callback, continuation) },
@@ -5874,6 +5820,32 @@ open class LocationNode: Disposable, AutoCloseable, LocationNodeInterface
     }
     
     
+
+    
+    /**
+     * Say yes to a roster offered to us, or take the yes back. Enrolls at once where the roster
+     * would accept us; otherwise remembers it and enrolls the moment the invite arrives
+     * (`repeater::want`). Returns whether the roster carries us now.
+     */
+    @Throws(LocationException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `wantRepeater`(`rosterId`: kotlin.String, `want`: kotlin.Boolean) : kotlin.Boolean {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_iroh_location_fn_method_locationnode_want_repeater(
+                uniffiHandle,
+                FfiConverterString.lower(`rosterId`),FfiConverterBoolean.lower(`want`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_i8(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_iroh_location_rust_future_complete_i8(future, continuation) },
+        { future -> UniffiLib.ffi_iroh_location_rust_future_free_i8(future) },
+        // lift function
+        { FfiConverterBoolean.lift(it) },
+        // Error FFI converter
+        LocationException.ErrorHandler,
+    )
+    }
 
     
     /**
@@ -9716,6 +9688,16 @@ data class RepeaterRoster (
      * next time one of them is reachable (REPEATERS.md §4.4).
      */
     var `waiting`: kotlin.Boolean
+    , 
+    /**
+     * Who offered it to us at pairing (endpoint ids), from their offers record (§4.4).
+     */
+    var `offeredBy`: List<kotlin.String>
+    , 
+    /**
+     * We said yes and are waiting for it to accept us: enrolled the moment an invite arrives.
+     */
+    var `wanted`: kotlin.Boolean
     
 ){
     
@@ -9747,6 +9729,8 @@ public object FfiConverterTypeRepeaterRoster: FfiConverterRustBuffer<RepeaterRos
             FfiConverterSequenceString.read(buf),
             FfiConverterBoolean.read(buf),
             FfiConverterBoolean.read(buf),
+            FfiConverterSequenceString.read(buf),
+            FfiConverterBoolean.read(buf),
         )
     }
 
@@ -9765,7 +9749,9 @@ public object FfiConverterTypeRepeaterRoster: FfiConverterRustBuffer<RepeaterRos
             FfiConverterSequenceString.allocationSize(value.`inviters`) +
             FfiConverterSequenceString.allocationSize(value.`invited`) +
             FfiConverterBoolean.allocationSize(value.`canInvite`) +
-            FfiConverterBoolean.allocationSize(value.`waiting`)
+            FfiConverterBoolean.allocationSize(value.`waiting`) +
+            FfiConverterSequenceString.allocationSize(value.`offeredBy`) +
+            FfiConverterBoolean.allocationSize(value.`wanted`)
     )
 
     override fun write(value: RepeaterRoster, buf: ByteBuffer) {
@@ -9784,6 +9770,8 @@ public object FfiConverterTypeRepeaterRoster: FfiConverterRustBuffer<RepeaterRos
             FfiConverterSequenceString.write(value.`invited`, buf)
             FfiConverterBoolean.write(value.`canInvite`, buf)
             FfiConverterBoolean.write(value.`waiting`, buf)
+            FfiConverterSequenceString.write(value.`offeredBy`, buf)
+            FfiConverterBoolean.write(value.`wanted`, buf)
     }
 }
 
