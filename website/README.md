@@ -67,6 +67,11 @@ while unclaimed): claimed by the same two files, it opens the app on Settings > 
 link filled in. The fallback offers a `streetcryptid:///repeater?t=…&s=…` hand-off and the
 `streetcryptid-repeater:` link to paste.
 
+Repeaters print `/repeater/claim#…`, and only that path is in the association files (and the
+app's Android intent filter): **bare `/repeater` is the setup guide**, and a claimed path never
+opens in a browser on a phone with the app. Repeaters built before 2026-11-15 print
+`/repeater#…`; that now lands on this page in the browser, which hands it to the app with one tap.
+
 **Without a claim in the fragment, `/repeater` is the setup guide** — what the app's "SET UP"
 button on the claim screen opens (`REPEATER_SETUP_URL`). One page does both because the app and
 every printed QR code already point at that path. `repeater/guide.js` decides which to show; with

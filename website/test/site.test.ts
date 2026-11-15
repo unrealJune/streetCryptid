@@ -39,9 +39,12 @@ describe('association files', () => {
     const [details] = aasa.applinks.details;
     expect(details.appIDs).toEqual(['X37464B5A7.com.unrealjune.streetcryptid']);
     const paths = details.components.map((c: { '/': string }) => c['/']);
-    for (const path of ['/pair', '/pair/', '/repeater', '/repeater/']) {
+    for (const path of ['/pair', '/pair/', '/repeater/claim']) {
       expect(paths).toContain(path);
     }
+    // The setup guide has to open in a browser on a phone that has the app.
+    expect(paths).not.toContain('/repeater');
+    expect(paths).not.toContain('/repeater/');
   });
 });
 
@@ -61,7 +64,7 @@ describe('pages', () => {
   test.each(pages)('%s references only files that exist', (page) => {
     const html = read(page);
     for (const [, url] of html.matchAll(/\b(?:src|href)="(\/[^"#?]*)"/g)) {
-      if (url === '/' || url === '/pair' || url === '/repeater') continue;
+      if (['/', '/pair', '/repeater', '/repeater/claim'].includes(url)) continue;
       expect(existsSync(join(site, url))).toBe(true);
     }
   });

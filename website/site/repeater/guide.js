@@ -55,7 +55,11 @@
     if (next.get('t') || next.get('s') || ticket || secret) location.reload();
   });
 
-  if (ticket || secret) {
+  // The claim path with nothing after it is a claim that lost its fragment, not a visit to the
+  // guide.
+  var claimPath = /^\/repeater\/claim\/?$/.test(location.pathname);
+
+  if (ticket || secret || claimPath) {
     // Shape check only; the app checks the repeater's signed answer, not this page.
     var valid = /^[A-Za-z0-9]+$/.test(ticket) && /^[0-9a-fA-F]{64}$/.test(secret);
 

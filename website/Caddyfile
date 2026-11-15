@@ -53,9 +53,10 @@
 	@pair path /pair /pair/
 	rewrite @pair /pair/index.html
 
-	# A repeater's claim QR code, the same way: its ticket and secret ride in the fragment. Without
-	# one, the same page is the setup guide.
-	@repeater path /repeater /repeater/
+	# A repeater's claim QR code, the same way: its ticket and secret ride in the fragment.
+	# /repeater/claim is what repeaters print and the app claims; bare /repeater is the setup guide
+	# (and what repeaters printed before 2026-11-15, which the same page still hands to the app).
+	@repeater path /repeater /repeater/ /repeater/claim /repeater/claim/
 	rewrite @repeater /repeater/index.html
 
 	file_server

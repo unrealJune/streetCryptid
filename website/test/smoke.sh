@@ -33,6 +33,8 @@ check /pair 200 text/html
 check /pair/ 200 text/html
 check /repeater 200 text/html
 check /repeater/ 200 text/html
+check /repeater/claim 200 text/html
+check /repeater/claim/ 200 text/html
 # `irm … | iex` needs a text type, or iex is handed bytes.
 check /repeater/install.ps1 200 text/plain
 check /repeater/guide.js 200 text/javascript
