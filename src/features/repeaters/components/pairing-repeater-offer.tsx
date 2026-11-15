@@ -34,7 +34,15 @@ export interface PairingRepeaterOffer {
   enroll(rosterIds: Iterable<string>): void;
 }
 
-const NONE: PairingOffers = { enroll: [], invite: [] };
+const NONE: PairingOffers = { enroll: [], invite: [], awaiting: [] };
+
+/**
+ * How often the offer is read again while a friend is on the pairing screen. The friend's card
+ * arrives by replication moments after the pair completes (their profile key is wrapped for us
+ * then, `pending_peers` in the core), and an invite they sign at ACKNOWLEDGE a moment after that;
+ * one read at mount saw neither. A local read of the roster book, never a dial.
+ */
+const OFFER_REFRESH_MS = 1500;
 
 /**
  * The repeater questions at pairing (REPEATERS.md §4.4), read from the rosters this phone already
@@ -43,9 +51,12 @@ const NONE: PairingOffers = { enroll: [], invite: [] };
  * through friends, with a badge on the Settings menu.
  *
  * Two questions, asked at two moments. "Also invite them to my repeaters" sits above ACKNOWLEDGE,
- * one switch per invite-only roster this phone may invite to, pre-checked when auto-invite is on:
- * it is part of deciding about the friend. "Replicate your location on their repeaters?" comes
+ * one switch per roster this phone may invite to (open ones too), pre-checked when auto-invite is
+ * on: it is part of deciding about the friend. "Replicate your location on their repeaters?" comes
  * after ACKNOWLEDGE, on its own, because it is a decision about your location, not about them.
+ *
+ * Read again every {@link OFFER_REFRESH_MS} while `friend` is set, which the screen keeps set
+ * through the enroll question, so an invite that lands after ACKNOWLEDGE is still asked about.
  */
 export function usePairingRepeaterOffer(
   friend: { readonly endpointId: string; readonly handle: string } | null
@@ -59,6 +70,13 @@ export function usePairingRepeaterOffer(
   // without resetting state from inside an effect.
   const [loaded, setLoaded] = useState<Loaded | null>(null);
   const [picked, setPicked] = useState<Picked>(UNPICKED);
+  const [tick, setTick] = useState(0);
+
+  useEffect(() => {
+    if (!client || !friendId) return;
+    const timer = setInterval(() => setTick((n) => n + 1), OFFER_REFRESH_MS);
+    return () => clearInterval(timer);
+  }, [client, friendId]);
 
   useEffect(() => {
     if (!client || !friendId) return;
@@ -86,7 +104,7 @@ export function usePairingRepeaterOffer(
     return () => {
       live = false;
     };
-  }, [client, friendId, friendHandle, self]);
+  }, [client, friendId, friendHandle, self, tick]);
 
   const current = loaded && loaded.friendId === friendId ? loaded : null;
   const offers = current?.offers ?? NONE;
@@ -220,6 +238,36 @@ export function PairingEnrollQuestion({
               onChange={(on) => onToggle(roster.rosterId, on)}
             />
           ))}
+    </View>
+  );
+}
+
+/**
+ * After ACKNOWLEDGE, when the friend has an invite-only roster and no invite has reached us yet:
+ * their ACKNOWLEDGE is what signs it, and it may come a moment after ours.
+ */
+export function PairingAwaitingInvite({
+  rosters,
+  gaveUp,
+  chrome,
+}: {
+  readonly rosters: readonly RosterView[];
+  /** The wait ran out: say where the invite will turn up instead. */
+  readonly gaveUp: boolean;
+  readonly chrome: CryptidChrome;
+}) {
+  const only = rosters.length === 1 ? rosters[0] : null;
+  const whose = only ? `${ownerName(only).toUpperCase()}’S REPEATERS` : 'THEIR REPEATERS';
+  return (
+    <View style={styles.question}>
+      <Text style={[styles.questionTitle, { color: chrome.ink }]}>
+        {gaveUp ? `NO INVITE TO ${whose} YET` : `WAITING FOR AN INVITE TO ${whose}…`}
+      </Text>
+      <Text style={[styles.detail, { color: chrome.steel }]}>
+        {gaveUp
+          ? 'If they send one, it shows up under Settings → Repeaters.'
+          : 'Invite only. It arrives when they acknowledge you.'}
+      </Text>
     </View>
   );
 }

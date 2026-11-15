@@ -577,22 +577,28 @@ places.
 the other about your location.
 
 - **Above ACKNOWLEDGE / REJECT**, the inviting side sees _"Also invite them to my repeaters"_:
-  one switch per `invite` roster I may invite to and they are not in, each pre-checked when my
-  auto-invite is on. Acknowledging signs those invites (`inviteToRepeater`, per roster), not
+  one switch per roster I may invite to and they are not in, `open` ones included (there the
+  invite is the offer, and it brings back someone the owner once removed), each pre-checked when
+  my auto-invite is on. Acknowledging signs those invites (`inviteToRepeater`, per roster), not
   awaited, like everything else at ACKNOWLEDGE (`connectNewFriend`); the grant pass offers them
   to the repeaters (§4.4).
 - **After ACKNOWLEDGE**, if this phone knows rosters of the new friend's it may enroll in (an
   `open` one, or an `invite` one where they invited me), the screen stays to ask _"Replicate your
   location on their repeaters?"_, with what that gives, what it never does and who will see it
   (`enrollFacts`), then ENROLL / NOT NOW. The radio is stood down first exactly as leaving would
-  (`stopPairing`), and ENROLL goes through `setRepeaterCarried`, not awaited.
+  (`stopPairing`), and ENROLL goes through `setRepeaterCarried`, not awaited. When the friend has
+  an `invite` roster that has not invited me YET, the screen stays too and waits for it: their
+  ACKNOWLEDGE is what signs it, and it can land after mine. The rosters it lists are the live
+  offer, read again every 1.5 s, so an invite that arrives is asked about switched on; after 20 s
+  the screen says the invite will turn up under Settings → Repeaters.
 
 Built: `usePairingRepeaterOffer` and `pairingOffers` (`src/features/repeaters`).
 
 The cards arrive with the pair: the v4 `Accept` carries the profile record, and the cards follow on
-the profile namespace. If they arrive in time the question is on the pairing result screen.
-Otherwise the roster turns up under Available through friends, and the Settings menu's repeater
-line counts it ("1 offered by friends") with a badge.
+the profile namespace, readable at once because a completed pair is in the keyring before anyone
+presses ACKNOWLEDGE (ARCHITECTURE.md §9a.1, `pending_peers`). A pending peer's card is read like a
+friend's. If nothing arrives in time the roster turns up under Available through friends, and the
+Settings menu's repeater line counts it ("1 offered by friends") with a badge.
 
 **In the repeater menu** (Settings → Repeaters), at any time:
 

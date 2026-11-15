@@ -255,8 +255,13 @@ export function inviteCandidates(
 export interface PairingOffers {
   /** Their rosters (owned or vouched for by them) that I may enroll in and am not carried by. */
   readonly enroll: readonly RosterView[];
-  /** Invite-only rosters I may invite them to, that they are not in or invited to. */
+  /** Rosters I may invite them to, open or invite-only, that they are not in or invited to. */
   readonly invite: readonly RosterView[];
+  /**
+   * Their invite-only rosters I cannot enroll in yet: what an invite they sign at ACKNOWLEDGE
+   * would open. The pairing screen waits a moment for it rather than closing on nothing.
+   */
+  readonly awaiting: readonly RosterView[];
 }
 
 /**
@@ -273,19 +278,18 @@ export function pairingOffers(sections: RosterSections, friendId: string): Pairi
     ...sections.others,
   ];
   const isFriend = (p: RosterPerson) => p.id.toLowerCase() === friend;
+  const theirs = (r: RosterView) =>
+    !r.mine && !r.carriesMe && (r.owner.toLowerCase() === friend || r.vouchers.some(isFriend));
   return {
-    enroll: all.filter(
-      (r) =>
-        !r.mine &&
-        !r.carriesMe &&
-        r.canEnroll &&
-        (r.owner.toLowerCase() === friend || r.vouchers.some(isFriend))
-    ),
-    // Open rosters need no invite to join; offering one there would only add an op.
+    enroll: all.filter((r) => theirs(r) && r.canEnroll),
+    // Open and refusing me means the owner removed me: no invite is on its way there.
+    awaiting: all.filter((r) => theirs(r) && !r.canEnroll && !r.open),
+    // Open rosters too. They need no invite to join, but an invite is how the owner says "these
+    // are yours to use" at the moment it means most, it names the friend in the roster before
+    // they enroll, and it is what lets someone the owner once removed back in (§3.3).
     invite: all.filter(
       (r) =>
         r.canInvite &&
-        !r.open &&
         r.owner.toLowerCase() !== friend &&
         !r.members.some(isFriend) &&
         !r.invited.some(isFriend)

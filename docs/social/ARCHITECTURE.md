@@ -476,7 +476,8 @@ holders could read it, so every record is **sealed** (`rust/src/profile_seal.rs`
 - The key reaches friends in the `keyring` entry: one HPKE wrap (RFC 9180, X25519, the suite the
   envelope uses) per friend, to the receiving key their profile already binds to their endpoint,
   found by the same 8-byte key id an envelope uses. Nothing new is exchanged at pairing; the
-  keyring is rewritten when the friend list changes (`setRecipientKeys`).
+  keyring is rewritten when the friend list changes (`setRecipientKeys`), and when a pair
+  completes (below).
 - The key is derived from the identity seed and a generation; only the generation, who it was
   wrapped for and when are stored (`profile-key.bin`). **Removing a friend moves to the next
   generation** and seals everything again, so what is written afterwards is closed to them; what
@@ -485,8 +486,19 @@ holders could read it, so every record is **sealed** (`rust/src/profile_seal.rs`
   phone seals everything again every 12 hours it is awake (`RESEAL_AFTER_MS`, on each stash
   grant).
 - A pairing `Accept` still carries the record itself, unsealed, over the authenticated pairing
-  channel: a new friend has the persona at once, and the keyring includes them as soon as the app
-  registers their receiving key.
+  channel, so a new friend has the persona at once. The handed copy is kept even when its epoch is
+  one this process already read: on a re-pair the namespace is sealed under a key the peer stopped
+  wrapping for us when they removed us, and the handed copy is the only one we can open.
+- **A completed pair is wrapped for before ACKNOWLEDGE** (`pending_peers` in `lib.rs`). The moment
+  the app reads a pair result (SAS-verified, both sides accepted), the peer's receiving key from
+  the handshake joins the keyring, so the rest of the profile follows the persona: the repeater
+  card, which the pairing screen offers, and an invite signed at ACKNOWLEDGE, which reaches the
+  peer while their screen is still up. It is the same disclosure the Accept already made, to the
+  same verified peer. A pending peer is held in memory only and leaves on REJECT (`cancelPair`),
+  when the session no longer has a result (either side withdrew, or it expired), after 10 minutes,
+  or on restart; one who leaves without becoming a friend moves the profile to the next generation
+  exactly as a removal does. Until 2026-11-14 the keyring waited for ACKNOWLEDGE, and the
+  receiving screen could offer no repeater at all.
 
 What a non-friend holder still learns: that the namespace exists, when it changes, how large its
 records are, and how many friends the keyring wraps for (one wrap each, with the key id of each

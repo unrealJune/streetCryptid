@@ -143,21 +143,43 @@ describe('pairingOffers', () => {
     expect(offers.invite.map((r) => r.rosterId)).toEqual(['mine']);
   });
 
-  it('offers nothing to invite them to once they are in it or invited, or if it is open', () => {
+  it('offers nothing to invite them to once they are in it or invited', () => {
     const invited = rosterSections(
       [roster({ rosterId: 'mine', mine: true, canInvite: true, invited: [SAM] })],
       []
     );
     expect(pairingOffers(invited, SAM).invite).toEqual([]);
+    expect(pairingOffers(rosterSections([], []), SAM)).toEqual({
+      enroll: [],
+      invite: [],
+      awaiting: [],
+    });
+  });
+
+  it('waits for an invite to their invite-only roster, never for one that removed me', () => {
+    const sections = rosterSections(
+      [
+        roster({ rosterId: 'closed', owner: SAM, vouchers: [SAM], canEnroll: false }),
+        roster({ rosterId: 'gone', owner: SAM, open: true, vouchers: [SAM], canEnroll: false }),
+        roster({ rosterId: 'open', owner: SAM, open: true, vouchers: [SAM], canEnroll: true }),
+      ],
+      [{ endpointId: SAM, handle: '@sam' }],
+      ME
+    );
+    const offers = pairingOffers(sections, SAM);
+    expect(offers.awaiting.map((r) => r.rosterId)).toEqual(['closed']);
+    expect(offers.enroll.map((r) => r.rosterId)).toEqual(['open']);
+  });
+
+  it('offers an open roster too, since anyone may join but the invite is the offer', () => {
     const open = rosterSections(
       [roster({ rosterId: 'mine', mine: true, open: true, canInvite: true })],
       []
     );
-    expect(pairingOffers(open, SAM).invite).toEqual([]);
-    expect(pairingOffers(rosterSections([], []), SAM)).toEqual({ enroll: [], invite: [] });
+    expect(pairingOffers(open, SAM).invite.map((r) => r.rosterId)).toEqual(['mine']);
   });
 
-  it('offers each invite-only roster I may invite to, not only my own', () => {
+  it('offers each roster I may invite to, not only my own', () => {
     const sections = rosterSections(
       [
         roster({ rosterId: 'mine', mine: true, canInvite: true }),

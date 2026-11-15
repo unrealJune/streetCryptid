@@ -1286,11 +1286,19 @@ impl LocationNode {
                 friends.push((id, key));
             }
         }
+        let pending = self.pending_peers().await;
+        let pending_count = pending.len();
+        for (id, key) in pending {
+            if !friends.iter().any(|(known, _)| *known == id) {
+                friends.push((id, key));
+            }
+        }
         let span = tracing::info_span!(
             "profile.reseal",
             sc.author = %telemetry::short_hex(&self.author),
             reason,
             friends = friends.len(),
+            pending = pending_count,
             written = tracing::field::Empty,
             error = tracing::field::Empty,
         );
@@ -1498,7 +1506,7 @@ impl LocationNode {
     /// Every friend's endpoint id, recipients and watchers alike. Empty when the store is not
     /// open yet.
     async fn known_friends(&self) -> BTreeSet<[u8; 32]> {
-        match self.recipient_store().await {
+        let mut friends: BTreeSet<[u8; 32]> = match self.recipient_store().await {
             Ok(store) => store
                 .get()
                 .iter()
@@ -1506,7 +1514,68 @@ impl LocationNode {
                 .filter_map(|id| decode_endpoint(id).ok())
                 .collect(),
             Err(_) => BTreeSet::new(),
+        };
+        // A pair waiting on ACKNOWLEDGE too: their card is what the pairing screen offers, and it
+        // is readable now (see `pending_peers`).
+        friends.extend(self.pending_peers().await.into_iter().map(|(id, _)| id));
+        friends
+    }
+
+    /// Peers whose pair completed and who are not yet friends, with their receiving keys.
+    ///
+    /// Our profile key is wrapped for them from the moment the pair completes, not from the
+    /// moment someone presses ACKNOWLEDGE (ARCHITECTURE.md 9a.1). Their persona already reached
+    /// us on the Accept, and ours them; this lets the rest of the profile follow it: the repeater
+    /// card above all, so the pairing screen can offer a friend's repeaters, and an invite signed
+    /// at ACKNOWLEDGE reaches them while the screen is still up rather than after a reseal.
+    /// Sealing waited for ACKNOWLEDGE until 2026-11-14, and the receiving screen offered nothing.
+    ///
+    /// Held in memory only, and dropped when the peer becomes a friend (the recipient store has
+    /// them), when the pair is cancelled (`cancel_pair`), when the session no longer has a result
+    /// (either side withdrew, or it expired), or after [`PENDING_PEER_TTL_MS`]. A peer dropped
+    /// without becoming a friend has LEFT the keyring, so the next reseal moves us to a new key as
+    /// a removal does: what they could open ends where the pair did. A restart drops them all the
+    /// same way, which fails closed.
+    async fn pending_peers(&self) -> Vec<([u8; 32], Vec<u8>)> {
+        let held: Vec<([u8; 16], PendingPeer)> = self
+            .pending_peers
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .iter()
+            .map(|(sid, peer)| (*sid, peer.clone()))
+            .collect();
+        if held.is_empty() {
+            return Vec::new();
         }
+        let friends: HashSet<String> = match self.recipient_store().await {
+            Ok(store) => store
+                .get()
+                .into_iter()
+                .chain(store.watchers())
+                .map(|id| id.to_lowercase())
+                .collect(),
+            Err(_) => HashSet::new(),
+        };
+        let now = now_ms();
+        let mut keep = Vec::new();
+        let mut gone = Vec::new();
+        for (sid, peer) in held {
+            let live = now.saturating_sub(peer.at_ms) < PENDING_PEER_TTL_MS
+                && !friends.contains(&encode_hex(&peer.endpoint))
+                && self.pair.result_data(&sid).await.is_some();
+            if live {
+                keep.push((peer.endpoint, peer.recv_pub.to_vec()));
+            } else {
+                gone.push(sid);
+            }
+        }
+        if !gone.is_empty() {
+            let mut map = self.pending_peers.lock().unwrap_or_else(|p| p.into_inner());
+            for sid in gone {
+                map.remove(&sid);
+            }
+        }
+        keep
     }
 
     /// Where else each friend's profile can be read while their phone is away: the stash, when it
@@ -1597,6 +1666,9 @@ pub struct LocationNode {
     /// When the last full stash grant ran (ms), for the floor on the untracked-slots trigger.
     /// In memory on purpose: every process grants once at start regardless. See [`stash`].
     stash_grant_at: AtomicU64,
+    /// Peers whose pair completed and who are waiting on a human's ACKNOWLEDGE, by pairing
+    /// session. See [`Self::pending_peers`].
+    pending_peers: StdMutex<HashMap<[u8; 16], PendingPeer>>,
     /// Every repeater roster this phone knows (see [`repeater`]), opened from `state_dir` on first
     /// use. It claims nothing, so it has no part in `start` or `shutdown`.
     repeater_book: Mutex<Option<Arc<repeater::RosterBook>>>,
@@ -2504,6 +2576,7 @@ fn new_location_node_at(
         clock_offset_ms: std::sync::atomic::AtomicI64::new(0),
         ordinal,
         stash_grant_at: AtomicU64::new(0),
+        pending_peers: StdMutex::new(HashMap::new()),
         repeater_book: Mutex::new(None),
         repeater_delivery: Arc::default(),
         repeater_pull_cursor: AtomicU64::new(0),
@@ -4018,11 +4091,22 @@ impl LocationNode {
         let sid = session_id_arr(&session_id)?;
         let pair = self.pair.clone();
         let mut cancel = tokio::spawn(async move { pair.cancel_sas(&sid).await });
-        match tokio::time::timeout(CANCEL_PAIR_WAIT, &mut cancel).await {
+        let outcome = match tokio::time::timeout(CANCEL_PAIR_WAIT, &mut cancel).await {
             Ok(Ok(result)) => result.map_err(|e| LocationError::Network(e.to_string())),
             Ok(Err(join)) => Err(LocationError::Network(join.to_string())),
             Err(_) => Ok(()),
+        };
+        // A REJECT on the reveal: they leave the keyring, and our profile moves to a new key.
+        let was_pending = self
+            .pending_peers
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(&sid)
+            .is_some();
+        if was_pending {
+            self.reseal_profile("pair-cancelled").await;
         }
+        outcome
     }
 
     /// Drain pairing events (pending requests, peer responses, ready, rejects) since the last poll.
@@ -4070,6 +4154,27 @@ impl LocationNode {
             Some(d) => d,
             None => return Ok(None),
         };
+        // The pair is complete and SAS-verified: wrap our profile key for them now, so the card
+        // follows the persona that already rode the Accept (see `pending_peers`).
+        let fresh = {
+            let mut map = self.pending_peers.lock().unwrap_or_else(|p| p.into_inner());
+            if map.contains_key(&sid) {
+                false
+            } else {
+                map.insert(
+                    sid,
+                    PendingPeer {
+                        endpoint: data.peer_endpoint,
+                        recv_pub: data.peer_recv_pub,
+                        at_ms: now_ms(),
+                    },
+                );
+                true
+            }
+        };
+        if fresh {
+            self.reseal_profile("pair").await;
+        }
         // `live_opt` rather than the guard: this runs the instant a pair completes, and a profile
         // read that stalled here used to stall the whole node with it.
         let peer_profile = match self.live_opt().await {
@@ -4762,6 +4867,18 @@ fn profile_view(r: &ProfileRecord) -> ProfileView {
 }
 
 /// A 16-byte session id from a UniFFI byte vector.
+/// How long a completed pair may wait on ACKNOWLEDGE and still hold our profile key. Longer than
+/// anyone looks at a reveal; a peer still waiting after it is dropped (`pending_peers`).
+const PENDING_PEER_TTL_MS: u64 = 10 * 60_000;
+
+/// A completed pair waiting on ACKNOWLEDGE. See [`LocationNode::pending_peers`].
+#[derive(Clone)]
+struct PendingPeer {
+    endpoint: [u8; 32],
+    recv_pub: [u8; 32],
+    at_ms: u64,
+}
+
 fn session_id_arr(v: &[u8]) -> Result<[u8; 16], LocationError> {
     <[u8; 16]>::try_from(v).map_err(|_| LocationError::Decode("session id must be 16 bytes".into()))
 }

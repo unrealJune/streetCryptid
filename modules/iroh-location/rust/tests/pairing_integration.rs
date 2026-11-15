@@ -581,6 +581,90 @@ async fn two_node_pair_and_profile_sync() {
     );
 }
 
+/// A completed pair holds our profile key before anyone presses ACKNOWLEDGE, and loses it when
+/// the pair is cancelled (`LocationNode::pending_peers`). The persona rides the Accept either way;
+/// what this covers is everything sealed AFTER it: an edit, and in the app the repeater card and
+/// an invite signed at ACKNOWLEDGE, which the pairing screen offers while it is still up.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_completed_pair_reads_sealed_edits_before_acknowledge() {
+    let a = start_node().await;
+    let b = start_node().await;
+    let a_id = a.endpoint_id();
+    for (node, handle) in [(&a, "alice"), (&b, "bob")] {
+        node.publish_profile(
+            handle.into(),
+            "Sighting".into(),
+            SIGIL.into(),
+            "#11aa33".into(),
+        )
+        .await
+        .expect("publish profile");
+    }
+
+    let invite = a.create_invite(300).await.expect("A create invite");
+    let sid = b.initiate_pair(invite).await.expect("B initiate pair");
+    poll_until!(20, {
+        a.poll_pair_events()
+            .await
+            .into_iter()
+            .find(|e| matches!(e.kind, PairEventKind::PendingRequest) && e.session_id == sid)
+    });
+    clear_sas_gate(&a, &sid).await;
+    clear_sas_gate(&b, &sid).await;
+    for node in [&a, &b] {
+        poll_until!(20, {
+            match node.pair_state(sid.clone()).await.expect("pair_state") {
+                Some(st) if matches!(st.state, PairState::Complete) => Some(()),
+                _ => None,
+            }
+        });
+    }
+    // What the app does the moment a pair completes: read the result. Nobody acknowledges, and
+    // neither side registers the other (no `set_sharing_recipients`, no `set_recipient_keys`).
+    for node in [&a, &b] {
+        poll_until!(20, {
+            node.pair_result(sid.clone()).await.expect("pair_result")
+        });
+    }
+
+    // An edit sealed after the pair: not on the Accept, so readable only through the keyring.
+    a.publish_profile(
+        "alicexo".into(),
+        "Sighting".into(),
+        SIGIL.into(),
+        "#11aa33".into(),
+    )
+    .await
+    .expect("A update profile");
+    poll_until!(30, {
+        match b.read_profile(a_id.clone()).await.expect("B read A") {
+            Some(p) if p.handle == "alicexo" => Some(()),
+            _ => None,
+        }
+    });
+
+    // A rejects on the reveal. B leaves A's keyring, and what A seals next is closed to B.
+    a.cancel_pair(sid.clone()).await.expect("A cancel");
+    a.publish_profile(
+        "alice-after".into(),
+        "Sighting".into(),
+        SIGIL.into(),
+        "#11aa33".into(),
+    )
+    .await
+    .expect("A update profile again");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
+    while std::time::Instant::now() < deadline {
+        let seen = b.read_profile(a_id.clone()).await.expect("B read A");
+        assert_ne!(
+            seen.map(|p| p.handle),
+            Some("alice-after".to_string()),
+            "a cancelled pair must not open what was sealed after it"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    }
+}
+
 /// Bring two fresh nodes to an invite-based pair that has cleared the SAS commit-then-reveal
 /// handshake (both sides in `Verifying` with a live challenge). Returns `(initiator, responder,
 /// session_id)` where `b` initiated against `a`'s invite.

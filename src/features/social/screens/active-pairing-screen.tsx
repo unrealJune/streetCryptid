@@ -34,11 +34,11 @@ import {
 } from '@/features/social/core/active-pairing-state';
 import { patternHaptic, successHaptic, tapHaptic, warningHaptic } from '@/features/haptics/haptics';
 import {
+  PairingAwaitingInvite,
   PairingEnrollQuestion,
   PairingInviteOfferView,
   usePairingRepeaterOffer,
 } from '@/features/repeaters/components/pairing-repeater-offer';
-import type { RosterView } from '@/features/repeaters/core/repeaters';
 import { PERSONA_RESOLVE } from '@/features/social/core/pairing-experience';
 import { pairingSearchProgress, secondsRemaining } from '@/features/social/core/pairing-countdown';
 import { useArmedBump } from '@/features/social/hooks/use-armed-bump';
@@ -60,6 +60,12 @@ const QR_SIZE = 88;
 /** Content swaps are quick enough not to feel like a page load, slow enough to read as a move. */
 const SWAP_IN_MS = 260;
 const SWAP_OUT_MS = 160;
+/**
+ * How long the enroll question waits for an invite the friend has yet to sign. Their ACKNOWLEDGE
+ * signs it, and the reveal holds both phones' attention for a few seconds at most; past this the
+ * copy says where the invite will turn up and the person can leave.
+ */
+const AWAIT_INVITE_MS = 20_000;
 /**
  * A landscape window at least this wide puts the panel beside the field instead of under it. On an
  * unfolded foldable (~950 × 670 pt) the stacked layout left the field a strip between the header
@@ -283,17 +289,43 @@ export default function ActivePairingScreen() {
    * their repeaters?", asked once the friend is kept, about the rosters of theirs this phone may
    * enroll in. The friend is already acknowledged and the radio already stood down by then
    * (`stopPairing`), so the reveal is held from this copy, not from the pairing snapshot.
+   *
+   * The rosters are the LIVE offer, not a copy taken at ACKNOWLEDGE: an invite-only roster opens
+   * only when the friend's own ACKNOWLEDGE signs our invite, which can land a moment after ours.
+   * So the prompt also opens on a roster still awaiting one, and keeps only what was switched
+   * off — a roster that arrives later starts switched on, like the ones there at the start.
    */
   const [enrollPrompt, setEnrollPrompt] = useState<{
     readonly friend: NonNullable<typeof friend>;
-    readonly rosters: readonly RosterView[];
-    readonly chosen: ReadonlySet<string>;
+    readonly declined: ReadonlySet<string>;
+    /** The wait for an invite ran out ({@link AWAIT_INVITE_MS}). */
+    readonly gaveUp: boolean;
   } | null>(null);
   const shownFriend = friend ?? enrollPrompt?.friend ?? null;
   const signal = shownFriend ? resolveSignalColor(shownFriend.color, chrome.green) : chrome.green;
   // The repeater questions at pairing (REPEATERS.md §4.4): invites above ACKNOWLEDGE, carried out
-  // after it; the enroll question after it.
-  const repeaterOffer = usePairingRepeaterOffer(friend);
+  // after it; the enroll question after it. Keyed by the friend on screen, so the offer keeps
+  // refreshing through the enroll question.
+  const repeaterOffer = usePairingRepeaterOffer(shownFriend);
+  const enrollRosters = repeaterOffer.offers.enroll;
+  const enrollChosen = useMemo(
+    () =>
+      new Set(
+        enrollRosters
+          .map((roster) => roster.rosterId)
+          .filter((id) => !enrollPrompt?.declined.has(id))
+      ),
+    [enrollPrompt?.declined, enrollRosters]
+  );
+  const awaitingInvite = enrollPrompt !== null && enrollRosters.length === 0;
+  useEffect(() => {
+    if (!awaitingInvite) return;
+    const timer = setTimeout(
+      () => setEnrollPrompt((was) => (was ? { ...was, gaveUp: true } : was)),
+      AWAIT_INVITE_MS
+    );
+    return () => clearTimeout(timer);
+  }, [awaitingInvite]);
 
   const stage: ActivePairingStage = deriveActivePairingStage({
     servicePhase: service.phase,
@@ -793,15 +825,11 @@ export default function ActivePairingScreen() {
           await acknowledgeDiscoveredFriend();
           // Never awaited: the friend is kept whatever a repeater does.
           repeaterOffer.apply();
-          const enroll = repeaterOffer.offers.enroll;
-          if (enroll.length > 0) {
+          const { enroll, awaiting } = repeaterOffer.offers;
+          if (enroll.length > 0 || awaiting.length > 0) {
             // Latch the radio off exactly as leaving would (see `close`), but stay to ask.
             stopPairing();
-            setEnrollPrompt({
-              friend,
-              rosters: enroll,
-              chosen: new Set(enroll.map((roster) => roster.rosterId)),
-            });
+            setEnrollPrompt({ friend, declined: new Set(), gaveUp: false });
             return;
           }
         } else await rejectDiscoveredFriend();
@@ -1079,18 +1107,24 @@ export default function ActivePairingScreen() {
             </View>
           ) : null}
 
-          {enrollPrompt ? (
+          {enrollPrompt && awaitingInvite ? (
+            <PairingAwaitingInvite
+              rosters={repeaterOffer.offers.awaiting}
+              gaveUp={enrollPrompt.gaveUp}
+              chrome={chrome}
+            />
+          ) : enrollPrompt ? (
             <PairingEnrollQuestion
-              rosters={enrollPrompt.rosters}
-              chosen={enrollPrompt.chosen}
+              rosters={enrollRosters}
+              chosen={enrollChosen}
               chrome={chrome}
               onToggle={(rosterId, on) =>
                 setEnrollPrompt((was) => {
                   if (!was) return was;
-                  const chosen = new Set(was.chosen);
-                  if (on) chosen.add(rosterId);
-                  else chosen.delete(rosterId);
-                  return { ...was, chosen };
+                  const declined = new Set(was.declined);
+                  if (on) declined.delete(rosterId);
+                  else declined.add(rosterId);
+                  return { ...was, declined };
                 })
               }
             />
@@ -1116,11 +1150,11 @@ export default function ActivePairingScreen() {
                   color={signal}
                   label="ENROLL"
                   testID="pairing-enroll-repeaters"
-                  disabled={enrollPrompt.chosen.size === 0}
+                  disabled={enrollChosen.size === 0}
                   onPress={() => {
                     // Never awaited, like the invites: `setRepeaterCarried` queues the Enroll in
                     // the core and the grant pass offers it until a repeater answers.
-                    repeaterOffer.enroll(enrollPrompt.chosen);
+                    repeaterOffer.enroll(enrollChosen);
                     close();
                   }}
                 />
