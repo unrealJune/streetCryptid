@@ -27,6 +27,7 @@ use anyhow::{anyhow, Result};
 use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use iroh::EndpointAddr;
 use iroh_blobs::api::Store as BlobsStore;
+use iroh_blobs::Hash;
 use iroh_docs::{
     api::{
         protocol::{AddrInfoOptions, ShareMode},
@@ -37,6 +38,7 @@ use iroh_docs::{
     store::Query,
     AuthorId, NamespaceId,
 };
+use n0_future::time::Instant;
 use n0_future::StreamExt;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
@@ -357,6 +359,40 @@ pub struct ProfileDocs {
     /// read by [`read_for_endpoint`](Self::read_for_endpoint) alongside the replicas, so the
     /// namespace winning later with a newer epoch simply outranks the handed copy.
     handed: Mutex<HashMap<[u8; 32], ProfileRecord>>,
+    /// The peer that last handed us an entry in each friend namespace (`InsertRemote.from`), so
+    /// a [settle](Self::settle_stranded) can ask it again for bytes it did not deliver.
+    served_by: Mutex<HashMap<[u8; 32], [u8; 32]>>,
+}
+
+/// A friend profile entry whose newest record is in the replica while the bytes it names are not.
+///
+/// The same state as the trail's [`crate::docs::StrandedSlot`], for the same reason: iroh-docs
+/// gives a record's content one download attempt, against the peer that delivered the record,
+/// and never retries. A profile namespace is held by more than its owner (every friend who
+/// imported it serves it, and so does anything else it is granted to), so a record can arrive
+/// from a peer that has not got its bytes yet. Until they land [`ProfileDocs::read_latest`] reads
+/// the namespace as having no profile, and the friend keeps whatever name and sigil we last had.
+///
+/// Every key counts, not only [`PROFILE_KEY`]: anything a friend publishes in this namespace is
+/// read by someone, and a key-agnostic scan cannot fall behind the keys.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StrandedEntry {
+    pub namespace: [u8; 32],
+    pub key: Vec<u8>,
+    pub hash: Hash,
+    /// The entry's record timestamp (iroh-docs microseconds), for the age on the telemetry.
+    pub written_us: u64,
+}
+
+/// What one [`ProfileDocs::settle_stranded`] pass found and fixed.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ProfileSettleReport {
+    /// Friend profile entries whose newest record had no local bytes when the pass began.
+    pub stranded: usize,
+    /// Of those, the ones whose bytes this pass fetched.
+    pub fetched: usize,
+    /// Profiles that became readable and were newer than what we had, each handed to the sink.
+    pub updated: usize,
 }
 
 impl ProfileDocs {
@@ -408,6 +444,7 @@ impl ProfileDocs {
             epochs: Mutex::new(HashMap::new()),
             watched: Mutex::new(HashSet::new()),
             handed: Mutex::new(HashMap::new()),
+            served_by: Mutex::new(HashMap::new()),
         })
     }
 
@@ -635,6 +672,171 @@ impl ProfileDocs {
         }
     }
 
+    /// Every friend profile entry whose newest record is here without its bytes.
+    ///
+    /// Friend namespaces only: we write our own, so its bytes are always local. Presence is asked
+    /// of the blob store directly (`has`), which reads no content.
+    pub async fn stranded_entries(&self) -> Result<Vec<StrandedEntry>> {
+        let namespaces: Vec<NamespaceId> = self
+            .handles
+            .lock()
+            .await
+            .keys()
+            .map(|b| NamespaceId::from(*b))
+            .filter(|ns| *ns != self.own_ns)
+            .collect();
+        let mut out = Vec::new();
+        for ns in namespaces {
+            let doc = self.doc_for(ns).await?;
+            let stream = doc.get_many(Query::single_latest_per_key().build()).await?;
+            tokio::pin!(stream);
+            while let Some(entry) = stream.next().await {
+                let entry = entry?;
+                if entry.content_len() == 0 {
+                    continue; // a tombstone names no bytes
+                }
+                if self.blobs.blobs().has(entry.content_hash()).await? {
+                    continue;
+                }
+                out.push(StrandedEntry {
+                    namespace: ns.to_bytes(),
+                    key: entry.key().to_vec(),
+                    hash: entry.content_hash(),
+                    written_us: entry.timestamp(),
+                });
+            }
+        }
+        Ok(out)
+    }
+
+    /// The owner of each friend namespace we can name: the peers its read ticket lists, which is
+    /// the friend's own phone. Empty without a book.
+    fn owner_sources(&self) -> HashMap<[u8; 32], Vec<iroh::EndpointId>> {
+        let Some(book) = &self.book else {
+            return HashMap::new();
+        };
+        book.friends()
+            .into_iter()
+            .map(|friend| {
+                let ids = crate::docs::ticket_peers(&friend.ticket)
+                    .into_iter()
+                    .map(|addr| addr.id)
+                    .collect();
+                (friend.namespace, ids)
+            })
+            .collect()
+    }
+
+    /// Fetch the bytes of every [stranded](StrandedEntry) friend profile entry, and hand each
+    /// profile that became readable, and is newer than what we accepted, to `sink`.
+    ///
+    /// The profile twin of [`crate::docs::TrailDocs::settle_stranded`], run by the same pull.
+    /// The docs engine raises no `ContentReady` for bytes fetched here, so the watch loop never
+    /// re-reads them: the re-read happens here.
+    ///
+    /// Sources per entry, most likely first: `sources` (the peers the pull dialled, the stash
+    /// among them), `namespace_sources` for the entry's namespace (whoever else holds that
+    /// friend's profile: the repeaters carrying them), the friend's own phone (from the read
+    /// ticket we imported), and whoever last served that namespace to us. Bounded by `deadline`
+    /// and by the trail's per-fetch cap; anything still stranded is tried on the next pull, and
+    /// failures are reported, not raised.
+    pub async fn settle_stranded(
+        &self,
+        endpoint: &iroh::Endpoint,
+        sources: &[iroh::EndpointId],
+        namespace_sources: &HashMap<[u8; 32], Vec<iroh::EndpointId>>,
+        deadline: Option<Instant>,
+        sink: Option<&dyn ProfileSink>,
+    ) -> Result<ProfileSettleReport> {
+        let stranded = self.stranded_entries().await?;
+        let mut report = ProfileSettleReport {
+            stranded: stranded.len(),
+            ..ProfileSettleReport::default()
+        };
+        if stranded.is_empty() {
+            return Ok(report);
+        }
+        let wait = crate::docs::stranded_wait(deadline);
+        if wait.is_zero() {
+            tracing::debug!(
+                stranded = stranded.len(),
+                "stranded friend profile entries left for the next pull: no time left in this one"
+            );
+            return Ok(report);
+        }
+        let now_us = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_micros() as u64)
+            .unwrap_or(0);
+
+        let owners = self.owner_sources();
+        let served_by = self.served_by.lock().await.clone();
+        let own = endpoint.id();
+        let jobs = stranded
+            .iter()
+            .map(|entry| {
+                let extra: Vec<iroh::EndpointId> = namespace_sources
+                    .get(&entry.namespace)
+                    .into_iter()
+                    .chain(owners.get(&entry.namespace))
+                    .flatten()
+                    .copied()
+                    .collect();
+                let providers = crate::docs::stranded_sources(
+                    sources,
+                    &extra,
+                    None,
+                    served_by.get(&entry.namespace).copied(),
+                    own,
+                );
+                (entry.hash, providers)
+            })
+            .collect();
+        let outcomes = crate::docs::fetch_stranded(&self.blobs, endpoint, jobs, wait).await;
+
+        let mut readable: Vec<[u8; 32]> = Vec::new();
+        for (entry, outcome) in stranded.iter().zip(outcomes) {
+            let key = String::from_utf8_lossy(&entry.key);
+            let age_ms = now_us.saturating_sub(entry.written_us) / 1000;
+            match outcome {
+                Ok(()) => {
+                    report.fetched += 1;
+                    if !readable.contains(&entry.namespace) {
+                        readable.push(entry.namespace);
+                    }
+                    tracing::info!(
+                        sc.namespace = %crate::telemetry::short_hex(&entry.namespace),
+                        sc.entry_hash = %crate::telemetry::short_hex(entry.hash.as_bytes()),
+                        profile.key = %key,
+                        age_ms,
+                        "fetched a stranded friend profile entry's bytes"
+                    );
+                }
+                Err(error) => {
+                    tracing::debug!(
+                        sc.namespace = %crate::telemetry::short_hex(&entry.namespace),
+                        sc.entry_hash = %crate::telemetry::short_hex(entry.hash.as_bytes()),
+                        profile.key = %key,
+                        age_ms,
+                        %error,
+                        "stranded friend profile entry still without bytes; will retry next pull"
+                    );
+                }
+            }
+        }
+        for ns in readable {
+            if let Ok(Some(rec)) = self.read_latest(NamespaceId::from(ns), None).await {
+                if self.accept_if_newer(&rec).await {
+                    report.updated += 1;
+                    if let Some(sink) = sink {
+                        sink.on_profile_update(rec);
+                    }
+                }
+            }
+        }
+        Ok(report)
+    }
+
     /// Spawn a live-sync watcher for `ns` that verifies inbound profile records, enforces the
     /// monotonic-epoch rule, and forwards accepted updates to `sink`. Runs until the doc closes.
     ///
@@ -664,7 +866,13 @@ impl ProfileDocs {
         };
         while let Some(event) = events.next().await {
             let entry = match event {
-                Ok(LiveEvent::InsertRemote { entry, .. }) => entry,
+                Ok(LiveEvent::InsertRemote { from, entry, .. }) => {
+                    this.served_by
+                        .lock()
+                        .await
+                        .insert(ns.to_bytes(), *from.as_bytes());
+                    entry
+                }
                 Ok(LiveEvent::InsertLocal { entry }) => entry,
                 Ok(LiveEvent::ContentReady { .. }) => {
                     // Content for a previously-seen entry may now be available; re-read.
@@ -1031,5 +1239,167 @@ mod tests {
         // Byte-identical, because what goes on the Accept has to be exactly what was signed.
         assert_eq!(docs.own_record_bytes().await.as_deref(), Some(&bytes[..]));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── A profile record whose bytes never arrived ───────────────────────────────────────────
+
+    /// A profile replica that serves what it holds: blobs and docs behind a router, as on a node.
+    struct ServedProfile {
+        docs: ProfileDocs,
+        endpoint: iroh::Endpoint,
+        _router: iroh::protocol::Router,
+    }
+
+    async fn served_profile(
+        dir: &std::path::Path,
+        book: Option<Arc<NamespaceBook>>,
+    ) -> ServedProfile {
+        use iroh::{Endpoint, RelayMode, SecretKey};
+        let endpoint = Endpoint::builder(iroh::endpoint::presets::N0)
+            .secret_key(SecretKey::generate())
+            .relay_mode(RelayMode::Disabled)
+            .bind()
+            .await
+            .expect("bind test endpoint");
+        let gossip = iroh_gossip::net::Gossip::builder().spawn(endpoint.clone());
+        let blobs = iroh_blobs::store::fs::FsStore::load(dir.join("blobs"))
+            .await
+            .expect("load test blobs");
+        let docs = iroh_docs::protocol::Docs::persistent(dir.to_path_buf())
+            .spawn(endpoint.clone(), (*blobs).clone(), gossip.clone())
+            .await
+            .expect("spawn test docs");
+        let router = iroh::protocol::Router::builder(endpoint.clone())
+            .accept(iroh_gossip::ALPN, gossip)
+            .accept(
+                iroh_blobs::ALPN,
+                iroh_blobs::BlobsProtocol::new(&blobs, None),
+            )
+            .accept(iroh_docs::ALPN, docs.clone())
+            .spawn();
+        let profile = ProfileDocs::init(docs, (*blobs).clone(), dir.to_path_buf(), book)
+            .await
+            .expect("init profile");
+        // A read ticket carries only the direct addresses with no relay, which take a moment.
+        for _ in 0..200 {
+            if !endpoint.addr().is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        ServedProfile {
+            docs: profile,
+            endpoint,
+            _router: router,
+        }
+    }
+
+    #[derive(Default)]
+    struct Collected(std::sync::Mutex<Vec<ProfileRecord>>);
+
+    impl ProfileSink for Collected {
+        fn on_profile_update(&self, record: ProfileRecord) {
+            self.0.lock().unwrap().push(record);
+        }
+    }
+
+    /// The trail's 2026-11-10 incident, on a profile. The reader reconciles a friend's profile
+    /// record from a peer that does not hold the bytes yet, so the docs engine's one download
+    /// attempt fails; the bytes then land on that peer without a `ContentReady`. Before the settle
+    /// pass the friend's name and sigil never updated. Here the only source offered is the
+    /// friend's own phone, taken from the read ticket in the reader's book.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_profile_reconciled_before_its_bytes_is_fetched_once_they_land() {
+        let w_dir = crate::docs::tests::scratch_dir("stranded-profile-writer");
+        let r_dir = crate::docs::tests::scratch_dir("stranded-profile-reader");
+        let r_state = crate::docs::tests::scratch_dir("stranded-profile-reader-state");
+        let writer = served_profile(&w_dir, None).await;
+        let book = Arc::new(NamespaceBook::open(&r_state, ns_book::PROFILE_BOOK_FILE).unwrap());
+        let reader = served_profile(&r_dir, Some(book)).await;
+
+        let (seed, endpoint) = identity();
+        let bytes = signed_record(&seed, &endpoint, 5);
+        let hash = Hash::new(&bytes);
+        let doc = writer.docs.doc_for(writer.docs.own_ns).await.unwrap();
+        doc.set_hash(
+            writer.docs.author,
+            PROFILE_KEY.to_vec(),
+            hash,
+            bytes.len() as u64,
+        )
+        .await
+        .unwrap();
+        writer.docs.arm_publishing().await.unwrap();
+
+        let ticket = writer.docs.ticket().await.unwrap();
+        let ns = reader.docs.import_ticket(&ticket).await.unwrap();
+        for _ in 0..600 {
+            if !reader.docs.stranded_entries().await.unwrap().is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        let stranded = reader.docs.stranded_entries().await.unwrap();
+        assert_eq!(stranded.len(), 1, "the record arrives without its bytes");
+        assert_eq!(stranded[0].namespace, ns.to_bytes());
+        assert_eq!(stranded[0].key, PROFILE_KEY.to_vec());
+        assert_eq!(stranded[0].hash, hash);
+
+        // The bytes land on the serving peer out-of-band; nothing in iroh-docs asks again.
+        writer.docs.blobs.add_bytes(bytes.clone()).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        assert!(reader.docs.read_latest(ns, None).await.unwrap().is_none());
+
+        let sink = Collected::default();
+        let report = reader
+            .docs
+            .settle_stranded(
+                &reader.endpoint,
+                &[],
+                &HashMap::new(),
+                None,
+                Some(&sink as &dyn ProfileSink),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            report,
+            ProfileSettleReport {
+                stranded: 1,
+                fetched: 1,
+                updated: 1,
+            }
+        );
+        let delivered = sink.0.lock().unwrap().clone();
+        assert_eq!(delivered.len(), 1, "the app is told");
+        assert_eq!(delivered[0].epoch, 5);
+        assert_eq!(
+            reader
+                .docs
+                .read_for_endpoint(&endpoint)
+                .await
+                .unwrap()
+                .map(|r| r.epoch),
+            Some(5)
+        );
+
+        // Nothing stranded is a cheap no-op.
+        let again = reader
+            .docs
+            .settle_stranded(
+                &reader.endpoint,
+                &[],
+                &HashMap::new(),
+                None,
+                Some(&sink as &dyn ProfileSink),
+            )
+            .await
+            .unwrap();
+        assert_eq!(again, ProfileSettleReport::default());
+        assert_eq!(sink.0.lock().unwrap().len(), 1);
+
+        for dir in [w_dir, r_dir, r_state] {
+            let _ = std::fs::remove_dir_all(&dir);
+        }
     }
 }
