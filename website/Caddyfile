@@ -1,0 +1,67 @@
+# Static site for streetcrypt.id. Its real job is the two well-known files that let a pairing
+# invite or a repeater's claim code open the streetCryptid app directly instead of landing as
+# unclickable text; the pages are the fallback for when that doesn't happen, plus the repeater setup
+# docs at /repeater. TLS terminates at the Caddy jumpbox, so this listens on plain HTTP.
+{
+	# Nothing reconfigures a running pod: a new site is a new image.
+	admin off
+	persist_config off
+}
+
+:8080 {
+	root * /srv
+
+	header {
+		-Server
+		X-Content-Type-Options nosniff
+		Referrer-Policy no-referrer
+	}
+
+	# Apple documents application/json as required for the association file, and it has no
+	# extension -- a static server would otherwise serve it as application/octet-stream. This is
+	# the single reason the site is worth running here rather than on GitHub Pages, where response
+	# headers cannot be set.
+	#
+	# Neither file may redirect: Google's verifier and Apple's CDN both fetch the exact URL and treat
+	# a redirect as a failure.
+	@wellknown path /.well-known/apple-app-site-association /.well-known/assetlinks.json
+	header @wellknown {
+		Content-Type application/json
+		# Short on purpose: a corrected fingerprint or team ID then propagates in minutes. Apple's
+		# CDN and Play services re-fetch on their own schedules regardless; this only bounds what
+		# sits in between.
+		Cache-Control "public, max-age=300"
+	}
+
+	# `irm https://streetcrypt.id/repeater/install.ps1 | iex`. Invoke-RestMethod hands `iex` a
+	# string only for a text type; anything else arrives as bytes and fails to run. Short-lived for
+	# the same reason as the well-known files: the script names the release it downloads.
+	@installers path /repeater/install.ps1
+	header @installers {
+		Content-Type "text/plain; charset=utf-8"
+		Cache-Control "public, max-age=300"
+	}
+
+	# The fonts never change under these names, and every navigation would otherwise revalidate
+	# four of them. The HTML and CSS deliberately get no such header: they change on deploy and
+	# their URLs do not.
+	@fonts path /fonts/*
+	header @fonts Cache-Control "public, max-age=2592000"
+
+	# Serve /pair without the trailing-slash redirect. The invite rides in the URL fragment, and a
+	# redirect is one more thing that can drop it.
+	@pair path /pair /pair/
+	rewrite @pair /pair/index.html
+
+	# A repeater's claim QR code, the same way: its ticket and secret ride in the fragment. Without
+	# one, the same page is the setup guide.
+	@repeater path /repeater /repeater/
+	rewrite @repeater /repeater/index.html
+
+	file_server
+
+	handle_errors {
+		rewrite * /404.html
+		file_server
+	}
+}

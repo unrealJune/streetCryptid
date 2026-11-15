@@ -11,3 +11,7 @@ modules/iroh-location/ios/generated/** -whitespace text eol=lf
 # tree LF, and so does this one.
 repeater/server/** text=auto eol=lf
 repeater/protocol/** text=auto eol=lf
+
+# The website ships in a Linux image; keep it LF like the server. Fonts are binary.
+website/** text=auto eol=lf
+website/**/*.woff2 binary

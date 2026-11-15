@@ -1,0 +1,15 @@
+{
+  "applinks": {
+    "details": [
+      {
+        "appIDs": ["X37464B5A7.com.unrealjune.streetcryptid"],
+        "components": [
+          { "/": "/pair", "comment": "Pairing invite; the token rides in the fragment" },
+          { "/": "/pair/", "comment": "Pairing invite, trailing slash" },
+          { "/": "/repeater", "comment": "Repeater claim QR code; ticket and secret ride in the fragment" },
+          { "/": "/repeater/", "comment": "Repeater claim, trailing slash" }
+        ]
+      }
+    ]
+  }
+}
