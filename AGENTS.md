@@ -1,6 +1,7 @@
 # Repository map
 
-One repository, four products, one Cargo workspace (`Cargo.toml`, `docs/MONOREPO.md`):
+One repository, four products and their website, one Cargo workspace (`Cargo.toml`,
+`docs/MONOREPO.md`):
 
 - **The app** — the Expo app at the root (`src/`, `modules/`, `app.json`, …) and its Rust core
   (`modules/iroh-location/rust`, plus the browser bridge in `rust-wasm`). Releases as `v*` to the
@@ -13,13 +14,18 @@ One repository, four products, one Cargo workspace (`Cargo.toml`, `docs/MONOREPO
   tarballs. Its own notes: `repeater/linux/AGENTS.md`.
 - **The Windows repeater** — `repeater/windows`: WinUI app, Windows service, Rust host. Releases as
   `windows-v*-preview.N`. Its own notes: `repeater/windows/AGENTS.md`.
+- **The website** — `website/`: streetcrypt.id (the App Link / Universal Link association files,
+  the `/pair` and `/repeater` fallbacks, the repeater setup guide and `install.ps1`). Every push to
+  main that touches it deploys to Buttercup (`release-website.yml`, image + chart on GHCR); no tags.
+  Its own notes: `website/README.md`. A new repeater platform or install step changes
+  `website/site/repeater/` in the same pull request.
 - **Shared** — `repeater/host` (the desktop repeater both Windows and Linux run: node, identity,
   settings, the line protocol), `repeater/protocol` (the roster and wire the phone and every
   repeater agree on, with golden vectors) and `third_party/noq` (patched for every crate).
 
 CI runs a lane per product (`ci.yml` → `ci-app.yml`, `ci-repeater-server.yml`,
-`ci-repeater-windows.yml`, `ci-repeater-linux.yml`, chosen by `scripts/ci-changes.sh`); `Required`
-passes skipped lanes.
+`ci-repeater-windows.yml`, `ci-repeater-linux.yml`, `ci-website.yml`, chosen by
+`scripts/ci-changes.sh`); `Required` passes skipped lanes.
 Every product releases from Conventional Commits on its own paths
 (`scripts/lib/conventional-commits.sh`), so a commit's type and the files it touches decide what
 ships: `feat`/`fix` release, `docs`/`chore`/`ci`/`build`/`test`/`refactor`/`style` do not. Build
@@ -197,6 +203,17 @@ Conventions when changing that code:
   per wake); with one mounted, the heartbeat's `healIfIsolated` calls `rebindNode('isolated')`,
   because only JS can rewire its subscriptions. Do not let the core rebuild under an app lease.
   `node.isolation{event=recovered,last_step}` says whether a step or time fixed it.
+- **A node whose docs engine is gone is rebuilt, not left deaf** (`isolation.rs`, `docs::engine_gone`).
+  iroh-docs never restarts its live engine, and that engine's teardown shuts the replica store down
+  with it, so after one stop every docs call on the node fails with `sending to iroh_docs actor
+failed` for the life of the process. On 2026-11-15 a single panicking accept task (iroh-docs 0.101
+  `BobState::into_outcome` unwrapping progress a failed message had taken; likely a removed friend's
+  namespace closed mid-sync) did that to a Pixel 10 for 17 hours: no push, no pull, and a friend
+  paired that evening got no persona because the Pixel could not read its own sealed profile to
+  hand over. The panic is patched in `third_party/iroh-docs` (NOTICE says how; the live actor also
+  survives a panicked sync task now), and the node probes its replica store on every drain and pull
+  (`check_docs_engine`): a dead engine makes `rebuild_due` true at once, floored by
+  `DOCS_DEAD_REBUILD_COOLDOWN_MS`, and any rebuild clears it — `node.isolation{event=docs_dead}`.
 - **`bg.wake` and `bg.backfill` do not exist.** They went dead when capture moved into Rust — the
   location wake is native and emits no JS span at all. Six e2e scenarios asserted them,
   `background-location-e2e.sh` gated its PASS on `bg.wake > 0` so it could never pass, and two
@@ -322,6 +339,28 @@ Conventions when changing that code:
   JS subscribe/topic/reachability model of its own; it was deleted, not kept as a fallback, so do
   not add a second lane to speed delivery up — fix the docs path. Web (wasm) reads the replica and
   does not publish (`web-no-publish`).
+- **A record is not its bytes, and a reader must fetch the bytes itself** (`TrailDocs::settle_stranded`).
+  iroh-docs reconciles entry records; the content behind each is a separate iroh-blobs download
+  that the engine attempts ONCE, from whichever peer handed the record over, and then waits for a
+  gossip `ContentReady`. The stash receives a writer's record by reconciliation and its bytes
+  moments later by HTTP, which imports straight into its blob store and announces nothing. So a
+  reader that reconciled in between (any phone that keeps friend namespaces live, which every build
+  since the gossip removal does) held the record with no bytes forever: `read_latest_sealed` skips
+  such a slot without a word, the ratchet never sees it, and not even a miss is counted. From
+  2026-11-10 17:25 to 11-12 an iPhone read nothing from one friend while the Pixel beside it read
+  everything; the friend's entries were in its replica and 0 of 17 of their bytes were in its blob
+  store. Every pull now fetches stranded friend slots (`fix`, `nul`, `rsy`) from the peers it
+  dialled, then each namespace's own sources (`namespace_sources`: the repeaters this pass planned
+  for that friend, `repeater::pull_plan`), then the author and the last serving peer, inside the
+  pull's deadline, and reports `sync.stranded` / `sync.stranded_fetched` on `trail.sync`. Friends'
+  profile namespaces get the same pass beside it (`ProfileDocs::settle_stranded`, every key, so the
+  sealed `s/profile`, `s/repeaters` and `keyring` too; sources are the owner's `profile_relays`,
+  then the owner named by the read ticket), which hands a profile that became readable to the app
+  because no `ContentReady` will, and re-reads repeater cards when anything landed; it reports
+  `sync.profile_stranded` / `_fetched`. Do not move
+  either into the replica read (a read never dials), and do not drop the `rsy` lane: a control
+  record without bytes is a restart request the leader cannot see. The web build does not run it
+  yet.
 - **There is ONE node per process, and only `NodeHost` builds it** (`rust/src/host.rs`). The
   mounted app (every JS context, through the module's `createNode`/`shutdown`) and the native
   background runtime (`acquireBackground`) take LEASES on it; the last one out shuts it down,

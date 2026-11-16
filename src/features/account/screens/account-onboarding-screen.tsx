@@ -165,6 +165,14 @@ export function AccountOnboardingScreen({
           availability={availability}
           disabled={saving}
           onSelect={setMode}
+          // Not a claim form: sharing has not started yet at this point in the account gate, so
+          // there is no node to dial a repeater with. Settings → Repeaters is where that lives.
+          footnote={
+            <ThemedText type="small" themeColor="textSecondary">
+              Have a computer that stays on? Once you are set up, you can run your own repeater, or
+              use a friend&apos;s, from Settings → Repeaters.
+            </ThemedText>
+          }
         />
       ) : !error ? (
         <ThemedText type="small" themeColor="textSecondary">

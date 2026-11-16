@@ -21,8 +21,9 @@ use std::time::{Duration, Instant};
 use anyhow::{bail, Context, Result};
 use serde_json::Value;
 use streetcryptid_repeater_host::{
-    claim_directory, identity, init_telemetry, message, run_pulse, snapshot, start, Command,
-    HostInfo, PulseInfo, Settings, Snapshot, MAX_COMMAND_LINE, SERVICE_MARKER,
+    claim_directory, identity, init_telemetry, message, read_name, run_pulse, snapshot, start,
+    write_name, Action, Command, HostInfo, PulseInfo, Settings, Snapshot, MAX_COMMAND_LINE,
+    SERVICE_MARKER,
 };
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
@@ -109,6 +110,9 @@ async fn serve(
             return Ok(());
         }
     };
+    if let Some(repeater) = node.repeater() {
+        repeater.set_name(read_name(&dir).as_deref());
+    }
     let power = power::KeepAwake::spawn(settings.keep_awake_flag());
     drop(tracing::info_span!(
         "repeater.host.start",
@@ -157,8 +161,19 @@ async fn serve(
         tokio::select! {
             _ = &mut stop => break,
             Some(Request { command, reply }) = requested.recv() => {
-                let ok = match command.settings() {
-                    Ok(next) => settings.set(next).is_ok(),
+                let ok = match command.action() {
+                    Ok(Action::Settings(next)) => settings.set(next).is_ok(),
+                    Ok(Action::Name(name)) => match (write_name(&dir, Some(&name)), node.repeater()) {
+                        (Ok(kept), Some(repeater)) => {
+                            repeater.set_name(kept.as_deref());
+                            true
+                        }
+                        _ => false,
+                    },
+                    Ok(Action::Release) => match node.repeater() {
+                        Some(repeater) => repeater.release().await.is_ok(),
+                        None => false,
+                    },
                     Err(_) => false,
                 };
                 let _ = reply.send(message::result(&run_id, &command.request_id, ok));
@@ -333,7 +348,7 @@ async fn serve_client(stream: UnixStream, hub: Arc<Hub>, commands: mpsc::Sender<
             let Ok(command) = serde_json::from_slice::<Command>(&line) else {
                 break;
             };
-            if command.settings().is_err() {
+            if command.action().is_err() {
                 break;
             }
             let (reply, answer) = oneshot::channel();
@@ -499,7 +514,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn clients_get_the_latest_lines_and_are_dropped_for_anything_but_settings() {
+    async fn clients_get_the_latest_lines_and_are_dropped_for_an_invalid_command() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("control.sock");
         let listener = bind(&path, Mode::User).unwrap();

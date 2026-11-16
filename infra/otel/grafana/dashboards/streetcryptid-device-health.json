@@ -838,6 +838,46 @@
           "refId": "A"
         }
       ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Where friends' fixes came from /h — fix.provenance",
+      "description": "One count per friend's fix that reached a phone, by who handed it over: `author` is the friend's own phone, `friend` another friend relaying it, `stash` the hosted mirror, `repeater` a machine in a roster this phone knows. Unlike the contact panels this counts fixes, not exchanges, and it includes JS-free background pulls. A slot already in the replica counts nothing.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 60
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "fillOpacity": 8,
+            "spanNulls": false,
+            "drawStyle": "bars",
+            "stacking": {
+              "mode": "normal"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${prometheus}"
+          },
+          "expr": "sum by (fix_source, fix_path) (rate(traces_span_metrics_calls_total{span_name=\"fix.provenance\"}[1h])) * 3600",
+          "legendFormat": "{{fix_source}} ({{fix_path}})",
+          "refId": "A"
+        }
+      ]
     }
   ]
 }

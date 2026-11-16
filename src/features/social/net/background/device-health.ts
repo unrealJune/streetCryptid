@@ -398,6 +398,21 @@ async function intentAttributes(): Promise<Attributes> {
     // Not Hermes, or the stats call changed shape — omitted.
   }
   try {
+    // Who relies on a repeater, and whether one has been heard from (REPEATERS.md §5). A local
+    // read in the core; it never dials. `last_contact_age_ms` is per process, so it is absent
+    // after a relaunch until a repeater answers, rather than zero.
+    const repeaters = await tryGetIrohLocation()?.repeaterHealth?.();
+    if (repeaters) {
+      attrs['repeaters.enrolled'] = repeaters.enrolled;
+      attrs['repeaters.carriers'] = repeaters.carriers;
+      if (repeaters.lastContactAgeMs !== null) {
+        attrs['repeaters.last_contact_age_ms'] = repeaters.lastContactAgeMs;
+      }
+    }
+  } catch {
+    // A binary without the call, or a node not started — omitted rather than zero.
+  }
+  try {
     const armedAt = await loadReviveFenceArmedAt(kv);
     if (armedAt !== null) attrs['fence.armed_age_ms'] = Math.max(0, Date.now() - armedAt);
   } catch {

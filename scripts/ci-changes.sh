@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 # Decide which CI lanes a change needs: the app, the repeater server, the Windows repeater, the
-# Linux repeater.
+# Linux repeater, the website.
 #
 # A path-filtered workflow that does not run leaves a required check pending forever, so `ci.yml`
 # always runs and asks this script instead. The rules (docs/MONOREPO.md, "CI"):
@@ -10,15 +10,19 @@
 #   repeater/windows/**                                      -> windows
 #   repeater/linux/**                                        -> linux
 #   repeater/host/** (the desktop host both link)            -> windows + linux
+#   website/**                                               -> website
 #   assets/images/mothman-logo*.svg (the Windows icon's source) -> app + windows
 #   repeater/protocol/**, Cargo.toml, Cargo.lock,
 #   rust-toolchain.toml, third_party/**, .github/**,
-#   this script, any other repeater/ path                    -> every lane
+#   this script, any other repeater/ path                    -> every repeater lane + app
+#                                                               (.github/** and this script:
+#                                                               the website too)
 #   anything else                                            -> app
 #
 # "Anything else" is deliberately the app: Prettier checks Markdown and YAML wherever they live,
 # so a docs-only change still needs the app lane's Format job. Only a change confined to one
-# repeater product skips the mobile suite.
+# repeater product, or to the website (whose lane runs Prettier over website/ itself), skips the
+# mobile suite.
 #
 # Usage:
 #   scripts/ci-changes.sh <base-sha> [<head-sha>]   diff from the merge base of base and head
@@ -27,16 +31,17 @@
 # A base that is empty, all zeros (a new branch) or not in the local history runs every lane:
 # not knowing what changed must never skip a check.
 #
-# Prints `app=`, `server=`, `windows=`, `linux=` (true|false) on stdout, for $GITHUB_OUTPUT.
+# Prints `app=`, `server=`, `windows=`, `linux=`, `website=` (true|false) on stdout, for
+# $GITHUB_OUTPUT.
 
 set -euo pipefail
 
 all() {
-  printf 'app=true\nserver=true\nwindows=true\nlinux=true\n'
+  printf 'app=true\nserver=true\nwindows=true\nlinux=true\nwebsite=true\n'
 }
 
 classify() {
-  local app=false server=false windows=false linux=false path
+  local app=false server=false windows=false linux=false website=false path
   while IFS= read -r path; do
     [[ -z "$path" ]] && continue
     case "$path" in
@@ -47,12 +52,19 @@ classify() {
         windows=true
         linux=true
         ;;
+      website/*) website=true ;;
       assets/images/mothman-logo*.svg)
         app=true
         windows=true
         ;;
-      repeater/protocol/* | Cargo.toml | Cargo.lock | rust-toolchain.toml | third_party/* | \
-        .github/* | scripts/ci-changes.sh | repeater/*)
+      .github/* | scripts/ci-changes.sh)
+        app=true
+        server=true
+        windows=true
+        linux=true
+        website=true
+        ;;
+      repeater/protocol/* | Cargo.toml | Cargo.lock | rust-toolchain.toml | third_party/* | repeater/*)
         app=true
         server=true
         windows=true
@@ -61,7 +73,8 @@ classify() {
       *) app=true ;;
     esac
   done
-  printf 'app=%s\nserver=%s\nwindows=%s\nlinux=%s\n' "$app" "$server" "$windows" "$linux"
+  printf 'app=%s\nserver=%s\nwindows=%s\nlinux=%s\nwebsite=%s\n' \
+    "$app" "$server" "$windows" "$linux" "$website"
 }
 
 if [[ "${1:-}" == '--paths' ]]; then

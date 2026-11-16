@@ -157,6 +157,43 @@ impl Settings {
     }
 }
 
+const NAME_FILE: &str = "repeater-name.txt";
+
+/// The name the person at this machine gave it (REPEATERS.md §4.1), read at start. A missing or
+/// unusable file is "no name": a name is a label, never a reason to refuse to start.
+pub fn read_name(dir: &Path) -> Option<String> {
+    std::fs::read_to_string(dir.join(NAME_FILE))
+        .ok()
+        .and_then(|text| streetcryptid_repeater::roster::repeater_name(&text))
+}
+
+/// Save a name (or clear it with `None` / an empty one), returning what was kept. Refuses one
+/// [`repeater_name`](streetcryptid_repeater::roster::repeater_name) would not carry, so the app
+/// can say so instead of saving something the phone will never show.
+pub fn write_name(dir: &Path, name: Option<&str>) -> Result<Option<String>> {
+    let path = dir.join(NAME_FILE);
+    let wanted = name.map(str::trim).filter(|n| !n.is_empty());
+    let Some(wanted) = wanted else {
+        match std::fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
+        }
+        return Ok(None);
+    };
+    let Some(name) = streetcryptid_repeater::roster::repeater_name(wanted) else {
+        bail!("Not a usable name");
+    };
+    let tmp = path.with_extension("txt.tmp");
+    {
+        let mut file = File::create(&tmp)?;
+        file.write_all(name.as_bytes())?;
+        file.sync_all()?;
+    }
+    std::fs::rename(&tmp, &path)?;
+    Ok(Some(name))
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Snapshot {
@@ -164,6 +201,11 @@ pub struct Snapshot {
     pub version: &'static str,
     pub mode: &'static str,
     pub endpoint_id: String,
+    /// What this machine is called here, signed into the next cert it issues.
+    pub name: Option<String>,
+    /// The name in the cert its roster holds: what phones show now. Differs from `name` until
+    /// the owner's phone picks up a rename.
+    pub listed_name: Option<String>,
     pub claimed: bool,
     pub claim_url: Option<String>,
     pub owner: Option<String>,
@@ -208,6 +250,8 @@ pub fn snapshot(node: &StashNode, host: HostInfo) -> Snapshot {
         version: host.version,
         mode: host.mode,
         endpoint_id: hex(&repeater.id()),
+        name: repeater.name(),
+        listed_name: repeater.listed_name(),
         claimed: state.is_some(),
         claim_url,
         owner: state.as_ref().map(|s| hex(&s.owner)),
@@ -240,32 +284,54 @@ pub fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// The one command a supervisor may send: the person's [`HostSettings`]. Anything else — another
-/// kind, another protocol, an unknown field — is refused, and the Windows host and the Linux
-/// daemon both drop the connection that sent it.
+/// A command a supervisor may send. Anything not an [`Action`] — another kind, another protocol,
+/// an unknown field, a field the kind does not take — is refused, and the Windows host and the
+/// Linux daemon both drop the connection that sent it.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Command {
     pub protocol: u32,
     pub kind: String,
     pub request_id: String,
-    pub telemetry: bool,
-    pub keep_awake: bool,
+    pub telemetry: Option<bool>,
+    pub keep_awake: Option<bool>,
+    /// For `name`: the new name, or `""` to clear it.
+    pub name: Option<String>,
+}
+
+/// What the app may ask of the host: its settings, its name, or releasing the repeater from its
+/// roster (REPEATERS.md §4.1). Each is something only the person at this machine decides.
+#[derive(Debug, PartialEq)]
+pub enum Action {
+    Settings(HostSettings),
+    Name(String),
+    Release,
 }
 
 impl Command {
-    pub fn settings(&self) -> Result<HostSettings> {
-        if self.protocol != PROTOCOL
-            || self.kind != "settings"
-            || self.request_id.is_empty()
-            || self.request_id.len() > 64
-        {
+    pub fn action(&self) -> Result<Action> {
+        if self.protocol != PROTOCOL || self.request_id.is_empty() || self.request_id.len() > 64 {
             bail!("Invalid command");
         }
-        Ok(HostSettings {
-            telemetry: self.telemetry,
-            keep_awake: self.keep_awake,
-        })
+        match (
+            self.kind.as_str(),
+            self.telemetry,
+            self.keep_awake,
+            self.name.as_deref(),
+        ) {
+            ("settings", Some(telemetry), Some(keep_awake), None) => {
+                Ok(Action::Settings(HostSettings {
+                    telemetry,
+                    keep_awake,
+                }))
+            }
+            // Bounded here as well as by `repeater_name`: the line itself is at most 4 KiB.
+            ("name", None, None, Some(name)) if name.chars().count() <= 200 => {
+                Ok(Action::Name(name.to_string()))
+            }
+            ("release", None, None, None) => Ok(Action::Release),
+            _ => bail!("Invalid command"),
+        }
     }
 }
 
@@ -426,21 +492,57 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            command.settings().unwrap(),
-            HostSettings {
+            command.action().unwrap(),
+            Action::Settings(HostSettings {
                 telemetry: true,
                 keep_awake: false
-            }
+            })
         );
         let old: Command = serde_json::from_str(
             r#"{"protocol":1,"kind":"settings","requestId":"one","telemetry":true,"keepAwake":false}"#,
         )
         .unwrap();
-        assert!(old.settings().is_err());
+        assert!(old.action().is_err());
         assert!(serde_json::from_str::<Command>(
             r#"{"protocol":2,"kind":"subscription","requestId":"one","member":"ab","receiving":false}"#,
         )
         .is_err());
+        // Settings without their values, or a release carrying some, are refused.
+        let partial: Command =
+            serde_json::from_str(r#"{"protocol":2,"kind":"settings","requestId":"one"}"#).unwrap();
+        assert!(partial.action().is_err());
+        let release: Command =
+            serde_json::from_str(r#"{"protocol":2,"kind":"release","requestId":"two"}"#).unwrap();
+        assert_eq!(release.action().unwrap(), Action::Release);
+        let odd: Command = serde_json::from_str(
+            r#"{"protocol":2,"kind":"release","requestId":"two","telemetry":true}"#,
+        )
+        .unwrap();
+        assert!(odd.action().is_err());
+    }
+
+    #[test]
+    fn name_commands_carry_a_name_and_nothing_else() {
+        let name: Command = serde_json::from_str(
+            r#"{"protocol":2,"kind":"name","requestId":"n","name":"Living room PC"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            name.action().unwrap(),
+            Action::Name("Living room PC".into())
+        );
+        let clear: Command =
+            serde_json::from_str(r#"{"protocol":2,"kind":"name","requestId":"n","name":""}"#)
+                .unwrap();
+        assert_eq!(clear.action().unwrap(), Action::Name(String::new()));
+        let bare: Command =
+            serde_json::from_str(r#"{"protocol":2,"kind":"name","requestId":"n"}"#).unwrap();
+        assert!(bare.action().is_err());
+        let mixed: Command = serde_json::from_str(
+            r#"{"protocol":2,"kind":"settings","requestId":"n","telemetry":true,"keepAwake":false,"name":"x"}"#,
+        )
+        .unwrap();
+        assert!(mixed.action().is_err());
     }
 
     #[test]
@@ -462,6 +564,23 @@ mod tests {
         std::fs::write(dir.path().join("roster.bin"), b"existing").unwrap();
         assert!(identity(dir.path()).is_err());
         assert!(!dir.path().join("secret.key").exists());
+    }
+
+    #[test]
+    fn a_name_is_kept_tidied_cleared_and_never_a_reason_to_fail() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(read_name(dir.path()), None);
+        assert_eq!(
+            write_name(dir.path(), Some("  Living   room PC ")).unwrap(),
+            Some("Living room PC".into())
+        );
+        assert_eq!(read_name(dir.path()), Some("Living room PC".into()));
+        assert!(write_name(dir.path(), Some(&"x".repeat(41))).is_err());
+        assert_eq!(read_name(dir.path()), Some("Living room PC".into()));
+        assert_eq!(write_name(dir.path(), Some("")).unwrap(), None);
+        assert_eq!(read_name(dir.path()), None);
+        std::fs::write(dir.path().join(NAME_FILE), b"bell\x07").unwrap();
+        assert_eq!(read_name(dir.path()), None);
     }
 
     #[test]

@@ -69,6 +69,11 @@ connectors:
       - name: pull.outcome
       - name: pull.trigger
       - name: pull.app_state
+      # `fix.provenance` — where each fix this phone received came from: who handed it over
+      # (`author` / `friend` / `stash` / `repeater` / `other`), over which path. Closed
+      # vocabularies (`contact.rs`).
+      - name: fix.source
+      - name: fix.path
     # Deliberately NOT `sc.author`, `sc.seq` or `sc.entry_hash`: those are per-envelope and would
     # make a new time series for every ping. Follow one envelope in Tempo; count them here.
     histogram:

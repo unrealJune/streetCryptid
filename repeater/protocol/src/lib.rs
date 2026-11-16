@@ -13,7 +13,7 @@
 //! ## What does not
 //! Transport (each side has its own iroh, and they are different versions), storage, timers, and
 //! anything only one side reads: the console claim window and the namespace book are the
-//! repeater's; the `RepeaterCard` a friend publishes and the enrolment prompt are the app's.
+//! repeater's; the `RepeaterCard` a friend publishes and the enrollment prompt are the app's.
 //! Nothing here does I/O, so every rule is a unit test.
 //!
 //! Every identity is a raw 32-byte ed25519 public key, which is what an iroh endpoint id and an

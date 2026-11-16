@@ -28,6 +28,7 @@ jobs:
       server: ${{ steps.lanes.outputs.server }}
       windows: ${{ steps.lanes.outputs.windows }}
       linux: ${{ steps.lanes.outputs.linux }}
+      website: ${{ steps.lanes.outputs.website }}
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -73,6 +74,12 @@ jobs:
     if: needs.changes.outputs.linux == 'true'
     uses: ./.github/workflows/ci-repeater-linux.yml
 
+  website:
+    name: Website
+    needs: changes
+    if: needs.changes.outputs.website == 'true'
+    uses: ./.github/workflows/ci-website.yml
+
   required:
     name: Required
     if: always()
@@ -82,6 +89,7 @@ jobs:
       - server
       - windows
       - linux
+      - website
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -92,13 +100,14 @@ jobs:
           SERVER_RESULT: ${{ needs.server.result }}
           WINDOWS_RESULT: ${{ needs.windows.result }}
           LINUX_RESULT: ${{ needs.linux.result }}
+          WEBSITE_RESULT: ${{ needs.website.result }}
         run: |
           # Without a lane decision nothing below it means anything.
           if [[ "$CHANGES_RESULT" != "success" ]]; then
             echo "Lane selection did not succeed." >&2
             exit 1
           fi
-          for result in "$APP_RESULT" "$SERVER_RESULT" "$WINDOWS_RESULT" "$LINUX_RESULT"; do
+          for result in "$APP_RESULT" "$SERVER_RESULT" "$WINDOWS_RESULT" "$LINUX_RESULT" "$WEBSITE_RESULT"; do
             if [[ "$result" != "success" && "$result" != "skipped" ]]; then
               echo "A required CI lane did not succeed." >&2
               exit 1

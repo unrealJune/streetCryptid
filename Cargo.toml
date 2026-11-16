@@ -34,6 +34,12 @@ default-members = ["repeater/protocol", "repeater/server"]
 # noq release fixes it.
 [patch.crates-io]
 noq = { path = "third_party/noq" }
+# iroh-docs 0.101.0 with one fix, vendored (MIT OR Apache-2.0; third_party/iroh-docs/NOTICE): the
+# accept side of a sync panicked whenever processing a message failed, and that one panic stopped
+# the live engine and the replica store for the rest of the process — every later docs call
+# failed with "sending to iroh_docs actor failed" (a Pixel 10, 2026-11-15, 17 hours). The stash
+# accepts every phone's syncs and runs the same code. Drop the patch once upstream fixes it.
+iroh-docs = { path = "third_party/iroh-docs" }
 
 # --- the phone (modules/iroh-location/rust): EAS, `just bindgen-*` -----------------------------
 [profile.release]

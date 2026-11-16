@@ -164,7 +164,7 @@ pub trait PublishSink: Send + Sync {
 
 /// Whether a flush actually moved anything off the device.
 ///
-/// Two outcomes rather than a bare `Ok`, because they were the same value and it made the push
+/// Separate outcomes rather than a bare `Ok`, because they were the same value and it made the push
 /// watermark lie: a phone with nowhere to send returned `Ok`, the drain stamped `last_pushed_at`,
 /// and `device.health` reported a fresh push forever on a device that had never pushed at all.
 /// That is the same class of fault the native watermarks were introduced to end, reintroduced one
@@ -176,6 +176,8 @@ pub enum FlushOutcome {
     /// Nowhere to send: the stash is not opted into and the pool is empty. A real configuration,
     /// not a failure — and emphatically not a push.
     NoTargets,
+    /// A push was scheduled, but no receipt established that anything was received.
+    Scheduled,
     /// There was somewhere to send, and the caller's time ran out before a push could start.
     ///
     /// A background iOS wake has about thirty seconds, and a push to friends who are asleep spends
@@ -847,7 +849,8 @@ impl<S: PublishSink> DrainEngine<'_, S> {
             }
             // Only a flush that actually reached a peer counts. `NoTargets` is a successful call
             // that pushed nothing, and stamping it would report a fresh push on a phone that has
-            // never had anywhere to send.
+            // never had anywhere to send. A repeater scheduled in the background with no receipt
+            // (`Scheduled`) is not a delivery either.
             //
             // `Deferred` stamps nothing either: the entries are still only in our replica.
             match self.sink.flush().await {
@@ -856,7 +859,7 @@ impl<S: PublishSink> DrainEngine<'_, S> {
                     self.stamp(|state| state.last_pushed_at = Some(at));
                 }
                 Ok(FlushOutcome::Deferred) => push_deferred = true,
-                Ok(FlushOutcome::NoTargets) | Err(_) => {}
+                Ok(FlushOutcome::Scheduled | FlushOutcome::NoTargets) | Err(_) => {}
             }
         }
         Ok(Drained {

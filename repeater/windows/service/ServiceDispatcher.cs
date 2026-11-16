@@ -15,13 +15,17 @@ internal static unsafe class ServiceDispatcher
     private const uint AcceptStop = 0x1, AcceptShutdown = 0x4;
     private const uint ControlStop = 1, ControlInterrogate = 4, ControlShutdown = 5;
 
-    private static Func<CancellationToken, Task>? body;
+    private static Func<string[], CancellationToken, Task<uint>>? body;
     private static readonly CancellationTokenSource Stopping = new();
     private static IntPtr statusHandle;
     private static uint checkpoint;
 
-    /// <summary>Blocks until the service has stopped. False when not started by the SCM.</summary>
-    public static bool Run(Func<CancellationToken, Task> run)
+    /// <summary>
+    /// Blocks until the service has stopped. False when not started by the SCM. The body gets the
+    /// arguments the service was started with (not its command line) and returns its exit code,
+    /// which a caller reads back from the SCM.
+    /// </summary>
+    public static bool Run(Func<string[], CancellationToken, Task<uint>> run)
     {
         body = run;
         fixed (char* name = ServiceLayout.ServiceName)
@@ -39,12 +43,15 @@ internal static unsafe class ServiceDispatcher
         statusHandle = RegisterServiceCtrlHandlerExW(ServiceLayout.ServiceName, &Handler, IntPtr.Zero);
         if (statusHandle == IntPtr.Zero) return;
         Report(StartPending, 0, 30_000);
+        // argv[0] is the service's name; the rest are what StartService was given.
+        var arguments = new string[Math.Max(0, (int)argc - 1)];
+        for (int i = 0; i < arguments.Length; i++) arguments[i] = new string(argv[i + 1]);
         uint exitCode = 0;
         try
         {
-            var task = body!(Stopping.Token);
+            var task = body!(arguments, Stopping.Token);
             Report(Running, 0, 0);
-            task.GetAwaiter().GetResult();
+            exitCode = task.GetAwaiter().GetResult();
         }
         catch (OperationCanceledException) when (Stopping.IsCancellationRequested) { }
         catch

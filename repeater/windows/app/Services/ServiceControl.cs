@@ -26,6 +26,41 @@ public static class ServiceControl
     public static Task<ServiceVerbResult?> InstallAsync(string userDirectory) =>
         RunElevatedAsync(["install", "--owner", CurrentUser(), "--from", userDirectory], TimeSpan.FromMinutes(2));
 
+    /// <summary>Whether the installed service has the unattended updater (installs before it did not).</summary>
+    public static bool HasUpdater()
+    {
+        try { return Scm.IsInstalled(ServiceLayout.UpdaterName); }
+        catch (Win32Exception) { return false; }
+    }
+
+    /// <summary>
+    /// Bring the service up to <see cref="AppVersion"/> with no prompt, through the updater the
+    /// install registered (service/Updater.cs), and wait for its verdict. Null when there is no
+    /// updater this person may start — a service installed before it existed — so the caller can
+    /// fall back to <see cref="InstallAsync"/>.
+    /// </summary>
+    public static async Task<ServiceVerbResult?> UpdateUnattendedAsync(TimeSpan timeout)
+    {
+        try
+        {
+            if (!Scm.IsInstalled(ServiceLayout.UpdaterName)) return null;
+            // Already running means someone else asked first; its verdict is ours too.
+            Scm.StartWith(ServiceLayout.UpdaterName, AppVersion);
+            var deadline = DateTime.UtcNow + timeout;
+            while (DateTime.UtcNow < deadline)
+            {
+                await Task.Delay(TimeSpan.FromSeconds(1));
+                if (Scm.QueryFull(ServiceLayout.UpdaterName) is not { } status) return null;
+                if (status.State != Scm.Stopped) continue;
+                return Enum.IsDefined(typeof(ServiceVerbResult), (int)status.ExitCode)
+                    ? (ServiceVerbResult)(int)status.ExitCode
+                    : ServiceVerbResult.Failed;
+            }
+            return ServiceVerbResult.Failed;
+        }
+        catch (Win32Exception) { return null; }
+    }
+
     public static Task<ServiceVerbResult?> UninstallAsync(string userDirectory, TimeSpan? timeout = null) =>
         RunElevatedAsync(["uninstall", "--to", userDirectory], timeout ?? TimeSpan.FromMinutes(2));
 
@@ -38,6 +73,8 @@ public static class ServiceControl
             "keep the one your phone claimed and remove the other by hand.",
         ServiceVerbResult.StillRunning => "The repeater service did not stop in time. Try again.",
         ServiceVerbResult.BadArguments => "The repeater service rejected the request.",
+        ServiceVerbResult.NotNewer => "The repeater service is already this version or newer.",
+        ServiceVerbResult.DownloadFailed => "The update for the repeater service could not be downloaded. Try again.",
         _ => "The repeater service could not be changed. Try again.",
     };
 

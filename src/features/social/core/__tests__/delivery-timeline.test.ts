@@ -121,7 +121,8 @@ describe('reduced motion', () => {
 
 describe('formatCountdown', () => {
   it('is always mm:ss so the digits do not jump', () => {
-    expect(formatCountdown(STASH_RETENTION_MS)).toBe('30:00');
+    expect(formatCountdown(STASH_RETENTION_MS)).toBe('48:00:00');
+    expect(formatCountdown(3_600_000 + 61_000)).toBe('1:01:01');
     expect(formatCountdown(61_000)).toBe('01:01');
     expect(formatCountdown(0)).toBe('00:00');
     expect(formatCountdown(-5)).toBe('00:00');

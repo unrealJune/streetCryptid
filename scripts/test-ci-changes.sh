@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 # Exercise scripts/ci-changes.sh: the path rules, and the fallbacks that must run every lane.
-# `lanes app server windows [linux]`: linux defaults to windows's value.
+# `lanes app server windows [linux] [website]`: linux defaults to windows's value, website to false.
 
 set -euo pipefail
 
@@ -17,7 +17,7 @@ expect() {
 }
 
 lanes() {
-  printf 'app=%s\nserver=%s\nwindows=%s\nlinux=%s' "$1" "$2" "$3" "${4:-$3}"
+  printf 'app=%s\nserver=%s\nwindows=%s\nlinux=%s\nwebsite=%s' "$1" "$2" "$3" "${4:-$3}" "${5:-false}"
 }
 
 paths() {
@@ -37,11 +37,13 @@ expect "protocol" "$(lanes true true true)" "$(paths repeater/protocol/src/roste
 expect "root lockfile" "$(lanes true true true)" "$(paths Cargo.lock)"
 expect "toolchain" "$(lanes true true true)" "$(paths rust-toolchain.toml)"
 expect "shared third_party" "$(lanes true true true)" "$(paths third_party/noq/src/lib.rs)"
-expect "workflows" "$(lanes true true true)" "$(paths .github/workflows/ci-repeater-server.yml)"
-expect "the gate itself" "$(lanes true true true)" "$(paths scripts/ci-changes.sh)"
+expect "workflows" "$(lanes true true true true true)" "$(paths .github/workflows/ci-repeater-server.yml)"
+expect "the gate itself" "$(lanes true true true true true)" "$(paths scripts/ci-changes.sh)"
 expect "unknown repeater path" "$(lanes true true true)" "$(paths repeater/README.md)"
 expect "linux only" "$(lanes false false false true)" "$(paths repeater/linux/src/daemon.rs)"
 expect "the desktop host" "$(lanes false false true true)" "$(paths repeater/host/src/lib.rs)"
+expect "website only" "$(lanes false false false false true)" "$(paths website/site/repeater/index.html website/Caddyfile)"
+expect "website and app" "$(lanes true false false false true)" "$(paths website/README.md src/app/index.tsx)"
 expect "mixed" "$(lanes true true false)" "$(paths repeater/server/src/lib.rs package.json)"
 
 # Against a real history: the merge base decides, and an unknown base runs everything.
@@ -67,8 +69,8 @@ main="$(git -C "$work" rev-parse HEAD)"
 run() { (cd "$work" && bash "$script" "$@" 2>/dev/null); }
 expect "branch diffs from the merge base" "$(lanes false true false)" "$(run "$main" topic)"
 expect "push diffs from before" "$(lanes true false false)" "$(run "$base" "$main")"
-expect "new branch" "$(lanes true true true)" "$(run 0000000000000000000000000000000000000000 topic)"
-expect "empty base" "$(lanes true true true)" "$(run '' topic)"
-expect "unknown base" "$(lanes true true true)" "$(run 1234567890abcdef1234567890abcdef12345678 topic)"
+expect "new branch" "$(lanes true true true true true)" "$(run 0000000000000000000000000000000000000000 topic)"
+expect "empty base" "$(lanes true true true true true)" "$(run '' topic)"
+expect "unknown base" "$(lanes true true true true true)" "$(run 1234567890abcdef1234567890abcdef12345678 topic)"
 
 echo "CI lane selection resolved every scenario."

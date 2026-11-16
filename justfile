@@ -12,6 +12,7 @@ default:
 mod server 'repeater/server'
 mod windows 'repeater/windows'
 mod linux 'repeater/linux'
+mod website 'website'
 
 # --- Setup -------------------------------------------------------------------
 

@@ -5,8 +5,8 @@ use std::time::{Duration, Instant};
 
 use anyhow::{bail, Result};
 use streetcryptid_repeater_host::{
-    claim_directory, identity, init_telemetry, message, run_pulse, snapshot, start, Command,
-    HostInfo, PulseInfo, Settings, MAX_COMMAND_LINE, SERVICE_MARKER,
+    claim_directory, identity, init_telemetry, message, read_name, run_pulse, snapshot, start,
+    write_name, Action, Command, HostInfo, PulseInfo, Settings, MAX_COMMAND_LINE, SERVICE_MARKER,
 };
 use trail_stash::config::{DEFAULT_PEER_SYNC_INTERVAL_MIN, DEFAULT_PRUNE_INTERVAL_MIN};
 
@@ -147,7 +147,7 @@ async fn serve(args: Args, secret: iroh::SecretKey, settings: Arc<Settings>) -> 
             let Ok(command) = serde_json::from_slice::<Command>(&line) else {
                 break;
             };
-            if command.settings().is_err() || commands.try_send(command).is_err() {
+            if command.action().is_err() || commands.try_send(command).is_err() {
                 break;
             }
         }
@@ -159,6 +159,9 @@ async fn serve(args: Args, secret: iroh::SecretKey, settings: Arc<Settings>) -> 
         result = start(&dir, secret) => result?,
         _ = stopped.recv() => return Ok(()),
     };
+    if let Some(repeater) = node.repeater() {
+        repeater.set_name(read_name(&dir).as_deref());
+    }
     let power = power::KeepAwake::spawn(settings.keep_awake_flag());
     // Spans, not events: Loki keeps an event's message and drops its fields.
     drop(tracing::info_span!(
@@ -199,8 +202,19 @@ async fn serve(args: Args, secret: iroh::SecretKey, settings: Arc<Settings>) -> 
         let message = tokio::select! {
             _ = stopped.recv() => break,
             Some(command) = requested.recv() => {
-                let ok = match command.settings() {
-                    Ok(next) => settings.set(next).is_ok(),
+                let ok = match command.action() {
+                    Ok(Action::Settings(next)) => settings.set(next).is_ok(),
+                    Ok(Action::Name(name)) => match (write_name(&dir, Some(&name)), node.repeater()) {
+                        (Ok(kept), Some(repeater)) => {
+                            repeater.set_name(kept.as_deref());
+                            true
+                        }
+                        _ => false,
+                    },
+                    Ok(Action::Release) => match node.repeater() {
+                        Some(repeater) => repeater.release().await.is_ok(),
+                        None => false,
+                    },
                     Err(_) => false,
                 };
                 // Command replies must not be silently dropped like decorative arrival events.
