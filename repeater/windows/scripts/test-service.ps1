@@ -105,8 +105,15 @@ try {
         throw "The updater is $($updater.StartMode) as $($updater.StartName)."
     }
     $sddl = (& sc.exe sdshow StreetCryptidRepeaterUpdate | Where-Object { $_ }) -join ''
-    if ($sddl -notmatch [regex]::Escape(";;;$sid)")) { throw "The owner may not start the updater: $sddl" }
-    if ($sddl -match ';;;(IU|AU|BU|WD)\)') { throw "The updater is startable beyond its owner: $sddl" }
+    # Read the DACL as SIDs, not as SDDL text: sc.exe prints well-known accounts as aliases (the
+    # runner's built-in Administrator is `LA`, not its S-1-5-21-…-500), and the SACL's audit ACE
+    # for Everyone (`WD`) grants nothing.
+    $startable = [System.Security.AccessControl.RawSecurityDescriptor]::new($sddl).DiscretionaryAcl |
+        Where-Object { $_.AceQualifier -eq 'AccessAllowed' -and ($_.AccessMask -band 0x10) } | # SERVICE_START
+        ForEach-Object { $_.SecurityIdentifier.Value }
+    if ($startable -notcontains $sid) { throw "The owner may not start the updater: $sddl" }
+    $broad = @('S-1-5-4', 'S-1-5-11', 'S-1-5-32-545', 'S-1-1-0') # IU, AU, BU, WD
+    if ($startable | Where-Object { $broad -contains $_ }) { throw "The updater is startable beyond its owner: $sddl" }
     $before = (Get-Service StreetCryptidRepeater).Status
     $code = Invoke-Updater '0.0.1'
     if ($code -ne 5) { throw "An older version was not refused as not newer (got $code)." }
