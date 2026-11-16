@@ -1353,3 +1353,51 @@ fn randomized_sessions_always_converge() {
         run_random_case(seed, 80);
     }
 }
+
+#[test]
+fn a_followers_introduction_sealed_before_it_could_wrap_for_the_leader_strands_nothing() {
+    // The 2026-11 field sequence. Both phones introduce themselves at ACKNOWLEDGE, and the
+    // follower usually seals before the leader's introduction has reached it — so its envelope
+    // goes out for the friends it already has (here C) and drops the leader as `no_sending_chain`.
+    // The leader reads that wrap-less envelope as an ordinary miss. Nothing about it may cost the
+    // pair: once the follower opens the leader's introduction, its next envelope must open.
+    let now = T0;
+    let (mut leader, mut follower) = two();
+    let mut c = Party::new("c", 0x33);
+    pair_any(&follower, &c, now);
+    let (l, f) = if follower.id < c.id {
+        (&mut follower, &mut c)
+    } else {
+        (&mut c, &mut follower)
+    };
+    let first = l.send(&[f.id], 0, now).unwrap();
+    f.open(&first, now).unwrap();
+
+    pair(&leader, &follower, now);
+    let intro_f = follower
+        .send(&[leader.id, c.id], 0, now)
+        .expect("C still gets a wrap");
+    let intro_l = leader.send(&[follower.id], 0, now).unwrap();
+    // Re-read on every sync, as the durable slot is.
+    for _ in 0..3 {
+        assert!(
+            leader.open(&intro_f, now).is_err(),
+            "nothing in it for the leader"
+        );
+    }
+    leader.pass(&[follower.id], &[], &controls_of(&follower, now), now);
+
+    let later = now + 1000;
+    follower.open(&intro_l, later).unwrap();
+    follower.pass(&[leader.id, c.id], &[&intro_l], &none(), later);
+
+    let next = later + 300_000;
+    let wrapped = follower
+        .send(&[leader.id, c.id], 0, next)
+        .expect("the follower can wrap for the leader now");
+    leader.pass(&[follower.id], &[], &controls_of(&follower, next), next);
+    leader
+        .open(&wrapped, next)
+        .expect("the leader opens the follower's first wrapped envelope");
+    assert_talking(&mut leader, &mut follower, next);
+}

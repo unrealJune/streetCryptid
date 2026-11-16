@@ -7,6 +7,7 @@ import type {
   BleCapabilities,
   BlePeer,
   BumpResolution,
+  NativeRatchetEvent,
   PairEvent,
   PairInviteWithToken,
   PairResult,
@@ -87,6 +88,10 @@ export class FakeNativeModule {
     pairingReady: false,
   };
   pairResults = new Map<string, PairResult>();
+  /** What `readLatest` returns: the envelopes the replica holds that opened. */
+  latest: NativeRatchetEvent[] = [];
+  /** Who each seal left out, as `<endpoint>:<reason>`; `null` until something is sealed. */
+  droppedPeers: string[] | null = null;
   ratchets = new Map<string, string>();
   profiles = new Map<string, ProfileView>();
   bumpResolution: BumpResolution = {
@@ -214,7 +219,19 @@ export class FakeNativeModule {
   }
   async syncLatest() {}
   async readLatest() {
-    return [];
+    return this.latest;
+  }
+  async lastSealReport() {
+    if (this.droppedPeers === null) return null;
+    return {
+      at: 0,
+      recipients: 1,
+      dropped: this.droppedPeers.length,
+      lapsed: 0,
+      noSession: 0,
+      other: this.droppedPeers.length,
+      droppedPeers: this.droppedPeers,
+    };
   }
   async pruneTrail() {}
   async transportDiagnostics() {

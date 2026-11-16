@@ -540,6 +540,14 @@ Conventions when changing that code:
   and it deliberately does not advance `last_published_slot` (the cadence is what the stash reads),
   does not write `last_state` (pairing says nothing about having parked), and is not battery-
   suspended (one envelope, at a moment the user chose).
+  **The responder's introduction usually cannot reach the friend it is for.** The ratchet's
+  responder (the higher endpoint id) has no sending chain until it opens the initiator's first
+  envelope, and both phones introduce at ACKNOWLEDGE: in 7 of 10 pairings from 2026-11-08 to 11-12
+  the responder's `docs.write` dropped the new friend as `no_sending_chain`, and the initiator
+  waited for its next scheduled publish (18 s to 16 min there). So the app reads the seal report
+  after introducing, and the first envelope it then opens from that friend triggers one more
+  introduction (`pair.reintroduce`). Do not "fix" this by giving the responder a sending chain at
+  bootstrap: `ratchet.rs` keeps the published asymmetric schedule on purpose.
 - **The PAIRING wire is the opposite, and the rule above does not carry over to it.** `PairMsg` is
   ed25519-signed, and `pair_signing_bytes` signs a re-encode of the DECODED struct — so a peer that
   does not know a newly appended field drops it, reconstructs different bytes, and fails the
