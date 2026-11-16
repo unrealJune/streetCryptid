@@ -35,6 +35,10 @@ final class LocationRuntimeReporter {
     var candidatePending: Bool
     var anchorArmed: Bool
     var fenceRegistered: Bool
+    /// `BackgroundLocationRuntime.MovingFenceState`, its age and its registered radius.
+    var movingFence: String? = nil
+    var movingFenceAgeMs: UInt64? = nil
+    var movingFenceRadiusM: Double? = nil
   }
 
   static let pulseInterval: TimeInterval = 5 * 60
@@ -204,7 +208,10 @@ final class LocationRuntimeReporter {
       candidatePending: snap?.candidatePending ?? false,
       anchorArmed: snap?.anchorArmed ?? false,
       fenceRegistered: snap?.fenceRegistered ?? false,
-      detail: detail)
+      detail: detail,
+      movingFence: snap?.movingFence,
+      movingFenceAgeMs: snap?.movingFenceAgeMs,
+      movingFenceRadiusM: snap?.movingFenceRadiusM)
     // `workStarted`/`workFinished` are deliberately NOT reset: they are process-lifetime totals,
     // so their difference is the work in flight right now, whichever pulse it straddles.
     if reset {

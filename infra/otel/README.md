@@ -540,15 +540,16 @@ invisible.
 `location.runtime` (`streetcryptid-core`, so it ships from a JS-free process) is that state machine
 reporting itself, from `LocationRuntimeReporter.swift` through `location_runtime.rs`:
 
-| `location.event`                                                           | Fires                                                                                                                                                                                                                                                                                                                  |
-| -------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `pulse`                                                                    | every 5 min from a background timer while the process runs — NOT from the delivery path                                                                                                                                                                                                                                |
-| `main_stalled`                                                             | the pulse's main-thread probe went unanswered for 10 s (once per stall)                                                                                                                                                                                                                                                |
-| `started`                                                                  | `start()` armed the runtime; `location.reason` is the wake reason                                                                                                                                                                                                                                                      |
-| `transition`                                                               | `moving` ⇄ `stopped`; `location.reason` is the stop evidence or the wake reason                                                                                                                                                                                                                                        |
-| `visit` / `fence_exit`                                                     | a `CLVisit` (`arrival` / `departure`) or a stop-anchor exit. A visit's `location.detail` is what it did: `parked`, `pending`, `stale`, `already-parked`, `unparked`, `ignored`                                                                                                                                         |
-| `paused` / `resumed` / `location_error` / `fence_failed` / `authorization` | the Core Location callbacks that used to reach only `NSLog`                                                                                                                                                                                                                                                            |
-| `publish_assertion`                                                        | native publish work outlived its background-task assertion: `reason = expired` (iOS ran the expiration handler mid-seal or mid-push) or `stranded` (a later process found assertions an earlier one never ended — killed holding them). `location.detail` has the lane and `held_ms`. Also counted in `wake.publish_*` |
+| `location.event`                                                           | Fires                                                                                                                                                                                                                                                                                                                          |
+| -------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `pulse`                                                                    | every 5 min from a background timer while the process runs — NOT from the delivery path                                                                                                                                                                                                                                        |
+| `main_stalled`                                                             | the pulse's main-thread probe went unanswered for 10 s (once per stall)                                                                                                                                                                                                                                                        |
+| `started`                                                                  | `start()` armed the runtime; `location.reason` is the wake reason                                                                                                                                                                                                                                                              |
+| `transition`                                                               | `moving` ⇄ `stopped`; `location.reason` is the stop evidence or the wake reason                                                                                                                                                                                                                                                |
+| `visit` / `fence_exit`                                                     | a `CLVisit` (`arrival` / `departure`) or a stop-anchor exit. A visit's `location.detail` is what it did: `parked`, `pending`, `stale`, `already-parked`, `unparked`, `ignored`                                                                                                                                                 |
+| `paused` / `resumed` / `location_error` / `fence_failed` / `authorization` | the Core Location callbacks that used to reach only `NSLog`                                                                                                                                                                                                                                                                    |
+| `publish_assertion`                                                        | native publish work outlived its background-task assertion: `reason = expired` (iOS ran the expiration handler mid-seal or mid-push) or `stranded` (a later process found assertions an earlier one never ended — killed holding them). `location.detail` has the lane and `held_ms`. Also counted in `wake.publish_*`         |
+| `fence_rearm`                                                              | after a moving-fence crossing no fresh fix redrew the fence in time, so it was drawn from the best position at hand: `reason = deadline` (20 s) or `expired` (iOS ended the background time first). `location.detail` has `radius_m` and `fix_age_ms`. Rare; a steady stream of them is GPS that will not answer while driving |
 
 Read a pulse like this:
 
@@ -562,6 +563,16 @@ Read a pulse like this:
 - `location.redeliveries` close to `location.deliveries`: Core Location is handing back a position
   it already gave us. Those are no longer ingested (they went out `live` with a stale position on
   2026-10-02); a non-zero `fix_age_at_delivery_ms` on a fresh delivery says the same thing.
+- `location.moving_fence` (iOS, every event): `armed` (centred on a fresh fix), `adopted` (taken
+  back from an earlier process), `crossed` (the phone left it and nothing has redrawn it yet),
+  `fallback` (redrawn without a fresh fix — see `fence_rearm`) or `none`.
+  `location.moving_fence_age_ms` is how long it has been so and `location.moving_fence_radius_m`
+  what it was registered with (150 m plus ten seconds of travel at the fix's speed, up to 1 km).
+  **The last event before a silence is the one to read.** `moving` + `crossed` there is a process
+  suspended outside the only fence that could wake it; until 2026-11-16 that was routine on a
+  drive (a quarter of crossings came within a second of the fix that drew the fence), and it is
+  what preceded seventeen hours of silence from `14befa639f` that day. A crossing now holds
+  background time until the fence is redrawn, so `crossed` should never be the last word.
 
 **Android emits it too, since 2026-10-13** (`LocationRuntimeReporter.kt`, `os.type = android`),
 from the foreground service: `started` (`location.reason = service`) when the service is created,
@@ -586,6 +597,9 @@ service re-applies it on `onCreate`. So for an Android phone, pulses continuing 
 
 # Moving and deaf: pulses that saw no delivery at all.
 { name = "location.runtime" && span.location.event = "pulse" && span.location.state = "moving" && span.location.deliveries = 0 }
+
+# Processes whose last word was a crossing with no fence redrawn (should be none since 2026-11-16).
+{ name = "location.runtime" && span.location.state = "moving" && span.location.moving_fence = "crossed" }
 
 # Android phones carried by the service alone (no JS wired).
 { name = "location.runtime" && resource.os.type = "android" && span.location.node_owner = "native" }
