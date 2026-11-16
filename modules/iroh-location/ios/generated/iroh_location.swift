@@ -5413,6 +5413,22 @@ public struct LocationRuntimeEvent: Equatable, Hashable {
      * An OS error description, for the error kinds only.
      */
     public var detail: String?
+    /**
+     * What the moving fence is (iOS): `none` (no region held), `armed` (centred on a fresh fix the
+     * phone is believed inside), `adopted` (a region an earlier process registered), `crossed`
+     * (the phone left it and no fix has redrawn it yet) or `fallback` (redrawn without a fresh
+     * fix). `crossed` at the end of a process's life is a phone outside the only fence that could
+     * wake it: on 2026-11-16 that shape preceded 17 h of silence from a driving iPhone.
+     */
+    public var movingFence: String?
+    /**
+     * How long the moving fence has been in that state.
+     */
+    public var movingFenceAgeMs: UInt64?
+    /**
+     * The radius the moving fence was registered with.
+     */
+    public var movingFenceRadiusM: Double?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
@@ -5459,7 +5475,20 @@ public struct LocationRuntimeEvent: Equatable, Hashable {
          */nodeOwner: String, candidatePending: Bool, anchorArmed: Bool, fenceRegistered: Bool, 
         /**
          * An OS error description, for the error kinds only.
-         */detail: String?) {
+         */detail: String?, 
+        /**
+         * What the moving fence is (iOS): `none` (no region held), `armed` (centred on a fresh fix the
+         * phone is believed inside), `adopted` (a region an earlier process registered), `crossed`
+         * (the phone left it and no fix has redrawn it yet) or `fallback` (redrawn without a fresh
+         * fix). `crossed` at the end of a process's life is a phone outside the only fence that could
+         * wake it: on 2026-11-16 that shape preceded 17 h of silence from a driving iPhone.
+         */movingFence: String? = nil, 
+        /**
+         * How long the moving fence has been in that state.
+         */movingFenceAgeMs: UInt64? = nil, 
+        /**
+         * The radius the moving fence was registered with.
+         */movingFenceRadiusM: Double? = nil) {
         self.kind = kind
         self.state = state
         self.reason = reason
@@ -5480,6 +5509,9 @@ public struct LocationRuntimeEvent: Equatable, Hashable {
         self.anchorArmed = anchorArmed
         self.fenceRegistered = fenceRegistered
         self.detail = detail
+        self.movingFence = movingFence
+        self.movingFenceAgeMs = movingFenceAgeMs
+        self.movingFenceRadiusM = movingFenceRadiusM
     }
 
     
@@ -5517,7 +5549,10 @@ public struct FfiConverterTypeLocationRuntimeEvent: FfiConverterRustBuffer {
                 candidatePending: FfiConverterBool.read(from: &buf), 
                 anchorArmed: FfiConverterBool.read(from: &buf), 
                 fenceRegistered: FfiConverterBool.read(from: &buf), 
-                detail: FfiConverterOptionString.read(from: &buf)
+                detail: FfiConverterOptionString.read(from: &buf), 
+                movingFence: FfiConverterOptionString.read(from: &buf), 
+                movingFenceAgeMs: FfiConverterOptionUInt64.read(from: &buf), 
+                movingFenceRadiusM: FfiConverterOptionDouble.read(from: &buf)
         )
     }
 
@@ -5542,6 +5577,9 @@ public struct FfiConverterTypeLocationRuntimeEvent: FfiConverterRustBuffer {
         FfiConverterBool.write(value.anchorArmed, into: &buf)
         FfiConverterBool.write(value.fenceRegistered, into: &buf)
         FfiConverterOptionString.write(value.detail, into: &buf)
+        FfiConverterOptionString.write(value.movingFence, into: &buf)
+        FfiConverterOptionUInt64.write(value.movingFenceAgeMs, into: &buf)
+        FfiConverterOptionDouble.write(value.movingFenceRadiusM, into: &buf)
     }
 }
 
@@ -8116,7 +8154,7 @@ public enum LocationRuntimeKind: Equatable, Hashable {
      */
     case visit
     /**
-     * The stop-anchor fence reported an exit.
+     * A fence reported an exit: the stop anchor's, or (`reason=moving_fence`) the moving fence's.
      */
     case fenceExit
     /**
@@ -8146,6 +8184,14 @@ public enum LocationRuntimeKind: Equatable, Hashable {
      * lane and how long it had been held. The durable `wake.publish_*` counters say the same.
      */
     case publishAssertion
+    /**
+     * The moving fence was redrawn without a fresh fix, because the wait for one after a crossing
+     * ran out. `reason` is `deadline` (our own bound) or `expired` (iOS ended the background time
+     * first); `detail` carries the radius and how old the position it was centred on was. Rare by
+     * design: every ordinary crossing is answered by the next fix, and this is the backstop that
+     * keeps a suspended process from being left outside the only fence that could wake it.
+     */
+    case fenceRearm
 
 
 
@@ -8190,6 +8236,8 @@ public struct FfiConverterTypeLocationRuntimeKind: FfiConverterRustBuffer {
         case 11: return .authorization
         
         case 12: return .publishAssertion
+        
+        case 13: return .fenceRearm
         
         default: throw UniffiInternalError.unexpectedEnumCase
         }
@@ -8245,6 +8293,10 @@ public struct FfiConverterTypeLocationRuntimeKind: FfiConverterRustBuffer {
         
         case .publishAssertion:
             writeInt(&buf, Int32(12))
+        
+        
+        case .fenceRearm:
+            writeInt(&buf, Int32(13))
         
         }
     }
