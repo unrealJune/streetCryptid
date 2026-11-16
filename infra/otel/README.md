@@ -488,9 +488,11 @@ location lane the docs-only transport removed; series before that date carry it.
 
 Attributes, all spanmetrics dimensions (so they keep for 90 days, not 7):
 
-- `contact.role` — `friend` | `stash` | `other`. Friends come from the native recipient store
-  (sharing + watching); the stash is the first delivery ticket when the stash is opted into. A
-  friend is checked first, so it can never be filed as the stash.
+- `contact.role` — `friend` | `stash` | `repeater` | `other`. Friends come from the native
+  recipient store (sharing + watching); the stash is the first delivery ticket when the stash is
+  opted into; a repeater is any machine in a roster this phone knows (`repeaters.bin`, including
+  rosters learned from friends' cards). A friend is checked first, then the stash, so neither can
+  be filed as anything else.
 - `contact.from_author` (receive only) — the peer handed over **its own** envelope. `friend` +
   `from_author=true` is the strongest statement there is: the author's phone was on the other end.
 - `contact.path` — `ble` | `lan` | `direct` | `relay` | `unknown`, the closest open path to that
@@ -517,6 +519,54 @@ sum by (service_instance_id, sc_peer) (
 # How friends' fixes reach us: the author directly, another friend, or the stash.
 sum by (contact_role, contact_from_author) (
   rate(traces_span_metrics_calls_total{span_name="peer.contact", contact_dir="recv"}[1h])) * 3600
+```
+
+**Production had none of these dimensions until 2026-11-08.** buttercup's
+`helmrelease-public.yaml` carried only the first six, so every panel above read empty there while
+working against this file's dev collector. Keep the two lists in step.
+
+## Where did this fix come from? (`fix.provenance`)
+
+`peer.contact` counts exchanges per peer. `fix.provenance` (Rust, `contact.rs`) counts **fixes**:
+one span for every friend's fix that reached this phone, at the moment it arrived, saying who
+handed it over. It fires from the replica watch beside the receive-side `peer.contact` (one per
+author a peer delivered), whichever pass carried it — a live broadcast, a pull, or a sync a peer
+opened to us — so JS-free background pulls are counted too, and none twice.
+
+| attribute                   | values                                                                                         |
+| --------------------------- | ---------------------------------------------------------------------------------------------- |
+| `fix.source`                | `author` (their own phone), `friend` (another friend relayed it), `stash`, `repeater`, `other` |
+| `fix.path`                  | `ble` \| `lan` \| `direct` \| `relay` \| `unknown`, as on `peer.contact`                       |
+| `fix.repeater_owner`        | short id of the roster owner, when `fix.source = repeater` (span attribute, not a metric)      |
+| `sc.author` / `sc.via_peer` | whose fix, and who handed it over                                                              |
+
+`fix.source` and `fix.path` are spanmetrics dimensions. A slot that was already in the
+replica produces nothing: this is delivery, never presence.
+
+```promql
+# Where this phone's friends' fixes come from, per hour.
+sum by (fix_source) (
+  rate(traces_span_metrics_calls_total{span_name="fix.provenance"}[1h])) * 3600
+```
+
+```traceql
+# Fixes a repeater delivered, and whose repeater it was.
+{ name = "fix.provenance" && span.fix.source = "repeater" } | select(span.fix.repeater_owner, span.sc.author)
+```
+
+**Repeaters from the phone's side** (`docs/social/REPEATERS.md` §4.4, §5). `repeater.grant`
+(Rust, every start) carries `delivered` (repeaters that took a roster op they were owed),
+`refreshed` (rosters fetched), `granted` and `failed`. `repeater.receipt` follows a push that
+reached repeaters alone (no stash, no awake friend): it asks them `Have` for up to 8 s, and
+`confirmed=true` with `sc.peer` is the only evidence such a phone has that a fix landed anywhere;
+it is what turns the flush into `Pushed` rather than `Scheduled`. `device.health` reports
+`repeaters.enrolled` (rosters carrying this phone), `repeaters.carriers` (machines across them)
+and `repeaters.last_contact_age_ms`, which is per process and absent until a repeater answers
+after a relaunch.
+
+```traceql
+# Phones relying on repeaters alone whose pushes no repeater confirmed.
+{ name = "repeater.receipt" && span.confirmed = false } | select(span.carriers, span.sc.author)
 ```
 
 ```traceql
@@ -611,12 +661,27 @@ answer. Any `peer.contact` is an answer.
 | `network_change`         | the node called `Endpoint::network_change()` on itself — on entry, then every 30 min while it lasts                            |
 | `rebuild`                | the node was rebuilt inside an episode (`trigger` = `heal`, native with no app; `restart`, the app's `rebindNode('isolated')`) |
 | `recovered`              | someone answered: `isolated_ms`, the steps taken, `last_step` and `since_last_step_ms`                                         |
+| `docs_dead`              | this node's iroh-docs engine is gone (`error`, `rebuild_due`, `since_rebuild_ms`); once per node, and a rebuild is due at once |
 
 A rebuild is due 10 min after a network change that did not help, at most once an hour (any rebuild,
 a settings change included, starts the cooldown). With no app holding the node the core heals it
 itself (`node.host.heal`); a mounted app reads `isolationStatus().rebuildDue` on its heartbeat and
 calls `rebindNode('isolated')`, because only it can rewire its subscriptions. `device.health`
 carries the state as `isolation.*`.
+
+**`docs_dead` is not isolation, and peers answering does not end it.** iroh-docs never restarts its
+engine: once the live actor stops, its teardown shuts the replica store down too, and every docs
+call on that node fails with `sending to iroh_docs actor failed` — no push, no pull, no profile
+reseal — while everything else about the node looks fine. On 2026-11-15 one panicking accept task
+(since patched, `third_party/iroh-docs`) did that to a Pixel 10 for 17 hours. The node now probes
+its replica store on every drain and pull, and a dead engine makes a rebuild due at once, through
+the same paths (`node.host.heal` with no app, `rebindNode('isolated')` with one), floored at 10 min
+since the last rebuild so an engine that dies again cannot loop. `session.recover` reports
+`error = docs engine gone` meanwhile.
+
+```traceql
+{ name = "node.isolation" && span.event = "docs_dead" } | select(resource.service.instance.id, span.error, span.rebuild_due)
+```
 
 **Read `recovered{last_step}` before tuning anything.** `none` means it came back on its own (as it
 did twice on 2026-10-22), `network_change` / `rebuild` with a small `since_last_step_ms` means that

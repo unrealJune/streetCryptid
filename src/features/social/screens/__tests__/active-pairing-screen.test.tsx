@@ -32,6 +32,12 @@ jest.mock('../../components/pairing-figure-view', () => ({
   PairingFigureChoices: () => null,
 }));
 jest.mock('../../components/persona-reveal', () => ({ PersonaReveal: () => null }));
+const mockRepeaterOffer: { apply: jest.Mock } = { apply: jest.fn() };
+const mockRepeaterCards = jest.fn((_props: { friendLabel: string | null }) => null);
+jest.mock('@/features/repeaters/components/pairing-repeater-offer', () => ({
+  usePairingRepeaterOffer: () => mockRepeaterOffer,
+  PairingRepeaterCards: (props: { friendLabel: string | null }) => mockRepeaterCards(props),
+}));
 jest.mock('@/features/social/net/bluetooth-settings', () => ({ openBluetoothSettings: jest.fn() }));
 jest.mock('@/features/social/net/location-sharing', () => ({
   TERMINAL_PAIR_STATES: ['complete', 'rejected', 'failed'],
@@ -136,6 +142,7 @@ describe('ActivePairingScreen', () => {
     mockSharing.createPairInvite.mockResolvedValue(LINK);
     mockSharing.acknowledgeDiscoveredFriend.mockResolvedValue(undefined);
     mockSharing.rejectDiscoveredFriend.mockResolvedValue(undefined);
+    mockRepeaterCards.mockClear();
     jest
       .spyOn(Share, 'share')
       .mockResolvedValue({ action: Share.sharedAction, activityType: undefined });
@@ -250,6 +257,27 @@ describe('ActivePairingScreen', () => {
     expect(mockSharing.cancelPair).not.toHaveBeenCalled();
     expect(mockSharing.standDownPairing).toHaveBeenCalledWith([]);
     expect(mockRouter.back).toHaveBeenCalledTimes(1);
+  });
+
+  /**
+   * The repeater choices are made before ACKNOWLEDGE — mine before the shake, theirs on the
+   * reveal — so ACKNOWLEDGE applies them and leaves. There is no question after it any more.
+   */
+  it('applies the repeater choices on acknowledge and leaves at once', async () => {
+    await renderDiscovery();
+    expect(mockRepeaterCards).toHaveBeenLastCalledWith(
+      expect.objectContaining({ friendLabel: expect.any(String) })
+    );
+    await act(async () => action('acknowledge').props.onPress());
+    expect(mockSharing.acknowledgeDiscoveredFriend).toHaveBeenCalledTimes(1);
+    expect(mockRepeaterOffer.apply).toHaveBeenCalledTimes(1);
+    expect(mockRouter.back).toHaveBeenCalledTimes(1);
+  });
+
+  it('applies nothing on reject', async () => {
+    await renderDiscovery();
+    await act(async () => action('reject').props.onPress());
+    expect(mockRepeaterOffer.apply).not.toHaveBeenCalled();
   });
 
   it('treats closing an unconfirmed discovery as rejection, not silent acceptance', async () => {

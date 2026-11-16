@@ -33,6 +33,10 @@ import {
   type PairingRouteIntent,
 } from '@/features/social/core/active-pairing-state';
 import { patternHaptic, successHaptic, tapHaptic, warningHaptic } from '@/features/haptics/haptics';
+import {
+  PairingRepeaterCards,
+  usePairingRepeaterOffer,
+} from '@/features/repeaters/components/pairing-repeater-offer';
 import { PERSONA_RESOLVE } from '@/features/social/core/pairing-experience';
 import { pairingSearchProgress, secondsRemaining } from '@/features/social/core/pairing-countdown';
 import { useArmedBump } from '@/features/social/hooks/use-armed-bump';
@@ -272,7 +276,11 @@ export default function ActivePairingScreen() {
     void patternHaptic(PERSONA_RESOLVE);
   }, []);
   const friend = pairing?.discoveredFriend ?? null;
-  const signal = friend ? resolveSignalColor(friend.color, chrome.green) : chrome.green;
+  const shownFriend = friend;
+  const signal = shownFriend ? resolveSignalColor(shownFriend.color, chrome.green) : chrome.green;
+  // The repeater choices at pairing (REPEATERS.md §4.4), both ways: what I offer, chosen before
+  // the shake, and what the friend offered me, answered on the reveal. ACKNOWLEDGE applies both.
+  const repeaterOffer = usePairingRepeaterOffer(friend);
 
   const stage: ActivePairingStage = deriveActivePairingStage({
     servicePhase: service.phase,
@@ -746,13 +754,17 @@ export default function ActivePairingScreen() {
    * had completed. An iPhone did exactly that on 2026-10-05 (`pool.friend_added` at 22:18:17,
    * then 300 ms `pairing.poll`s on a screen the user had acknowledged). Replace onto the map.
    */
-  const close = useCallback((): void => {
+  const stopPairing = useCallback((): void => {
     routeActive.current = false;
     setLeaving(true);
     void standDown();
+  }, [standDown]);
+
+  const close = useCallback((): void => {
+    stopPairing();
     if (router.canGoBack()) router.back();
     else router.replace('/');
-  }, [router, standDown]);
+  }, [router, stopPairing]);
 
   const decideFriend = useCallback(
     async (accept: boolean): Promise<void> => {
@@ -764,8 +776,11 @@ export default function ActivePairingScreen() {
       setDiscoveryError(null);
       if (!accept) setRejectedDiscovery(key);
       try {
-        if (accept) await acknowledgeDiscoveredFriend();
-        else await rejectDiscoveredFriend();
+        if (accept) {
+          await acknowledgeDiscoveredFriend();
+          // Never awaited: the friend is kept whatever a repeater does.
+          repeaterOffer.apply();
+        } else await rejectDiscoveredFriend();
         close();
       } catch (error: unknown) {
         setDiscoveryError(
@@ -776,7 +791,14 @@ export default function ActivePairingScreen() {
         setWorking(null);
       }
     },
-    [acknowledgeDiscoveredFriend, close, friend, rejectedDiscovery, rejectDiscoveredFriend]
+    [
+      acknowledgeDiscoveredFriend,
+      close,
+      friend,
+      rejectedDiscovery,
+      rejectDiscoveredFriend,
+      repeaterOffer,
+    ]
   );
 
   useEffect(() => {
@@ -800,14 +822,14 @@ export default function ActivePairingScreen() {
   }, [close, decideFriend, friend, scanning, verification, verify]);
 
   const showPasteRow =
-    !friend &&
+    !shownFriend &&
     !verification &&
     !activeSession &&
     !['link-live', 'link-creating', 'redeeming', 'pair-failed'].includes(stage);
 
   // One key per distinct thing the stage can show. Changing it crossfades the stage; leaving it
   // alone (a countdown tick, a rising peer count) lets the existing content update in place.
-  const stageKey = friend
+  const stageKey = shownFriend
     ? 'discovered'
     : verification
       ? `verify:${verify.mode}`
@@ -833,6 +855,7 @@ export default function ActivePairingScreen() {
           accessibilityRole="button"
           disabled={working === 'accept-friend' || working === 'reject-friend'}
           onPress={() => {
+            // Once acknowledged, leaving is NOT NOW to the repeater question, never a rejection.
             if (friend) void decideFriend(false);
             else close();
           }}
@@ -851,13 +874,13 @@ export default function ActivePairingScreen() {
             exiting={reducedMotion ? undefined : FadeOut.duration(SWAP_OUT_MS)}
             style={styles.stageContent}
           >
-            {friend ? (
+            {shownFriend ? (
               <PersonaReveal
                 // Keyed by friend so a second pairing gets a fresh reveal rather than a component
                 // trying to unwind the last one's state.
-                key={friend.endpointId}
+                key={shownFriend.endpointId}
                 accent={signal}
-                friend={friend}
+                friend={shownFriend}
                 neutral={chrome.steel}
                 onResolved={personaResolved}
               />
@@ -908,7 +931,7 @@ export default function ActivePairingScreen() {
             },
           ]}
         >
-          {!friend ? (
+          {!shownFriend ? (
             <View style={styles.statusRow}>
               <Animated.View
                 key={presentation.status}
@@ -1029,6 +1052,15 @@ export default function ActivePairingScreen() {
                 <Text style={[styles.buttonLabel, { color: signal }]}>PAIR</Text>
               </PressableAction>
             </View>
+          ) : null}
+
+          {friend || !verification ? (
+            <PairingRepeaterCards
+              offer={repeaterOffer}
+              chrome={chrome}
+              friendLabel={friend?.handle ?? null}
+              disabled={Boolean(working)}
+            />
           ) : null}
 
           {discoveryError ? (

@@ -8,8 +8,8 @@ use anyhow::{bail, Result};
 use iroh::SecretKey;
 use serde::Deserialize;
 use streetcryptid_repeater_host::{
-    claim_directory, identity, snapshot, start, HostInfo, HostSettings, Settings, PROTOCOL,
-    SERVICE_MARKER,
+    claim_directory, identity, read_name, snapshot, start, write_name, HostInfo, HostSettings,
+    Settings, PROTOCOL, SERVICE_MARKER,
 };
 use trail_stash::config::{DEFAULT_PEER_SYNC_INTERVAL_MIN, DEFAULT_PRUNE_INTERVAL_MIN};
 
@@ -91,23 +91,45 @@ struct Command {
     protocol: u32,
     kind: String,
     request_id: String,
-    telemetry: bool,
-    keep_awake: bool,
+    telemetry: Option<bool>,
+    keep_awake: Option<bool>,
+    /// For `name`: the new name, or `""` to clear it.
+    name: Option<String>,
+}
+
+/// What the app may ask of the host: its settings, its name, or releasing the repeater from its
+/// roster (REPEATERS.md §4.1). Each is something only the person at this machine decides.
+#[derive(Debug, PartialEq)]
+enum Action {
+    Settings(HostSettings),
+    Name(String),
+    Release,
 }
 
 impl Command {
-    fn settings(&self) -> Result<HostSettings> {
-        if self.protocol != PROTOCOL
-            || self.kind != "settings"
-            || self.request_id.is_empty()
-            || self.request_id.len() > 64
-        {
+    fn action(&self) -> Result<Action> {
+        if self.protocol != PROTOCOL || self.request_id.is_empty() || self.request_id.len() > 64 {
             bail!("Invalid command");
         }
-        Ok(HostSettings {
-            telemetry: self.telemetry,
-            keep_awake: self.keep_awake,
-        })
+        match (
+            self.kind.as_str(),
+            self.telemetry,
+            self.keep_awake,
+            self.name.as_deref(),
+        ) {
+            ("settings", Some(telemetry), Some(keep_awake), None) => {
+                Ok(Action::Settings(HostSettings {
+                    telemetry,
+                    keep_awake,
+                }))
+            }
+            // Bounded here as well as by `repeater_name`: the line itself is at most 4 KiB.
+            ("name", None, None, Some(name)) if name.chars().count() <= 200 => {
+                Ok(Action::Name(name.to_string()))
+            }
+            ("release", None, None, None) => Ok(Action::Release),
+            _ => bail!("Invalid command"),
+        }
     }
 }
 
@@ -216,7 +238,7 @@ async fn serve(args: Args, secret: SecretKey, settings: Arc<Settings>) -> Result
             let Ok(command) = serde_json::from_slice::<Command>(&line) else {
                 break;
             };
-            if command.settings().is_err() || commands.try_send(command).is_err() {
+            if command.action().is_err() || commands.try_send(command).is_err() {
                 break;
             }
         }
@@ -228,6 +250,9 @@ async fn serve(args: Args, secret: SecretKey, settings: Arc<Settings>) -> Result
         result = start(&dir, secret) => result?,
         _ = stopped.recv() => return Ok(()),
     };
+    if let Some(repeater) = node.repeater() {
+        repeater.set_name(read_name(&dir).as_deref());
+    }
     let power = power::KeepAwake::spawn(settings.keep_awake_flag());
     // Spans, not events: Loki keeps an event's message and drops its fields.
     drop(tracing::info_span!(
@@ -258,8 +283,19 @@ async fn serve(args: Args, secret: SecretKey, settings: Arc<Settings>) -> Result
         let message = tokio::select! {
             _ = stopped.recv() => break,
             Some(command) = requested.recv() => {
-                let ok = match command.settings() {
-                    Ok(next) => settings.set(next).is_ok(),
+                let ok = match command.action() {
+                    Ok(Action::Settings(next)) => settings.set(next).is_ok(),
+                    Ok(Action::Name(name)) => match (write_name(&dir, Some(&name)), node.repeater()) {
+                        (Ok(kept), Some(repeater)) => {
+                            repeater.set_name(kept.as_deref());
+                            true
+                        }
+                        _ => false,
+                    },
+                    Ok(Action::Release) => match node.repeater() {
+                        Some(repeater) => repeater.release().await.is_ok(),
+                        None => false,
+                    },
                     Err(_) => false,
                 };
                 // Command replies must not be silently dropped like decorative arrival events.
@@ -466,21 +502,57 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            command.settings().unwrap(),
-            HostSettings {
+            command.action().unwrap(),
+            Action::Settings(HostSettings {
                 telemetry: true,
                 keep_awake: false
-            }
+            })
         );
         let old: Command = serde_json::from_str(
             r#"{"protocol":1,"kind":"settings","requestId":"one","telemetry":true,"keepAwake":false}"#,
         )
         .unwrap();
-        assert!(old.settings().is_err());
+        assert!(old.action().is_err());
         assert!(serde_json::from_str::<Command>(
             r#"{"protocol":2,"kind":"subscription","requestId":"one","member":"ab","receiving":false}"#,
         )
         .is_err());
+        // Settings without their values, or a release carrying some, are refused.
+        let partial: Command =
+            serde_json::from_str(r#"{"protocol":2,"kind":"settings","requestId":"one"}"#).unwrap();
+        assert!(partial.action().is_err());
+        let release: Command =
+            serde_json::from_str(r#"{"protocol":2,"kind":"release","requestId":"two"}"#).unwrap();
+        assert_eq!(release.action().unwrap(), Action::Release);
+        let odd: Command = serde_json::from_str(
+            r#"{"protocol":2,"kind":"release","requestId":"two","telemetry":true}"#,
+        )
+        .unwrap();
+        assert!(odd.action().is_err());
+    }
+
+    #[test]
+    fn name_commands_carry_a_name_and_nothing_else() {
+        let name: Command = serde_json::from_str(
+            r#"{"protocol":2,"kind":"name","requestId":"n","name":"Living room PC"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            name.action().unwrap(),
+            Action::Name("Living room PC".into())
+        );
+        let clear: Command =
+            serde_json::from_str(r#"{"protocol":2,"kind":"name","requestId":"n","name":""}"#)
+                .unwrap();
+        assert_eq!(clear.action().unwrap(), Action::Name(String::new()));
+        let bare: Command =
+            serde_json::from_str(r#"{"protocol":2,"kind":"name","requestId":"n"}"#).unwrap();
+        assert!(bare.action().is_err());
+        let mixed: Command = serde_json::from_str(
+            r#"{"protocol":2,"kind":"settings","requestId":"n","telemetry":true,"keepAwake":false,"name":"x"}"#,
+        )
+        .unwrap();
+        assert!(mixed.action().is_err());
     }
 
     struct PausedOutput {

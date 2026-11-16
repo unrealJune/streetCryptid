@@ -89,8 +89,12 @@ account (plus SYSTEM and the service) may open, and which refuses remote clients
 it the app checks that the process serving the pipe is the running service. The service forwards
 exactly one command to the host — settings — and drops a client that sends anything else.
 
-An app update does not replace the service's copy: when the versions differ the app offers
-**Update service**, which runs the installer again (administrator approval again). Turning the
+An app update does not replace the service's copy on its own, but the person sees one update:
+**Update** restarts the app into the new version with `--finish-update`, and that process runs the
+installer again as soon as the service answers (one administrator approval), on the same update
+page. A service whose version differs from the app's is shown as an update not yet finished, and
+the app never sends it a command it might not know (an older service drops the connection),
+offering to finish the update instead. Turning the
 service off in Settings moves the identity back. Uninstalling the app tries to do the same,
 best effort, within Velopack's 25-second budget; if the prompt is declined the service keeps
 running, and `StreetCryptid.Repeater.Service.exe uninstall --to "%LOCALAPPDATA%\streetCryptid\Repeater"`
@@ -177,15 +181,31 @@ metadata file). Never describe them as signed production releases or bypass Wind
 automatically. Because updates replace binaries on a machine that holds an identity key, signing
 is a gate for any release beyond our own preview group; the workflow refuses non-preview tags.
 
-Automatic updates download in the background and apply on restart; manual checks are available in
-Settings and the tray. Restart stops a per-user host before replacement; the service keeps running
-and is updated separately. Installation does not opt users into startup. Upgrade state lives
+Automatic updates download in the background every six hours. While the window is open the app
+waits behind its UPDATE button; once it is closed to the tray, it applies the update and restarts into
+the tray (`--background-update`). Manual checks are available in Settings and the tray. Restart stops
+a per-user host before replacement. Installation does not opt users into startup. Upgrade state lives
 outside the installation directory.
+
+The service's copy under Program Files follows the app with no administrator prompt.
+`install` registers a second service beside it, `StreetCryptidRepeaterUpdate`: the installed
+service executable's `update` verb, demand-start, LocalSystem, startable only by the owner (and
+administrators). The app that restarted into a new version starts it with that version; it refuses
+anything not newer than itself (`NotNewer`), downloads
+`windows-v<version>/StreetCryptid.Repeater.Service-<rid>.zip` from this repository's releases over
+HTTPS into an admin-only staging directory under Program Files, stops the service, swaps the files
+(renaming the running ones aside), and starts it again, putting the old files back if it will not
+start. Its exit code comes back through the SCM. It never reads from a directory the person can
+write, so a process in their session cannot hand SYSTEM a binary. A service installed before the
+updater existed, or an updater that fails, leaves the UPDATE button, which falls back to the
+elevated `install`; an unattended run never raises a prompt. Until releases are signed, the
+updater's trust is HTTPS to GitHub, the same as the app's own update; once they are, it should also
+check the download's publisher against the installed copy's.
 
 ## Release acceptance still required
 
 Build/test success alone is not device or installer acceptance. Before promoting an initial
-release, record clean-install and two-version update results (including **Update service**),
+release, record clean-install and two-version update results (including the service step of **Update**),
 verify startup and Explorer-restart tray recovery, scan the QR from a real phone, and exercise
 receipt/serve/removal with that phone — once per user and once under the service, including a
 reboot with nobody signed in. Verify native ARM64 UI, Windows themes/high contrast/reduced motion,

@@ -160,6 +160,8 @@ struct FakeSink {
     fail_flush: Mutex<bool>,
     /// Nowhere to send — stash opted out and an empty pool. A successful call that pushed nothing.
     no_targets: Mutex<bool>,
+    /// Targets were scheduled without a confirmed receipt.
+    scheduled: Mutex<bool>,
     /// The caller's background budget ran out before a push could start (`FlushOutcome::Deferred`).
     defer_push: Mutex<bool>,
     /// Every recipient is dropped from the wrap set — a mutual lapse. The call succeeds and the
@@ -257,6 +259,9 @@ impl PublishSink for FakeSink {
         }
         if *self.no_targets.lock().unwrap() {
             return Ok(FlushOutcome::NoTargets);
+        }
+        if *self.scheduled.lock().unwrap() {
+            return Ok(FlushOutcome::Scheduled);
         }
         if *self.defer_push.lock().unwrap() {
             return Ok(FlushOutcome::Deferred);
@@ -1158,6 +1163,23 @@ async fn a_flush_with_nowhere_to_send_is_not_recorded_as_a_push() {
         1,
         "the flush was still attempted"
     );
+}
+
+#[tokio::test]
+async fn a_scheduled_repeater_is_not_recorded_as_a_confirmed_push() {
+    let h = Harness::new();
+    *h.sink.scheduled.lock().unwrap() = true;
+    let now = INTERVAL * 10;
+
+    h.engine()
+        .ingest(fix(now, 20.0), healthy_battery(), INTERVAL, now)
+        .await
+        .unwrap();
+
+    let state = h.gate.get();
+    assert_eq!(state.last_published_at, Some(now));
+    assert_eq!(state.last_pushed_at, None);
+    assert_eq!(*h.sink.flushes.lock().unwrap(), 1);
 }
 
 #[tokio::test]

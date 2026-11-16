@@ -36,6 +36,21 @@ public class HostProtocolTests
         Assert.True(tracker.Observe(4, false));
     }
 
+    [Theory]
+    [InlineData("https://streetcrypt.id/repeater/claim#t=abc&s=00", true)]
+    [InlineData("https://streetcrypt.id/repeater#t=abc&s=00", true)]
+    [InlineData("https://streetcrypt.id/repeater/install.ps1#t=abc", false)]
+    [InlineData("https://streetcrypt.id/repeater/claim", false)]
+    [InlineData("https://example.com/repeater/claim#t=abc", false)]
+    public void SnapshotClaimLinksAreTheRepeaterClaimUrl(string claim, bool valid)
+    {
+        var line = "{\"protocol\":2,\"kind\":\"snapshot\",\"runId\":\"run\",\"sequence\":1,\"snapshot\":" +
+            "{\"endpointId\":\"e\",\"claimed\":false,\"claimUrl\":\"" + claim + "\",\"members\":[]," +
+            "\"tracked\":0,\"missing\":0,\"received\":0}}";
+        if (valid) Assert.Equal(claim, HostProtocol.Parse(line).Snapshot!.ClaimUrl);
+        else Assert.Throws<InvalidDataException>(() => HostProtocol.Parse(line));
+    }
+
     [Fact]
     public void SettingsCommandIsCorrelatedAndRepliesAreChecked()
     {
@@ -87,6 +102,49 @@ public class HostProtocolTests
         Assert.False(HostProtocol.IsSettingsCommand(
             "{\"protocol\":2,\"kind\":\"settings\",\"requestId\":\"a\",\"telemetry\":1,\"keepAwake\":true}"));
         Assert.False(HostProtocol.IsSettingsCommand("not json"));
+    }
+
+    [Fact]
+    public void OnlyWellFormedReleaseCommandsPassTheService()
+    {
+        string release = HostProtocol.ReleaseCommand("abc");
+        Assert.Contains("\"kind\":\"release\"", release);
+        Assert.True(HostProtocol.IsHostCommand(release));
+        Assert.False(HostProtocol.IsSettingsCommand(release));
+        Assert.True(HostProtocol.IsHostCommand(HostProtocol.SettingsCommand("abc", new HostSettings(true, true))));
+        Assert.False(HostProtocol.IsHostCommand(
+            "{\"protocol\":2,\"kind\":\"release\",\"requestId\":\"a\",\"telemetry\":true}"));
+        Assert.False(HostProtocol.IsHostCommand("{\"protocol\":2,\"kind\":\"release\"}"));
+        Assert.False(HostProtocol.IsHostCommand("{\"protocol\":2,\"kind\":\"claim\",\"requestId\":\"a\"}"));
+        Assert.Throws<ArgumentException>(() => HostProtocol.ReleaseCommand(""));
+    }
+
+    [Fact]
+    public void OnlyWellFormedNameCommandsPassTheService()
+    {
+        string name = HostProtocol.NameCommand("abc", "Living room PC");
+        Assert.Contains("\"kind\":\"name\"", name);
+        Assert.True(HostProtocol.IsHostCommand(name));
+        Assert.True(HostProtocol.IsHostCommand(HostProtocol.NameCommand("abc", "")));
+        Assert.False(HostProtocol.IsSettingsCommand(name));
+        // A name on any other command, a missing name, or a name that is not a string.
+        Assert.False(HostProtocol.IsHostCommand(
+            "{\"protocol\":2,\"kind\":\"release\",\"requestId\":\"a\",\"name\":\"x\"}"));
+        Assert.False(HostProtocol.IsHostCommand("{\"protocol\":2,\"kind\":\"name\",\"requestId\":\"a\"}"));
+        Assert.False(HostProtocol.IsHostCommand(
+            "{\"protocol\":2,\"kind\":\"name\",\"requestId\":\"a\",\"name\":7}"));
+        Assert.Throws<ArgumentException>(() => HostProtocol.NameCommand("abc", new string('x', 201)));
+    }
+
+    [Fact]
+    public void SnapshotsCarryTheNameAndWhatPhonesShow()
+    {
+        var message = HostProtocol.Parse(
+            "{\"protocol\":2,\"kind\":\"snapshot\",\"runId\":\"r\",\"snapshot\":{\"endpointId\":\"ab\"," +
+            "\"claimed\":true,\"members\":[],\"tracked\":0,\"missing\":0,\"received\":0," +
+            "\"name\":\"Attic PC\",\"listedName\":\"Old name\"}}");
+        Assert.Equal("Attic PC", message.Snapshot!.Name);
+        Assert.Equal("Old name", message.Snapshot.ListedName);
     }
 
     [Theory]

@@ -37,6 +37,20 @@
 //!
 //! The tracker is process-wide ([`tracker`]), not per node: a rebuild replaces the node, and the
 //! episode it was meant to end must outlive it.
+//!
+//! ## A node whose docs engine is gone
+//!
+//! The same rebuild answers a second failure, which no amount of answering peers can end. On
+//! 2026-11-15 one panicking iroh-docs accept task stopped a Pixel 10's live engine, whose teardown
+//! shuts the replica store down too: from then on every docs call on that node failed with
+//! "sending to iroh_docs actor failed" — no push, no pull, no profile reseal, so a friend paired
+//! that evening never got its persona — for 17 hours, until the app was force-stopped. The node
+//! itself was fine to every other check. The panic is patched (`third_party/iroh-docs`), but
+//! nothing restarts that engine, so whatever stops it next must not cost a phone a day:
+//! [`IsolationTracker::note_docs_dead`] makes a rebuild due at once (subject only to
+//! [`DOCS_DEAD_REBUILD_COOLDOWN_MS`]), and any rebuild clears it. The node notices through a
+//! one-read probe of its replica store on every drain and every pull (`LocationNode`), and says
+//! so once per node as `node.isolation{event=docs_dead}`.
 
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
@@ -50,6 +64,10 @@ pub const NETWORK_CHANGE_REPEAT_MS: u64 = 30 * 60 * 1000;
 pub const REBUILD_AFTER_MS: u64 = 10 * 60 * 1000;
 /// The least time between two rebuilds — any rebuild, including a settings change.
 pub const REBUILD_COOLDOWN_MS: u64 = 60 * 60 * 1000;
+/// The least time since the last rebuild before a node whose docs engine is gone is rebuilt. Short,
+/// because such a node does nothing useful; not zero, so an engine that dies again at once cannot
+/// put the phone into a rebuild loop.
+pub const DOCS_DEAD_REBUILD_COOLDOWN_MS: u64 = 10 * 60 * 1000;
 
 /// What one delivery pass, or one contact, said about reachability.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -152,6 +170,9 @@ pub struct IsolationTracker {
     episode_rebuilds: u32,
     episodes: u32,
     recoveries: u32,
+    /// When the current node's docs engine was first seen gone; `None` once any rebuild replaced
+    /// that node. See the module docs.
+    docs_dead_since_ms: Option<u64>,
 }
 
 impl IsolationTracker {
@@ -224,6 +245,11 @@ impl IsolationTracker {
     /// Whether a rebuild should happen now: isolated, a network change has had its chance, and the
     /// cooldown since the last rebuild has passed.
     pub fn rebuild_due(&self, now_ms: u64) -> bool {
+        if self.docs_dead_since_ms.is_some() {
+            return self.last_rebuild_ms.map_or(true, |at| {
+                now_ms.saturating_sub(at) >= DOCS_DEAD_REBUILD_COOLDOWN_MS
+            });
+        }
         if !self.isolated {
             return false;
         }
@@ -244,11 +270,29 @@ impl IsolationTracker {
     /// would, so the next network change waits its full repeat interval).
     pub fn note_rebuild(&mut self, now_ms: u64) {
         self.last_rebuild_ms = Some(now_ms);
+        // A rebuild is a new docs engine.
+        self.docs_dead_since_ms = None;
         if self.isolated {
             self.episode_rebuilds += 1;
             self.last_step = Some((Step::Rebuild, now_ms));
             self.last_network_change_ms = Some(now_ms);
         }
+    }
+
+    /// The current node's docs engine is gone: nothing but a rebuild brings it back, so one is due
+    /// now (see [`Self::rebuild_due`]). Returns whether this is news, so the caller reports it
+    /// once per node rather than once per probe.
+    pub fn note_docs_dead(&mut self, now_ms: u64) -> bool {
+        if self.docs_dead_since_ms.is_some() {
+            return false;
+        }
+        self.docs_dead_since_ms = Some(now_ms);
+        true
+    }
+
+    /// When the current node's docs engine was first seen gone, if it is.
+    pub fn docs_dead_since(&self) -> Option<u64> {
+        self.docs_dead_since_ms
     }
 
     pub fn status(&self, now_ms: u64) -> IsolationStatus {
@@ -313,6 +357,30 @@ pub fn note_rebuild(trigger: &'static str) {
         )
         .in_scope(|| {});
     }
+}
+
+/// Note that the current node's docs engine is gone, with a `node.isolation{event=docs_dead}` span
+/// the first time per node. Returns whether a rebuild is due.
+pub fn note_docs_dead(error: &str) -> bool {
+    let now = now_ms();
+    let mut tracker = tracker();
+    let news = tracker.note_docs_dead(now);
+    let due = tracker.rebuild_due(now);
+    let last_rebuild_ms = tracker.status(now).last_rebuild_ms;
+    drop(tracker);
+    if news {
+        tracing::info_span!(
+            "node.isolation",
+            event = "docs_dead",
+            rebuild_due = due,
+            since_rebuild_ms = last_rebuild_ms.map(|at| now.saturating_sub(at)),
+            error = error,
+        )
+        .in_scope(|| {
+            tracing::error!("node.isolation: this node's docs engine is gone; rebuilding")
+        });
+    }
+    due
 }
 
 /// The process tracker's status, for `device.health`.
@@ -535,6 +603,35 @@ mod tests {
         t.observe(Observation::Silent, 50 * MIN);
         assert!(!t.status(0).isolated);
         assert!(!t.rebuild_due(0));
+    }
+
+    #[test]
+    fn a_dead_docs_engine_makes_a_rebuild_due_at_once_and_a_rebuild_clears_it() {
+        let mut t = IsolationTracker::new();
+        assert!(t.note_docs_dead(0));
+        assert!(!t.note_docs_dead(MIN), "reported once per node");
+        // Not isolated, no network change: the engine alone is reason enough.
+        assert!(!t.status(0).isolated);
+        assert!(t.rebuild_due(0));
+        assert!(t.status(0).rebuild_due, "what the mounted app reads");
+        // Peers answering does not bring an engine back.
+        t.observe(Observation::Answered, MIN);
+        assert!(t.rebuild_due(MIN));
+        t.note_rebuild(2 * MIN);
+        assert_eq!(t.docs_dead_since(), None);
+        assert!(!t.rebuild_due(2 * MIN));
+    }
+
+    #[test]
+    fn an_engine_that_dies_again_waits_out_the_short_cooldown() {
+        let mut t = IsolationTracker::new();
+        t.note_rebuild(0);
+        assert!(t.note_docs_dead(MIN), "news again for the new node");
+        assert!(!t.rebuild_due(MIN));
+        assert!(!t.rebuild_due(DOCS_DEAD_REBUILD_COOLDOWN_MS - 1));
+        assert!(t.rebuild_due(DOCS_DEAD_REBUILD_COOLDOWN_MS));
+        // Far shorter than an isolation rebuild's cooldown.
+        const { assert!(DOCS_DEAD_REBUILD_COOLDOWN_MS < REBUILD_COOLDOWN_MS) };
     }
 
     /// Every sequence of up to six events (silent / answered / rebuild) at 5-minute spacing keeps

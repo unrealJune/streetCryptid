@@ -197,6 +197,17 @@ Conventions when changing that code:
   per wake); with one mounted, the heartbeat's `healIfIsolated` calls `rebindNode('isolated')`,
   because only JS can rewire its subscriptions. Do not let the core rebuild under an app lease.
   `node.isolation{event=recovered,last_step}` says whether a step or time fixed it.
+- **A node whose docs engine is gone is rebuilt, not left deaf** (`isolation.rs`, `docs::engine_gone`).
+  iroh-docs never restarts its live engine, and that engine's teardown shuts the replica store down
+  with it, so after one stop every docs call on the node fails with `sending to iroh_docs actor
+failed` for the life of the process. On 2026-11-15 a single panicking accept task (iroh-docs 0.101
+  `BobState::into_outcome` unwrapping progress a failed message had taken; likely a removed friend's
+  namespace closed mid-sync) did that to a Pixel 10 for 17 hours: no push, no pull, and a friend
+  paired that evening got no persona because the Pixel could not read its own sealed profile to
+  hand over. The panic is patched in `third_party/iroh-docs` (NOTICE says how; the live actor also
+  survives a panicked sync task now), and the node probes its replica store on every drain and pull
+  (`check_docs_engine`): a dead engine makes `rebuild_due` true at once, floored by
+  `DOCS_DEAD_REBUILD_COOLDOWN_MS`, and any rebuild clears it — `node.isolation{event=docs_dead}`.
 - **`bg.wake` and `bg.backfill` do not exist.** They went dead when capture moved into Rust — the
   location wake is native and emits no JS span at all. Six e2e scenarios asserted them,
   `background-location-e2e.sh` gated its PASS on `bg.wake > 0` so it could never pass, and two
@@ -333,12 +344,14 @@ Conventions when changing that code:
   2026-11-10 17:25 to 11-12 an iPhone read nothing from one friend while the Pixel beside it read
   everything; the friend's entries were in its replica and 0 of 17 of their bytes were in its blob
   store. Every pull now fetches stranded friend slots (`fix`, `nul`, `rsy`) from the peers it
-  dialled, then each namespace's own sources (`namespace_sources`: the repeaters carrying that
-  friend, once a build knows them), then the author and the last serving peer, inside the pull's
-  deadline, and reports `sync.stranded` / `sync.stranded_fetched` on `trail.sync`. Friends' profile
-  namespaces get the same pass beside it (`ProfileDocs::settle_stranded`, every key, sources ending
-  in the owner named by the read ticket), which hands a profile that became readable to the app
-  because no `ContentReady` will; it reports `sync.profile_stranded` / `_fetched`. Do not move
+  dialled, then each namespace's own sources (`namespace_sources`: the repeaters this pass planned
+  for that friend, `repeater::pull_plan`), then the author and the last serving peer, inside the
+  pull's deadline, and reports `sync.stranded` / `sync.stranded_fetched` on `trail.sync`. Friends'
+  profile namespaces get the same pass beside it (`ProfileDocs::settle_stranded`, every key, so the
+  sealed `s/profile`, `s/repeaters` and `keyring` too; sources are the owner's `profile_relays`,
+  then the owner named by the read ticket), which hands a profile that became readable to the app
+  because no `ContentReady` will, and re-reads repeater cards when anything landed; it reports
+  `sync.profile_stranded` / `_fetched`. Do not move
   either into the replica read (a read never dials), and do not drop the `rsy` lane: a control
   record without bytes is a restart request the leader cannot see. The web build does not run it
   yet.

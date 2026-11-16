@@ -8,28 +8,35 @@
             <RowDefinition Height="Auto" />
             <RowDefinition Height="*" />
         </Grid.RowDefinitions>
-        <TitleBar x:Name="AppTitleBar"
-                  Foreground="{ThemeResource CryptidInk}" Background="Transparent">
-            <TitleBar.IconSource>
-                <ImageIconSource ImageSource="ms-appx:///Assets/repeater-256.png" />
-            </TitleBar.IconSource>
-            <TitleBar.RightHeader>
-                <StackPanel Orientation="Horizontal" Spacing="16">
-                    <TextBlock x:Name="StatusText" Text="STARTING" VerticalAlignment="Center"
-                               FontFamily="ms-appx:///Assets/Plex.ttf#IBM Plex Mono" FontSize="11" />
-                    <Button x:Name="SettingsButton" Click="SettingsClicked" AutomationProperties.Name="Settings"
-                            ToolTipService.ToolTip="Settings" Background="Transparent" BorderThickness="0">
-                        <FontIcon x:Name="SettingsGlyph" Glyph="&#xE713;" FontSize="16" />
-                    </Button>
-                </StackPanel>
-            </TitleBar.RightHeader>
-        </TitleBar>
+        <!-- Our own title bar, so the status and Settings always sit against the caption buttons. -->
+        <Grid x:Name="AppTitleBar" Height="48">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition x:Name="CaptionColumn" Width="0" />
+            </Grid.ColumnDefinitions>
+            <Image Source="ms-appx:///Assets/repeater-256.png" Width="16" Height="16" Margin="16,0,0,0"
+                   VerticalAlignment="Center" AutomationProperties.AccessibilityView="Raw" />
+            <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="8" Margin="0,0,8,0"
+                        VerticalAlignment="Center">
+                <TextBlock x:Name="StatusText" Text="STARTING" VerticalAlignment="Center"
+                           Foreground="{ThemeResource CryptidInk}"
+                           FontFamily="ms-appx:///Assets/Plex.ttf#IBM Plex Mono" FontSize="11"
+                           AutomationProperties.LiveSetting="Polite" />
+                <Button x:Name="SettingsButton" Click="SettingsClicked" AutomationProperties.Name="Settings"
+                        ToolTipService.ToolTip="Settings" Background="Transparent" BorderThickness="0"
+                        VerticalAlignment="Center">
+                    <FontIcon x:Name="SettingsGlyph" Glyph="&#xE713;" FontSize="16" />
+                </Button>
+            </StackPanel>
+        </Grid>
         <Grid Grid.Row="1">
             <controls:DotGridBackdrop x:Name="Field" />
-            <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"
-                          HorizontalContentAlignment="Stretch" VerticalContentAlignment="Center">
-            <Border x:Name="Island" Margin="40,24" Padding="32" MaxWidth="620"
-                    HorizontalAlignment="Center" VerticalAlignment="Center"
+            <!-- The card keeps one design width and shrinks to fit the window; it never scrolls. -->
+            <Viewbox x:Name="Fit" Margin="24,0,24,24" Stretch="Uniform" StretchDirection="DownOnly"
+                     HorizontalAlignment="Center" VerticalAlignment="Center">
+            <Border x:Name="Island" Width="600" Padding="32"
                     Background="{ThemeResource CryptidPanel}" BorderBrush="{ThemeResource CryptidLine}"
                     BorderThickness="1" CornerRadius="6">
                 <StackPanel Spacing="20">
@@ -53,34 +60,115 @@
                     <StackPanel.RenderTransform>
                         <TranslateTransform x:Name="PageOffset" />
                     </StackPanel.RenderTransform>
-                    <StackPanel x:Name="SetupPanel" Spacing="14" Visibility="Collapsed">
+                    <!-- An update, app and service together, as one sequence of steps. -->
+                    <StackPanel x:Name="UpdatePanel" Spacing="16" Visibility="Collapsed">
+                        <TextBlock x:Name="UpdateHeading" Text="Updating" FontSize="24"
+                                   FontFamily="ms-appx:///Assets/Rajdhani.ttf#Rajdhani SemiBold" />
+                        <Border Height="1" Background="{ThemeResource CryptidLine}" />
+                        <Grid x:Name="DownloadStep" ColumnSpacing="14">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="Auto" /><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <Grid Width="12" Height="12" VerticalAlignment="Center">
+                                <Ellipse x:Name="DownloadPending" Fill="{ThemeResource CryptidLine}" />
+                                <Ellipse x:Name="DownloadActive" Stroke="{ThemeResource CryptidSignal}" StrokeThickness="2" Visibility="Collapsed" />
+                                <Ellipse x:Name="DownloadDone" Fill="{ThemeResource CryptidSignal}" Visibility="Collapsed" />
+                                <Ellipse x:Name="DownloadFailed" Fill="{ThemeResource CryptidDanger}" Visibility="Collapsed" />
+                            </Grid>
+                            <TextBlock Grid.Column="1" Text="Download" FontSize="20" VerticalAlignment="Center"
+                                       FontFamily="ms-appx:///Assets/Rajdhani.ttf#Rajdhani SemiBold" />
+                            <TextBlock x:Name="DownloadState" Grid.Column="2" VerticalAlignment="Center" FontSize="11"
+                                       FontFamily="ms-appx:///Assets/Plex.ttf#IBM Plex Mono" />
+                        </Grid>
+                        <Grid x:Name="RestartStep" ColumnSpacing="14">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="Auto" /><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <Grid Width="12" Height="12" VerticalAlignment="Center">
+                                <Ellipse x:Name="RestartPending" Fill="{ThemeResource CryptidLine}" />
+                                <Ellipse x:Name="RestartActive" Stroke="{ThemeResource CryptidSignal}" StrokeThickness="2" Visibility="Collapsed" />
+                                <Ellipse x:Name="RestartDone" Fill="{ThemeResource CryptidSignal}" Visibility="Collapsed" />
+                                <Ellipse x:Name="RestartFailed" Fill="{ThemeResource CryptidDanger}" Visibility="Collapsed" />
+                            </Grid>
+                            <TextBlock Grid.Column="1" Text="Restart" FontSize="20" VerticalAlignment="Center"
+                                       FontFamily="ms-appx:///Assets/Rajdhani.ttf#Rajdhani SemiBold" />
+                            <TextBlock x:Name="RestartState" Grid.Column="2" VerticalAlignment="Center" FontSize="11"
+                                       FontFamily="ms-appx:///Assets/Plex.ttf#IBM Plex Mono" />
+                        </Grid>
+                        <Grid x:Name="ServiceStep" ColumnSpacing="14">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="Auto" /><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <Grid Width="12" Height="12" VerticalAlignment="Center">
+                                <Ellipse x:Name="ServicePending" Fill="{ThemeResource CryptidLine}" />
+                                <Ellipse x:Name="ServiceActive" Stroke="{ThemeResource CryptidSignal}" StrokeThickness="2" Visibility="Collapsed" />
+                                <Ellipse x:Name="ServiceDone" Fill="{ThemeResource CryptidSignal}" Visibility="Collapsed" />
+                                <Ellipse x:Name="ServiceFailed" Fill="{ThemeResource CryptidDanger}" Visibility="Collapsed" />
+                            </Grid>
+                            <TextBlock Grid.Column="1" Text="Repeater service" FontSize="20" VerticalAlignment="Center"
+                                       FontFamily="ms-appx:///Assets/Rajdhani.ttf#Rajdhani SemiBold" />
+                            <TextBlock x:Name="ServiceState" Grid.Column="2" VerticalAlignment="Center" FontSize="11"
+                                       FontFamily="ms-appx:///Assets/Plex.ttf#IBM Plex Mono" />
+                        </Grid>
+                        <Border Height="1" Background="{ThemeResource CryptidLine}" />
+                        <TextBlock x:Name="UpdateDetail" FontSize="12" TextWrapping="Wrap" Opacity=".7"
+                                   FontFamily="ms-appx:///Assets/Plex.ttf#IBM Plex Mono" AutomationProperties.LiveSetting="Polite" />
+                        <Button x:Name="UpdateContinueButton" Content="CONTINUE" Click="UpdateContinueClicked"
+                                Style="{StaticResource CryptidButton}" Visibility="Collapsed" />
+                    </StackPanel>
+                    <StackPanel x:Name="SetupPanel" Spacing="16" Visibility="Collapsed">
                         <TextBlock x:Name="SettingsHeading" Text="Setup" FontSize="24" FontFamily="ms-appx:///Assets/Rajdhani.ttf#Rajdhani SemiBold" />
-                        <ToggleSwitch x:Name="ServiceChoice" Header="Run as a Windows service" IsOn="True" Toggled="SaveDraft" />
-                        <TextBlock x:Name="ServiceHelp" TextWrapping="Wrap" Opacity=".7"
-                                   Text="Keeps carrying before anyone signs in and after you sign out. Windows asks an administrator to approve this once, and again when an update changes the service." />
-                        <ToggleSwitch x:Name="AwakeChoice" Header="Keep this PC awake on mains power" Toggled="SaveDraft" />
-                        <TextBlock x:Name="AwakeHelp" TextWrapping="Wrap" Opacity=".7"
-                                   Text="A sleeping PC carries nothing. On battery, Windows sleeps as usual." />
-                        <ToggleSwitch x:Name="DiagnosticsChoice" Header="Send diagnostics" IsOn="True" Toggled="SaveDraft" />
-                        <TextBlock x:Name="DiagnosticsHelp" TextWrapping="Wrap" Opacity=".7"
-                                   Text="Preview builds report how this repeater is running (counts, timings, errors) to the streetCryptid developers. Never locations: everything it carries is encrypted for your friends." />
-                        <ToggleSwitch x:Name="StartupChoice" Header="Open the app with Windows" Toggled="SaveDraft" />
-                        <TextBlock x:Name="StartupHelp" Text="Shows the repeater in the tray after you sign in, and keeps updates arriving." TextWrapping="Wrap" Opacity=".7" />
-                        <ToggleSwitch x:Name="TrayChoice" Header="Start in tray at sign-in" IsOn="True" Toggled="SaveDraft" />
-                        <ToggleSwitch x:Name="CloseChoice" Header="Keep running when closed" IsOn="True" Toggled="SaveDraft" />
-                        <TextBlock x:Name="TrayHelp" Text="Without the service, the repeater stops when the app does." TextWrapping="Wrap" Opacity=".7" />
-                        <ToggleSwitch x:Name="UpdatesChoice" Header="Automatic updates" IsOn="True" Toggled="SaveDraft" />
-                        <TextBlock x:Name="UpdateHelp" Text="Download improvements; apply on restart." TextWrapping="Wrap" Opacity=".7" />
-                        <Button x:Name="SaveButton" Content="CONTINUE" Click="SaveClicked" Style="{StaticResource CryptidButton}" />
+                        <TextBox x:Name="NameBox" Header="Name" PlaceholderText="Living room PC"
+                                 MaxLength="40" KeyDown="NameKeyDown" Visibility="Collapsed"
+                                 AutomationProperties.Name="Repeater name" />
+                        <Grid ColumnSpacing="24">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" /><ColumnDefinition Width="*" />
+                            </Grid.ColumnDefinitions>
+                            <StackPanel Spacing="4">
+                                <ToggleSwitch x:Name="ServiceChoice" Header="Run as a Windows service" IsOn="True" Toggled="SaveDraft" />
+                                <ToggleSwitch x:Name="AwakeChoice" Header="Keep awake on mains power" Toggled="SaveDraft" />
+                                <ToggleSwitch x:Name="DiagnosticsChoice" Header="Send diagnostics" IsOn="True" Toggled="SaveDraft" />
+                                <ToggleSwitch x:Name="UpdatesChoice" Header="Automatic updates" IsOn="True" Toggled="SaveDraft" />
+                            </StackPanel>
+                            <StackPanel Grid.Column="1" Spacing="4">
+                                <ToggleSwitch x:Name="StartupChoice" Header="Open with Windows" Toggled="SaveDraft" />
+                                <ToggleSwitch x:Name="TrayChoice" Header="Start in tray at sign-in" IsOn="True" Toggled="SaveDraft" />
+                                <ToggleSwitch x:Name="CloseChoice" Header="Keep running when closed" IsOn="True" Toggled="SaveDraft" />
+                            </StackPanel>
+                        </Grid>
+                        <StackPanel Orientation="Horizontal" Spacing="12">
+                            <Button x:Name="SaveButton" Content="CONTINUE" Click="SaveClicked" Style="{StaticResource CryptidButton}" />
+                            <Button x:Name="SettingsUpdateButton" Content="CHECK FOR UPDATES" Click="UpdateClicked"
+                                    Style="{StaticResource CryptidButton}" Visibility="Collapsed" />
+                        </StackPanel>
                         <TextBlock x:Name="VersionText" FontSize="12" Opacity=".7" TextWrapping="Wrap"
                                    FontFamily="ms-appx:///Assets/Plex.ttf#IBM Plex Mono" />
+                        <Button x:Name="ReleaseButton" Content="RELEASE THIS REPEATER" Click="ReleaseClicked"
+                                Style="{StaticResource CryptidDangerButton}" Visibility="Collapsed">
+                            <Button.Resources>
+                                <ResourceDictionary>
+                                    <ResourceDictionary.ThemeDictionaries>
+                                        <ResourceDictionary x:Key="Default">
+                                            <SolidColorBrush x:Key="ButtonBackgroundPointerOver" Color="#D64536" />
+                                            <SolidColorBrush x:Key="ButtonBackgroundPressed" Color="#A32418" />
+                                            <SolidColorBrush x:Key="ButtonBorderBrushPointerOver" Color="#D64536" />
+                                            <SolidColorBrush x:Key="ButtonBorderBrushPressed" Color="#A32418" />
+                                            <SolidColorBrush x:Key="ButtonForegroundPointerOver" Color="White" />
+                                            <SolidColorBrush x:Key="ButtonForegroundPressed" Color="White" />
+                                        </ResourceDictionary>
+                                        <ResourceDictionary x:Key="HighContrast" />
+                                    </ResourceDictionary.ThemeDictionaries>
+                                </ResourceDictionary>
+                            </Button.Resources>
+                        </Button>
                     </StackPanel>
                     <StackPanel x:Name="ClaimPanel" Spacing="16" Visibility="Collapsed"
                                 HorizontalAlignment="Center">
                         <Viewbox MaxWidth="300" Stretch="Uniform">
                             <controls:ClaimQr x:Name="Qr" AutomationProperties.Name="One-time repeater claim code" />
                         </Viewbox>
-                        <Button Content="COPY CLAIM LINK" Click="CopyClicked" HorizontalAlignment="Center"
+                        <Button x:Name="CopyButton" Content="COPY CLAIM LINK" Click="CopyClicked" HorizontalAlignment="Center"
                                 Style="{StaticResource CryptidButton}" />
                     </StackPanel>
                     <StackPanel x:Name="RunningPanel" Spacing="16" Visibility="Collapsed">
@@ -99,29 +187,23 @@
                             <TextBlock x:Name="SentText" Grid.Row="1" Grid.Column="1" FontFamily="ms-appx:///Assets/Plex.ttf#IBM Plex Mono" FontSize="18" />
                             <TextBlock x:Name="ConnectionText" Grid.Row="2" Grid.ColumnSpan="2" TextWrapping="Wrap" />
                         </Grid>
-                        <TextBlock Text="Traffic since this repeater started, including sync overhead."
-                                   FontSize="12" TextWrapping="Wrap" />
-                        <TextBlock x:Name="HostText" FontSize="12" TextWrapping="Wrap" />
                         <Border Height="1" Background="{ThemeResource CryptidLine}" />
                         <ScrollViewer MaxHeight="240">
-                            <StackPanel x:Name="Members" Spacing="12" />
+                            <StackPanel x:Name="Members" Spacing="8" />
                         </ScrollViewer>
-                        <TextBlock x:Name="PolicyStatus" FontSize="12" TextWrapping="Wrap" />
                     </StackPanel>
                     </StackPanel>
-                    <TextBlock x:Name="MessageText" TextWrapping="Wrap" Visibility="Collapsed"
-                               AutomationProperties.LiveSetting="Polite" />
-                    <Button x:Name="UpdateServiceButton" Content="UPDATE SERVICE" Click="UpdateServiceClicked"
-                            Style="{StaticResource CryptidButton}" Visibility="Collapsed" />
-                    <Button x:Name="RetryButton" Content="RETRY" Click="RetryClicked"
-                            Style="{StaticResource CryptidButton}" Visibility="Collapsed" />
-                    <Button x:Name="UpdateButton" Content="CHECK FOR UPDATES" Click="UpdateClicked"
-                            Style="{StaticResource CryptidButton}" Visibility="Collapsed" />
-                    <Button x:Name="RestartButton" Content="RESTART TO UPDATE" Click="RestartClicked"
+                    <!-- What is wrong right now, and only while it is: never a log of past actions. -->
+                    <StackPanel x:Name="ProblemPanel" Spacing="12" Visibility="Collapsed">
+                        <TextBlock x:Name="ProblemText" TextWrapping="Wrap" AutomationProperties.LiveSetting="Assertive" />
+                        <Button x:Name="RetryButton" Content="RETRY" Click="RetryClicked"
+                                Style="{StaticResource CryptidButton}" Visibility="Collapsed" />
+                    </StackPanel>
+                    <Button x:Name="UpdateButton" Content="UPDATE" Click="UpdateClicked"
                             Style="{StaticResource CryptidButton}" Visibility="Collapsed" />
                 </StackPanel>
             </Border>
-            </ScrollViewer>
+            </Viewbox>
         </Grid>
     </Grid>
 </Window>

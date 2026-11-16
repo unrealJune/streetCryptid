@@ -19,7 +19,7 @@
 //! [`is_newer_epoch`] / the namespace-metadata file helpers is pure and unit-tested here.
 //! [`ProfileDocs`] wraps the live iroh-docs replica.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -44,6 +44,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
 use crate::ns_book::{self, NamespaceBook};
+use crate::profile_seal::{self, KeyId, KeyState};
 
 /// Current profile schema version.
 pub const PROFILE_V: u8 = 1;
@@ -334,6 +335,48 @@ pub trait ProfileSink: Send + Sync + 'static {
     fn on_profile_update(&self, record: ProfileRecord);
 }
 
+/// What sealing needs (see [`crate::profile_seal`]): the identity seed our profile keys derive
+/// from, the receiving secret that opens friends' keyrings, and where the key state lives.
+pub struct Sealer {
+    identity_seed: [u8; 32],
+    recv_secret: Vec<u8>,
+    state_dir: PathBuf,
+    state: std::sync::Mutex<KeyState>,
+    /// Friends' profile keys as their keyrings opened, by namespace and key id.
+    friend_keys: std::sync::Mutex<HashMap<([u8; 32], KeyId), [u8; 32]>>,
+}
+
+impl Sealer {
+    pub fn new(identity_seed: [u8; 32], recv_secret: Vec<u8>, state_dir: PathBuf) -> Self {
+        let state = KeyState::load(&state_dir);
+        Self {
+            identity_seed,
+            recv_secret,
+            state_dir,
+            state: std::sync::Mutex::new(state),
+            friend_keys: std::sync::Mutex::new(HashMap::new()),
+        }
+    }
+
+    fn state(&self) -> KeyState {
+        self.state.lock().unwrap_or_else(|p| p.into_inner()).clone()
+    }
+
+    fn current_key(&self) -> [u8; 32] {
+        profile_seal::derive_key(&self.identity_seed, self.state().generation)
+    }
+
+    /// Our own key named `kid`: the current generation's, or the one before it, which an entry
+    /// can still be sealed under for the moment a rotation is being written.
+    fn own_key(&self, kid: &KeyId) -> Option<[u8; 32]> {
+        let generation = self.state().generation;
+        [generation, generation.saturating_sub(1)]
+            .into_iter()
+            .map(|g| profile_seal::derive_key(&self.identity_seed, g))
+            .find(|key| profile_seal::key_id(key) == *kid)
+    }
+}
+
 /// Wraps the profile iroh-docs replica: our own single-writer namespace plus any friend
 /// namespaces imported from a pairing Accept.
 pub struct ProfileDocs {
@@ -359,6 +402,11 @@ pub struct ProfileDocs {
     /// read by [`read_for_endpoint`](Self::read_for_endpoint) alongside the replicas, so the
     /// namespace winning later with a newer epoch simply outranks the handed copy.
     handed: Mutex<HashMap<[u8; 32], ProfileRecord>>,
+    /// Sealing ([`crate::profile_seal`]). `None` stores and reads every record in the clear, as
+    /// before sealing existed: the docs fixtures, and tests that look at the stored bytes.
+    seal: Option<Arc<Sealer>>,
+    /// One writer to our own namespace at a time, so a reseal and a publish never interleave.
+    write: Mutex<()>,
     /// The peer that last handed us an entry in each friend namespace (`InsertRemote.from`), so
     /// a [settle](Self::settle_stranded) can ask it again for bytes it did not deliver.
     served_by: Mutex<HashMap<[u8; 32], [u8; 32]>>,
@@ -444,8 +492,16 @@ impl ProfileDocs {
             epochs: Mutex::new(HashMap::new()),
             watched: Mutex::new(HashSet::new()),
             handed: Mutex::new(HashMap::new()),
+            seal: None,
+            write: Mutex::new(()),
             served_by: Mutex::new(HashMap::new()),
         })
+    }
+
+    /// Seal what this node writes and open what friends sealed ([`crate::profile_seal`]).
+    pub fn with_seal(mut self, sealer: Sealer) -> Self {
+        self.seal = Some(Arc::new(sealer));
+        self
     }
 
     async fn doc_for(&self, ns: NamespaceId) -> Result<Doc> {
@@ -496,8 +552,8 @@ impl ProfileDocs {
         if let Err(err) = self.arm_publishing().await {
             tracing::warn!(error = %err, "profile: start_sync failed; publish is local-only");
         }
-        doc.set_bytes(self.author, PROFILE_KEY.to_vec(), record_bytes)
-            .await?;
+        let _write = self.write.lock().await;
+        self.write_own(&doc, PROFILE_KEY, record_bytes).await?;
         if let Ok(arr) = <[u8; 32]>::try_from(endpoint_id) {
             let mut epochs = self.epochs.lock().await;
             let e = epochs.entry(arr).or_insert(0);
@@ -525,6 +581,33 @@ impl ProfileDocs {
         Ok(ticket.to_string())
     }
 
+    /// Our profile namespace's write key, for a repeater grant proof (see the trail's
+    /// `own_namespace_secret`). It never leaves the phone.
+    pub async fn own_namespace_secret(&self) -> Result<[u8; 32]> {
+        let doc = self.doc_for(self.own_ns).await?;
+        match doc
+            .share(ShareMode::Write, AddrInfoOptions::Id)
+            .await?
+            .capability
+        {
+            iroh_docs::Capability::Write(secret) => Ok(secret.to_bytes()),
+            iroh_docs::Capability::Read(_) => Err(anyhow!("our own profile is open read-only")),
+        }
+    }
+
+    /// Every friend profile ticket in the book: what the stash is granted beside our own.
+    pub fn friend_tickets(&self) -> Vec<String> {
+        self.book
+            .as_ref()
+            .map(|book| {
+                book.friends()
+                    .into_iter()
+                    .map(|entry| entry.ticket)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     /// Import a friend's profile read-ticket, begin replicating, and return the namespace id.
     ///
     /// Recorded in the book, so every later start reopens it whether or not JS runs.
@@ -547,6 +630,86 @@ impl ProfileDocs {
         Ok(ns)
     }
 
+    /// Re-arm saved profiles after a native-only node restart and wait for their content.
+    /// The caller bounds this wait and runs it alongside the trail pull.
+    ///
+    /// A friend's profile is taken from their own phone and from `relays[friend]`: the stash and
+    /// the repeaters that carry them hold it too, sealed (`crate::profile_seal`), so it arrives
+    /// while their phone sleeps the same way their trail does. Done once any of them has synced
+    /// and the content is in; given up once every one of them has failed.
+    pub async fn sync_known_friends(
+        &self,
+        friends: &BTreeSet<[u8; 32]>,
+        relays: &HashMap<[u8; 32], Vec<EndpointAddr>>,
+    ) {
+        let Some(book) = &self.book else {
+            return;
+        };
+        let saved = book.friends();
+        let tickets: Vec<_> = saved.iter().map(|entry| entry.ticket.clone()).collect();
+        let owners: HashMap<_, _> = crate::repeater::friend_namespaces(&tickets, friends)
+            .into_iter()
+            .map(|(owner, namespace)| (namespace, owner))
+            .collect();
+        n0_future::join_all(saved.into_iter().filter_map(|entry| {
+            let owner = *owners.get(&entry.namespace)?;
+            let ticket: iroh_docs::DocTicket = entry.ticket.parse().ok()?;
+            if ticket.capability.id().to_bytes() != entry.namespace {
+                return None;
+            }
+            let mut peers: Vec<EndpointAddr> = ticket
+                .nodes
+                .into_iter()
+                .filter(|addr| addr.id.as_bytes() == &owner)
+                .map(crate::relay::scrub_addr)
+                .collect();
+            for relay in relays.get(&owner).into_iter().flatten() {
+                if !peers.iter().any(|p| p.id == relay.id) {
+                    peers.push(relay.clone());
+                }
+            }
+            if peers.is_empty() {
+                return None;
+            }
+            let mut waiting: HashSet<[u8; 32]> =
+                peers.iter().map(|addr| *addr.id.as_bytes()).collect();
+            Some(async move {
+                let Ok(doc) = self.doc_for(NamespaceId::from(entry.namespace)).await else {
+                    return;
+                };
+                let Ok(mut events) = doc.subscribe().await else {
+                    return;
+                };
+                if let Err(error) = doc.start_sync(peers).await {
+                    tracing::warn!(%error, "profile: could not schedule friend sync");
+                    return;
+                }
+                let mut synced = false;
+                while let Some(Ok(event)) = events.next().await {
+                    match event {
+                        LiveEvent::SyncFinished(result)
+                            if waiting.contains(result.peer.as_bytes()) =>
+                        {
+                            match result.result {
+                                Ok(_) => synced = true,
+                                Err(error) if error.contains("AlreadySyncing") => {}
+                                Err(_) => {
+                                    waiting.remove(result.peer.as_bytes());
+                                    if waiting.is_empty() && !synced {
+                                        return;
+                                    }
+                                }
+                            }
+                        }
+                        LiveEvent::PendingContentReady if synced => return,
+                        _ => {}
+                    }
+                }
+            })
+        }))
+        .await;
+    }
+
     /// Stop replicating a removed friend's profile namespace and drop it from the book. Returns
     /// whether we were replicating it.
     pub async fn forget_ticket(&self, ticket: &str) -> Result<bool> {
@@ -565,22 +728,230 @@ impl ProfileDocs {
         Ok(in_book || handle.is_some())
     }
 
-    /// The raw signed bytes of the newest record in `ns`, or `None` if there is no entry yet or
-    /// its content has not replicated locally. These bytes are exactly what was signed, which is
-    /// what makes them forwardable verbatim — see [`own_record_bytes`](Self::own_record_bytes).
-    async fn latest_bytes(&self, ns: NamespaceId) -> Result<Option<Vec<u8>>> {
+    /// Put `bytes` under `key` in our own profile namespace, unless that is already what it holds.
+    /// Returns whether anything was written.
+    ///
+    /// For records that live beside the profile under their own key and signing context (today the
+    /// repeater card, `crate::repeater`), so that older readers, which look up [`PROFILE_KEY`]
+    /// only, never see them. Same arming rule as [`publish`](Self::publish).
+    pub async fn publish_key(&self, key: &[u8], bytes: Vec<u8>) -> Result<bool> {
+        let _write = self.write.lock().await;
+        if self.latest_key_bytes(self.own_ns, key).await?.as_deref() == Some(bytes.as_slice()) {
+            return Ok(false);
+        }
+        let doc = self.doc_for(self.own_ns).await?;
+        if let Err(err) = self.arm_publishing().await {
+            tracing::warn!(error = %err, "profile: start_sync failed; publish is local-only");
+        }
+        self.write_own(&doc, key, bytes).await?;
+        Ok(true)
+    }
+
+    /// Store `plaintext` under `key` in our own namespace: sealed under the current profile key
+    /// when sealing is on, else in the clear. Callers hold `write`.
+    async fn write_own(&self, doc: &Doc, key: &[u8], plaintext: Vec<u8>) -> Result<()> {
+        let Some(sealer) = &self.seal else {
+            doc.set_bytes(self.author, key.to_vec(), plaintext).await?;
+            return Ok(());
+        };
+        self.write_sealed(doc, &sealer.current_key(), key, &plaintext)
+            .await
+    }
+
+    async fn write_sealed(
+        &self,
+        doc: &Doc,
+        profile_key: &[u8; 32],
+        key: &[u8],
+        plaintext: &[u8],
+    ) -> Result<()> {
+        let sealed =
+            profile_seal::seal_entry(profile_key, &self.own_ns.to_bytes(), key, plaintext)?;
+        doc.set_bytes(self.author, profile_seal::sealed_key(key), sealed)
+            .await?;
+        // The copy an earlier build kept in the clear: every holder could read it, so it goes as
+        // soon as a sealed one stands beside it. Friends on a build that cannot open sealed
+        // records keep the last one they read.
+        if self.raw_bytes(self.own_ns, key).await?.is_some() {
+            doc.del(self.author, key.to_vec()).await?;
+        }
+        Ok(())
+    }
+
+    /// Wrap the profile key for `friends` (endpoint id, X25519 receiving key) and seal everything
+    /// again, when [`KeyState::plan`] says so: someone joined or left, or it is time to refresh
+    /// the copies the stash holds. A friend who left moves us to the next key. Returns whether
+    /// anything was written; `false` too when sealing is off.
+    pub async fn reseal(&self, friends: &[([u8; 32], Vec<u8>)], now_ms: u64) -> Result<bool> {
+        let Some(sealer) = &self.seal else {
+            return Ok(false);
+        };
+        let _write = self.write.lock().await;
+        let state = sealer.state();
+        let plan = state.plan(friends, now_ms);
+        if !plan.reseal {
+            return Ok(false);
+        }
+        // What we hold now, opened with the key it was sealed under, before the key moves on.
+        let mut records = Vec::new();
+        for key in [
+            PROFILE_KEY,
+            crate::repeater::CARD_KEY,
+            crate::repeater::OFFERS_KEY,
+        ] {
+            if let Some(bytes) = self.latest_key_bytes(self.own_ns, key).await? {
+                records.push((key, bytes));
+            }
+        }
+        let next = state.after(&plan, friends, now_ms);
+        let profile_key = profile_seal::derive_key(&sealer.identity_seed, next.generation);
+        let doc = self.doc_for(self.own_ns).await?;
+        if let Err(err) = self.arm_publishing().await {
+            tracing::warn!(error = %err, "profile: start_sync failed; reseal is local-only");
+        }
+        // The keyring first, so a friend who sees the new entries can already open them.
+        let keyring =
+            profile_seal::build_keyring(&profile_key, &self.own_ns.to_bytes(), &next.keys)?;
+        doc.set_bytes(self.author, profile_seal::KEYRING_KEY.to_vec(), keyring)
+            .await?;
+        for (key, plaintext) in records {
+            self.write_sealed(&doc, &profile_key, key, &plaintext)
+                .await?;
+        }
+        // Last: a crash before here plans the same generation again next time.
+        next.save(&sealer.state_dir)?;
+        *sealer.state.lock().unwrap_or_else(|p| p.into_inner()) = next;
+        Ok(true)
+    }
+
+    /// The newest bytes under `key` in every profile namespace we hold whose content has arrived,
+    /// our own included. Unverified: the caller checks whatever signature the record carries.
+    /// Tests only: the app reads cards with [`Self::read_key_from_friends`], which knows whose
+    /// namespace each came from.
+    #[cfg(test)]
+    pub async fn read_key_everywhere(&self, key: &[u8]) -> Vec<Vec<u8>> {
+        let namespaces: Vec<NamespaceId> = self
+            .handles
+            .lock()
+            .await
+            .keys()
+            .map(|b| NamespaceId::from(*b))
+            .collect();
+        let mut out = Vec::new();
+        for ns in namespaces {
+            if let Ok(Some(bytes)) = self.latest_key_bytes(ns, key).await {
+                out.push(bytes);
+            }
+        }
+        out
+    }
+
+    /// The newest bytes under `key` in each friend's profile namespace, paired with the friend it
+    /// belongs to. The owner comes from the ticket handed over at pairing (the same unambiguous
+    /// match [`Self::sync_known_friends`] uses), never from the record, so a reader can check
+    /// that whatever signed the bytes is the friend whose namespace they were read from
+    /// (REPEATERS.md §4.2: a card counts as a vouch only from the friend it claims to be).
+    /// Unverified otherwise. Empty without a book.
+    pub async fn read_key_from_friends(
+        &self,
+        key: &[u8],
+        friends: &BTreeSet<[u8; 32]>,
+    ) -> Vec<([u8; 32], Vec<u8>)> {
+        let Some(book) = &self.book else {
+            return Vec::new();
+        };
+        let tickets: Vec<_> = book
+            .friends()
+            .into_iter()
+            .map(|entry| entry.ticket)
+            .collect();
+        let mut out = Vec::new();
+        for (owner, namespace) in crate::repeater::friend_namespaces(&tickets, friends) {
+            if let Ok(Some(bytes)) = self
+                .latest_key_bytes(NamespaceId::from(namespace), key)
+                .await
+            {
+                out.push((owner, bytes));
+            }
+        }
+        out
+    }
+
+    /// The newest record under `key` in `ns`, opened when it is sealed. A namespace with no sealed
+    /// copy is read in the clear: a friend on an older build, or ours before its first seal. A
+    /// sealed copy we cannot open is `None`, never the clear one beside it.
+    async fn latest_key_bytes(&self, ns: NamespaceId, key: &[u8]) -> Result<Option<Vec<u8>>> {
+        let Some(sealer) = &self.seal else {
+            return self.raw_bytes(ns, key).await;
+        };
+        match self.raw_bytes(ns, &profile_seal::sealed_key(key)).await? {
+            Some(sealed) => Ok(self.open_sealed(sealer, ns, key, &sealed).await),
+            None => self.raw_bytes(ns, key).await,
+        }
+    }
+
+    async fn open_sealed(
+        &self,
+        sealer: &Sealer,
+        ns: NamespaceId,
+        key: &[u8],
+        sealed: &[u8],
+    ) -> Option<Vec<u8>> {
+        let kid = profile_seal::entry_kid(sealed)?;
+        let profile_key = if ns == self.own_ns {
+            sealer.own_key(&kid)?
+        } else {
+            self.friend_key(sealer, ns, kid).await?
+        };
+        profile_seal::open_entry(&profile_key, &ns.to_bytes(), key, sealed)
+    }
+
+    /// A friend's profile key `kid`, from the cache or from their keyring.
+    async fn friend_key(&self, sealer: &Sealer, ns: NamespaceId, kid: KeyId) -> Option<[u8; 32]> {
+        let slot = (ns.to_bytes(), kid);
+        let cached = sealer
+            .friend_keys
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(&slot)
+            .copied();
+        if cached.is_some() {
+            return cached;
+        }
+        let keyring = self
+            .raw_bytes(ns, profile_seal::KEYRING_KEY)
+            .await
+            .ok()
+            .flatten()?;
+        let (ring_kid, key) =
+            profile_seal::open_keyring(&keyring, &ns.to_bytes(), &sealer.recv_secret)?;
+        sealer
+            .friend_keys
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert((ns.to_bytes(), ring_kid), key);
+        (ring_kid == kid).then_some(key)
+    }
+
+    /// The newest bytes stored under exactly `key` in `ns`, as stored.
+    async fn raw_bytes(&self, ns: NamespaceId, key: &[u8]) -> Result<Option<Vec<u8>>> {
         let doc = self.doc_for(ns).await?;
-        let query = Query::single_latest_per_key()
-            .key_exact(PROFILE_KEY)
-            .build();
+        let query = Query::single_latest_per_key().key_exact(key).build();
         let entry = match doc.get_one(query).await? {
             Some(e) => e,
             None => return Ok(None),
         };
         match self.blobs.blobs().get_bytes(entry.content_hash()).await {
             Ok(b) => Ok(Some(b.to_vec())),
-            Err(_) => Ok(None), // content not replicated locally yet
+            Err(_) => Ok(None),
         }
+    }
+
+    /// The raw signed bytes of the newest record in `ns`, or `None` if there is no entry yet or
+    /// its content has not replicated locally. These bytes are exactly what was signed, which is
+    /// what makes them forwardable verbatim — see [`own_record_bytes`](Self::own_record_bytes).
+    async fn latest_bytes(&self, ns: NamespaceId) -> Result<Option<Vec<u8>>> {
+        self.latest_key_bytes(ns, PROFILE_KEY).await
     }
 
     /// Read + verify the newest profile in `ns`. `expected_endpoint` binds it to a known peer.
@@ -623,6 +994,20 @@ impl ProfileDocs {
         let rec = verify(bytes, Some(expected_endpoint))?;
         let arr = rec.endpoint_arr().ok_or(ProfileError::Decode)?;
         if !self.accept_if_newer(&rec).await {
+            // Not new, but still kept when it IS the newest we accepted. A re-pair hands back the
+            // epoch this process already read from the old friendship, and since profiles are
+            // sealed the namespace can no longer stand in for it: the peer moved to a new key
+            // when they removed us, and wraps it for us only once they acknowledge again. Dropping
+            // the handed copy there left the reveal churning into "persona unavailable" while the
+            // record that would have answered it sat in this function. An OLDER epoch is still
+            // refused, which is all the rollback rule ever asked.
+            let current = self.epochs.lock().await.get(&arr).copied();
+            if current == Some(rec.epoch) {
+                let mut handed = self.handed.lock().await;
+                if handed.get(&arr).is_none_or(|held| held.epoch <= rec.epoch) {
+                    handed.insert(arr, rec);
+                }
+            }
             return Ok(None);
         }
         self.handed.lock().await.insert(arr, rec.clone());
@@ -886,14 +1271,17 @@ impl ProfileDocs {
                 Ok(_) => continue,
                 Err(_) => break,
             };
-            if entry.key() != PROFILE_KEY {
+            // The record itself, its sealed copy, or a keyring that may open a sealed copy we
+            // could not read before. Read back through `read_latest`, which opens what is sealed;
+            // content that has not arrived yet comes round again as `ContentReady`.
+            let key = entry.key();
+            if key != PROFILE_KEY
+                && key != profile_seal::sealed_key(PROFILE_KEY).as_slice()
+                && key != profile_seal::KEYRING_KEY
+            {
                 continue;
             }
-            let bytes = match this.blobs.blobs().get_bytes(entry.content_hash()).await {
-                Ok(b) => b,
-                Err(_) => continue, // await ContentReady
-            };
-            if let Ok(rec) = verify(&bytes, None) {
+            if let Ok(Some(rec)) = this.read_latest(ns, None).await {
                 if this.accept_if_newer(&rec).await {
                     sink.on_profile_update(rec);
                 }
@@ -1210,6 +1598,48 @@ mod tests {
                 .unwrap()
                 .map(|r| r.epoch),
             Some(8)
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A re-pair: this process already accepted the peer's epoch during the old friendship, and
+    /// their namespace is sealed under a key we no longer hold. The Accept's copy is the only one
+    /// we can read, so it must be what the pair result finds, though it is not an update.
+    #[tokio::test]
+    async fn a_re_pair_hands_back_the_epoch_we_already_saw() {
+        let (docs, dir) = live_profile("handed-repair").await;
+        let (seed, endpoint) = identity();
+        let record = signed_record(&seed, &endpoint, 5);
+        let rec = verify(&record, Some(&endpoint)).unwrap();
+        // What reading their namespace during the first friendship left behind.
+        assert!(docs.accept_if_newer(&rec).await);
+        assert!(docs.read_for_endpoint(&endpoint).await.unwrap().is_none());
+
+        assert!(
+            docs.ingest_handed_record(&record, &endpoint)
+                .await
+                .unwrap()
+                .is_none(),
+            "the same epoch again is not news for the sink"
+        );
+        assert_eq!(
+            docs.read_for_endpoint(&endpoint)
+                .await
+                .unwrap()
+                .map(|r| r.epoch),
+            Some(5),
+            "but the pair result must find it, or the reveal times out"
+        );
+        // An older epoch is still refused outright.
+        docs.ingest_handed_record(&signed_record(&seed, &endpoint, 4), &endpoint)
+            .await
+            .unwrap();
+        assert_eq!(
+            docs.read_for_endpoint(&endpoint)
+                .await
+                .unwrap()
+                .map(|r| r.epoch),
+            Some(5)
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

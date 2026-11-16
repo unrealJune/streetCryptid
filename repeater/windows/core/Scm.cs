@@ -10,6 +10,10 @@ public static unsafe class Scm
     private const uint ScManagerConnect = 0x0001;
     private const uint ServiceAllAccess = 0xF01FF;
     private const uint ServiceQueryStatus = 0x0004;
+    private const uint ServiceStart = 0x0010;
+    private const uint ServiceDemandStart = 3;
+    private const uint DaclSecurityInformation = 4;
+    private const uint ErrorServiceSpecificError = 1066;
     private const uint ServiceWin32OwnProcess = 0x10;
     private const uint ServiceAutoStart = 2;
     private const uint ServiceErrorNormal = 1;
@@ -22,21 +26,88 @@ public static unsafe class Scm
     public const uint Stopped = 1;
     public const uint Running = 4;
 
-    public static bool IsInstalled()
+    public static bool IsInstalled(string name = ServiceLayout.ServiceName)
     {
         using var manager = OpenManager(ScManagerConnect);
-        using var service = OpenService(manager, ServiceQueryStatus, throwIfMissing: false);
+        using var service = OpenService(manager, ServiceQueryStatus, throwIfMissing: false, name);
         return service is not null;
     }
 
     /// <summary>The service's process id and state, or null when it is not installed.</summary>
     public static (uint ProcessId, uint State)? Query()
     {
+        var status = QueryFull(ServiceLayout.ServiceName);
+        return status is { } s ? (s.ProcessId, s.State) : null;
+    }
+
+    /// <summary>
+    /// A service's state and, once stopped, the code it exited with (its service-specific code when
+    /// it reported one). Null when it is not installed. Needs only query access.
+    /// </summary>
+    public static (uint ProcessId, uint State, uint ExitCode)? QueryFull(string name)
+    {
         using var manager = OpenManager(ScManagerConnect);
-        using var service = OpenService(manager, ServiceQueryStatus, throwIfMissing: false);
+        using var service = OpenService(manager, ServiceQueryStatus, throwIfMissing: false, name);
         if (service is null) return null;
         var status = QueryStatus(service);
-        return (status.ProcessId, status.CurrentState);
+        uint exit = status.Win32ExitCode == ErrorServiceSpecificError
+            ? status.ServiceSpecificExitCode : status.Win32ExitCode;
+        return (status.ProcessId, status.CurrentState, exit);
+    }
+
+    /// <summary>
+    /// Start a service with one argument, opening it with nothing but start access — which is all
+    /// the owner is granted on the updater. False when it was already running.
+    /// </summary>
+    public static bool StartWith(string name, string argument)
+    {
+        using var manager = OpenManager(ScManagerConnect);
+        using var service = OpenService(manager, ServiceStart, throwIfMissing: true, name)!;
+        fixed (char* value = argument)
+        {
+            char* arguments = value;
+            if (StartServiceW(service.Value, 1, (IntPtr)(&arguments))) return true;
+        }
+        int error = Marshal.GetLastWin32Error();
+        if (error == ErrorServiceAlreadyRunning) return false;
+        throw new Win32Exception(error);
+    }
+
+    /// <summary>
+    /// Create the updater, or point an existing one at <paramref name="commandLine"/> again: a
+    /// demand-start LocalSystem service whose DACL lets <paramref name="owner"/> start it and read
+    /// its status, and nothing more. SYSTEM and Administrators keep full control.
+    /// </summary>
+    [System.Runtime.Versioning.SupportedOSPlatform("windows")]
+    public static void InstallUpdater(string commandLine, string owner)
+    {
+        using var manager = OpenManager(ScManagerAllAccess);
+        var service = OpenService(manager, ServiceAllAccess, throwIfMissing: false, ServiceLayout.UpdaterName);
+        if (service is null)
+        {
+            service = new Handle(CreateServiceW(manager.Value, ServiceLayout.UpdaterName,
+                ServiceLayout.UpdaterDisplayName, ServiceAllAccess, ServiceWin32OwnProcess, ServiceDemandStart,
+                ServiceErrorNormal, commandLine, null, IntPtr.Zero, null, null, null));
+            if (service.Value == IntPtr.Zero) throw new Win32Exception();
+        }
+        else if (!ChangeServiceConfigW(service.Value, ServiceWin32OwnProcess, ServiceDemandStart, ServiceErrorNormal,
+                     commandLine, null, IntPtr.Zero, null, "LocalSystem", null, ServiceLayout.UpdaterDisplayName))
+            throw new Win32Exception();
+        using (service)
+        {
+            fixed (char* description = ServiceLayout.UpdaterDescription)
+            {
+                var info = new ServiceDescription { Description = description };
+                Configure(service, 1, &info);
+            }
+            // SY and BA: full control. The owner: query status (LC), start (RP), read control (RC).
+            var descriptor = new System.Security.AccessControl.RawSecurityDescriptor(
+                $"D:P(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;SY)(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;BA)(A;;LCRPRC;;;{new System.Security.Principal.SecurityIdentifier(owner).Value})");
+            var binary = new byte[descriptor.BinaryLength];
+            descriptor.GetBinaryForm(binary, 0);
+            fixed (byte* sd = binary)
+                if (!SetServiceObjectSecurity(service.Value, DaclSecurityInformation, sd)) throw new Win32Exception();
+        }
     }
 
     /// <summary>
@@ -85,20 +156,20 @@ public static unsafe class Scm
         }
     }
 
-    public static void Start()
+    public static void Start(string name = ServiceLayout.ServiceName)
     {
         using var manager = OpenManager(ScManagerConnect);
-        using var service = OpenService(manager, ServiceAllAccess, throwIfMissing: true)!;
+        using var service = OpenService(manager, ServiceAllAccess, throwIfMissing: true, name)!;
         if (!StartServiceW(service.Value, 0, IntPtr.Zero) &&
             Marshal.GetLastWin32Error() != ErrorServiceAlreadyRunning)
             throw new Win32Exception();
     }
 
     /// <summary>Stop the service and wait for it; false if it is still running at the deadline.</summary>
-    public static bool Stop(TimeSpan timeout)
+    public static bool Stop(TimeSpan timeout, string name = ServiceLayout.ServiceName)
     {
         using var manager = OpenManager(ScManagerConnect);
-        using var service = OpenService(manager, ServiceAllAccess, throwIfMissing: false);
+        using var service = OpenService(manager, ServiceAllAccess, throwIfMissing: false, name);
         if (service is null) return true;
         var status = new ServiceStatusRaw();
         if (!ControlService(service.Value, 1, &status))
@@ -115,10 +186,10 @@ public static unsafe class Scm
         return QueryStatus(service).CurrentState == Stopped;
     }
 
-    public static void Delete()
+    public static void Delete(string name = ServiceLayout.ServiceName)
     {
         using var manager = OpenManager(ScManagerConnect);
-        using var service = OpenService(manager, ServiceAllAccess, throwIfMissing: false);
+        using var service = OpenService(manager, ServiceAllAccess, throwIfMissing: false, name);
         if (service is null) return;
         if (!DeleteService(service.Value) && Marshal.GetLastWin32Error() != ErrorServiceMarkedForDelete)
             throw new Win32Exception();
@@ -131,9 +202,10 @@ public static unsafe class Scm
         return handle;
     }
 
-    private static Handle? OpenService(Handle manager, uint access, bool throwIfMissing)
+    private static Handle? OpenService(Handle manager, uint access, bool throwIfMissing,
+        string name = ServiceLayout.ServiceName)
     {
-        IntPtr service = OpenServiceW(manager.Value, ServiceLayout.ServiceName, access);
+        IntPtr service = OpenServiceW(manager.Value, name, access);
         if (service != IntPtr.Zero) return new Handle(service);
         int error = Marshal.GetLastWin32Error();
         if (error == ErrorServiceDoesNotExist && !throwIfMissing) return null;
@@ -235,6 +307,10 @@ public static unsafe class Scm
     [DllImport("advapi32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool DeleteService(IntPtr service);
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool SetServiceObjectSecurity(IntPtr service, uint information, byte* descriptor);
 
     [DllImport("advapi32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
