@@ -89,7 +89,7 @@ for _ in $(seq 60); do
 done
 grep -q '"mode": "service"' "$work/status.json" || fail "status did not reach the service"
 grep -q '"keepAwake": true' "$work/status.json" || fail "install's settings were not applied"
-"$bin" claim --once --link | grep -q '^https://streetcrypt.id/repeater#' || fail "no claim link from the service"
+"$bin" claim --once --link | grep -q '^https://streetcrypt.id/repeater/claim#' || fail "no claim link from the service"
 journalctl -u streetcryptid-repeater --no-pager | grep -q 'streetcrypt.id/repeater' &&
   fail "the claim link reached the journal"
 

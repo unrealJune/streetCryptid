@@ -29,7 +29,7 @@ mod tests {
 
     #[test]
     fn renders_a_code_with_the_link_beside_it() {
-        let url = "https://streetcrypt.id/repeater#t=endpointticket&s=secret";
+        let url = "https://streetcrypt.id/repeater/claim#t=endpointticket&s=secret";
         let qr = render(url);
         assert!(qr.lines().count() > 10);
         let text = claim_text(url, 30);
