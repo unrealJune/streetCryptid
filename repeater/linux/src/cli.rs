@@ -79,6 +79,27 @@ enum Commands {
         #[arg(long)]
         socket: Option<PathBuf>,
     },
+    /// Show this machine's name, or name it ("Living room PC"); phones show it once the owner's
+    /// phone picks it up.
+    Name {
+        /// The new name, at most 40 characters.
+        #[arg(conflicts_with = "clear")]
+        name: Option<String>,
+        /// Remove the name.
+        #[arg(long)]
+        clear: bool,
+        #[arg(long)]
+        socket: Option<PathBuf>,
+    },
+    /// Release the repeater from its owner: it stops carrying everyone and shows a new claim code.
+    /// The identity is kept.
+    Release {
+        /// Release without asking: it cannot be undone from this machine.
+        #[arg(long)]
+        yes: bool,
+        #[arg(long)]
+        socket: Option<PathBuf>,
+    },
     /// Print every message the repeater sends, one JSON object per line.
     Watch {
         #[arg(long)]
@@ -201,6 +222,12 @@ fn client_command(command: Commands) -> anyhow::Result<()> {
                 )
                 .await
             }
+            Commands::Name {
+                name,
+                clear,
+                socket,
+            } => client::name(socket, if clear { Some(String::new()) } else { name }).await,
+            Commands::Release { yes, socket } => client::release(socket, yes).await,
             Commands::Watch { socket } => client::watch(socket).await,
             _ => unreachable!("handled in main"),
         }

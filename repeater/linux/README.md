@@ -6,8 +6,8 @@ runs the same node as the Windows repeater (`repeater/host`, on the server crate
 web UI, no HTTP port, and nothing on the machine can decrypt a location.
 
 ```
-streetcryptid-repeater status|claim|settings|watch ──unix socket──▶ streetcryptid-repeater run
-                                                                    (a terminal, or systemd)
+streetcryptid-repeater status|claim|settings|name|release|watch ──unix socket──▶ streetcryptid-repeater run
+                                                                                 (a terminal, or systemd)
 ```
 
 The Windows repeater needs a C# service to supervise its Rust host; on Linux systemd is the
@@ -36,15 +36,17 @@ sudo ./streetcryptid-repeater install --system   # for the machine, from boot
 
 ## Commands
 
-| Command                                               | What it does                                                              |
-| ----------------------------------------------------- | ------------------------------------------------------------------------- |
-| `run`                                                 | The repeater, in the foreground. Prints the claim QR at a terminal.       |
-| `status [--json]`                                     | What it is doing: claim, people carried, items ready, traffic, settings.  |
-| `claim [--once] [--link]`                             | The claim QR, renewed until a phone claims it (`--link`: the link alone). |
-| `settings [--telemetry on/off] [--keep-awake on/off]` | Show or change this machine's choices.                                    |
-| `watch`                                               | Every protocol line, as JSON, for scripts.                                |
-| `install [--system]`                                  | Opt in to the systemd daemon (per user, or the machine's).                |
-| `uninstall [--system]`                                | Stop and remove the daemon; the identity is kept.                         |
+| Command                                               | What it does                                                                |
+| ----------------------------------------------------- | --------------------------------------------------------------------------- |
+| `run`                                                 | The repeater, in the foreground. Prints the claim QR at a terminal.         |
+| `status [--json]`                                     | What it is doing: claim, people carried, items ready, traffic, settings.    |
+| `claim [--once] [--link]`                             | The claim QR, renewed until a phone claims it (`--link`: the link alone).   |
+| `settings [--telemetry on/off] [--keep-awake on/off]` | Show or change this machine's choices.                                      |
+| `name [NAME] [--clear]`                               | Show or set the name phones show for this machine (at most 40 chars).       |
+| `release --yes`                                       | Hand it back: stop carrying everyone, show a new claim code; same identity. |
+| `watch`                                               | Every protocol line, as JSON, for scripts.                                  |
+| `install [--system]`                                  | Opt in to the systemd daemon (per user, or the machine's).                  |
+| `uninstall [--system]`                                | Stop and remove the daemon; the identity is kept.                           |
 
 The management commands find the running repeater by themselves: your own first
 (`$XDG_RUNTIME_DIR/streetcryptid-repeater/control.sock`), then the machine's
@@ -59,9 +61,9 @@ object per line.
 - On connecting, a client gets a `service` line (`starting`, `running`, `stopped`) and the latest
   `snapshot`, so it never waits for a first screen.
 - Then a snapshot every two seconds and an `arrival` for each newly servable fix.
-- The one command it takes is `settings` (`telemetry`, `keepAwake`), answered with a `result` to
-  that client and a fresh snapshot to everyone. Anything else and the client is dropped, as the
-  Windows service does.
+- It takes the host's three commands: `settings` (`telemetry`, `keepAwake`), `name` (`name`, `""`
+  to clear) and `release`, each answered with a `result` to that client and a fresh snapshot to
+  everyone. Anything else and the client is dropped, as the Windows service does.
 
 The claim link travels over this socket, so it is never world-accessible: a person's socket is
 0600 in their private runtime directory, the machine's is 0660 in a 0750 directory, open to root

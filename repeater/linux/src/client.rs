@@ -122,6 +122,27 @@ impl Connection {
         .map_err(|_| anyhow!("The repeater did not report within {FIRST_SNAPSHOT:?}"))?
     }
 
+    /// Send one command (`kind` and its fields) and wait for the daemon's answer to it.
+    async fn request(&mut self, mut body: Value) -> Result<bool> {
+        let request_id = streetcryptid_repeater_host::run_id()[..16].to_string();
+        body["protocol"] = PROTOCOL.into();
+        body["requestId"] = request_id.as_str().into();
+        self.send(&body).await?;
+        tokio::time::timeout(REPLY, async {
+            loop {
+                let message = self
+                    .next()
+                    .await?
+                    .ok_or_else(|| anyhow!("The repeater closed the connection"))?;
+                if message["kind"] == "result" && message["requestId"] == request_id.as_str() {
+                    return Ok(message["ok"].as_bool() == Some(true));
+                }
+            }
+        })
+        .await
+        .map_err(|_| anyhow!("The repeater did not answer"))?
+    }
+
     async fn send(&mut self, value: &Value) -> Result<()> {
         let line = format!("{value}\n");
         self.write.write_all(line.as_bytes()).await?;
@@ -173,6 +194,7 @@ pub fn describe(state: &Value, socket: &std::path::Path) -> String {
     let row = |out: &mut String, label: &str, value: String| {
         out.push_str(&format!("  {label:<12} {value}\n"));
     };
+    row(&mut out, "Name", describe_name(state));
     row(&mut out, "Endpoint", short(state["endpointId"].as_str()));
     if state["claimed"].as_bool() == Some(true) {
         row(
@@ -358,29 +380,13 @@ pub async fn settings(
     }
     let next_telemetry = telemetry.unwrap_or(current["telemetry"].as_bool() == Some(true));
     let next_keep_awake = keep_awake.unwrap_or(current["keepAwake"].as_bool() == Some(true));
-    let request_id = streetcryptid_repeater_host::run_id()[..16].to_string();
-    connection
-        .send(&serde_json::json!({
-            "protocol": PROTOCOL,
+    let ok = connection
+        .request(serde_json::json!({
             "kind": "settings",
-            "requestId": request_id,
             "telemetry": next_telemetry,
             "keepAwake": next_keep_awake,
         }))
         .await?;
-    let ok = tokio::time::timeout(REPLY, async {
-        loop {
-            let message = connection
-                .next()
-                .await?
-                .ok_or_else(|| anyhow!("The repeater closed the connection"))?;
-            if message["kind"] == "result" && message["requestId"] == request_id.as_str() {
-                return Ok::<_, anyhow::Error>(message["ok"].as_bool() == Some(true));
-            }
-        }
-    })
-    .await
-    .map_err(|_| anyhow!("The repeater did not answer"))??;
     if !ok {
         bail!("The repeater could not save its settings; check its state directory");
     }
@@ -392,6 +398,61 @@ pub async fn settings(
     if next_telemetry && !available {
         println!("This build was made without a diagnostics endpoint, so nothing will be sent.");
     }
+    Ok(())
+}
+
+/// Print this machine's name, or change it (`""` clears it). The name is signed into the next
+/// cert the repeater issues, so phones show it once the owner's phone picks the rename up.
+pub async fn name(socket: Option<PathBuf>, name: Option<String>) -> Result<()> {
+    let mut connection = Connection::open(socket).await?;
+    let state = connection.snapshot().await?;
+    let Some(name) = name else {
+        println!("{}", describe_name(&state));
+        return Ok(());
+    };
+    if !connection
+        .request(serde_json::json!({"kind": "name", "name": name}))
+        .await?
+    {
+        bail!("The repeater refused that name: at most 40 printable characters");
+    }
+    let state = connection.snapshot().await?;
+    match state["name"].as_str() {
+        Some(kept) => println!("Named \"{kept}\". Phones show it once the owner opens Repeaters."),
+        None => println!("Name cleared."),
+    }
+    Ok(())
+}
+
+fn describe_name(state: &Value) -> String {
+    match (state["name"].as_str(), state["listedName"].as_str()) {
+        (None, _) => "(no name)".into(),
+        (Some(name), Some(listed)) if name == listed => name.into(),
+        (Some(name), _) => format!("{name} (phones show it once the owner opens Repeaters)"),
+    }
+}
+
+/// Release the repeater from its roster (REPEATERS.md §4.1): it stops carrying everyone and shows
+/// a new claim code. The identity stays, so the same machine can be claimed again.
+pub async fn release(socket: Option<PathBuf>, yes: bool) -> Result<()> {
+    let mut connection = Connection::open(socket).await?;
+    let state = connection.snapshot().await?;
+    if state["claimed"].as_bool() != Some(true) {
+        println!("This repeater is not claimed; there is nothing to release.");
+        return Ok(());
+    }
+    if !yes {
+        bail!(
+            "Releasing stops carrying everyone and cannot be undone here. Run it again with --yes"
+        );
+    }
+    if !connection
+        .request(serde_json::json!({"kind": "release"}))
+        .await?
+    {
+        bail!("The repeater did not confirm the release. Try again");
+    }
+    println!("Released. Run `streetcryptid-repeater claim` to show the new claim code.");
     Ok(())
 }
 
@@ -427,6 +488,18 @@ mod tests {
         assert!(text.contains("999 B out"));
         assert!(text.contains("Keep awake   on (holding off sleep)"));
         assert!(!text.contains("0123456789abcdef0123"));
+        assert!(text.contains("Name         (no name)"));
+    }
+
+    #[test]
+    fn a_rename_reads_as_pending_until_the_roster_carries_it() {
+        let named = |name: Value, listed: Value| {
+            describe_name(&serde_json::json!({"name": name, "listedName": listed}))
+        };
+        assert_eq!(named(Value::Null, Value::Null), "(no name)");
+        assert_eq!(named("Den".into(), "Den".into()), "Den");
+        assert!(named("Den".into(), "Old".into()).starts_with("Den (phones show it"));
+        assert!(named("Den".into(), Value::Null).starts_with("Den (phones show it"));
     }
 
     #[test]

@@ -12,8 +12,9 @@ One Rust binary, `streetcryptid-repeater` (crate `streetcryptid-repeater-linux`)
   platforms; this crate only adds what is Linux's: the Unix socket, systemd, logind, the move into
   `/var/lib`.
 - The management plane is the Windows service's protocol, not a new one: a `service` line and the
-  latest snapshot on connect, snapshots and arrivals after, `settings` as the only command. Keep it
-  that way; anything a CLI needs that a snapshot lacks belongs in the snapshot, for both platforms.
+  latest snapshot on connect, snapshots and arrivals after, and the host's commands (`settings`,
+  `name`, `release`; `streetcryptid_repeater_host::Action`) and nothing else. Keep it that way;
+  anything a CLI needs that a snapshot lacks belongs in the snapshot, for both platforms.
 - The claim link is `streetcryptid_repeater::wire::claim_url`, through the host's snapshot. Never
   format it again, and never print it anywhere but an interactive terminal: under systemd stdout
   is the journal.
