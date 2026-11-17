@@ -287,9 +287,14 @@ runs:
             # of one compile's hashed inputs differed in exactly that line, and 97% of compiles
             # missed a warm cache. The NDK version (also in the cache key) names the compiler.
             echo "CCACHE_COMPILERCHECK=string:ndk-27.1.12297006"
-            echo "CMAKE_C_COMPILER_LAUNCHER=/usr/local/bin/ccache"
-            echo "CMAKE_CXX_COMPILER_LAUNCHER=/usr/local/bin/ccache"
+            # Through scripts/compile-slot.sh, which caps concurrent compilers across every
+            # library's CMake build and ABI at once (it says why), and then runs ccache.
+            echo "CMAKE_C_COMPILER_LAUNCHER=/usr/local/bin/sc-compile-slot"
+            echo "CMAKE_CXX_COMPILER_LAUNCHER=/usr/local/bin/sc-compile-slot"
+            echo "SC_COMPILE_SLOTS=$(nproc)"
+            echo "SC_COMPILE_SLOT_DIR=$RUNNER_TEMP/compile-slots"
           } >> "$GITHUB_ENV"
+          sudo install -m 0755 "$GITHUB_WORKSPACE/scripts/compile-slot.sh" /usr/local/bin/sc-compile-slot
         fi
 
     # Every run saves a new entry (the run id ends the key) and restores the newest one with the

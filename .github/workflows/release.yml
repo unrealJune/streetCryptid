@@ -156,6 +156,7 @@ jobs:
         env:
           VERSION: ${{ steps.resolve.outputs.version }}
           TAG: ${{ steps.resolve.outputs.tag }}
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN || github.token }}
         run: |
           set -euo pipefail
           bash scripts/apply-version.sh "$VERSION"
@@ -170,10 +171,47 @@ jobs:
             git commit --message "chore(release): $TAG"
           fi
           git tag --annotate "$TAG" --message "$TAG"
-          # The branch has to land before the tag: if someone pushed to main mid-run this fails
-          # here, leaving no dangling tag behind.
-          git push origin HEAD:main
-          git push origin "$TAG"
+          # The branch and the tag land together or not at all. They used to be two pushes, and on
+          # 2026-11-17 GitHub refused the tag alone twice ("! [remote rejected] v4.3.0 -> v4.3.0
+          # (failed)", then v4.4.0) after main had already taken the bump commit: no tag, no build,
+          # and every later run -- the manual one included -- stopped at "HEAD is this workflow's
+          # own bump commit". An atomic push leaves main untouched when either ref is refused, so
+          # a failed run can simply be run again. If main moved mid-run the refusal is final (the
+          # newer commit's own run releases it); anything else is retried.
+          #
+          # If git keeps refusing, main goes alone and the tag is created through the REST API
+          # instead (a lightweight tag on the same commit; next-version.sh and `gh release` read
+          # either kind), so a tag refusal can no longer cost a release.
+          base="$(git rev-parse origin/main)"
+          pushed=false
+          for attempt in 1 2 3; do
+            if git push --atomic origin HEAD:main "refs/tags/$TAG"; then
+              pushed=true
+              break
+            fi
+            git fetch --quiet origin main
+            if [[ "$(git rev-parse origin/main)" != "$base" ]]; then
+              echo "main moved during the release; the newer commit's own run will release it." >&2
+              exit 1
+            fi
+            sleep $((attempt * 15))
+          done
+          if [[ "$pushed" != true ]]; then
+            echo "::warning::git refused main + $TAG three times; pushing main alone and creating the tag through the API."
+            git push origin HEAD:main
+            for attempt in 1 2 3; do
+              if gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" \
+                -f ref="refs/tags/$TAG" -f sha="$(git rev-parse HEAD)" > /dev/null; then
+                pushed=true
+                break
+              fi
+              sleep $((attempt * 15))
+            done
+            if [[ "$pushed" != true ]]; then
+              echo "main has the $TAG bump commit, but the tag could not be created." >&2
+              exit 1
+            fi
+          fi
           printf 'sha=%s\n' "$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
   release_ios:
@@ -388,6 +426,11 @@ jobs:
       # 5 GB Gradle heap: on 2026-11-15 the resource lines fell from 14 GB available to 0.9 GB at
       # load 15 in five minutes, and the runner was shut down. Two workers keeps the native peak
       # inside the runner; caching, not parallelism, is what makes the next run fast.
+      #
+      # It was not enough on its own: two workers still meant ~12 compilers, the 2026-11-16 v4.0.4
+      # build finished only after pushing 7.7 GB into swap, and v4.2.0's thrashed for an hour until
+      # the runner was lost. The compiler count itself is now capped at nproc across every CMake
+      # build and ABI by the launcher the setup action installs (scripts/compile-slot.sh).
       GRADLE_OPTS: >-
         -Dorg.gradle.parallel=true
         -Dorg.gradle.caching=true
