@@ -30,7 +30,7 @@ fail() {
   if [[ -f "$work/daemon.log" ]]; then
     echo "--- daemon output ---" >&2
     # The claim link is a secret even in a test; it must not be in here, and is not printed.
-    sed 's#streetcrypt.id/repeater\#.*#<claim link>#' "$work/daemon.log" >&2
+    sed 's#streetcrypt\.id/repeater[^#[:space:]]*\#.*#<claim link>#' "$work/daemon.log" >&2
   fi
   exit 1
 }

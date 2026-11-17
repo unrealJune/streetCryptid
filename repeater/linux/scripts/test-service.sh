@@ -38,10 +38,10 @@ fail() {
   for log in "$work"/*.log; do
     [[ -f "$log" ]] || continue
     echo "--- $(basename "$log")" >&2
-    sed 's#streetcrypt.id/repeater\#.*#<claim link>#' "$log" >&2
+    sed 's#streetcrypt\.id/repeater[^#[:space:]]*\#.*#<claim link>#' "$log" >&2
   done
   journalctl -u streetcryptid-repeater --no-pager -n 50 2>/dev/null |
-    sed 's#streetcrypt.id/repeater\#.*#<claim link>#' >&2 || true
+    sed 's#streetcrypt\.id/repeater[^#[:space:]]*\#.*#<claim link>#' >&2 || true
   exit 1
 }
 
@@ -51,6 +51,26 @@ as_person() {
   sudo -u "$person" -H env -u XDG_RUNTIME_DIR "$@"
 }
 
+# Stop the person's daemon on `socket` and wait for the sudo in front of it (`pid`). The signal goes
+# to the daemon itself, never to sudo: sudo before 1.9.14 (Ubuntu 22.04's runners) does not relay
+# a signal sent from the command's own process group, which a background job here shares, so a
+# TERM to sudo was dropped and `wait` hung the job until its timeout.
+stop_person_daemon() {
+  local pid="$1" socket="$2" what="$3"
+  pkill -TERM -u "$person" -f -- "--socket $socket" ||
+    fail "$what: no daemon of $person's was running (it had already exited)"
+  local waited
+  for waited in $(seq 30); do
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 1
+  done
+  if kill -0 "$pid" 2>/dev/null; then
+    pkill -KILL -u "$person" -f -- "--socket $socket" || true
+    fail "$what: the daemon did not stop within 30 s of SIGTERM"
+  fi
+  wait "$pid" || fail "$what: the daemon did not stop cleanly"
+}
+
 echo "== a per-user identity to move"
 sudo -u "$person" -H env -u XDG_RUNTIME_DIR "$bin" run --state-dir "$user_state" --socket "$work/user.sock" > "$work/user.log" 2>&1 &
 pid=$!
@@ -58,8 +78,7 @@ for _ in $(seq 90); do
   [[ -f "$user_state/secret.key" ]] && as_person "$bin" status --socket "$work/user.sock" > /dev/null 2>&1 && break
   sleep 1
 done
-kill -TERM "$pid"
-wait "$pid" || fail "the per-user daemon did not stop cleanly"
+stop_person_daemon "$pid" "$work/user.sock" "the per-user identity"
 cp "$user_state/secret.key" "$work/identity"
 chmod 0644 "$work/identity"
 
@@ -133,7 +152,6 @@ for _ in $(seq 90); do
   as_person "$bin" status --socket "$work/user.sock" > /dev/null 2>&1 && break
   sleep 1
 done
-kill -TERM "$pid"
-wait "$pid" || fail "the per-user daemon did not run again"
+stop_person_daemon "$pid" "$work/user.sock" "the per-user daemon after uninstall"
 
 echo "The system service installed, moved the identity in and out, and came off cleanly."
