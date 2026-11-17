@@ -416,6 +416,10 @@ impl StashNode {
         });
         if let Some(repeater) = &node.repeater {
             repeater.attach(&node);
+            // Removed while a build that did not release on removal was running: release now.
+            if repeater.is_removed() {
+                repeater.release().await?;
+            }
         }
         let settle = tokio::spawn(node.clone().run_settle_loop());
         node.track_task(settle.abort_handle());
@@ -423,9 +427,14 @@ impl StashNode {
             node.shutdown().await;
             return Err(e);
         }
-        // A roster that moved on while this node was down is applied once at start.
-        if let Some(state) = node.repeater.as_ref().and_then(|r| r.roster_state()) {
-            node.enforce_roster(&state).await;
+        // A roster that moved on while this node was down is applied once at start, including a
+        // removal of this machine, which releases everything it carried.
+        if let Some(repeater) = node.repeater.as_ref() {
+            match repeater.carrying_state() {
+                Some(state) => node.enforce_roster(&state).await,
+                // Unclaimed (released from its console while it was down): it carries nobody.
+                None => node.release_all_members().await,
+            }
         }
         Ok(node)
     }
@@ -694,7 +703,17 @@ impl StashNode {
 
     /// Stop carrying every namespace granted on behalf of someone `state` no longer carries.
     pub async fn enforce_roster(&self, state: &streetcryptid_repeater::roster::RosterState) {
-        let carried: HashSet<String> = state.carried.iter().map(full_hex).collect();
+        self.release_members_except(state.carried.iter().map(full_hex).collect())
+            .await;
+    }
+
+    /// Stop carrying every namespace any member granted: what an unclaimed repeater holds for
+    /// nobody (a console release, or `roster.bin` removed while the machine was down).
+    pub async fn release_all_members(&self) {
+        self.release_members_except(HashSet::new()).await;
+    }
+
+    async fn release_members_except(&self, carried: HashSet<String>) {
         let doomed: Vec<String> = match &self.book {
             Some(book) => book
                 .lock()
@@ -721,8 +740,9 @@ impl StashNode {
     }
 
     /// Stop carrying a namespace: forget the grant, leave the doc so the live engine stops
-    /// syncing it, and drop its content from the ledger. What is on disk is not deleted here; it
-    /// is unreachable to the ledger and goes when disk GC lands (REPEATERS.md, phase 3).
+    /// syncing it, and drop its content from the ledger. A repeater (`Storage::MemoryRepeater`)
+    /// holds ciphertext in memory only, so what it already held stays there, unserved, until the
+    /// in-memory GC reclaims it or the process restarts (REPEATERS.md §1, §2.2).
     #[tracing::instrument(
         name = "repeater.release",
         skip_all,

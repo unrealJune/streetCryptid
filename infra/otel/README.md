@@ -489,9 +489,11 @@ location lane the docs-only transport removed; series before that date carry it.
 
 Attributes, all spanmetrics dimensions (so they keep for 90 days, not 7):
 
-- `contact.role` — `friend` | `stash` | `other`. Friends come from the native recipient store
-  (sharing + watching); the stash is the first delivery ticket when the stash is opted into. A
-  friend is checked first, so it can never be filed as the stash.
+- `contact.role` — `friend` | `stash` | `repeater` | `other`. Friends come from the native
+  recipient store (sharing + watching); the stash is the first delivery ticket when the stash is
+  opted into; a repeater is any machine in a roster this phone knows (`repeaters.bin`, including
+  rosters learned from friends' cards). A friend is checked first, then the stash, so neither can
+  be filed as anything else.
 - `contact.from_author` (receive only) — the peer handed over **its own** envelope. `friend` +
   `from_author=true` is the strongest statement there is: the author's phone was on the other end.
 - `contact.path` — `ble` | `lan` | `direct` | `relay` | `unknown`, the closest open path to that
@@ -520,6 +522,54 @@ sum by (contact_role, contact_from_author) (
   rate(traces_span_metrics_calls_total{span_name="peer.contact", contact_dir="recv"}[1h])) * 3600
 ```
 
+**Production had none of these dimensions until 2026-11-08.** buttercup's
+`helmrelease-public.yaml` carried only the first six, so every panel above read empty there while
+working against this file's dev collector. Keep the two lists in step.
+
+## Where did this fix come from? (`fix.provenance`)
+
+`peer.contact` counts exchanges per peer. `fix.provenance` (Rust, `contact.rs`) counts **fixes**:
+one span for every friend's fix that reached this phone, at the moment it arrived, saying who
+handed it over. It fires from the replica watch beside the receive-side `peer.contact` (one per
+author a peer delivered), whichever pass carried it — a live broadcast, a pull, or a sync a peer
+opened to us — so JS-free background pulls are counted too, and none twice.
+
+| attribute                   | values                                                                                         |
+| --------------------------- | ---------------------------------------------------------------------------------------------- |
+| `fix.source`                | `author` (their own phone), `friend` (another friend relayed it), `stash`, `repeater`, `other` |
+| `fix.path`                  | `ble` \| `lan` \| `direct` \| `relay` \| `unknown`, as on `peer.contact`                       |
+| `fix.repeater_owner`        | short id of the roster owner, when `fix.source = repeater` (span attribute, not a metric)      |
+| `sc.author` / `sc.via_peer` | whose fix, and who handed it over                                                              |
+
+`fix.source` and `fix.path` are spanmetrics dimensions. A slot that was already in the
+replica produces nothing: this is delivery, never presence.
+
+```promql
+# Where this phone's friends' fixes come from, per hour.
+sum by (fix_source) (
+  rate(traces_span_metrics_calls_total{span_name="fix.provenance"}[1h])) * 3600
+```
+
+```traceql
+# Fixes a repeater delivered, and whose repeater it was.
+{ name = "fix.provenance" && span.fix.source = "repeater" } | select(span.fix.repeater_owner, span.sc.author)
+```
+
+**Repeaters from the phone's side** (`docs/social/REPEATERS.md` §4.4, §5). `repeater.grant`
+(Rust, every start) carries `delivered` (repeaters that took a roster op they were owed),
+`refreshed` (rosters fetched), `granted` and `failed`. `repeater.receipt` follows a push that
+reached repeaters alone (no stash, no awake friend): it asks them `Have` for up to 8 s, and
+`confirmed=true` with `sc.peer` is the only evidence such a phone has that a fix landed anywhere;
+it is what turns the flush into `Pushed` rather than `Scheduled`. `device.health` reports
+`repeaters.enrolled` (rosters carrying this phone), `repeaters.carriers` (machines across them)
+and `repeaters.last_contact_age_ms`, which is per process and absent until a repeater answers
+after a relaunch.
+
+```traceql
+# Phones relying on repeaters alone whose pushes no repeater confirmed.
+{ name = "repeater.receipt" && span.confirmed = false } | select(span.carriers, span.sc.author)
+```
+
 ```traceql
 # Every direct handover between two phones (swap in real short ids).
 { name = "peer.contact" && resource.service.instance.id = "6942d8b97f" && span.sc.peer = "84f86b144a" }
@@ -541,15 +591,16 @@ invisible.
 `location.runtime` (`streetcryptid-core`, so it ships from a JS-free process) is that state machine
 reporting itself, from `LocationRuntimeReporter.swift` through `location_runtime.rs`:
 
-| `location.event`                                                           | Fires                                                                                                                                                                                                                                                                                                                  |
-| -------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `pulse`                                                                    | every 5 min from a background timer while the process runs — NOT from the delivery path                                                                                                                                                                                                                                |
-| `main_stalled`                                                             | the pulse's main-thread probe went unanswered for 10 s (once per stall)                                                                                                                                                                                                                                                |
-| `started`                                                                  | `start()` armed the runtime; `location.reason` is the wake reason                                                                                                                                                                                                                                                      |
-| `transition`                                                               | `moving` ⇄ `stopped`; `location.reason` is the stop evidence or the wake reason                                                                                                                                                                                                                                        |
-| `visit` / `fence_exit`                                                     | a `CLVisit` (`arrival` / `departure`) or a stop-anchor exit. A visit's `location.detail` is what it did: `parked`, `pending`, `stale`, `already-parked`, `unparked`, `ignored`                                                                                                                                         |
-| `paused` / `resumed` / `location_error` / `fence_failed` / `authorization` | the Core Location callbacks that used to reach only `NSLog`                                                                                                                                                                                                                                                            |
-| `publish_assertion`                                                        | native publish work outlived its background-task assertion: `reason = expired` (iOS ran the expiration handler mid-seal or mid-push) or `stranded` (a later process found assertions an earlier one never ended — killed holding them). `location.detail` has the lane and `held_ms`. Also counted in `wake.publish_*` |
+| `location.event`                                                           | Fires                                                                                                                                                                                                                                                                                                                          |
+| -------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `pulse`                                                                    | every 5 min from a background timer while the process runs — NOT from the delivery path                                                                                                                                                                                                                                        |
+| `main_stalled`                                                             | the pulse's main-thread probe went unanswered for 10 s (once per stall)                                                                                                                                                                                                                                                        |
+| `started`                                                                  | `start()` armed the runtime; `location.reason` is the wake reason                                                                                                                                                                                                                                                              |
+| `transition`                                                               | `moving` ⇄ `stopped`; `location.reason` is the stop evidence or the wake reason                                                                                                                                                                                                                                                |
+| `visit` / `fence_exit`                                                     | a `CLVisit` (`arrival` / `departure`) or a stop-anchor exit. A visit's `location.detail` is what it did: `parked`, `pending`, `stale`, `already-parked`, `unparked`, `ignored`                                                                                                                                                 |
+| `paused` / `resumed` / `location_error` / `fence_failed` / `authorization` | the Core Location callbacks that used to reach only `NSLog`                                                                                                                                                                                                                                                                    |
+| `publish_assertion`                                                        | native publish work outlived its background-task assertion: `reason = expired` (iOS ran the expiration handler mid-seal or mid-push) or `stranded` (a later process found assertions an earlier one never ended — killed holding them). `location.detail` has the lane and `held_ms`. Also counted in `wake.publish_*`         |
+| `fence_rearm`                                                              | after a moving-fence crossing no fresh fix redrew the fence in time, so it was drawn from the best position at hand: `reason = deadline` (20 s) or `expired` (iOS ended the background time first). `location.detail` has `radius_m` and `fix_age_ms`. Rare; a steady stream of them is GPS that will not answer while driving |
 
 Read a pulse like this:
 
@@ -563,6 +614,16 @@ Read a pulse like this:
 - `location.redeliveries` close to `location.deliveries`: Core Location is handing back a position
   it already gave us. Those are no longer ingested (they went out `live` with a stale position on
   2026-10-02); a non-zero `fix_age_at_delivery_ms` on a fresh delivery says the same thing.
+- `location.moving_fence` (iOS, every event): `armed` (centred on a fresh fix), `adopted` (taken
+  back from an earlier process), `crossed` (the phone left it and nothing has redrawn it yet),
+  `fallback` (redrawn without a fresh fix — see `fence_rearm`) or `none`.
+  `location.moving_fence_age_ms` is how long it has been so and `location.moving_fence_radius_m`
+  what it was registered with (150 m plus ten seconds of travel at the fix's speed, up to 1 km).
+  **The last event before a silence is the one to read.** `moving` + `crossed` there is a process
+  suspended outside the only fence that could wake it; until 2026-11-16 that was routine on a
+  drive (a quarter of crossings came within a second of the fix that drew the fence), and it is
+  what preceded seventeen hours of silence from `14befa639f` that day. A crossing now holds
+  background time until the fence is redrawn, so `crossed` should never be the last word.
 
 **Android emits it too, since 2026-10-13** (`LocationRuntimeReporter.kt`, `os.type = android`),
 from the foreground service: `started` (`location.reason = service`) when the service is created,
@@ -588,6 +649,9 @@ service re-applies it on `onCreate`. So for an Android phone, pulses continuing 
 # Moving and deaf: pulses that saw no delivery at all.
 { name = "location.runtime" && span.location.event = "pulse" && span.location.state = "moving" && span.location.deliveries = 0 }
 
+# Processes whose last word was a crossing with no fence redrawn (should be none since 2026-11-16).
+{ name = "location.runtime" && span.location.state = "moving" && span.location.moving_fence = "crossed" }
+
 # Android phones carried by the service alone (no JS wired).
 { name = "location.runtime" && resource.os.type = "android" && span.location.node_owner = "native" }
 ```
@@ -612,12 +676,27 @@ answer. Any `peer.contact` is an answer.
 | `network_change`         | the node called `Endpoint::network_change()` on itself — on entry, then every 30 min while it lasts                            |
 | `rebuild`                | the node was rebuilt inside an episode (`trigger` = `heal`, native with no app; `restart`, the app's `rebindNode('isolated')`) |
 | `recovered`              | someone answered: `isolated_ms`, the steps taken, `last_step` and `since_last_step_ms`                                         |
+| `docs_dead`              | this node's iroh-docs engine is gone (`error`, `rebuild_due`, `since_rebuild_ms`); once per node, and a rebuild is due at once |
 
 A rebuild is due 10 min after a network change that did not help, at most once an hour (any rebuild,
 a settings change included, starts the cooldown). With no app holding the node the core heals it
 itself (`node.host.heal`); a mounted app reads `isolationStatus().rebuildDue` on its heartbeat and
 calls `rebindNode('isolated')`, because only it can rewire its subscriptions. `device.health`
 carries the state as `isolation.*`.
+
+**`docs_dead` is not isolation, and peers answering does not end it.** iroh-docs never restarts its
+engine: once the live actor stops, its teardown shuts the replica store down too, and every docs
+call on that node fails with `sending to iroh_docs actor failed` — no push, no pull, no profile
+reseal — while everything else about the node looks fine. On 2026-11-15 one panicking accept task
+(since patched, `third_party/iroh-docs`) did that to a Pixel 10 for 17 hours. The node now probes
+its replica store on every drain and pull, and a dead engine makes a rebuild due at once, through
+the same paths (`node.host.heal` with no app, `rebindNode('isolated')` with one), floored at 10 min
+since the last rebuild so an engine that dies again cannot loop. `session.recover` reports
+`error = docs engine gone` meanwhile.
+
+```traceql
+{ name = "node.isolation" && span.event = "docs_dead" } | select(resource.service.instance.id, span.error, span.rebuild_due)
+```
 
 **Read `recovered{last_step}` before tuning anything.** `none` means it came back on its own (as it
 did twice on 2026-10-22), `network_change` / `rebuild` with a small `since_last_step_ms` means that

@@ -1,8 +1,9 @@
 # Windows repeater — agent notes
 
 The WinUI 3 app (`app/`), the native-AOT Windows service (`service/`), the C# model they share
-(`core/`, tested in `tests/`) and the Rust host (`host/`). Read `README.md` first. The root
-`AGENTS.md` still applies.
+(`core/`, tested in `tests/`) and the Rust host (`../host`, shared with the Linux repeater, which
+runs the same node behind a Unix socket). Read `README.md` first. The root `AGENTS.md` still
+applies.
 
 ## How it fits
 
@@ -28,4 +29,10 @@ The WinUI 3 app (`app/`), the native-AOT Windows service (`service/`), the C# mo
   (`.github/workflows/release-repeater-windows.yml`, `scripts/next-repeater-version.sh windows`).
   Commit types decide it, as for the app and the server. Installers stay unsigned previews until
   `REPEATER_SIGN_PARAMS` is set.
+- The service updates itself without a prompt through `StreetCryptidRepeaterUpdate`
+  (`service/Updater.cs`, README "Releases and updates"), which fetches the per-architecture
+  `StreetCryptid.Repeater.Service-<rid>.zip` that `build.ps1 -Package` cuts from the Velopack
+  package. Keep that asset's name and contents in step with `ServiceLayout.ServiceArchive` and
+  `InstalledFiles`, and never let the updater take files from anywhere the person can write: it
+  runs as LocalSystem.
 - `scripts/test-service.ps1` installs the real service; run it only on a disposable machine.

@@ -1,6 +1,7 @@
 # Repository map
 
-One repository, three products and their website, one Cargo workspace (`Cargo.toml`, `docs/MONOREPO.md`):
+One repository, four products and their website, one Cargo workspace (`Cargo.toml`,
+`docs/MONOREPO.md`):
 
 - **The app** — the Expo app at the root (`src/`, `modules/`, `app.json`, …) and its Rust core
   (`modules/iroh-location/rust`, plus the browser bridge in `rust-wasm`). Releases as `v*` to the
@@ -8,6 +9,9 @@ One repository, three products and their website, one Cargo workspace (`Cargo.to
 - **The repeater server** — `repeater/server` (crate `trail-stash`): the hosted stash and the
   Linux/Docker repeater, with its Helm chart. Releases as `server-v*` plus the image and chart on
   GHCR. Its own notes: `repeater/server/AGENTS.md`.
+- **The Linux repeater** — `repeater/linux` (binary `streetcryptid-repeater`): CLI and opt-in
+  systemd daemon, serving the Windows management plane on a Unix socket. Releases as `linux-v*`
+  tarballs. Its own notes: `repeater/linux/AGENTS.md`.
 - **The Windows repeater** — `repeater/windows`: WinUI app, Windows service, Rust host. Releases as
   `windows-v*-preview.N`. Its own notes: `repeater/windows/AGENTS.md`.
 - **The website** — `website/`: streetcrypt.id (the App Link / Universal Link association files,
@@ -15,11 +19,13 @@ One repository, three products and their website, one Cargo workspace (`Cargo.to
   main that touches it deploys to Buttercup (`release-website.yml`, image + chart on GHCR); no tags.
   Its own notes: `website/README.md`. A new repeater platform or install step changes
   `website/site/repeater/` in the same pull request.
-- **Shared** — `repeater/protocol` (the roster and wire the phone and every repeater agree on, with
-  golden vectors) and `third_party/noq` (patched for every crate).
+- **Shared** — `repeater/host` (the desktop repeater both Windows and Linux run: node, identity,
+  settings, the line protocol), `repeater/protocol` (the roster and wire the phone and every
+  repeater agree on, with golden vectors) and `third_party/noq` (patched for every crate).
 
 CI runs a lane per product (`ci.yml` → `ci-app.yml`, `ci-repeater-server.yml`,
-`ci-repeater-windows.yml`, `ci-website.yml`, chosen by `scripts/ci-changes.sh`); `Required` passes skipped lanes.
+`ci-repeater-windows.yml`, `ci-repeater-linux.yml`, `ci-website.yml`, chosen by
+`scripts/ci-changes.sh`); `Required` passes skipped lanes.
 Every product releases from Conventional Commits on its own paths
 (`scripts/lib/conventional-commits.sh`), so a commit's type and the files it touches decide what
 ships: `feat`/`fix` release, `docs`/`chore`/`ci`/`build`/`test`/`refactor`/`style` do not. Build
@@ -44,6 +50,13 @@ Read the exact versioned docs at https://docs.expo.dev/versions/v58.0.0/ before 
 - `expo-env.d.ts` and `.expo/types/` are generated (git-ignored). Run `just start`
   once on a fresh clone before `just typecheck`.
 - ESLint is pinned to v9 (eslint-config-expo's plugins were not ESLint 10 ready as of SDK 57).
+- **OS permission prompts come from `PermissionsGate` and nowhere else on launch.** It sits in
+  front of `LocationSharingProvider` and asks one permission per explained step
+  (`core/permission-steps.ts` decides which); node init only CHECKS (`hasPairingPermissions`).
+  A new permission gets a step there. Asking from init put Bluetooth and nearby-devices dialogs
+  over the location disclosure, and iOS raised its Bluetooth and local-network alerts whenever the
+  node first touched the radio or the LAN — which is why iOS now triggers both on purpose
+  (`OnboardingPermissions.swift`; `_streetcryptid._tcp` must stay in `NSBonjourServices`).
 
 ## Developer telemetry (OTEL)
 
@@ -197,6 +210,17 @@ Conventions when changing that code:
   per wake); with one mounted, the heartbeat's `healIfIsolated` calls `rebindNode('isolated')`,
   because only JS can rewire its subscriptions. Do not let the core rebuild under an app lease.
   `node.isolation{event=recovered,last_step}` says whether a step or time fixed it.
+- **A node whose docs engine is gone is rebuilt, not left deaf** (`isolation.rs`, `docs::engine_gone`).
+  iroh-docs never restarts its live engine, and that engine's teardown shuts the replica store down
+  with it, so after one stop every docs call on the node fails with `sending to iroh_docs actor
+failed` for the life of the process. On 2026-11-15 a single panicking accept task (iroh-docs 0.101
+  `BobState::into_outcome` unwrapping progress a failed message had taken; likely a removed friend's
+  namespace closed mid-sync) did that to a Pixel 10 for 17 hours: no push, no pull, and a friend
+  paired that evening got no persona because the Pixel could not read its own sealed profile to
+  hand over. The panic is patched in `third_party/iroh-docs` (NOTICE says how; the live actor also
+  survives a panicked sync task now), and the node probes its replica store on every drain and pull
+  (`check_docs_engine`): a dead engine makes `rebuild_due` true at once, floored by
+  `DOCS_DEAD_REBUILD_COOLDOWN_MS`, and any rebuild clears it — `node.isolation{event=docs_dead}`.
 - **`bg.wake` and `bg.backfill` do not exist.** They went dead when capture moved into Rust — the
   location wake is native and emits no JS span at all. Six e2e scenarios asserted them,
   `background-location-e2e.sh` gated its PASS on `bg.wake > 0` so it could never pass, and two
@@ -240,6 +264,18 @@ Conventions when changing that code:
   registered around a spot the phone has already left never reports an exit — and for the same
   reason a crossing must NOT re-centre on `manager.location`, the fix just left, or `outside`
   repeats forever. `location.moving_fence_armed` reports what the OS holds.
+  **A crossing is not answered until the fence is redrawn, and the process stays awake for it.**
+  After an exit the phone is outside every fence it holds, and a relaunched process suspended
+  before the next fresh fix (seconds, at the speed a car crosses 150 m) has nothing left that can
+  wake it once it parks: on 2026-11-16 `14befa639f`'s last event was such a crossing at 13 m/s,
+  followed by seventeen hours of silence and "out of contact" on every friend's map
+  (`7d684c129f` the day before). `crossedMovingFence` therefore takes background time and lifts the
+  distance filter (`holdForFenceRearm`) until a fence is drawn — by the next fix, or after 20 s
+  or at iOS's expiry from the newest position, widened by how far the phone may have gone
+  (`fenceRearmDue`, `location.runtime{event=fence_rearm}`) — and the fence reaches ten seconds of
+  travel ahead of a moving fix, so a car is not already outside it when Core Location first looks.
+  `location.moving_fence` (`armed` / `adopted` / `crossed` / `fallback` / `none`) is on every
+  `location.runtime` event; `crossed` as the last word before a silence is this bug back.
 - **One drain run at a time, per node (`publish::DrainLock`).** "Idempotent per slot" held only for
   SEQUENTIAL callers: UniFFI polls each foreign call on the host's thread, so concurrent
   `heartbeat_fix`/`ingest_fix` calls both found the slot due, and two drains peeked the same outbox
@@ -333,12 +369,14 @@ Conventions when changing that code:
   2026-11-10 17:25 to 11-12 an iPhone read nothing from one friend while the Pixel beside it read
   everything; the friend's entries were in its replica and 0 of 17 of their bytes were in its blob
   store. Every pull now fetches stranded friend slots (`fix`, `nul`, `rsy`) from the peers it
-  dialled, then each namespace's own sources (`namespace_sources`: the repeaters carrying that
-  friend, once a build knows them), then the author and the last serving peer, inside the pull's
-  deadline, and reports `sync.stranded` / `sync.stranded_fetched` on `trail.sync`. Friends' profile
-  namespaces get the same pass beside it (`ProfileDocs::settle_stranded`, every key, sources ending
-  in the owner named by the read ticket), which hands a profile that became readable to the app
-  because no `ContentReady` will; it reports `sync.profile_stranded` / `_fetched`. Do not move
+  dialled, then each namespace's own sources (`namespace_sources`: the repeaters this pass planned
+  for that friend, `repeater::pull_plan`), then the author and the last serving peer, inside the
+  pull's deadline, and reports `sync.stranded` / `sync.stranded_fetched` on `trail.sync`. Friends'
+  profile namespaces get the same pass beside it (`ProfileDocs::settle_stranded`, every key, so the
+  sealed `s/profile`, `s/repeaters` and `keyring` too; sources are the owner's `profile_relays`,
+  then the owner named by the read ticket), which hands a profile that became readable to the app
+  because no `ContentReady` will, and re-reads repeater cards when anything landed; it reports
+  `sync.profile_stranded` / `_fetched`. Do not move
   either into the replica read (a read never dials), and do not drop the `rsy` lane: a control
   record without bytes is a restart request the leader cannot see. The web build does not run it
   yet.

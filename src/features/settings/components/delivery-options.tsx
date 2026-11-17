@@ -1,21 +1,24 @@
-import { useMemo, useState } from 'react';
+import { type ReactNode, useMemo, useState } from 'react';
 import { Platform, StyleSheet, useWindowDimensions, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { useColorScheme } from '@/hooks/use-color-scheme';
 import { useSystemRail } from '@/hooks/use-system-rail';
+import { CopyText } from '@/components/copy-text';
 import { ThemedText } from '@/components/themed-text';
 import { CryptidThemes, Spacing } from '@/constants/theme';
+import { StashCard } from '@/features/repeaters/components/stash-card';
+import { retentionWords } from '@/features/repeaters/core/repeaters';
 import {
   DELIVERY_MODE_COPY,
   deliveryModeOptions,
   isDeliveryModeDowngraded,
   mutualFriendRelayExplanation,
+  STASH_RETENTION_MS,
   type DeliveryAvailability,
   type DeliveryMode,
 } from '@/features/social/core/delivery-mode';
 
-import { DeliveryModePicker } from './delivery-mode-picker';
 import { DeliveryPreview } from './delivery-preview';
 import type { DeliveryStagePalette } from './delivery-stage';
 
@@ -23,13 +26,24 @@ interface DeliveryOptionsProps {
   readonly selected: DeliveryMode;
   readonly availability: DeliveryAvailability;
   readonly disabled?: boolean;
+  /** Under the switch: where repeaters live, which differs between onboarding and Settings. */
+  readonly footnote?: ReactNode;
   onSelect(mode: DeliveryMode): void;
 }
 
+/**
+ * How a trail travels, as the model now is: mutual friends always carry it, and the hosted stash
+ * is one optional carrier you opt in or out of, the same switch as in Settings → Repeaters
+ * (REPEATERS.md §5.1). The diagram still shows the route the switch selects.
+ *
+ * It was a two-way segmented picker ("Mutual friends" or "Mutuals + stash"), which framed the
+ * stash as a different route rather than something added to the one that always runs.
+ */
 export function DeliveryOptions({
   selected,
   availability,
   disabled,
+  footnote,
   onSelect,
 }: DeliveryOptionsProps) {
   const scheme = useColorScheme();
@@ -117,12 +131,13 @@ export function DeliveryOptions({
       <View style={[styles.copy, { minHeight: copyMinHeight }]}>
         <DeliveryCopy mode={selected} />
       </View>
-      <DeliveryModePicker
+      <StashCard
+        carriesMe={selected === 'stash'}
+        retention={retentionWords(STASH_RETENTION_MS)}
         accent={chrome.green}
-        options={options}
-        selected={selected}
-        disabled={disabled}
-        onSelect={onSelect}
+        busy={disabled ?? false}
+        available={availability.stashConfigured}
+        onCarryChange={(carry) => onSelect(carry ? 'stash' : 'mutual')}
       />
       {isDeliveryModeDowngraded(selected, availability) ? (
         <ThemedText type="small" style={{ color: chrome.amber }}>
@@ -130,6 +145,7 @@ export function DeliveryOptions({
           is remembered.
         </ThemedText>
       ) : null}
+      {footnote}
     </>
   );
 
@@ -173,14 +189,11 @@ export function DeliveryOptions({
 
 function DeliveryCopy({ mode }: { mode: DeliveryMode }) {
   const copy = DELIVERY_MODE_COPY[mode];
+  const body = mode === 'mutual' ? mutualFriendRelayExplanation(Platform.OS) : copy.body;
   return (
     <>
-      <ThemedText type="smallBold">
-        {mode === 'mutual' ? 'Mutual friend relay' : copy.title}
-      </ThemedText>
-      <ThemedText type="small" themeColor="textSecondary">
-        {mode === 'mutual' ? mutualFriendRelayExplanation(Platform.OS) : copy.body}
-      </ThemedText>
+      {copy.heading ? <ThemedText type="smallBold">{copy.heading}</ThemedText> : null}
+      {body ? <CopyText text={body} type="small" themeColor="textSecondary" /> : null}
     </>
   );
 }

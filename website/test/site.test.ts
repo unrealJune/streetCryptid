@@ -100,6 +100,26 @@ describe('repeater installer', () => {
     expect(files).toContain('repeater/install.ps1');
   });
 
+  test('the Linux tab points at the Linux releases and the commands the binary takes', () => {
+    const start = guide.indexOf('id="os-linux"');
+    expect(start).toBeGreaterThan(0);
+    const linux = guide.slice(start, guide.indexOf('</section>', start));
+    // Versioned file names on prereleases: no stable asset URL exists to link to instead.
+    expect(linux).toContain(
+      'https://github.com/unrealJune/streetCryptid/releases?q=linux-v&amp;expanded=true'
+    );
+    // package.sh names each tarball streetcryptid-repeater-<version>-<arch>-linux.tar.gz.
+    expect(linux).toContain('streetcryptid-repeater-*-$(uname -m)-linux.tar.gz');
+    for (const command of [
+      './streetcryptid-repeater run',
+      'sudo ./streetcryptid-repeater install --system',
+      'streetcryptid-repeater settings',
+      'SHA256SUMS',
+    ]) {
+      expect(linux).toContain(command);
+    }
+  });
+
   test('the script is ASCII, so Windows PowerShell 5.1 reads it the same as pwsh', () => {
     expect(/^[\x09\x0a\x0d\x20-\x7e]*$/.test(script)).toBe(true);
   });

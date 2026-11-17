@@ -1,0 +1,40 @@
+[package]
+name = "streetcryptid-repeater-linux"
+version = "0.1.0"
+edition = "2021"
+publish = false
+license = "AGPL-3.0-or-later"
+description = "The streetCryptid repeater for Linux: a CLI and an opt-in systemd daemon"
+
+[[bin]]
+name = "streetcryptid-repeater"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+iroh = "1"
+libc = "0.2"
+qrcode = { version = "0.14", default-features = false }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = [
+  "rt-multi-thread",
+  "macros",
+  "sync",
+  "time",
+  "net",
+  "io-util",
+  "signal",
+  "process",
+] }
+tracing = "0.1"
+# The node, the settings, the identity and the line protocol, exactly as the Windows host has them.
+streetcryptid-repeater-host = { path = "../host" }
+trail-stash = { path = "../server", features = ["live", "otel"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+# Its release profile (`desktop-release`) and the patched noq come from the workspace root
+# (/Cargo.toml): Cargo reads neither in a member manifest.

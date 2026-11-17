@@ -1,0 +1,94 @@
+name: CI / repeater linux
+
+# The Linux repeater (repeater/linux): one binary that is both the CLI and the opt-in systemd
+# daemon, on the desktop host it shares with Windows (repeater/host). Built, tested and packaged
+# for x86_64 and aarch64 on matching runners. Called by `ci.yml` as its Linux lane, and by
+# `release-repeater-linux.yml` with the version to stamp.
+#
+# Built on Ubuntu 22.04 so the binary runs on any glibc 2.35+ distribution (Debian 12 is 2.36). The
+# runners are disposable and have systemd, so the lane installs the real system service, moves an
+# identity into it and back, and removes it (`scripts/test-service.sh`).
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        type: string
+        required: false
+        default: ''
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: '0'
+  RUST_TOOLCHAIN: 1.97.0
+
+jobs:
+  build:
+    name: Linux / ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-22.04
+          - arch: aarch64
+            runner: ubuntu-22.04-arm
+    env:
+      REPEATER_VERSION: ${{ inputs.version || format('0.0.0-ci.{0}', github.run_number) }}
+      # Compiled into the binary; empty means a build with no exporter at all. Kept in a repository
+      # variable rather than here, like every other internal hostname (check-release-telemetry.mjs).
+      SC_REPEATER_OTEL_ENDPOINT: ${{ vars.REPEATER_OTEL_ENDPOINT }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # rust-toolchain.toml selects the version; this installs it with rustfmt.
+      - name: Install Rust
+        run: rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --component rustfmt
+
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install --yes --no-install-recommends protobuf-compiler
+
+      - name: Restore Rust compilation cache
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          workspaces: . -> target
+          key: repeater-linux-${{ matrix.arch }}
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+
+      - name: cargo fmt
+        run: cargo fmt -p streetcryptid-repeater-host -p streetcryptid-repeater-linux --check
+
+      # The desktop host's tests run here as well as on Windows: the Linux daemon is its other user.
+      - name: cargo test
+        run: >-
+          cargo test --locked --profile repeater-test
+          -p streetcryptid-repeater-host -p streetcryptid-repeater-linux -- --test-threads=4
+
+      - name: cargo build
+        run: cargo build --locked --profile desktop-release -p streetcryptid-repeater-linux
+
+      - name: Run the daemon and manage it, unprivileged
+        run: bash repeater/linux/scripts/test-daemon.sh target/desktop-release/streetcryptid-repeater
+
+      # The runner is disposable: install the real system service, use it, remove it.
+      - name: Install, exercise and remove the system service
+        run: sudo bash repeater/linux/scripts/test-service.sh target/desktop-release/streetcryptid-repeater "$USER"
+
+      - name: Package
+        run: bash repeater/linux/scripts/package.sh target/desktop-release/streetcryptid-repeater "$REPEATER_VERSION" "${{ matrix.arch }}" dist
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: repeater-linux-${{ matrix.arch }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 14

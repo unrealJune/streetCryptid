@@ -37,7 +37,7 @@ pub enum LocationRuntimeKind {
     Transition,
     /// A `CLVisit`. `reason` is `arrival` or `departure`.
     Visit,
-    /// The stop-anchor fence reported an exit.
+    /// A fence reported an exit: the stop anchor's, or (`reason=moving_fence`) the moving fence's.
     FenceExit,
     /// Core Location paused updates (it should not, with auto-pause off).
     Paused,
@@ -54,6 +54,12 @@ pub enum LocationRuntimeKind {
     /// assertions an earlier one never ended: it was killed holding them); `detail` says which
     /// lane and how long it had been held. The durable `wake.publish_*` counters say the same.
     PublishAssertion,
+    /// The moving fence was redrawn without a fresh fix, because the wait for one after a crossing
+    /// ran out. `reason` is `deadline` (our own bound) or `expired` (iOS ended the background time
+    /// first); `detail` carries the radius and how old the position it was centred on was. Rare by
+    /// design: every ordinary crossing is answered by the next fix, and this is the backstop that
+    /// keeps a suspended process from being left outside the only fence that could wake it.
+    FenceRearm,
 }
 
 impl LocationRuntimeKind {
@@ -71,6 +77,7 @@ impl LocationRuntimeKind {
             Self::FenceFailed => "fence_failed",
             Self::Authorization => "authorization",
             Self::PublishAssertion => "publish_assertion",
+            Self::FenceRearm => "fence_rearm",
         }
     }
 }
@@ -116,6 +123,19 @@ pub struct LocationRuntimeEvent {
     pub fence_registered: bool,
     /// An OS error description, for the error kinds only.
     pub detail: Option<String>,
+    /// What the moving fence is (iOS): `none` (no region held), `armed` (centred on a fresh fix the
+    /// phone is believed inside), `adopted` (a region an earlier process registered), `crossed`
+    /// (the phone left it and no fix has redrawn it yet) or `fallback` (redrawn without a fresh
+    /// fix). `crossed` at the end of a process's life is a phone outside the only fence that could
+    /// wake it: on 2026-11-16 that shape preceded 17 h of silence from a driving iPhone.
+    #[uniffi(default = None)]
+    pub moving_fence: Option<String>,
+    /// How long the moving fence has been in that state.
+    #[uniffi(default = None)]
+    pub moving_fence_age_ms: Option<u64>,
+    /// The radius the moving fence was registered with.
+    #[uniffi(default = None)]
+    pub moving_fence_radius_m: Option<f64>,
 }
 
 /// Longest `detail` exported. An OS error string, never user content, but bounded anyway.
@@ -150,6 +170,9 @@ pub fn record_location_runtime(event: LocationRuntimeEvent) {
         location.anchor_armed = event.anchor_armed,
         location.fence_registered = event.fence_registered,
         location.detail = tracing::field::Empty,
+        location.moving_fence = tracing::field::Empty,
+        location.moving_fence_age_ms = tracing::field::Empty,
+        location.moving_fence_radius_m = tracing::field::Empty,
     );
     if let Some(reason) = &event.reason {
         span.record("location.reason", reason.as_str());
@@ -172,6 +195,15 @@ pub fn record_location_runtime(event: LocationRuntimeEvent) {
     if let Some(detail) = &event.detail {
         let bounded: String = detail.chars().take(DETAIL_MAX).collect();
         span.record("location.detail", bounded.as_str());
+    }
+    if let Some(fence) = &event.moving_fence {
+        span.record("location.moving_fence", fence.as_str());
+    }
+    if let Some(age) = event.moving_fence_age_ms {
+        span.record("location.moving_fence_age_ms", age);
+    }
+    if let Some(radius) = event.moving_fence_radius_m {
+        span.record("location.moving_fence_radius_m", radius);
     }
     drop(span.entered());
 }
@@ -202,6 +234,9 @@ mod tests {
             anchor_armed: false,
             fence_registered: false,
             detail: Some("x".repeat(500)),
+            moving_fence: Some("crossed".into()),
+            moving_fence_age_ms: Some(4_000),
+            moving_fence_radius_m: Some(150.0),
         }
     }
 
@@ -220,6 +255,8 @@ mod tests {
             LocationRuntimeKind::LocationError,
             LocationRuntimeKind::FenceFailed,
             LocationRuntimeKind::Authorization,
+            LocationRuntimeKind::PublishAssertion,
+            LocationRuntimeKind::FenceRearm,
         ] {
             record_location_runtime(event(kind));
         }
@@ -239,6 +276,8 @@ mod tests {
             LocationRuntimeKind::LocationError,
             LocationRuntimeKind::FenceFailed,
             LocationRuntimeKind::Authorization,
+            LocationRuntimeKind::PublishAssertion,
+            LocationRuntimeKind::FenceRearm,
         ];
         let spellings: std::collections::HashSet<_> = all.iter().map(|k| k.as_str()).collect();
         assert_eq!(spellings.len(), all.len());

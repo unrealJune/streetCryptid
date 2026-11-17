@@ -7,10 +7,12 @@
 #            (.github/workflows/release-repeater-server.yml)
 #   windows  `windows-vX.Y.Z-preview.N`  the Windows repeater's installers and update feed
 #            (.github/workflows/release-repeater-windows.yml)
+#   linux    `linux-vX.Y.Z`              the Linux repeater's CLI and daemon tarballs
+#            (.github/workflows/release-repeater-linux.yml)
 #
 # What counts is what each product is built from. A commit that touches only the app never
-# releases a repeater, and vice versa; the Windows host links the server crate, so a server change
-# releases both.
+# releases a repeater, and vice versa; the desktop repeaters link the server crate, so a server
+# change releases all three, and both link the desktop host (repeater/host).
 #
 # Windows versions carry `-preview.1` while the installers are unsigned (README in
 # repeater/windows): the bump applies to MAJOR.MINOR.PATCH, and every automatic release is the
@@ -19,7 +21,7 @@
 # The tag is the version of record; no manifest is read or written.
 #
 # Usage:
-#   scripts/next-repeater-version.sh <server|windows> [--force auto|patch|minor|major]
+#   scripts/next-repeater-version.sh <server|windows|linux> [--force auto|patch|minor|major]
 #
 # Prints `key=value` lines on stdout:
 #   release=true|false     whether a release should happen at all
@@ -81,14 +83,28 @@ case "$product" in
     # app's sigil.
     paths=(
       repeater/windows
+      repeater/host
       repeater/server/src
       repeater/server/Cargo.toml
       "${workspace_paths[@]}"
       'assets/images/mothman-logo*.svg'
     )
     ;;
+  linux)
+    prefix='linux-v'
+    suffix=''
+    initial='0.1.0'
+    # The CLI and daemon link the desktop host and the server crate (not its chart or image).
+    paths=(
+      repeater/linux
+      repeater/host
+      repeater/server/src
+      repeater/server/Cargo.toml
+      "${workspace_paths[@]}"
+    )
+    ;;
   *)
-    echo "Usage: $0 <server|windows> [--force auto|patch|minor|major]" >&2
+    echo "Usage: $0 <server|windows|linux> [--force auto|patch|minor|major]" >&2
     exit 2
     ;;
 esac

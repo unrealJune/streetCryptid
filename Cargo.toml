@@ -16,7 +16,8 @@ members = [
   "modules/iroh-location/rust-wasm",
   "repeater/protocol",
   "repeater/server",
-  "repeater/windows/host",
+  "repeater/host",
+  "repeater/linux",
 ]
 # Vendored for the phone alone, with their own SimRadio test workspace (`just test-ble-transport`).
 exclude = [
@@ -33,6 +34,12 @@ default-members = ["repeater/protocol", "repeater/server"]
 # noq release fixes it.
 [patch.crates-io]
 noq = { path = "third_party/noq" }
+# iroh-docs 0.101.0 with one fix, vendored (MIT OR Apache-2.0; third_party/iroh-docs/NOTICE): the
+# accept side of a sync panicked whenever processing a message failed, and that one panic stopped
+# the live engine and the replica store for the rest of the process — every later docs call
+# failed with "sending to iroh_docs actor failed" (a Pixel 10, 2026-11-15, 17 hours). The stash
+# accepts every phone's syncs and runs the same code. Drop the patch once upstream fixes it.
+iroh-docs = { path = "third_party/iroh-docs" }
 
 # --- the phone (modules/iroh-location/rust): EAS, `just bindgen-*` -----------------------------
 [profile.release]
@@ -49,7 +56,7 @@ opt-level = "z"
 lto = "thin"
 strip = true
 
-# --- the hosted stash and the Linux repeater (repeater/server): the Dockerfile ------------------
+# --- the hosted stash and the Docker repeater (repeater/server): the Dockerfile -----------------
 # What `cargo build --release` gave it as its own workspace: Cargo's default release profile.
 [profile.server-release]
 inherits = "release"
@@ -57,7 +64,8 @@ opt-level = 3
 lto = false
 strip = "none"
 
-# --- the Windows repeater's host (repeater/windows/host): scripts/build.ps1 ----------------------
+# --- the desktop repeaters: the Windows host (repeater/host, built by repeater/windows/scripts/
+# build.ps1) and the Linux CLI and daemon (repeater/linux) ----------------------------------------
 # What its own manifest asked for as a separate workspace: optimized for speed, thin LTO, stripped.
 [profile.desktop-release]
 inherits = "release"
@@ -85,7 +93,7 @@ opt-level = 2
 # and a backtrace through a dependency needs no line numbers to be read. Workspace crates keep it.
 debug = false
 
-# --- the repeaters' tests (repeater/server, repeater/windows/host): CI and `just server::test` ----
+# --- the repeaters' tests (repeater/server, repeater/host, repeater/linux): CI and `just server::test`
 # The test profile above is tuned for the phone's CPU-bound crypto suite. The repeaters' tests
 # spend their time on network round trips, not in dependency code, so optimizing every dependency
 # only makes them compile slower: they ran at opt-level 0 before the workspace existed, and this

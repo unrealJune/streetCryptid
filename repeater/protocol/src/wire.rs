@@ -6,13 +6,13 @@
 //! The caller's identity is the iroh endpoint that dialled (authenticated by the QUIC handshake),
 //! never a field in the request: every rule that asks "who is this?" reads the connection.
 //!
-//! | request   | who may                                     | does                                       |
-//! | --------- | ------------------------------------------- | ------------------------------------------ |
-//! | `Claim`   | whoever holds the console's one-time secret | binds the repeater to a roster and owner   |
-//! | `Publish` | anyone; each op stands on its signature     | adds roster ops                            |
-//! | `Fetch`   | the owner, carried members, sibling repeaters | returns the roster                       |
-//! | `Grant`   | a carried member who owns the namespace     | starts carrying one of their namespaces    |
-//! | `Have`    | anyone (reading is open)                    | says which content hashes are held         |
+//! | request   | who may                                                 | does                                     |
+//! | --------- | ------------------------------------------------------- | ---------------------------------------- |
+//! | `Claim`   | whoever holds the console's one-time secret             | binds the repeater to a roster and owner |
+//! | `Publish` | anyone; each op stands on its signature                 | adds roster ops                          |
+//! | `Fetch`   | anyone who signed in it, inviters, sibling repeaters    | returns the roster                       |
+//! | `Grant`   | a carried member who owns the namespace                 | starts carrying one of their namespaces  |
+//! | `Have`    | anyone (reading is open)                                | says which content hashes are held       |
 
 use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use serde::{Deserialize, Serialize};
@@ -96,7 +96,8 @@ pub enum Response {
 pub enum Refusal {
     /// The claim secret is wrong or expired.
     BadClaimSecret,
-    /// This repeater already belongs to a roster.
+    /// This repeater already belongs to a roster (another owner's, or another roster of the
+    /// caller's; the owner repeating a claim for the same roster is answered `Claimed` again).
     AlreadyClaimed,
     /// The claim's roster is unusable, or its owner is not the caller.
     BadClaimRoster,
@@ -220,11 +221,18 @@ pub fn claim_link(endpoint_ticket: &str, secret: &[u8; 32]) -> String {
 }
 
 /// The same link as a URL any phone camera can open:
-/// `https://streetcrypt.id/repeater#t=<endpoint ticket>&s=<64 hex secret>`. streetcrypt.id claims
-/// `/repeater` as a Universal Link / App Link, so scanning the QR code a repeater prints opens
-/// streetCryptid's repeater settings with the link filled in. Both halves ride in the fragment,
-/// which a browser never sends to streetcrypt.id when the app is not installed.
-pub const CLAIM_URL: &str = "https://streetcrypt.id/repeater";
+/// `https://streetcrypt.id/repeater/claim#t=<endpoint ticket>&s=<64 hex secret>`. streetcrypt.id
+/// claims `/repeater/claim` as a Universal Link / App Link, so scanning the QR code a repeater
+/// prints opens streetCryptid's repeater settings with the link filled in. Both halves ride in the
+/// fragment, which a browser never sends to streetcrypt.id when the app is not installed.
+///
+/// Not `/repeater` itself: that is the setup guide, and a link claimed by the app cannot be read
+/// in a browser on a phone that has it installed.
+pub const CLAIM_URL: &str = "https://streetcrypt.id/repeater/claim";
+
+/// What [`CLAIM_URL`] was until 2026-11-15. Repeaters built before then still print it, and it
+/// still parses; streetcrypt.id serves the claim page there, which hands the claim to the app.
+pub const LEGACY_CLAIM_URL: &str = "https://streetcrypt.id/repeater";
 
 pub fn claim_url(endpoint_ticket: &str, secret: &[u8; 32]) -> String {
     let hex: String = secret.iter().map(|b| format!("{b:02x}")).collect();
@@ -238,7 +246,10 @@ pub fn parse_claim_link(link: &str) -> Option<(&str, [u8; 32])> {
     let (ticket, hex) = match link.strip_prefix(CLAIM_SCHEME) {
         Some(rest) => rest.split_once('#')?,
         None => {
-            let rest = link.strip_prefix(CLAIM_URL)?.strip_prefix(['#', '?'])?;
+            let rest = link
+                .strip_prefix(CLAIM_URL)
+                .or_else(|| link.strip_prefix(LEGACY_CLAIM_URL))?
+                .strip_prefix(['#', '?'])?;
             let mut ticket = None;
             let mut secret = None;
             for pair in rest.split('&') {
@@ -311,15 +322,23 @@ mod tests {
         assert_eq!(
             url,
             format!(
-                "https://streetcrypt.id/repeater#t=endpointabc&s={}",
+                "https://streetcrypt.id/repeater/claim#t=endpointabc&s={}",
                 "ab".repeat(32)
             )
         );
         assert_eq!(parse_claim_link(&url), Some(("endpointabc", secret)));
         let query = url.replacen('#', "?", 1);
         assert_eq!(parse_claim_link(&query), Some(("endpointabc", secret)));
+        // What repeaters printed before /repeater became the setup guide.
         assert_eq!(
-            parse_claim_link("https://streetcrypt.id/repeater#t=endpointabc"),
+            parse_claim_link(&format!(
+                "https://streetcrypt.id/repeater#t=endpointabc&s={}",
+                "ab".repeat(32)
+            )),
+            Some(("endpointabc", secret))
+        );
+        assert_eq!(
+            parse_claim_link("https://streetcrypt.id/repeater/claim#t=endpointabc"),
             None
         );
         assert_eq!(

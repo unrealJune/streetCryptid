@@ -7,9 +7,11 @@ default:
     @just --list
 
 # The repeater products have their own recipes: `just server::test`, `just server::run`,
-# `just windows::build x64`, `just windows::package x64 <version>` (`just --list server`).
+# `just windows::build x64`, `just windows::package x64 <version>`, `just linux::test`,
+# `just linux::smoke` (`just --list server`).
 mod server 'repeater/server'
 mod windows 'repeater/windows'
+mod linux 'repeater/linux'
 mod website 'website'
 
 # --- Setup -------------------------------------------------------------------
@@ -110,6 +112,10 @@ format:
 # Verify formatting without writing changes.
 format-check:
     bun run format:check
+
+# Regenerate the copy modules from the Markdown people edit (src/copy/*.md).
+copy:
+    bun scripts/build-copy.ts
 
 # Run the jest test suite.
 test:

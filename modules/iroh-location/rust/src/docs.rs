@@ -88,6 +88,21 @@ pub const PUSH_TIMEOUT_SECS: u64 = 30;
 /// Key separator between the hex author and the zero-padded sequence number.
 pub const KEY_SEP: u8 = b'/';
 
+/// The key [`TrailDocs::probe_store`] reads. Nothing writes it; the read only has to reach the
+/// replica store.
+const ENGINE_PROBE_KEY: &[u8] = b"sc/engine-probe";
+
+/// What iroh-docs says, through every call, once its replica store actor is gone
+/// (`iroh_docs::actor::SyncHandle::send`). That happens when the live engine stops: its teardown
+/// shuts the store down, and nothing in iroh-docs starts either again, so the node is deaf and mute
+/// for the rest of its life. See `isolation.rs`.
+const ENGINE_GONE: &str = "iroh_docs actor";
+
+/// Whether `error` (any `Display` of it, chain included) says the docs engine is gone.
+pub fn engine_gone(error: &str) -> bool {
+    error.contains(ENGINE_GONE)
+}
+
 /// Filename (under `data_dir`) holding the persisted trail `NamespaceId`, so our own trail
 /// namespace is stable across [`crate::LocationNode`] restarts even though iroh-docs mints a
 /// fresh namespace on `create()`. Mirrors [`crate::profile::PROFILE_NS_FILE`]; without it a
@@ -869,6 +884,19 @@ impl TrailDocs {
         self.own_ns
     }
 
+    /// One local read through the replica store: `Ok` whenever the docs engine is alive, whatever
+    /// the namespace holds. Its error is what [`engine_gone`] reads. Never dials.
+    pub async fn probe_store(&self) -> Result<()> {
+        let doc = self.doc_for(self.own_ns).await?;
+        doc.get_one(
+            Query::single_latest_per_key()
+                .key_exact(ENGINE_PROBE_KEY)
+                .build(),
+        )
+        .await?;
+        Ok(())
+    }
+
     /// Upload every current slot in our namespace to the stash's authenticated opaque-content API.
     ///
     /// **Per-slot outcomes, never a batch abort.** The stash only accepts content for a
@@ -889,6 +917,22 @@ impl TrailDocs {
     /// property of one slot — so they are counted and the last one is returned once the loop has
     /// still given every slot a chance. That keeps `trail.content.upload` reporting a genuine stash
     /// outage while no longer reporting a backlog of untracked slots as one.
+    /// The content hashes of the newest entry under every key of our own trail namespace: what a
+    /// repeater is asked about (`Have`) to confirm it holds what we just pushed.
+    pub async fn own_latest_hashes(&self) -> Result<Vec<[u8; 32]>> {
+        let doc = self.doc_for(self.own_ns).await?;
+        let stream = doc.get_many(Query::single_latest_per_key().build()).await?;
+        tokio::pin!(stream);
+        let mut hashes = Vec::new();
+        while let Some(entry) = stream.next().await {
+            let entry = entry?;
+            if entry.content_len() > 0 {
+                hashes.push(*entry.content_hash().as_bytes());
+            }
+        }
+        Ok(hashes)
+    }
+
     #[cfg(not(target_arch = "wasm32"))]
     pub async fn upload_own_latest(
         &self,
@@ -1509,10 +1553,16 @@ impl TrailDocs {
     /// `budget` is a deadline, not a wait: the exchange ends as soon as every dialled peer has
     /// reported. With no peers the namespace is still handed to the live engine, and nothing is
     /// waited for.
+    ///
+    /// `unwaited` peers (our repeater carriers) are handed to the live engine with the rest but
+    /// never waited for: a laptop repeater asleep in a bag would otherwise cost every push the
+    /// whole deadline. They reconcile whenever they next wake, and a carrier that answers while
+    /// the others are awaited is still reported.
     pub async fn push(
         &self,
         ns: NamespaceId,
         peers: Vec<EndpointAddr>,
+        unwaited: Vec<EndpointAddr>,
         budget: Duration,
     ) -> Result<Option<PushReport>> {
         use tracing::Instrument;
@@ -1533,10 +1583,18 @@ impl TrailDocs {
 
         let mut report = PushReport::default();
         let dialled = peers.len();
-        doc.start_sync(peers)
+        let scheduled = unwaited.len();
+        let mut targets = peers;
+        for peer in unwaited {
+            if !pending.contains(peer.id.as_bytes()) && !targets.iter().any(|t| t.id == peer.id) {
+                targets.push(peer);
+            }
+        }
+        doc.start_sync(targets)
             .instrument(tracing::info_span!(
                 "trail.push.start_sync",
-                peers = dialled
+                peers = dialled,
+                unwaited = scheduled
             ))
             .await?;
         if dialled == 0 {
@@ -1757,6 +1815,20 @@ impl TrailDocs {
         Ok(ticket.to_string())
     }
 
+    /// Our own namespace's write key: what proves to a repeater that this trail is ours
+    /// (`streetcryptid_repeater::wire::sign_grant`). It never leaves the phone.
+    pub async fn own_namespace_secret(&self) -> Result<[u8; 32]> {
+        let doc = self.doc_for(self.own_ns).await?;
+        match doc
+            .share(ShareMode::Write, AddrInfoOptions::Id)
+            .await?
+            .capability
+        {
+            iroh_docs::Capability::Write(secret) => Ok(secret.to_bytes()),
+            iroh_docs::Capability::Read(_) => Err(anyhow!("our own trail is open read-only")),
+        }
+    }
+
     /// All namespaces we can read (own + imported friends).
     pub async fn namespaces(&self) -> Vec<NamespaceId> {
         self.handles
@@ -1779,7 +1851,10 @@ impl TrailDocs {
     /// The web replica's refresh; the mobile node goes through [`Self::sync_all_until`].
     #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
     pub async fn sync_all(&self, peers: Vec<EndpointAddr>) -> Result<Vec<([u8; 32], [u8; 32])>> {
-        Ok(self.sync_all_until(peers, None).await?.delivered)
+        Ok(self
+            .sync_all_until(peers, HashMap::new(), None)
+            .await?
+            .delivered)
     }
 
     /// [`Self::sync_all`], stopped at `deadline` when one is given, reporting how each namespace's
@@ -1788,9 +1863,13 @@ impl TrailDocs {
     /// The deadline exists for the background callers: one pass can wait 25 s for a first event
     /// and then 8 s per idle gap, which is the whole of an iOS background window. A pass cut short
     /// keeps everything that had already arrived.
+    ///
+    /// `extra_peers` adds targets for one namespace only: the repeaters carrying that friend's
+    /// trail (`repeater::pull_plan`). Never ours to push to, never asked about anyone else's.
     pub async fn sync_all_until(
         &self,
         peers: Vec<EndpointAddr>,
+        extra_peers: HashMap<[u8; 32], Vec<EndpointAddr>>,
         deadline: Option<Instant>,
     ) -> Result<SyncPass> {
         let namespaces = self.namespaces().await;
@@ -1801,7 +1880,7 @@ impl TrailDocs {
         // pocket. The namespaces are independent replicas reconciled against the same peer set —
         // there is no ordering between them — so the pass now costs ONE timeout, not N.
         let results = join_all(namespaces.iter().map(|ns| {
-            let peers = peers.clone();
+            let peers = namespace_peers(&peers, extra_peers.get(&ns.to_bytes()));
             async move { (*ns, self.sync_ns(*ns, peers, deadline).await) }
         }))
         .await;
@@ -1913,6 +1992,18 @@ fn timeout_end(saw_event: bool, deadline_bound: bool) -> SyncEnd {
     } else {
         SyncEnd::NoAnswer
     }
+}
+
+/// Add only this namespace's extra targets, keeping an explicit address when an id overlaps.
+fn namespace_peers(peers: &[EndpointAddr], extra: Option<&Vec<EndpointAddr>>) -> Vec<EndpointAddr> {
+    let mut result = peers.to_vec();
+    let mut ids: std::collections::HashSet<_> = peers.iter().map(|peer| peer.id).collect();
+    for peer in extra.into_iter().flatten() {
+        if ids.insert(peer.id) {
+            result.push(peer.clone());
+        }
+    }
+    result
 }
 
 #[cfg(test)]
@@ -2490,6 +2581,339 @@ pub(crate) mod tests {
 
     fn book(state_dir: &std::path::Path) -> Arc<NamespaceBook> {
         Arc::new(NamespaceBook::open(state_dir, ns_book::TRAIL_BOOK_FILE).unwrap())
+    }
+
+    // ── repeaters: cards, unwaited carriers, pulling from a friend's carrier ─────────────────
+
+    async fn replication_peer() -> Result<(Endpoint, Docs, BlobsStore, iroh::protocol::Router)> {
+        use iroh::protocol::Router;
+        use iroh_blobs::store::mem::MemStore;
+        use iroh_blobs::BlobsProtocol;
+
+        let endpoint = Endpoint::builder(iroh::endpoint::presets::N0)
+            .relay_mode(RelayMode::Disabled)
+            .bind()
+            .await?;
+        let gossip = Gossip::builder().spawn(endpoint.clone());
+        let blobs = MemStore::new();
+        let docs = Docs::memory()
+            .spawn(endpoint.clone(), (*blobs).clone(), gossip.clone())
+            .await?;
+        let router = Router::builder(endpoint.clone())
+            .accept(iroh_gossip::ALPN, gossip)
+            .accept(iroh_docs::ALPN, docs.clone())
+            .accept(iroh_blobs::ALPN, BlobsProtocol::new(&blobs, None))
+            .spawn();
+        Ok((endpoint, docs, (*blobs).clone(), router))
+    }
+
+    #[tokio::test]
+    async fn reopened_friend_profile_schedules_card_sync_only_for_known_friends() -> Result<()> {
+        use crate::ns_book::PROFILE_BOOK_FILE;
+        use crate::profile::ProfileDocs;
+        use std::collections::{BTreeSet, HashMap};
+
+        let state = scratch_dir("profile-card-reader-state");
+        let writer_state = scratch_dir("profile-card-writer-state");
+        let (writer_endpoint, writer_docs, writer_blobs, writer_router) =
+            replication_peer().await?;
+        let (_reader_endpoint, reader_docs, reader_blobs, reader_router) =
+            replication_peer().await?;
+        let writer =
+            ProfileDocs::init(writer_docs, writer_blobs, writer_state.clone(), None).await?;
+        let ticket = writer.ticket().await?;
+        let namespace = crate::ns_book::ticket_namespace(&ticket)?;
+        let profile_book = Arc::new(NamespaceBook::open(&state, PROFILE_BOOK_FILE)?);
+        profile_book.add_friend(namespace, &ticket)?;
+        writer
+            .publish_key(crate::repeater::CARD_KEY, b"new card".to_vec())
+            .await?;
+
+        let reader =
+            ProfileDocs::init(reader_docs, reader_blobs, state.clone(), Some(profile_book)).await?;
+        reader
+            .sync_known_friends(&BTreeSet::new(), &HashMap::new())
+            .await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(reader
+            .read_key_everywhere(crate::repeater::CARD_KEY)
+            .await
+            .is_empty());
+
+        tokio::time::timeout(
+            Duration::from_secs(15),
+            reader.sync_known_friends(
+                &BTreeSet::from([*writer_endpoint.id().as_bytes()]),
+                &HashMap::new(),
+            ),
+        )
+        .await?;
+        assert!(reader
+            .read_key_everywhere(crate::repeater::CARD_KEY)
+            .await
+            .iter()
+            .any(|bytes| bytes == b"new card"));
+        reader_router.shutdown().await?;
+        writer_router.shutdown().await?;
+        let _ = std::fs::remove_dir_all(state);
+        let _ = std::fs::remove_dir_all(writer_state);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_sealed_card_opens_for_a_friend_in_the_keyring_only() -> Result<()> {
+        use crate::ns_book::PROFILE_BOOK_FILE;
+        use crate::profile::{ProfileDocs, Sealer};
+        use std::collections::{BTreeSet, HashMap};
+
+        let writer_state = scratch_dir("sealed-card-writer");
+        let friend_state = scratch_dir("sealed-card-friend");
+        let stranger_state = scratch_dir("sealed-card-stranger");
+        let (writer_endpoint, writer_docs, writer_blobs, writer_router) =
+            replication_peer().await?;
+        let (_friend_endpoint, friend_docs, friend_blobs, friend_router) =
+            replication_peer().await?;
+        let (_stranger_endpoint, stranger_docs, stranger_blobs, stranger_router) =
+            replication_peer().await?;
+        let (friend_secret, friend_pub) = crate::crypto::generate_recv_keypair();
+        let (stranger_secret, _) = crate::crypto::generate_recv_keypair();
+        let (writer_secret, _) = crate::crypto::generate_recv_keypair();
+
+        let writer = ProfileDocs::init(writer_docs, writer_blobs, writer_state.clone(), None)
+            .await?
+            .with_seal(Sealer::new([1; 32], writer_secret, writer_state.clone()));
+        writer
+            .publish_key(crate::repeater::CARD_KEY, b"new card".to_vec())
+            .await?;
+        assert!(writer.reseal(&[([2; 32], friend_pub)], 1).await?);
+        // What the writer holds is sealed: no clear copy under the card's own key.
+        assert!(writer
+            .read_key_everywhere(crate::repeater::CARD_KEY)
+            .await
+            .iter()
+            .any(|bytes| bytes == b"new card"));
+        let ticket = writer.ticket().await?;
+        let namespace = crate::ns_book::ticket_namespace(&ticket)?;
+
+        let writer_id = *writer_endpoint.id().as_bytes();
+        let reader = |docs: Docs, blobs: BlobsStore, state: PathBuf, secret: Vec<u8>| {
+            let ticket = ticket.clone();
+            async move {
+                let book = Arc::new(NamespaceBook::open(&state, PROFILE_BOOK_FILE)?);
+                book.add_friend(namespace, &ticket)?;
+                let docs = ProfileDocs::init(docs, blobs, state.clone(), Some(book))
+                    .await?
+                    .with_seal(Sealer::new([3; 32], secret, state));
+                tokio::time::timeout(
+                    Duration::from_secs(15),
+                    docs.sync_known_friends(&BTreeSet::from([writer_id]), &HashMap::new()),
+                )
+                .await?;
+                Ok::<_, anyhow::Error>(docs.read_key_everywhere(crate::repeater::CARD_KEY).await)
+            }
+        };
+        let friend_reads = reader(
+            friend_docs,
+            friend_blobs,
+            friend_state.clone(),
+            friend_secret,
+        )
+        .await?;
+        assert!(friend_reads.iter().any(|bytes| bytes == b"new card"));
+        let stranger_reads = reader(
+            stranger_docs,
+            stranger_blobs,
+            stranger_state.clone(),
+            stranger_secret,
+        )
+        .await?;
+        assert!(stranger_reads.is_empty());
+
+        for router in [writer_router, friend_router, stranger_router] {
+            router.shutdown().await?;
+        }
+        for dir in [writer_state, friend_state, stranger_state] {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn an_unwaited_carrier_is_scheduled_without_holding_the_push() -> Result<()> {
+        let dir = scratch_dir("unwaited-carrier");
+        let (writer_endpoint, writer_docs, writer_blobs, writer_router) =
+            replication_peer().await?;
+        let (reader_endpoint, reader_docs, reader_blobs, reader_router) =
+            replication_peer().await?;
+        let writer = TrailDocs::init(writer_docs, writer_blobs, dir.clone(), None, None).await?;
+        let ns = writer.own_namespace();
+        let writer_doc = writer.doc_for(ns).await?;
+        let key = encode_key(writer_endpoint.id().as_bytes());
+        writer_doc
+            .set_bytes(writer.author, key.clone(), b"sealed fix".to_vec())
+            .await?;
+        let ticket: iroh_docs::DocTicket = writer.read_ticket(ns).await?.parse()?;
+        let reader_doc = reader_docs.import_namespace(ticket.capability).await?;
+        reader_doc.start_sync(Vec::new()).await?;
+
+        // Nothing is waited for, so the push returns at once with nothing reported...
+        let report = tokio::time::timeout(
+            Duration::from_secs(3),
+            writer.push(
+                ns,
+                Vec::new(),
+                vec![reader_endpoint.addr()],
+                Duration::from_secs(30),
+            ),
+        )
+        .await??
+        .expect("a push with only unwaited carriers still reports");
+        assert!(report.per_peer.is_empty());
+
+        // ...and the carrier still receives the entry and its bytes.
+        tokio::time::timeout(Duration::from_secs(15), async {
+            loop {
+                if let Some(entry) = reader_doc
+                    .get_one(Query::single_latest_per_key().key_exact(&key).build())
+                    .await?
+                {
+                    if reader_blobs
+                        .blobs()
+                        .get_bytes(entry.content_hash())
+                        .await
+                        .is_ok_and(|bytes| bytes.as_ref() == b"sealed fix")
+                    {
+                        return Ok::<(), anyhow::Error>(());
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await??;
+        writer_router.shutdown().await?;
+        reader_router.shutdown().await?;
+        let _ = std::fs::remove_dir_all(dir);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_friend_pulls_its_namespace_from_a_carrier_after_the_writer_goes_offline(
+    ) -> Result<()> {
+        let writer_dir = scratch_dir("carrier-writer");
+        let reader_dir = scratch_dir("carrier-reader");
+        let state_dir = scratch_dir("carrier-state");
+        let (writer_endpoint, writer_docs, writer_blobs, writer_router) =
+            replication_peer().await?;
+        let (carrier_endpoint, carrier_docs, carrier_blobs, carrier_router) =
+            replication_peer().await?;
+        let (reader_endpoint, reader_docs, reader_blobs, reader_router) =
+            replication_peer().await?;
+
+        let writer =
+            TrailDocs::init(writer_docs, writer_blobs, writer_dir.clone(), None, None).await?;
+        let ns = writer.own_namespace();
+        let key = encode_key(writer_endpoint.id().as_bytes());
+        writer
+            .doc_for(ns)
+            .await?
+            .set_bytes(writer.author, key.clone(), b"sealed friend fix".to_vec())
+            .await?;
+        let ticket = writer.read_ticket(ns).await?;
+        let parsed: iroh_docs::DocTicket = ticket.parse()?;
+        let carrier_doc = carrier_docs.import_namespace(parsed.capability).await?;
+        carrier_doc.start_sync(Vec::new()).await?;
+        writer
+            .push(
+                ns,
+                Vec::new(),
+                vec![carrier_endpoint.addr()],
+                Duration::from_secs(30),
+            )
+            .await?;
+        tokio::time::timeout(Duration::from_secs(15), async {
+            loop {
+                if let Some(entry) = carrier_doc
+                    .get_one(Query::single_latest_per_key().key_exact(&key).build())
+                    .await?
+                {
+                    if carrier_blobs
+                        .blobs()
+                        .get_bytes(entry.content_hash())
+                        .await
+                        .is_ok()
+                    {
+                        return Ok::<(), anyhow::Error>(());
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await??;
+        writer_router.shutdown().await?;
+        writer_endpoint.close().await;
+
+        let reader = TrailDocs::init(
+            reader_docs,
+            reader_blobs.clone(),
+            reader_dir.clone(),
+            Some(book(&state_dir)),
+            None,
+        )
+        .await?;
+        reader.import_ticket(&ticket).await?;
+        let extras = HashMap::from([(ns.to_bytes(), vec![carrier_endpoint.addr()])]);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        reader
+            .sync_all_until(Vec::new(), extras, Some(deadline))
+            .await?;
+
+        let entry = reader
+            .doc_for(ns)
+            .await?
+            .get_one(Query::single_latest_per_key().key_exact(&key).build())
+            .await?
+            .expect("the carrier served the friend's fix");
+        assert_eq!(
+            reader_blobs
+                .blobs()
+                .get_bytes(entry.content_hash())
+                .await?
+                .as_ref(),
+            b"sealed friend fix"
+        );
+        assert!(
+            reader
+                .doc_for(reader.own_namespace())
+                .await?
+                .get_one(Query::single_latest_per_key().key_exact(&key).build())
+                .await?
+                .is_none(),
+            "a friend's carrier is not a target for our own namespace"
+        );
+        carrier_router.shutdown().await?;
+        reader_router.shutdown().await?;
+        carrier_endpoint.close().await;
+        reader_endpoint.close().await;
+        for dir in [writer_dir, reader_dir, state_dir] {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn extra_carriers_are_scoped_and_do_not_replace_explicit_addresses() {
+        let first = SecretKey::from_bytes(&[1; 32]).public();
+        let second = SecretKey::from_bytes(&[2; 32]).public();
+        let explicit = EndpointAddr::new(first);
+        let extra = vec![EndpointAddr::new(first), EndpointAddr::new(second)];
+        assert_eq!(
+            namespace_peers(&[explicit.clone()], None),
+            vec![explicit.clone()]
+        );
+        assert_eq!(
+            namespace_peers(&[explicit.clone()], Some(&extra)),
+            vec![explicit, EndpointAddr::new(second)]
+        );
     }
 
     #[tokio::test]

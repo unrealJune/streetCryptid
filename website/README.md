@@ -9,7 +9,7 @@ website/
 ├─ site/                  everything served, at the path it is served at
 │  ├─ .well-known/        apple-app-site-association, assetlinks.json
 │  ├─ pair/               invite fallback
-│  └─ repeater/           claim fallback + setup guide, install.ps1
+│  └─ repeater/           claim fallback + setup guide (Windows, Linux), install.ps1
 ├─ Caddyfile              headers, rewrites, error page
 ├─ Dockerfile             caddy + Caddyfile + site/, validated at build
 ├─ charts/streetcrypt-id/ Deployment, Service, PodDisruptionBudget
@@ -90,7 +90,33 @@ file it could not mark. Caddy serves it as `text/plain`, because `Invoke-RestMet
 bytes for anything else. Keep it ASCII: Windows PowerShell 5.1 reads a BOM-less file in the ANSI
 code page.
 
-When the Linux repeater ships (#208), its tab in `repeater/index.html` gets the same treatment.
+**The Linux tab is commands, not a script.** The Linux repeater (`repeater/linux`) is one
+binary in a tarball per architecture, `streetcryptid-repeater-<version>-<arch>-linux.tar.gz`
+(`repeater/linux/scripts/package.sh`), with `SHA256SUMS` beside it on each `linux-vX.Y.Z` GitHub
+release. The tab walks through what its README's quick start does: download, `run` (which prints
+the claim QR at a terminal), claim from the phone, then opt in to systemd with
+`install --system` (or a per-user `install`, `--linger` to outlive the session).
+
+- **There is no fixed download URL.** The file names carry the version and the releases are
+  prereleases (`--latest=false`), so `releases/latest/download/…` would find nothing, and nothing
+  re-uploads to a stable tag the way the Windows `repeater-preview` release is kept. The button
+  is the releases list filtered to `linux-v`. A one-line `curl … | sh` would have to resolve the
+  newest tag through the GitHub API first; it is not worth that until the releases stop being
+  previews.
+- **The commands name the architecture with `$(uname -m)`**, which prints exactly the `x86_64` /
+  `aarch64` the tarballs are named with, so someone who downloaded both does not hand `tar` two
+  archives. Nothing on the page detects it: `guide.js` picks the Linux tab and stops there.
+- **The page asks for the checksum and shows no QR.** The claim code only ever appears in the
+  person's own terminal (under systemd it says to run `streetcryptid-repeater claim`), which is
+  why the Linux steps tell people not to paste it into a log as well as not to screenshot it.
+
+A change to the Linux CLI's commands or its package name changes this tab in the same pull
+request, as the root `AGENTS.md` asks of every repeater platform. `test/site.test.ts` pins the
+tab's release link and the commands it shows.
+
+**Copy buttons collapse whitespace.** Every `.cmd` copies its `<code>` with runs of whitespace
+folded to one space, because Prettier wraps long commands in the source and a pasted newline in
+a shell runs the first half on its own.
 
 **The copy-paste route offers the token, not a 16-character pairing code.** Those
 are two unrelated handoffs in the app and only one of them is in this link.
