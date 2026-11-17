@@ -1,12 +1,15 @@
 #!/usr/bin/env bash
 
-# Decide which CI lanes a change needs: the app, the repeater server, the Windows repeater.
+# Decide which CI lanes a change needs: the app, the repeater server, the Windows repeater, the
+# Linux repeater, the website.
 #
 # A path-filtered workflow that does not run leaves a required check pending forever, so `ci.yml`
 # always runs and asks this script instead. The rules (docs/MONOREPO.md, "CI"):
 #
 #   repeater/server/**, .dockerignore (the server image's)   -> server
 #   repeater/windows/**                                      -> windows
+#   repeater/linux/**                                        -> linux
+#   repeater/host/** (the desktop host both link)            -> windows + linux
 #   website/**                                               -> website
 #   assets/images/mothman-logo*.svg (the Windows icon's source) -> app + windows
 #   repeater/protocol/**, Cargo.toml, Cargo.lock,
@@ -28,21 +31,27 @@
 # A base that is empty, all zeros (a new branch) or not in the local history runs every lane:
 # not knowing what changed must never skip a check.
 #
-# Prints `app=`, `server=`, `windows=`, `website=` (true|false) on stdout, for $GITHUB_OUTPUT.
+# Prints `app=`, `server=`, `windows=`, `linux=`, `website=` (true|false) on stdout, for
+# $GITHUB_OUTPUT.
 
 set -euo pipefail
 
 all() {
-  printf 'app=true\nserver=true\nwindows=true\nwebsite=true\n'
+  printf 'app=true\nserver=true\nwindows=true\nlinux=true\nwebsite=true\n'
 }
 
 classify() {
-  local app=false server=false windows=false website=false path
+  local app=false server=false windows=false linux=false website=false path
   while IFS= read -r path; do
     [[ -z "$path" ]] && continue
     case "$path" in
       repeater/server/* | .dockerignore) server=true ;;
       repeater/windows/*) windows=true ;;
+      repeater/linux/*) linux=true ;;
+      repeater/host/*)
+        windows=true
+        linux=true
+        ;;
       website/*) website=true ;;
       assets/images/mothman-logo*.svg)
         app=true
@@ -52,17 +61,20 @@ classify() {
         app=true
         server=true
         windows=true
+        linux=true
         website=true
         ;;
       repeater/protocol/* | Cargo.toml | Cargo.lock | rust-toolchain.toml | third_party/* | repeater/*)
         app=true
         server=true
         windows=true
+        linux=true
         ;;
       *) app=true ;;
     esac
   done
-  printf 'app=%s\nserver=%s\nwindows=%s\nwebsite=%s\n' "$app" "$server" "$windows" "$website"
+  printf 'app=%s\nserver=%s\nwindows=%s\nlinux=%s\nwebsite=%s\n' \
+    "$app" "$server" "$windows" "$linux" "$website"
 }
 
 if [[ "${1:-}" == '--paths' ]]; then

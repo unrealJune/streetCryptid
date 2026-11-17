@@ -1,23 +1,16 @@
 use std::io::{BufRead, Read, Write};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Result};
-use iroh::SecretKey;
-use serde::Deserialize;
 use streetcryptid_repeater_host::{
-    claim_directory, identity, read_name, snapshot, start, write_name, HostInfo, HostSettings,
-    Settings, PROTOCOL, SERVICE_MARKER,
+    claim_directory, identity, init_telemetry, message, read_name, run_pulse, snapshot, start,
+    write_name, Action, Command, HostInfo, PulseInfo, Settings, MAX_COMMAND_LINE, SERVICE_MARKER,
 };
 use trail_stash::config::{DEFAULT_PEER_SYNC_INTERVAL_MIN, DEFAULT_PRUNE_INTERVAL_MIN};
 
 const OUTPUT_CAPACITY: usize = 64;
-/// How often the host reports on itself. A host that stops reporting is the signal: a desktop
-/// repeater that is asleep, powered off or wedged emits nothing, and a gap between pulses is the
-/// only way that absence can be measured (the phones' `device.health` exists for the same reason).
-const PULSE_INTERVAL: Duration = Duration::from_secs(5 * 60);
 
 /// The release version, stamped by `build.ps1`; a local build reports the crate's.
 const VERSION: &str = match option_env!("REPEATER_VERSION") {
@@ -29,11 +22,6 @@ const VERSION: &str = match option_env!("REPEATER_VERSION") {
 /// and no setting can turn it on; with it, nothing is sent until the person running the repeater
 /// says yes.
 const TELEMETRY_ENDPOINT: Option<&str> = option_env!("SC_REPEATER_OTEL_ENDPOINT");
-const TELEMETRY_SERVICE: &str = "streetcryptid-repeater";
-/// iroh logs per packet path at debug and keeps endpoint-lifetime spans open for days; on a
-/// machine that runs for weeks only its warnings are worth shipping.
-const TELEMETRY_FILTER: &str = "info,iroh=warn,iroh_relay=warn,iroh_docs=warn,iroh_blobs=warn,\
-iroh_gossip=warn,noq=warn,noq_proto=warn,noq_udp=warn";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Mode {
@@ -85,54 +73,6 @@ fn parse_args(mut args: impl Iterator<Item = std::ffi::OsString>) -> Result<Args
     })
 }
 
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct Command {
-    protocol: u32,
-    kind: String,
-    request_id: String,
-    telemetry: Option<bool>,
-    keep_awake: Option<bool>,
-    /// For `name`: the new name, or `""` to clear it.
-    name: Option<String>,
-}
-
-/// What the app may ask of the host: its settings, its name, or releasing the repeater from its
-/// roster (REPEATERS.md §4.1). Each is something only the person at this machine decides.
-#[derive(Debug, PartialEq)]
-enum Action {
-    Settings(HostSettings),
-    Name(String),
-    Release,
-}
-
-impl Command {
-    fn action(&self) -> Result<Action> {
-        if self.protocol != PROTOCOL || self.request_id.is_empty() || self.request_id.len() > 64 {
-            bail!("Invalid command");
-        }
-        match (
-            self.kind.as_str(),
-            self.telemetry,
-            self.keep_awake,
-            self.name.as_deref(),
-        ) {
-            ("settings", Some(telemetry), Some(keep_awake), None) => {
-                Ok(Action::Settings(HostSettings {
-                    telemetry,
-                    keep_awake,
-                }))
-            }
-            // Bounded here as well as by `repeater_name`: the line itself is at most 4 KiB.
-            ("name", None, None, Some(name)) if name.chars().count() <= 200 => {
-                Ok(Action::Name(name.to_string()))
-            }
-            ("release", None, None, None) => Ok(Action::Release),
-            _ => bail!("Invalid command"),
-        }
-    }
-}
-
 fn spawn_output<W: Write + Send + 'static>(
     mut out: W,
 ) -> (
@@ -176,7 +116,7 @@ fn run() -> Result<()> {
     let settings = Arc::new(Settings::open(&args.state_dir));
     // Before the runtime exists: the exporter reads its endpoint from the environment, and no
     // other thread may be running while it is written.
-    init_telemetry(&secret, settings.telemetry_flag());
+    init_telemetry(TELEMETRY_ENDPOINT, &secret, settings.telemetry_flag());
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
@@ -185,40 +125,7 @@ fn run() -> Result<()> {
     result
 }
 
-fn init_telemetry(secret: &SecretKey, consent: Arc<AtomicBool>) {
-    use tracing_subscriber::filter::{filter_fn, EnvFilter};
-    use tracing_subscriber::layer::SubscriberExt;
-    use tracing_subscriber::util::SubscriberInitExt;
-    use tracing_subscriber::Layer;
-
-    type Base = tracing_subscriber::layer::Layered<EnvFilter, tracing_subscriber::Registry>;
-
-    let Some(endpoint) = TELEMETRY_ENDPOINT.filter(|e| !e.trim().is_empty()) else {
-        return;
-    };
-    std::env::set_var("OTEL_EXPORTER_OTLP_ENDPOINT", endpoint);
-    std::env::set_var("OTEL_SERVICE_NAME", TELEMETRY_SERVICE);
-    let Some(layers) = trail_stash::telemetry::otel_layers::<Base>(
-        &trail_stash::telemetry::instance_id(&secret.public()),
-    ) else {
-        return;
-    };
-    // Each exporter is behind the person's choice, read on every span and event, so turning
-    // diagnostics off takes effect at once and nothing recorded while off is ever sent.
-    let layers: Vec<_> = layers
-        .into_iter()
-        .map(|layer| {
-            let consent = consent.clone();
-            layer.with_filter(filter_fn(move |_| consent.load(Ordering::Relaxed)))
-        })
-        .collect();
-    tracing_subscriber::registry()
-        .with(EnvFilter::new(TELEMETRY_FILTER))
-        .with(layers)
-        .init();
-}
-
-async fn serve(args: Args, secret: SecretKey, settings: Arc<Settings>) -> Result<()> {
+async fn serve(args: Args, secret: iroh::SecretKey, settings: Arc<Settings>) -> Result<()> {
     let dir = args.state_dir.clone();
     let mode = args.mode;
     // EOF on the inherited pipe stops the node even if the UI (or the service) crashes.
@@ -229,8 +136,10 @@ async fn serve(args: Args, secret: SecretKey, settings: Arc<Settings>) -> Result
         loop {
             let mut line = Vec::new();
             if !matches!(
-                (&mut input).take(4097).read_until(b'\n', &mut line),
-                Ok(1..=4096)
+                (&mut input)
+                    .take(MAX_COMMAND_LINE as u64 + 1)
+                    .read_until(b'\n', &mut line),
+                Ok(1..=MAX_COMMAND_LINE)
             ) || line.last() != Some(&b'\n')
             {
                 break;
@@ -267,8 +176,17 @@ async fn serve(args: Args, secret: SecretKey, settings: Arc<Settings>) -> Result
         vec![],
         Duration::from_secs(DEFAULT_PEER_SYNC_INTERVAL_MIN * 60),
     ));
-    let pulse = tokio::spawn(run_pulse(node.clone(), mode, power.clone(), started_at));
-    let run_id = streetcryptid_repeater_host::hex(iroh::SecretKey::generate().public().as_bytes());
+    let pulse = tokio::spawn(run_pulse(
+        node.clone(),
+        PulseInfo {
+            platform: "windows",
+            mode: mode.name(),
+            version: VERSION,
+        },
+        power.clone(),
+        started_at,
+    ));
+    let run_id = streetcryptid_repeater_host::run_id();
     let mut arrivals = node.subscribe_arrivals();
     let (writer, _worker) = spawn_output(std::io::stdout());
     let mut interval = tokio::time::interval(Duration::from_secs(2));
@@ -278,6 +196,7 @@ async fn serve(args: Args, secret: SecretKey, settings: Arc<Settings>) -> Result
         mode: mode.name(),
         settings: settings.get(),
         telemetry_available: TELEMETRY_ENDPOINT.is_some_and(|e| !e.trim().is_empty()),
+        keep_awake_held: streetcryptid_repeater_host::PowerState::holding(&*power),
     };
     loop {
         let message = tokio::select! {
@@ -299,19 +218,16 @@ async fn serve(args: Args, secret: SecretKey, settings: Arc<Settings>) -> Result
                     Err(_) => false,
                 };
                 // Command replies must not be silently dropped like decorative arrival events.
-                let reply = serde_json::json!({"protocol": PROTOCOL, "kind": "result", "runId": run_id,
-                    "requestId": command.request_id, "ok": ok});
+                let reply = message::result(&run_id, &command.request_id, ok);
                 if writer.try_send(reply).is_err() { break; }
-                serde_json::json!({"protocol": PROTOCOL, "kind": "snapshot", "runId": run_id,
-                    "snapshot": snapshot(&node, info())})
+                message::snapshot(&run_id, &snapshot(&node, info()))
             }
             _ = interval.tick() => {
-                serde_json::json!({"protocol": PROTOCOL, "kind": "snapshot", "runId": run_id,
-                    "snapshot": snapshot(&node, info())})
+                message::snapshot(&run_id, &snapshot(&node, info()))
             }
             arrival = arrivals.recv() => {
                 match arrival {
-                    Ok(sequence) => serde_json::json!({"protocol": PROTOCOL, "kind": "arrival", "runId": run_id, "sequence": sequence}),
+                    Ok(sequence) => message::arrival(&run_id, sequence),
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
                     Err(_) => break,
                 }
@@ -334,52 +250,6 @@ async fn serve(args: Args, secret: SecretKey, settings: Arc<Settings>) -> Result
     Ok(())
 }
 
-/// One `repeater.host.pulse` span every [`PULSE_INTERVAL`]: what the node holds, what it has
-/// moved, and whether it is keeping the machine awake.
-async fn run_pulse(
-    node: Arc<trail_stash::node::StashNode>,
-    mode: Mode,
-    power: Arc<power::KeepAwake>,
-    started_at: Instant,
-) {
-    let mut interval = tokio::time::interval(PULSE_INTERVAL);
-    interval.tick().await;
-    loop {
-        interval.tick().await;
-        let (missing, tracked) = node.content_stats();
-        let members = node
-            .repeater()
-            .and_then(|r| r.roster_state())
-            .map(|s| s.carried.len())
-            .unwrap_or(0);
-        let metrics = node.endpoint().metrics();
-        let socket = &metrics.socket;
-        let span = tracing::info_span!(
-            "repeater.host.pulse",
-            host.mode = mode.name(),
-            host.version = VERSION,
-            uptime_s = started_at.elapsed().as_secs(),
-            roster.claimed = node.repeater().is_some_and(|r| r.is_claimed()),
-            roster.members = members as u64,
-            content.tracked = tracked as u64,
-            content.missing = missing as u64,
-            fix.received = node.arrival_count(),
-            net.connections = socket
-                .num_conns_opened
-                .get()
-                .saturating_sub(socket.num_conns_closed.get()),
-            net.bytes_in = socket.recv_data_ipv4.get()
-                + socket.recv_data_ipv6.get()
-                + socket.recv_data_relay.get(),
-            net.bytes_out =
-                socket.send_ipv4.get() + socket.send_ipv6.get() + socket.send_relay.get(),
-            power.on_ac = power.on_ac(),
-            power.keep_awake = power.holding(),
-        );
-        drop(span);
-    }
-}
-
 /// Keeping the machine awake while it is on mains power. A repeater that sleeps carries nothing,
 /// and Windows puts an idle desktop to sleep after minutes; on battery the person's battery wins.
 mod power {
@@ -390,6 +260,16 @@ mod power {
     pub struct KeepAwake {
         on_ac: AtomicBool,
         holding: AtomicBool,
+    }
+
+    impl streetcryptid_repeater_host::PowerState for KeepAwake {
+        fn on_ac(&self) -> bool {
+            self.on_ac.load(Ordering::Relaxed)
+        }
+
+        fn holding(&self) -> bool {
+            self.holding.load(Ordering::Relaxed)
+        }
     }
 
     impl KeepAwake {
@@ -411,14 +291,6 @@ mod power {
                 std::thread::sleep(Duration::from_secs(30));
             });
             state
-        }
-
-        pub fn on_ac(&self) -> bool {
-            self.on_ac.load(Ordering::Relaxed)
-        }
-
-        pub fn holding(&self) -> bool {
-            self.holding.load(Ordering::Relaxed)
         }
     }
 
@@ -493,66 +365,6 @@ mod tests {
         assert!(args(&["--state-dir", "a", "--state-dir", "b"]).is_err());
         assert!(args(&["--state-dir", "a", "--mode", "admin"]).is_err());
         assert!(args(&["--state-dir", "a", "extra"]).is_err());
-    }
-
-    #[test]
-    fn settings_commands_validate_the_protocol_and_shape() {
-        let command: Command = serde_json::from_str(
-            r#"{"protocol":2,"kind":"settings","requestId":"one","telemetry":true,"keepAwake":false}"#,
-        )
-        .unwrap();
-        assert_eq!(
-            command.action().unwrap(),
-            Action::Settings(HostSettings {
-                telemetry: true,
-                keep_awake: false
-            })
-        );
-        let old: Command = serde_json::from_str(
-            r#"{"protocol":1,"kind":"settings","requestId":"one","telemetry":true,"keepAwake":false}"#,
-        )
-        .unwrap();
-        assert!(old.action().is_err());
-        assert!(serde_json::from_str::<Command>(
-            r#"{"protocol":2,"kind":"subscription","requestId":"one","member":"ab","receiving":false}"#,
-        )
-        .is_err());
-        // Settings without their values, or a release carrying some, are refused.
-        let partial: Command =
-            serde_json::from_str(r#"{"protocol":2,"kind":"settings","requestId":"one"}"#).unwrap();
-        assert!(partial.action().is_err());
-        let release: Command =
-            serde_json::from_str(r#"{"protocol":2,"kind":"release","requestId":"two"}"#).unwrap();
-        assert_eq!(release.action().unwrap(), Action::Release);
-        let odd: Command = serde_json::from_str(
-            r#"{"protocol":2,"kind":"release","requestId":"two","telemetry":true}"#,
-        )
-        .unwrap();
-        assert!(odd.action().is_err());
-    }
-
-    #[test]
-    fn name_commands_carry_a_name_and_nothing_else() {
-        let name: Command = serde_json::from_str(
-            r#"{"protocol":2,"kind":"name","requestId":"n","name":"Living room PC"}"#,
-        )
-        .unwrap();
-        assert_eq!(
-            name.action().unwrap(),
-            Action::Name("Living room PC".into())
-        );
-        let clear: Command =
-            serde_json::from_str(r#"{"protocol":2,"kind":"name","requestId":"n","name":""}"#)
-                .unwrap();
-        assert_eq!(clear.action().unwrap(), Action::Name(String::new()));
-        let bare: Command =
-            serde_json::from_str(r#"{"protocol":2,"kind":"name","requestId":"n"}"#).unwrap();
-        assert!(bare.action().is_err());
-        let mixed: Command = serde_json::from_str(
-            r#"{"protocol":2,"kind":"settings","requestId":"n","telemetry":true,"keepAwake":false,"name":"x"}"#,
-        )
-        .unwrap();
-        assert!(mixed.action().is_err());
     }
 
     struct PausedOutput {

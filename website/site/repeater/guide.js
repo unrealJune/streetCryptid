@@ -128,7 +128,8 @@
   Array.prototype.forEach.call(document.querySelectorAll('.cmd'), function (cmd) {
     var code = cmd.querySelector('code');
     wireCopy(cmd.querySelector('.copy'), function () {
-      return code.textContent.trim();
+      // Source formatting wraps long commands; a pasted newline would run half of one.
+      return code.textContent.replace(/\s+/g, ' ').trim();
     });
   });
 

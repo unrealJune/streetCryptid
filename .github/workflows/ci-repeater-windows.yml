@@ -175,7 +175,7 @@ jobs:
         run: |
           $path = '.\repeater\windows\artifacts\win-${{ matrix.arch }}\releases'
           git archive --format=zip --output="$path\repeater-source-${{ matrix.arch }}.zip" HEAD `
-            repeater/windows repeater/server repeater/protocol third_party `
+            repeater/windows repeater/host repeater/server repeater/protocol third_party `
             Cargo.toml Cargo.lock rust-toolchain.toml LICENSE assets/images/mothman-logo.svg
           "$env:GITHUB_SHA" | Set-Content "$path\source-${{ matrix.arch }}.txt"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

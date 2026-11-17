@@ -13,8 +13,10 @@ WinUI app ──named pipe──▶ Windows service ──stdio──▶ Rust ho
   Service Control Manager starts; `install` and `uninstall` are run elevated by the app.
 - `core/` — what both share and what the tests cover: the line protocol, the identity move,
   preferences, the SCM calls.
-- `host/` — the Rust host, on the repeater server crate (`repeater/server`, crate `trail-stash`)
-  in its `Storage::MemoryRepeater` mode. A member of the repository's Cargo workspace.
+- `../host` (`repeater/host`) — the Rust host, on the repeater server crate (`repeater/server`,
+  crate `trail-stash`) in its `Storage::MemoryRepeater` mode. A member of the repository's Cargo
+  workspace, and shared: the Linux repeater (`repeater/linux`) runs the same node and speaks this
+  line protocol on a Unix socket.
 
 ## Build
 

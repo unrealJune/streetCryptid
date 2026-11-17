@@ -1,8 +1,9 @@
 # Windows repeater — agent notes
 
 The WinUI 3 app (`app/`), the native-AOT Windows service (`service/`), the C# model they share
-(`core/`, tested in `tests/`) and the Rust host (`host/`). Read `README.md` first. The root
-`AGENTS.md` still applies.
+(`core/`, tested in `tests/`) and the Rust host (`../host`, shared with the Linux repeater, which
+runs the same node behind a Unix socket). Read `README.md` first. The root `AGENTS.md` still
+applies.
 
 ## How it fits
 

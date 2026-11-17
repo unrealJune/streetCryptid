@@ -20,6 +20,7 @@ on:
       - main
     paths:
       - repeater/windows/**
+      - repeater/host/**
       - repeater/server/src/**
       - repeater/server/Cargo.toml
       - repeater/protocol/**

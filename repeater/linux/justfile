@@ -1,0 +1,31 @@
+# The Linux repeater, as `just linux::<recipe>` from the repository root. Needs Linux (or WSL),
+# the repository's Rust toolchain and protoc. Recipes run here, in repeater/linux; cargo finds the
+# root workspace.
+
+# The desktop host's and the CLI's tests.
+test:
+    cargo test --locked --profile repeater-test -p streetcryptid-repeater-host -p streetcryptid-repeater-linux -- --test-threads=4
+
+# Build the release binary into the workspace's target/desktop-release.
+build:
+    cargo build --locked --profile desktop-release -p streetcryptid-repeater-linux
+
+# Run the built daemon and manage it, unprivileged, in a temporary directory.
+smoke: build
+    bash scripts/test-daemon.sh ../../target/desktop-release/streetcryptid-repeater
+
+# Run the repeater in this terminal.
+run *args:
+    cargo run --locked -p streetcryptid-repeater-linux -- run {{args}}
+
+# Package the built binary as a release does.
+package version="0.0.0-dev" arch=`uname -m`: build
+    bash scripts/package.sh ../../target/desktop-release/streetcryptid-repeater {{version}} {{arch}} ../../target/repeater-linux
+
+# Format check for the host and the CLI.
+fmt:
+    cargo fmt -p streetcryptid-repeater-host -p streetcryptid-repeater-linux --check
+
+# The `linux-v*` tag the next push to main would cut, and why.
+next-version:
+    bash ../../scripts/next-repeater-version.sh linux

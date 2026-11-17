@@ -210,8 +210,8 @@
             <div class="soon">
               <h2>Not on macOS yet</h2>
               <p>
-                There's no Mac repeater yet. Any Windows PC that stays on will do in the meantime,
-                and you can claim it from an iPhone.
+                There's no Mac repeater yet. Any Windows or Linux computer that stays on will do in
+                the meantime, and you can claim it from an iPhone.
               </p>
               <button class="outline" type="button" data-show-tab="tab-windows">
                 Set up on Windows
@@ -221,21 +221,84 @@
 
           <!-- ── Linux ───────────────────────────────────────────────────────── -->
           <div class="panel" role="tabpanel" id="os-linux" aria-labelledby="tab-linux">
-            <div class="soon">
-              <h2>Linux is next</h2>
-              <p>
-                A Linux repeater, one command-line daemon with an optional systemd service, is in
-                review and not released yet. Until it is, a Windows PC that stays on will do.
-              </p>
-              <div class="pair-grid">
-                <a class="outline" href="https://github.com/unrealJune/streetCryptid/pull/208"
-                  >Follow along</a
-                >
-                <button class="outline" type="button" data-show-tab="tab-windows">
-                  Set up on Windows
-                </button>
-              </div>
-            </div>
+            <ol class="steps">
+              <li>
+                <h2>Download</h2>
+                <p>
+                  Any 64-bit Linux, x86_64 or aarch64 (a Raspberry Pi 4 or 5 will do). One binary;
+                  nothing needs root to try it.
+                </p>
+                <div class="downloads">
+                  <a
+                    class="outline"
+                    href="https://github.com/unrealJune/streetCryptid/releases?q=linux-v&amp;expanded=true"
+                    >Latest Linux release</a
+                  >
+                </div>
+                <div class="cmd">
+                  <code
+                    >tar xzf streetcryptid-repeater-*-$(uname -m)-linux.tar.gz &amp;&amp; cd
+                    streetcryptid-repeater-*-$(uname -m)-linux</code
+                  >
+                  <button class="copy" type="button" aria-live="polite">Copy</button>
+                </div>
+                <p class="caveat">
+                  <strong>This is a preview.</strong> Check the download against the release's
+                  <code>SHA256SUMS</code> before you run it.
+                </p>
+              </li>
+
+              <li>
+                <h2>Run it and claim it</h2>
+                <div class="cmd">
+                  <code>./streetcryptid-repeater run</code>
+                  <button class="copy" type="button" aria-live="polite">Copy</button>
+                </div>
+                <p>
+                  The terminal shows a claim code. On your phone, open streetCryptid →
+                  <em>Settings</em> → <em>Repeaters</em> → <em>Add a repeater</em>, and point the
+                  camera at it. Whoever claims it first owns it.
+                </p>
+                <p class="footnote">
+                  The code is single-use and replaced every 30 minutes. Don't post a screenshot of
+                  it, or paste it into a log.
+                </p>
+              </li>
+
+              <li>
+                <h2>Keep it running</h2>
+                <p>Opt in to a systemd service, for you or for the whole machine from boot:</p>
+                <div class="cmd">
+                  <code>sudo ./streetcryptid-repeater install --system</code>
+                  <button class="copy" type="button" aria-live="polite">Copy</button>
+                </div>
+                <ul class="options">
+                  <li>
+                    <strong>Your identity moves into the service</strong>, so it is the same
+                    repeater you just claimed. Without <code>--system</code> it runs as you, while
+                    you are signed in (<code>--linger</code>: after you sign out too).
+                  </li>
+                  <li>
+                    <strong>Keep awake</strong> and <strong>send diagnostics</strong> are
+                    <code>streetcryptid-repeater settings</code>; diagnostics are off unless you
+                    turn them on.
+                  </li>
+                  <li>
+                    <code>streetcryptid-repeater status</code> says what it is carrying;
+                    <code>claim</code> shows the code again.
+                  </li>
+                </ul>
+              </li>
+
+              <li>
+                <h2>Let it carry</h2>
+                <p>
+                  Turn on <em>Carry my location on your repeaters</em>. When you pair with someone
+                  you can offer them your repeaters too, and they choose whether to have theirs
+                  carried.
+                </p>
+              </li>
+            </ol>
           </div>
         </section>
 

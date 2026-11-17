@@ -378,13 +378,13 @@ over an unreadable one.
 gone (§10), or someone wants to hand the machine to another owner. The daemon has
 `trail-stash release` (run with the repeater stopped: it removes `roster.bin`, and the next start
 releases everything it carried and prints a new claim link); the Windows app has RELEASE THIS
-REPEATER on its running page, which sends the host's one other command (`release`) and shows the
-new code at once. Either keeps the machine's identity. The roster's owner, if there still is one,
+REPEATER on its running page, and the Linux repeater `streetcryptid-repeater release`, which send
+the host's `release` command and show the new code at once. Either keeps the machine's identity. The roster's owner, if there still is one,
 sees the machine stop answering and can remove it. A machine the owner removed releases itself the
 moment the removal reaches it (§6.2), so it needs no trip to the machine either way.
 
 **Naming a machine.** The person at the machine can name it ("Living room PC"): the Windows app's
-Name field, or `TRAIL_STASH_NAME` for the daemon. The name is signed into the `RepeaterCert` the
+Name field, `streetcryptid-repeater name` on Linux, or `TRAIL_STASH_NAME` for the daemon. The name is signed into the `RepeaterCert` the
 machine issues (`CertBody::name`), so it rides the roster to the owner and to everyone who reads
 it from a card, and nobody but the machine can set it. The cert's bytes are the four original
 fields and then `Some(name)` only when there is one: an unnamed cert is byte-identical to before,
@@ -782,12 +782,13 @@ phone and a repeater. `repeaters_in_different_rosters_converge_on_a_trail_they_b
 
 There are four channels. Only the first is "the repeater protocol".
 
-| channel                         | carries                                           | transport                                                             |
-| ------------------------------- | ------------------------------------------------- | --------------------------------------------------------------------- |
-| phone → repeater, and siblings  | `Claim`, `Publish`, `Fetch`, `Grant`, `Have`      | ALPN `streetcryptid/repeater/1` on the node's own iroh endpoint       |
-| owner or member → their friends | the roster's signed log (`RepeaterCard`)          | iroh-docs: the `repeaters` key of the publisher's profile namespace   |
-| phone → hosted stash            | namespace grants, push subscriptions              | HTTP + a PSK baked into the build. Not served in repeater mode        |
-| Windows app ↔ service ↔ host    | status snapshots out; `settings` and `release` in | JSON lines on the host's stdin/stdout, relayed over a named pipe (v2) |
+| channel                         | carries                                                | transport                                                             |
+| ------------------------------- | ------------------------------------------------------ | --------------------------------------------------------------------- |
+| phone → repeater, and siblings  | `Claim`, `Publish`, `Fetch`, `Grant`, `Have`           | ALPN `streetcryptid/repeater/1` on the node's own iroh endpoint       |
+| owner or member → their friends | the roster's signed log (`RepeaterCard`)               | iroh-docs: the `repeaters` key of the publisher's profile namespace   |
+| phone → hosted stash            | namespace grants, push subscriptions                   | HTTP + a PSK baked into the build. Not served in repeater mode        |
+| Windows app ↔ service ↔ host    | status snapshots out; `settings`, `name`, `release` in | JSON lines on the host's stdin/stdout, relayed over a named pipe (v2) |
+| Linux CLI ↔ daemon              | the same lines                                         | a Unix socket, 0600 per user or 0660 for the system service (v2)      |
 
 **The repeater protocol, exactly** (`repeater/protocol/src/wire.rs`):
 
