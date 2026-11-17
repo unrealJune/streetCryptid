@@ -1,0 +1,5 @@
+# One toolchain for every crate in the workspace (docs/MONOREPO.md). EAS builds pass `+stable`
+# explicitly and are unaffected; the server image pins the same version in its FROM line.
+[toolchain]
+channel = "1.97.0"
+profile = "minimal"

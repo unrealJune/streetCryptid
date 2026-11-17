@@ -1,3 +1,36 @@
+# Repository map
+
+One repository, four products and their website, one Cargo workspace (`Cargo.toml`,
+`docs/MONOREPO.md`):
+
+- **The app** — the Expo app at the root (`src/`, `modules/`, `app.json`, …) and its Rust core
+  (`modules/iroh-location/rust`, plus the browser bridge in `rust-wasm`). Releases as `v*` to the
+  stores (`release.yml`).
+- **The repeater server** — `repeater/server` (crate `trail-stash`): the hosted stash and the
+  Linux/Docker repeater, with its Helm chart. Releases as `server-v*` plus the image and chart on
+  GHCR. Its own notes: `repeater/server/AGENTS.md`.
+- **The Linux repeater** — `repeater/linux` (binary `streetcryptid-repeater`): CLI and opt-in
+  systemd daemon, serving the Windows management plane on a Unix socket. Releases as `linux-v*`
+  tarballs. Its own notes: `repeater/linux/AGENTS.md`.
+- **The Windows repeater** — `repeater/windows`: WinUI app, Windows service, Rust host. Releases as
+  `windows-v*-preview.N`. Its own notes: `repeater/windows/AGENTS.md`.
+- **The website** — `website/`: streetcrypt.id (the App Link / Universal Link association files,
+  the `/pair` and `/repeater` fallbacks, the repeater setup guide and `install.ps1`). Every push to
+  main that touches it deploys to Buttercup (`release-website.yml`, image + chart on GHCR); no tags.
+  Its own notes: `website/README.md`. A new repeater platform or install step changes
+  `website/site/repeater/` in the same pull request.
+- **Shared** — `repeater/host` (the desktop repeater both Windows and Linux run: node, identity,
+  settings, the line protocol), `repeater/protocol` (the roster and wire the phone and every
+  repeater agree on, with golden vectors) and `third_party/noq` (patched for every crate).
+
+CI runs a lane per product (`ci.yml` → `ci-app.yml`, `ci-repeater-server.yml`,
+`ci-repeater-windows.yml`, `ci-repeater-linux.yml`, `ci-website.yml`, chosen by
+`scripts/ci-changes.sh`); `Required` passes skipped lanes.
+Every product releases from Conventional Commits on its own paths
+(`scripts/lib/conventional-commits.sh`), so a commit's type and the files it touches decide what
+ships: `feat`/`fix` release, `docs`/`chore`/`ci`/`build`/`test`/`refactor`/`style` do not. Build
+Rust with `-p`, never `--workspace` with features.
+
 # Expo HAS CHANGED
 
 Read the exact versioned docs at https://docs.expo.dev/versions/v58.0.0/ before writing any code.
@@ -32,12 +65,26 @@ map, the `sc.*` join-key correlation model (entry-hash based; there is deliberat
 end-to-end trace because payloads are E2E-encrypted), and the TraceQL cookbook for debugging
 dropped location pings across devices and the trail-stash server.
 
+**Query it with `scripts/telemetry/{tq,tr,lq}.sh`** (TraceQL search, full trace, LogQL). Grafana
+resolves publicly but routes only over the tailnet. In a Claude Code web session,
+`scripts/claude-web/session-start.sh` (a SessionStart hook) joins the tailnet as an ephemeral
+userspace node and the helpers route through its SOCKS5 listener; it needs `TS_AUTHKEY`,
+`GRAFANA_URL` and `GRAFANA_TOKEN` set on the cloud environment, and `*.tailscale.com` in its
+network allowlist. The repo is public: the Grafana host and token stay out of it.
+The helpers pin Grafana to its **tailnet IP, looked up at run time** from `tailscale status` (the node
+named `grafana`) — never hardcode it, it changes when the node re-registers. A `403` with
+`x-deny-reason: private_dest_ip` means the request left via the sandbox proxy instead of the SOCKS
+listener, or was pinned to a wrong address. Find it by hand with
+`~/.local/tailscale/tailscale --socket=$HOME/.local/tailscale/tailscaled.sock status | grep grafana`
+and pass it as `GRAFANA_ADDR=100.x.y.z`. Run the helpers as `sh scripts/telemetry/lq.sh …` if the
+exec bit is missing.
+
 Conventions when changing that code:
 
 - Instrumentation lives at drop-decision points and stamps `sc.author` / `sc.seq` /
   `sc.entry_hash` / `sc.drop_reason`. JS uses `src/features/dev/telemetry/` (a hand-rolled
   OTLP-JSON client — do NOT add the OpenTelemetry JS SDK; it misbehaves in Hermes headless
-  contexts). Rust (both `modules/iroh-location/rust` and the trail-stash repo) uses plain
+  contexts). Rust (both `modules/iroh-location/rust` and `repeater/server`) uses plain
   `tracing` spans; OTLP is a subscriber layer behind the `otel` cargo feature (default-on in
   the mobile crate; keep call sites free of `#[cfg]`).
 - **Two gates, and the build-time one is the real one.** `EXPO_PUBLIC_DEV_TELEMETRY=1` compiles
@@ -136,6 +183,22 @@ Conventions when changing that code:
   `onFriendsPulled` and re-reads the replica — a local read, never a second dial. Android had the
   same hole (the service keeps the app mounted, so every capture is a hand-off) and pulls the same
   way after a hand-off while no activity is in the foreground. See `infra/otel/README.md`.
+- **Native publish work on iOS runs under a background assertion, taken in the callback.** Every
+  capture, heartbeat and claim `BackgroundLocationRuntime` decides on goes through `publish(lane)`,
+  which begins a `PublishAssertion` (`beginBackgroundTask`) synchronously, before the `Task` hop —
+  never a bare `Task { await self.heartbeat(...) }`. iOS owes a process nothing once a Core Location
+  callback returns, and on 2026-11-10/11 (v2.28.0) it suspended iPhones mid-push (`trail.push` 162.8
+  s against a 30 s budget; `trail.push.wait` p50 47 s fleet-wide) and before a `CLVisit` arrival's
+  parked declaration was even sealed: friends read "out of contact" about a phone sitting still.
+  The seal is never bounded; the push is (`ingest_fix_within` / `heartbeat_fix_within`, the
+  remaining allowance minus 5 s, not started under 2 s → `push_deferred`, which asks for a
+  `NativeRefreshTask` wake if none is pending). An ingest that owes a claim leaves 8 s for the
+  claim's push and pulls only after it. Outcomes are durable `wake.publish_*` counters plus
+  `location.runtime{event=publish_assertion}` (`expired` / `stranded`).
+  `native-publish-assertion.test.ts` scans the Swift for a bare `Task`. The `serviceRefresh` path is
+  the one exception: its `BGProcessingTask` is its assertion. Android was checked and left alone:
+  its foreground service keeps the process running, and the newest `trail.push.wait` spans there
+  end on their 30 s budget.
 - **A phone that reaches nobody notices, and heals itself** (`rust/src/isolation.rs`). On 2026-10-22
   the field-soak SE showed a friend "parked here 12 hr" while she was publishing live elsewhere:
   every dial the SE made, the stash's included, timed out for hours while its relays and Wi-Fi
@@ -147,6 +210,17 @@ Conventions when changing that code:
   per wake); with one mounted, the heartbeat's `healIfIsolated` calls `rebindNode('isolated')`,
   because only JS can rewire its subscriptions. Do not let the core rebuild under an app lease.
   `node.isolation{event=recovered,last_step}` says whether a step or time fixed it.
+- **A node whose docs engine is gone is rebuilt, not left deaf** (`isolation.rs`, `docs::engine_gone`).
+  iroh-docs never restarts its live engine, and that engine's teardown shuts the replica store down
+  with it, so after one stop every docs call on the node fails with `sending to iroh_docs actor
+failed` for the life of the process. On 2026-11-15 a single panicking accept task (iroh-docs 0.101
+  `BobState::into_outcome` unwrapping progress a failed message had taken; likely a removed friend's
+  namespace closed mid-sync) did that to a Pixel 10 for 17 hours: no push, no pull, and a friend
+  paired that evening got no persona because the Pixel could not read its own sealed profile to
+  hand over. The panic is patched in `third_party/iroh-docs` (NOTICE says how; the live actor also
+  survives a panicked sync task now), and the node probes its replica store on every drain and pull
+  (`check_docs_engine`): a dead engine makes `rebuild_due` true at once, floored by
+  `DOCS_DEAD_REBUILD_COOLDOWN_MS`, and any rebuild clears it — `node.isolation{event=docs_dead}`.
 - **`bg.wake` and `bg.backfill` do not exist.** They went dead when capture moved into Rust — the
   location wake is native and emits no JS span at all. Six e2e scenarios asserted them,
   `background-location-e2e.sh` gated its PASS on `bg.wake > 0` so it could never pass, and two
@@ -190,6 +264,18 @@ Conventions when changing that code:
   registered around a spot the phone has already left never reports an exit — and for the same
   reason a crossing must NOT re-centre on `manager.location`, the fix just left, or `outside`
   repeats forever. `location.moving_fence_armed` reports what the OS holds.
+  **A crossing is not answered until the fence is redrawn, and the process stays awake for it.**
+  After an exit the phone is outside every fence it holds, and a relaunched process suspended
+  before the next fresh fix (seconds, at the speed a car crosses 150 m) has nothing left that can
+  wake it once it parks: on 2026-11-16 `14befa639f`'s last event was such a crossing at 13 m/s,
+  followed by seventeen hours of silence and "out of contact" on every friend's map
+  (`7d684c129f` the day before). `crossedMovingFence` therefore takes background time and lifts the
+  distance filter (`holdForFenceRearm`) until a fence is drawn — by the next fix, or after 20 s
+  or at iOS's expiry from the newest position, widened by how far the phone may have gone
+  (`fenceRearmDue`, `location.runtime{event=fence_rearm}`) — and the fence reaches ten seconds of
+  travel ahead of a moving fix, so a car is not already outside it when Core Location first looks.
+  `location.moving_fence` (`armed` / `adopted` / `crossed` / `fallback` / `none`) is on every
+  `location.runtime` event; `crossed` as the last word before a silence is this bug back.
 - **One drain run at a time, per node (`publish::DrainLock`).** "Idempotent per slot" held only for
   SEQUENTIAL callers: UniFFI polls each foreign call on the host's thread, so concurrent
   `heartbeat_fix`/`ingest_fix` calls both found the slot due, and two drains peeked the same outbox
@@ -259,6 +345,41 @@ Conventions when changing that code:
   phone receiving fixes. A redelivery may still confirm a pending dwell, and otherwise drives a
   no-claim heartbeat at most once a minute, since on a JS-free process nothing else ticks while
   `moving`.
+- **Location travels over iroh-docs alone; there is no app gossip lane.** A phone seals each fix
+  into the one slot of its own trail namespace (`docs.write`), and every namespace the node holds —
+  its own and each imported friend's — joins the iroh-docs live engine at start (`start_sync`). A
+  write therefore reaches whoever is syncing that namespace live, and a phone that was asleep
+  reconciles the newest slot from any peer holding it: the author, the stash or another friend.
+  The native drain pushes after it writes (`trail.push`: the stash and every friend ticket under one
+  `docs::PUSH_TIMEOUT_SECS` deadline); JS never pushes. The one inbound signal is
+  `ReplicaListener::on_friend_entries` — WHO changed, never a fix, because only the app's read may
+  advance the ratchet — after which the app reads the replica. Gossip still runs, but only inside
+  iroh-docs. Until 2026-11 a parallel app gossip topic carried each fix sealed a second time, with a
+  JS subscribe/topic/reachability model of its own; it was deleted, not kept as a fallback, so do
+  not add a second lane to speed delivery up — fix the docs path. Web (wasm) reads the replica and
+  does not publish (`web-no-publish`).
+- **A record is not its bytes, and a reader must fetch the bytes itself** (`TrailDocs::settle_stranded`).
+  iroh-docs reconciles entry records; the content behind each is a separate iroh-blobs download
+  that the engine attempts ONCE, from whichever peer handed the record over, and then waits for a
+  gossip `ContentReady`. The stash receives a writer's record by reconciliation and its bytes
+  moments later by HTTP, which imports straight into its blob store and announces nothing. So a
+  reader that reconciled in between (any phone that keeps friend namespaces live, which every build
+  since the gossip removal does) held the record with no bytes forever: `read_latest_sealed` skips
+  such a slot without a word, the ratchet never sees it, and not even a miss is counted. From
+  2026-11-10 17:25 to 11-12 an iPhone read nothing from one friend while the Pixel beside it read
+  everything; the friend's entries were in its replica and 0 of 17 of their bytes were in its blob
+  store. Every pull now fetches stranded friend slots (`fix`, `nul`, `rsy`) from the peers it
+  dialled, then each namespace's own sources (`namespace_sources`: the repeaters this pass planned
+  for that friend, `repeater::pull_plan`), then the author and the last serving peer, inside the
+  pull's deadline, and reports `sync.stranded` / `sync.stranded_fetched` on `trail.sync`. Friends'
+  profile namespaces get the same pass beside it (`ProfileDocs::settle_stranded`, every key, so the
+  sealed `s/profile`, `s/repeaters` and `keyring` too; sources are the owner's `profile_relays`,
+  then the owner named by the read ticket), which hands a profile that became readable to the app
+  because no `ContentReady` will, and re-reads repeater cards when anything landed; it reports
+  `sync.profile_stranded` / `_fetched`. Do not move
+  either into the replica read (a read never dials), and do not drop the `rsy` lane: a control
+  record without bytes is a restart request the leader cannot see. The web build does not run it
+  yet.
 - **There is ONE node per process, and only `NodeHost` builds it** (`rust/src/host.rs`). The
   mounted app (every JS context, through the module's `createNode`/`shutdown`) and the native
   background runtime (`acquireBackground`) take LEASES on it; the last one out shuts it down,
@@ -275,9 +396,9 @@ Conventions when changing that code:
   identity; a settings change is `restartNode`, never `shutdown` + `createNode` (that would only
   return your own lease and adopt the same node back); and platform code caches the node by
   `generation()` and must not `destroy()` a superseded handle (another call may be inside it).
-  The own topic is a SLOT on the node (`own_subscription`): a second `subscribe` adopts the live
-  one rather than opening a second receive loop, and listeners are swappable so a departing app's
-  are detached without stopping what the background runtime publishes through. Every drain on a
+  The replica listener is a SLOT on the node (`watchReplica` / `unwatchReplica`): swappable, so a
+  departing app's is detached without stopping what the background runtime replicates and
+  publishes, and per node, so the app attaches again to each new `generation()`. Every drain on a
   node is serialized (`drain_lock`), because two holders can now both drive one. The sink
   (`eventSink` / `appIsWired()`) is ROUTING, not ownership: a wired app gets the capture because it
   runs the sampling policy and draws the own marker, and both paths end in `ingestFix` on the same
@@ -491,8 +612,8 @@ Conventions when changing that code:
   only as binding-compatible shims.
 - **The ratchet acceptance window is sized by how long a READER can stay away.** A sender's
   chain resets only when the reader opens something (on iOS, only while the app is mounted), and
-  every tick spends two positions because the gossip and docs lanes each call `next_wraps`. At
-  512 (`DEFAULT_ACCEPT_WINDOW`) that ran out after ~21 h: on 2026-10-09 an iPhone whose owner had
+  every tick spent two positions while a gossip lane and the docs lane each called `next_wraps`
+  (one since 2026-11). At 512 (`DEFAULT_ACCEPT_WINDOW`) that ran out after ~21 h: on 2026-10-09 an iPhone whose owner had
   not opened the app for 25 h was 570 positions behind its friend's Pixel, read every new
   envelope as "no wrap in this envelope belongs to us", and showed the Pixel as a day stale until
   the leader restart healed it. It is `2^17` now. Do not shrink it to bound work: the walk is one
@@ -523,8 +644,8 @@ Conventions when changing that code:
   and finalize's ticket imports are bounded by `PAIR_DOCS_TIMEOUT` and degrade to empty, which
   every consumer already treats as "not published yet". An unbounded await here is an unbounded
   JS promise, which is a pairing screen stuck on "REACHING THEM" with no error and no end state.
-  On the JS side `decideDiscovery` adopts the friend, emits, and hands the subscribe / introduction
-  / trail-sync to `connectNewFriend` WITHOUT awaiting it — a friend is a local decision, and nothing
+  On the JS side `decideDiscovery` adopts the friend, emits, and hands the ticket imports /
+  introduction / trail-sync to `connectNewFriend` WITHOUT awaiting it — a friend is a local decision, and nothing
   the network does may stand between a human saying "keep this one" and the app having kept them.
   `awaitFriendWiring()` is what shutdown and the tests use instead.
 - **A BLE pipe outlives its last connection by `PIPE_IDLE_LINGER` (30 s), a peer keeps its BLE id
@@ -594,10 +715,13 @@ Conventions when changing that code:
 - **iroh is 1.4 or later, and that is load-bearing.** 1.0.2's remote-state actor re-queued a path
   open once per refusing connection on every 333 ms retry; on 2026-11-01 an iPhone 16 Pro Max
   aborted in `VecDeque::grow` a second into a Bump (`ios.diagnostic` SIGABRT). We patched it by
-  hand until 1.4 bounded the queue (#4551). 1.4 also stops an Initial send waiting on a slow
+  hand until 1.4 bounded the queue (#4551). The stash hit the same bug from the other side: on
+  1.0.2 until the workspace merge, it was OOM-killed ten times between 2026-10-27 and 2026-11-09,
+  flat at ~45 MiB and then past its 512 MiB limit inside one scrape; `repeater/server` states the
+  1.4 floor itself for that reason. 1.4 also stops an Initial send waiting on a slow
   transport (a full BLE inbox) from stalling that peer's actor (#4512). Its noq 1.4 is patched
-  (`rust/third_party/noq`, `[patch.crates-io]`): `read_to_end` on a stream already read to its
-  FIN returned `ClosedStream`, and iroh-docs does that at the end of every sync, so most syncs
+  (`third_party/noq`, the root workspace's `[patch.crates-io]`): `read_to_end` on a stream already
+  read to its FIN returned `ClosedStream`, and iroh-docs does that at the end of every sync, so most syncs
   reported "Failed to close connection1" while their data had arrived and `PendingContentReady`
   ended pulls before the content landed. Drop the patch when noq fixes it. A
   `prev.last_state=active` relaunch during pairing is a crash until shown otherwise.
@@ -625,11 +749,11 @@ Conventions when changing that code:
 - **`peer.contact` is the only span that says two PHONES talked, and it must stay honest.** Every
   other delivery span says an envelope moved; a friend's dot updating via the stash hours later
   looks identical to two phones awake at once. `contact.rs` emits one per exchange with a named peer
-  at the four places one is visible (gossip send to a recipient neighbour, gossip receive, a FINISHED
-  push, a pull that DELIVERED entries), tagged `contact.role` (`friend`/`stash`/`other`) and, on
-  receive, `contact.from_author`. Do not emit it for a peer that was merely dialled, or for a
-  neighbour dropped from the seal — a contact we cannot observe is how the dashboard row starts
-  lying. Its dimensions are in `collector-config.yaml`; see `infra/otel/README.md`.
+  at the two places one is visible — a FINISHED `trail.push` peer (send), and the replica watch
+  when a peer's `InsertRemote` lands friend entries (receive; a live broadcast, a pull and a sync a
+  friend opened all end there, so each delivery counts once) — tagged `contact.role`
+  (`friend`/`stash`/`other`) and, on receive, `contact.from_author`. Do not emit it for a peer that
+  was merely dialled — a contact we cannot observe is how the dashboard row starts lying. Its dimensions are in `collector-config.yaml`; see `infra/otel/README.md`.
 - **One poll driver.** `pollPairingOnce` is driven by exactly one re-armed timer whose cadence comes
   from `pairingPollDelay()`; Bump's interval only watches for its own window closing. Two 300 ms
   drivers running the same drain produced 6-7 `pairing.poll` per second on 2026-09-17, each one six
@@ -684,7 +808,7 @@ Conventions when changing that code:
   relay their owner had when they were minted and live as long as the friendship, so every friend
   paired before 2026-10-11 still named a retired `iroh-*.junephilip.com` relay, which now lands on a
   wildcard record that fails TLS; every phone held a doomed connection to it. Every ticket-derived
-  dial (gossip bootstrap, push, pull, docs/profile ticket import) keeps only relays in this node's
+  dial (live-sync bootstrap, push, pull, docs/profile ticket import) keeps only relays in this node's
   own relay map and leaves the rest to the N0 address lookup. Retiring a relay is a config change
   and nothing more. The wasm build leaves addresses alone (a browser can only use relays).
 - **`process.memory` and `net.health` ride the five-minute runtime pulse, and are counters.**
@@ -776,6 +900,22 @@ on web is noise. Use it for ratios and for finding work that should not happen a
   them makes a slope that jumps at every DEM pixel (square hillshade tiles), and the height's low
   byte wraps every 256 m, which drew ghost lines along that elevation on the iOS GPU. CanvasKit's
   software filter does not show the second, so a CPU pixel test cannot catch it coming back.
+- **Camera animations move `(k, tx, ty)` on ONE clock** (`useCameraAnimation`), never as three
+  `withTiming`s. Each `withTiming` reads its own start time when assigned, and outside Reanimated's
+  frame loop (a gesture callback, a JS hop) those reads differ slightly. The focal-point error is
+  about `Δk · x_anchor · Δp`: near the anchor it is nothing, but in Kyoto, seen from a
+  Seattle-anchored session, it is thousands of px. That error is the "big jump" on a
+  double-tap or locate. Anything else that writes the transform calls `stop` (or `stopMotion`)
+  first, because assigning a shared value does not cancel that loop.
+- **Nothing live reaches the map's props, and the map screen must stay compiled.** The island's
+  readouts change mid-gesture, so they live in `LiveReadoutStore`. A prop on the map, such as its
+  accessibility label, reads the `settled*` copies, and only `MeIsland` subscribes to the live
+  ones. The React Compiler's caching is what keeps a screen render from reaching `MapView`, and
+  it bails out on a whole component without a word. 43d78fa put optional chains in a `&&` test in
+  `MapScreenBody`, the compiler skipped it, and with the live place name every pan re-rendered the
+  whole map. `screens/__tests__/react-compiler.test.ts` fails if that happens again. Live
+  `track` measurements run a macrotask after the gesture's JS hop, coalesced, so they do not
+  hold up the labels that hop moves.
 
 ## Store screenshots
 

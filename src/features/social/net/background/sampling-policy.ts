@@ -18,13 +18,6 @@ import type { AccuracyTier, BatteryState, SamplingConfig, SamplingDecision } fro
  */
 export interface SamplingInputs {
   battery: BatteryState;
-  /**
-   * Live-tracking override: when true, use the real-time `live*` cadence and bypass the low-battery
-   * accuracy degradation (only the critical-battery suspend still applies). Set on demand when a
-   * friend is actively watching; see `LocationSharingService.setLiveTracking`. Deliberately visible
-   * on the wire — see {@link SamplingConfig.liveIntervalMs}.
-   */
-  live?: boolean;
 }
 
 export interface SamplingPolicy {
@@ -71,8 +64,7 @@ export function benchmarkProfileOverrides(
 /**
  * Defaults for an *ambient* "friends on a map" sharer (Life360 / Find-My class), not a turn-by-turn
  * navigator. One fix every 5 minutes at balanced (~100m) accuracy, which a map dot reads fine, and
- * which the service can sustain indefinitely in the background. A short, on-demand live mode (see
- * {@link SamplingInputs.live}) covers the real-time case without paying its battery cost 24/7.
+ * which the service can sustain indefinitely in the background.
  */
 export const DEFAULT_SAMPLING_CONFIG: SamplingConfig = {
   intervalMs: SHARE_INTERVAL_MS,
@@ -86,37 +78,17 @@ export const DEFAULT_SAMPLING_CONFIG: SamplingConfig = {
   // manifest as the trail quietly freezing. Neither tier may be coarser than `maxAccuracyM`.
   lowBatteryAccuracy: 'balanced',
   suspendBelowLevel: 0.05,
-  liveIntervalMs: 4_000,
-  // 25 m, not 5 m. On iOS `timeInterval` is ignored, so this filter alone paced live mode: at 5 m a
-  // car crossed it roughly once a second and the engine — which bypasses the slot grid while live —
-  // published every one of them. 25 m keeps the OS from waking us for movement a map dot cannot
-  // show, and `liveMinPublishMs` below is what actually bounds the rate on both platforms.
-  liveDistanceM: 25,
-  liveAccuracy: 'high',
-  liveMinPublishMs: 4_000,
-  liveMinDistanceM: 25,
-  liveMaxQuietMs: 30_000,
 };
 
 /** Build a policy from a (partial) config merged over {@link DEFAULT_SAMPLING_CONFIG}. */
 export function createSamplingPolicy(config?: Partial<SamplingConfig>): SamplingPolicy {
   const merged: SamplingConfig = { ...DEFAULT_SAMPLING_CONFIG, ...config };
 
-  /** Critical-battery cutoff — the only backoff that still applies in live mode. */
+  /** Critical-battery cutoff: a hard stop rather than a slow-down. */
   const criticallyLow = (battery: BatteryState): boolean =>
     battery.level < merged.suspendBelowLevel && !battery.charging;
 
-  const decide = ({ battery, live }: SamplingInputs): SamplingDecision => {
-    if (live) {
-      return {
-        accuracy: merged.liveAccuracy,
-        timeIntervalMs: merged.liveIntervalMs,
-        distanceIntervalM: merged.liveDistanceM,
-        deferredUpdatesIntervalMs: 0, // real-time: never batch/defer
-        active: !criticallyLow(battery),
-      };
-    }
-
+  const decide = ({ battery }: SamplingInputs): SamplingDecision => {
     const lowBattery =
       !battery.charging && (battery.level <= merged.lowBatteryThreshold || battery.lowPower);
     const accuracy: AccuracyTier = lowBattery ? merged.lowBatteryAccuracy : merged.normalAccuracy;

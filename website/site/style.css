@@ -1,0 +1,843 @@
+/* streetCryptid brand tokens, transcribed from the app's cryptid-theme.ts
+   (daybreak = light, deepsea = dark). Keep them in step by hand; this site is
+   deliberately dependency-free and does not build anything.
+
+   Rajdhani is self-hosted rather than linked from fonts.googleapis.com. /pair is
+   opened by people holding a live invite, and this origin's claim that it
+   "collects nothing" has to survive a look at the network tab -- a webfont
+   request would hand a third party the visitor's IP and the fact that they
+   opened an invite. Latin subset only, four weights, ~60 KB in total.
+
+   Rajdhani (c) 2014 Indian Type Foundry, SIL Open Font License 1.1.
+   Full text at /fonts/OFL.txt, which is served so the fonts travel with it.
+
+   The other two faces the design system names -- Fira Sans for body, IBM Plex
+   Mono for micro-labels -- are carried by system stacks instead. They are doing
+   generic work here, and another 200 KB of webfont to reach a near-identical
+   grotesque and a near-identical mono is not worth it. */
+@font-face {
+  font-family: 'Rajdhani';
+  font-style: normal;
+  font-weight: 300;
+  font-display: swap;
+  src:
+    local('Rajdhani Light'),
+    url('/fonts/rajdhani-300.woff2') format('woff2');
+}
+
+@font-face {
+  font-family: 'Rajdhani';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src:
+    local('Rajdhani'),
+    url('/fonts/rajdhani-400.woff2') format('woff2');
+}
+
+@font-face {
+  font-family: 'Rajdhani';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src:
+    local('Rajdhani Medium'),
+    url('/fonts/rajdhani-500.woff2') format('woff2');
+}
+
+@font-face {
+  font-family: 'Rajdhani';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src:
+    local('Rajdhani SemiBold'),
+    url('/fonts/rajdhani-600.woff2') format('woff2');
+}
+
+:root {
+  color-scheme: light dark;
+
+  --f-display: 'Rajdhani', 'Roboto Condensed', 'Avenir Next Condensed', system-ui, sans-serif;
+  --f-body: system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --f-mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  --bg: #eef2f5;
+  --panel: #ffffff;
+  --ink: #152633;
+  --steel: #4d6675;
+  --hairline: #d6dee4;
+  --amber: #c6791a;
+  --amber-hover: #9a5c10;
+  --green: #2f9e6a;
+
+  --glass: rgba(255, 255, 255, 0.72);
+  --glass-solid: rgba(255, 255, 255, 0.92);
+  --glass-border: rgba(30, 55, 72, 0.14);
+  --inset: rgba(255, 255, 255, 0.6);
+  --shadow: rgba(40, 60, 80, 0.18);
+
+  /* Ground stops, page-coloured. The field is a full-bleed drawing and the copy
+     sits on it directly, so legibility is a wash of the page's own ground
+     rather than a capsule around the text or a hole cut in the map. */
+  --s0: rgba(238, 242, 245, 0);
+  --s1: rgba(238, 242, 245, 0.52);
+  --s2: rgba(238, 242, 245, 0.82);
+  --s3: rgba(238, 242, 245, 0.94);
+}
+
+/* A media query rather than light-dark(): this page is the fallback that has to
+   work on the old browsers whose app build could not open the link itself. */
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0a1420;
+    --panel: #0b1826;
+    --ink: #dcebf0;
+    --steel: #8aa6b2;
+    --hairline: #17293a;
+    --amber: #eda23c;
+    --amber-hover: #fff2dd;
+    --green: #6fd08a;
+
+    --glass: rgba(11, 21, 32, 0.6);
+    --glass-solid: rgba(11, 21, 32, 0.8);
+    --glass-border: rgba(130, 170, 190, 0.16);
+    --inset: rgba(6, 12, 20, 0.45);
+    --shadow: rgba(0, 0, 0, 0.6);
+
+    --s0: rgba(10, 20, 32, 0);
+    --s1: rgba(10, 20, 32, 0.56);
+    --s2: rgba(10, 20, 32, 0.84);
+    --s3: rgba(10, 20, 32, 0.95);
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  background: var(--bg);
+}
+
+body {
+  position: relative;
+  min-height: 100svh;
+  color: var(--ink);
+  font: 16px/1.55 var(--f-body);
+  overflow-x: hidden;
+}
+
+::selection {
+  background: rgba(198, 121, 26, 0.22);
+  color: var(--ink);
+}
+
+@media (prefers-color-scheme: dark) {
+  ::selection {
+    background: rgba(237, 162, 60, 0.3);
+  }
+}
+
+a {
+  color: var(--amber);
+  text-decoration: none;
+}
+
+a:hover {
+  color: var(--amber-hover);
+}
+
+:focus-visible {
+  outline: 2px solid var(--amber);
+  outline-offset: 4px;
+}
+
+[hidden] {
+  display: none !important;
+}
+
+/* ── The field ──────────────────────────────────────────────────────────── */
+
+#field,
+#scrim {
+  position: fixed;
+  inset: 0;
+}
+
+#field {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+/* A band at each edge, solid enough at the very edge that 11px mono in --steel
+   clears 4.5:1 there, so the masthead and colophon sit on ground rather than on
+   dots, over a --ground layer shaped to wherever that page keeps its copy. The
+   middle of the page used to be a radial, which drew a circle of map around a
+   cleared centre; the board now runs edge to edge and the ground moves to meet
+   the text instead. */
+#scrim {
+  /* Sheet pages centre a card that carries its own ground, so all they need is
+     an even veil to settle the board behind it. */
+  --ground: linear-gradient(var(--s1), var(--s1));
+  background:
+    linear-gradient(to bottom, var(--s3) 0, var(--s2) 46px, var(--s1) 82px, var(--s0) 148px),
+    linear-gradient(to top, var(--s3) 0, var(--s2) 40px, var(--s1) 72px, var(--s0) 128px),
+    var(--ground);
+}
+
+/* The landing copy has no card. Narrow: ground rises from the bottom, map over
+   it. Wide: ground is a column under the hero and the map runs out to the
+   right. Either way the text sits on at least --s2 and the board stays whole. */
+.landing #scrim {
+  --ground: linear-gradient(
+    to top,
+    var(--s3) 0,
+    var(--s3) 34%,
+    var(--s2) 52%,
+    var(--s1) 70%,
+    var(--s0) 92%
+  );
+}
+
+@media (min-width: 900px) {
+  .landing #scrim {
+    --ground: linear-gradient(
+      to right,
+      var(--s3) 0,
+      var(--s3) 30%,
+      var(--s2) 52%,
+      var(--s1) 72%,
+      var(--s0) 94%
+    );
+  }
+}
+
+/* ── Shell ──────────────────────────────────────────────────────────────── */
+
+.shell {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+  min-height: 100svh;
+  padding: 20px clamp(18px, 4vw, 44px) 18px;
+}
+
+.masthead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.wordmark {
+  display: flex;
+  align-items: baseline;
+  gap: 1px;
+  font: 600 19px/1 var(--f-display);
+  letter-spacing: 0.06em;
+  color: var(--ink);
+}
+
+.wordmark span {
+  color: var(--steel);
+}
+
+.micro,
+.masthead nav {
+  font: 500 11px/1 var(--f-mono);
+  letter-spacing: 0.15em;
+  text-transform: uppercase;
+  color: var(--steel);
+}
+
+.masthead nav {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+}
+
+.masthead nav a {
+  color: var(--steel);
+}
+
+.masthead nav a:hover {
+  color: var(--ink);
+}
+
+.colophon {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.colophon a {
+  color: var(--steel);
+  white-space: nowrap;
+}
+
+.colophon a:hover {
+  color: var(--ink);
+}
+
+.colophon .right {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+}
+
+.place {
+  white-space: nowrap;
+}
+
+/* ── Landing ────────────────────────────────────────────────────────────── */
+
+.hero {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  /* Narrow screens put the ground at the bottom of the field, so the copy goes
+     there with it and the map keeps the top of the screen to itself. */
+  justify-content: flex-end;
+  align-items: flex-start;
+  gap: 26px;
+  max-width: 820px;
+  padding: 40px 0;
+}
+
+@media (min-width: 900px) {
+  .hero {
+    justify-content: center;
+  }
+}
+
+.hero h1 {
+  margin: 0;
+  font: 300 clamp(52px, 10vw, 138px) / 0.9 var(--f-display);
+  letter-spacing: -0.012em;
+  text-wrap: balance;
+}
+
+.hero .lede {
+  margin: 0;
+  max-width: 46ch;
+  font-size: clamp(15px, 1.6vw, 18px);
+  line-height: 1.6;
+  color: var(--steel);
+  text-wrap: pretty;
+}
+
+.channels {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding-top: 6px;
+}
+
+.channel {
+  display: flex;
+  flex: 0 0 auto;
+  flex-direction: column;
+  gap: 2px;
+  width: fit-content;
+  padding: 11px 20px;
+  border: 1px solid var(--glass-border);
+  border-radius: 4px;
+  background: var(--glass);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  color: var(--ink);
+  transition:
+    border-color 0.2s,
+    background 0.2s;
+}
+
+a.channel:hover {
+  border-color: var(--amber);
+  background: var(--glass-solid);
+  color: var(--ink);
+}
+
+.channel .platform {
+  font: 500 10px/1 var(--f-mono);
+  letter-spacing: 0.15em;
+  text-transform: uppercase;
+  color: var(--steel);
+}
+
+.channel .state {
+  font: 500 19px/1.15 var(--f-display);
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+
+/* ── The pairing card ───────────────────────────────────────────────────── */
+
+.centred {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  justify-content: center;
+  padding: 32px 0;
+}
+
+.card {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  width: 100%;
+  max-width: 440px;
+  padding: 26px;
+  border: 1px solid var(--glass-border);
+  border-radius: 26px;
+  background: var(--glass-solid);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  box-shadow: 0 14px 28px var(--shadow);
+}
+
+.card h1 {
+  margin: 0;
+  font: 400 34px/1.05 var(--f-display);
+  letter-spacing: 0.01em;
+}
+
+.card p {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.6;
+  color: var(--steel);
+}
+
+.card p code {
+  font-family: var(--f-mono);
+  font-size: 0.92em;
+}
+
+.stack {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.stack.wide {
+  gap: 10px;
+}
+
+.rule {
+  height: 1px;
+  background: var(--hairline);
+}
+
+.primary {
+  display: block;
+  padding: 14px;
+  border: 0;
+  border-radius: 12px;
+  background: var(--ink);
+  color: var(--bg);
+  font: 600 18px/1.2 var(--f-display);
+  letter-spacing: 0.04em;
+  text-align: center;
+  cursor: pointer;
+  transition: opacity 0.2s;
+}
+
+.primary:hover {
+  opacity: 0.86;
+  color: var(--bg);
+}
+
+.primary:active {
+  transform: scale(0.98);
+}
+
+.pair-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 8px;
+}
+
+.outline {
+  padding: 10px 14px;
+  border: 1px solid var(--glass-border);
+  border-radius: 4px;
+  color: var(--ink);
+  font: 500 17px/1.3 var(--f-display);
+  text-align: center;
+  transition: border-color 0.2s;
+}
+
+a.outline:hover {
+  border-color: var(--amber);
+  color: var(--ink);
+}
+
+.token-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 14px 16px;
+  border: 1px solid var(--glass-border);
+  border-radius: 12px;
+  background: var(--inset);
+}
+
+.token-row code {
+  flex: 1;
+  min-width: 0;
+  font: 500 13px/1.45 var(--f-mono);
+  letter-spacing: 0.02em;
+  color: var(--ink);
+  overflow-wrap: anywhere;
+  user-select: all;
+  -webkit-user-select: all;
+}
+
+.copy {
+  flex: 0 0 auto;
+  padding: 7px 12px;
+  border: 1px solid var(--glass-border);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--steel);
+  font: 500 10px/1 var(--f-mono);
+  letter-spacing: 0.15em;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition:
+    color 0.2s,
+    border-color 0.2s;
+}
+
+.copy:hover {
+  border-color: var(--amber);
+  color: var(--ink);
+}
+
+.footnote {
+  margin: 0;
+  font: 400 11px/1.6 var(--f-mono);
+  letter-spacing: 0.06em;
+  color: var(--steel);
+  opacity: 0.8;
+}
+
+.footnote code {
+  font-family: var(--f-mono);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .primary:active {
+    transform: none;
+  }
+}
+
+/* ── The repeater guide ─────────────────────────────────────────────────── */
+
+/* A long page that scrolls over a fixed board, with copy outside the cards, so
+   the veil is the stronger stop everywhere rather than shaped to one place. */
+.guide-page #scrim {
+  --ground: linear-gradient(var(--s2), var(--s2));
+}
+
+.guide {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 26px;
+  width: 100%;
+  max-width: 780px;
+  margin: 0 auto;
+  padding: 28px 0 40px;
+}
+
+.guide-head {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.guide-head h1 {
+  margin: 0;
+  font: 300 clamp(46px, 8vw, 92px) / 0.92 var(--f-display);
+  letter-spacing: -0.01em;
+}
+
+.guide .lede {
+  margin: 0;
+  max-width: 52ch;
+  font-size: clamp(15px, 1.6vw, 18px);
+  line-height: 1.6;
+  color: var(--steel);
+  text-wrap: pretty;
+}
+
+.notice {
+  margin: 0;
+  padding: 14px 16px;
+  border: 1px solid var(--glass-border);
+  border-left: 3px solid var(--amber);
+  border-radius: 10px;
+  background: var(--glass-solid);
+  font-size: 14px;
+  line-height: 1.55;
+}
+
+.sheet-card {
+  display: flex;
+  flex-direction: column;
+  gap: 22px;
+  padding: clamp(18px, 4vw, 30px);
+  border: 1px solid var(--glass-border);
+  border-radius: 22px;
+  background: var(--glass-solid);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  box-shadow: 0 14px 28px var(--shadow);
+}
+
+.sheet-card h2 {
+  margin: 0;
+  font: 500 24px/1.15 var(--f-display);
+  letter-spacing: 0.01em;
+}
+
+.sheet-card p {
+  margin: 0;
+  font-size: 15px;
+  line-height: 1.6;
+  color: var(--steel);
+}
+
+.sheet-card em {
+  font-style: normal;
+  color: var(--ink);
+}
+
+/* Tabs. The operating systems are the big row; the ways to install are a
+   smaller row inside a step. */
+.tabs {
+  display: flex;
+  gap: 2px;
+  border-bottom: 1px solid var(--hairline);
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.tabs [role='tab'] {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: -1px;
+  padding: 10px 14px 12px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: none;
+  color: var(--steel);
+  font: 500 21px/1 var(--f-display);
+  letter-spacing: 0.02em;
+  cursor: pointer;
+  transition:
+    color 0.2s,
+    border-color 0.2s;
+}
+
+.tabs [role='tab']:hover {
+  color: var(--ink);
+}
+
+.tabs [role='tab'][aria-selected='true'] {
+  border-bottom-color: var(--amber);
+  color: var(--ink);
+}
+
+.tabs [role='tab']:focus-visible {
+  outline-offset: -2px;
+}
+
+.tabs .here {
+  font: 500 9px/1 var(--f-mono);
+  letter-spacing: 0.15em;
+  text-transform: uppercase;
+  color: var(--amber);
+}
+
+.tabs.small [role='tab'] {
+  padding: 8px 12px 10px;
+  font: 500 11px/1 var(--f-mono);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+/* Numbered steps, with the number in the gutter. */
+.steps {
+  display: flex;
+  flex-direction: column;
+  gap: 30px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  counter-reset: step;
+}
+
+.steps > li {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding-left: 46px;
+  counter-increment: step;
+}
+
+.steps > li::before {
+  content: counter(step);
+  position: absolute;
+  top: -2px;
+  left: 0;
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border: 1px solid var(--glass-border);
+  border-radius: 50%;
+  background: var(--inset);
+  font: 500 13px/1 var(--f-mono);
+  color: var(--steel);
+}
+
+@media (max-width: 520px) {
+  .steps > li {
+    padding-left: 0;
+    padding-top: 40px;
+  }
+}
+
+/* A command to paste: the token row, with room for a long line to wrap. */
+.cmd {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 14px 16px;
+  border: 1px solid var(--glass-border);
+  border-radius: 12px;
+  background: var(--inset);
+}
+
+.cmd code {
+  flex: 1;
+  min-width: 0;
+  font: 500 13.5px/1.55 var(--f-mono);
+  color: var(--ink);
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  user-select: all;
+  -webkit-user-select: all;
+}
+
+.downloads {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: 8px;
+}
+
+.outline.suggested {
+  border-color: var(--amber);
+}
+
+button.outline {
+  background: none;
+  cursor: pointer;
+}
+
+button.outline:hover {
+  border-color: var(--amber);
+}
+
+.caveat {
+  padding-left: 12px;
+  border-left: 2px solid var(--amber);
+  font-size: 13.5px !important;
+}
+
+.caveat strong {
+  color: var(--ink);
+  font-weight: 600;
+}
+
+.options {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 0;
+  padding-left: 18px;
+  font-size: 14.5px;
+  line-height: 1.55;
+  color: var(--steel);
+}
+
+.options strong {
+  color: var(--ink);
+  font-weight: 600;
+}
+
+.soon {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 14px;
+  padding: 6px 0;
+}
+
+.soon .pair-grid {
+  width: 100%;
+  max-width: 380px;
+}
+
+.facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  gap: 10px;
+}
+
+.facts > div {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 16px 18px;
+  border: 1px solid var(--glass-border);
+  border-radius: 14px;
+  background: var(--glass-solid);
+}
+
+.facts p {
+  margin: 0;
+  font-size: 13.5px;
+  line-height: 1.6;
+  color: var(--steel);
+}
+
+/* A phone has room for the three systems or the "this computer" tag, not both;
+   the tab is already selected, which says the same thing. */
+@media (max-width: 520px) {
+  .tabs .here {
+    display: none;
+  }
+
+  .tabs [role='tab'] {
+    padding-inline: 11px;
+  }
+
+  .tabs.small [role='tab'] {
+    padding-inline: 9px;
+    letter-spacing: 0.08em;
+  }
+}

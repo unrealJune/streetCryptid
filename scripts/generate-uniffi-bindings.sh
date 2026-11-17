@@ -12,7 +12,8 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 crate_dir="$repo_root/modules/iroh-location/rust"
 kotlin_out_dir="${UNIFFI_KOTLIN_OUT_DIR:-$repo_root/modules/iroh-location/android/src/main/java}"
 swift_out_dir="${UNIFFI_SWIFT_OUT_DIR:-$repo_root/modules/iroh-location/ios/generated}"
-target_dir="${CARGO_TARGET_DIR:-$crate_dir/target}"
+# The root Cargo workspace's target directory (the crate is a member).
+target_dir="${CARGO_TARGET_DIR:-$repo_root/target}"
 
 if [[ "$target_dir" != /* ]]; then
   target_dir="$crate_dir/$target_dir"

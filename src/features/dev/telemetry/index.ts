@@ -45,6 +45,12 @@ export {
 } from './event-log';
 export { getBuildResource, getResolvedDeviceId, resolveDeviceId } from './identity';
 export { createShipper } from './shipper';
+export {
+  isTelemetryExportEnabled,
+  resetTelemetryExportForTesting,
+  setTelemetryExportEnabled,
+  subscribeTelemetryExport,
+} from './export-consent';
 export type { Shipper, ShipperOptions, ShipperPush } from './shipper';
 export type {
   EventLogEntry,

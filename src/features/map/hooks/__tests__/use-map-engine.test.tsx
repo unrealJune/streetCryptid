@@ -470,15 +470,77 @@ describe('useMapEngine publication and recovery', () => {
     const committed = latest.camera;
     const rendersBefore = renders;
     act(() => latest.track(transformFor(13)));
+    await advance(0);
     expect(readouts.get().sectorsVisible).toBe(true);
     expect(readouts.get().placeName).toBe('z13.0');
-    // Crossing the cutoff mid-gesture is visible at once — the drawer pins on it.
+    // Crossing the cutoff mid-gesture is visible on the next macrotask — the drawer pins on it.
     act(() => latest.track(transformFor(11)));
+    await advance(0);
     expect(readouts.get().sectorsVisible).toBe(false);
     expect(latest.camera).toBe(committed);
     expect(calls).toHaveLength(1);
     // The whole point of the store: a live update renders nothing on the map side.
     expect(renders).toBe(rendersBefore);
+  });
+
+  it('measures a live camera off the gesture hop, once for a burst, at the newest camera', async () => {
+    await mount();
+    await finish(0);
+    const placeBefore = readouts.get().placeName;
+    const set = jest.spyOn(readouts, 'set');
+    act(() => {
+      latest.track(transformFor(13));
+      latest.track(transformFor(14));
+      latest.track(transformFor(15));
+    });
+    // Nothing on the hop that moved the labels and started the prefetch.
+    expect(set).not.toHaveBeenCalled();
+    expect(readouts.get().placeName).toBe(placeBefore);
+    await advance(0);
+    expect(set).toHaveBeenCalledTimes(1);
+    expect(readouts.get().placeName).toBe('z15.0');
+  });
+
+  it('lets a commit supersede a live measurement still pending', async () => {
+    await mount();
+    await finish(0);
+    act(() => latest.track(transformFor(15)));
+    commitZoom(13);
+    expect(readouts.get().placeName).toBe('z13.0');
+    await advance(0);
+    // The stale live camera never lands on top of the committed one.
+    expect(readouts.get().placeName).toBe('z13.0');
+  });
+
+  it('settles the place name on a commit and its build, never mid-gesture', async () => {
+    await mount();
+    await finish(0);
+    const settled = readouts.get().settledPlaceName;
+    expect(settled).not.toBeNull();
+    act(() => latest.track(transformFor(15)));
+    await advance(0);
+    expect(readouts.get().placeName).toBe('z15.0');
+    expect(readouts.get().settledPlaceName).toBe(settled);
+    // A prefetch landing mid-gesture updates the live name only.
+    const prefetched = prefetchZoom(16);
+    await act(async () => {
+      calls[1].resolve(regionFor(calls[1].request, 2));
+      await prefetched;
+    });
+    expect(readouts.get().settledPlaceName).toBe(settled);
+    commitZoom(13);
+    expect(readouts.get().settledPlaceName).toBe('z13.0');
+  });
+
+  it('cancels a pending live measurement on unmount', async () => {
+    await mount();
+    await finish(0);
+    act(() => latest.track(transformFor(15)));
+    const set = jest.spyOn(readouts, 'set');
+    act(() => renderer!.unmount());
+    renderer = undefined;
+    await advance(0);
+    expect(set).not.toHaveBeenCalled();
   });
 
   it('settles the percentage on a commit, never on a live update', async () => {
@@ -487,6 +549,7 @@ describe('useMapEngine publication and recovery', () => {
     await finish(0);
     readouts.set({ settledCoverage: 0.5 });
     act(() => latest.track(transformFor(13)));
+    await advance(0);
     expect(readouts.get().settledCoverage).toBe(0.5);
     commitZoom(13);
     expect(readouts.get().settledCoverage).toBe(0);

@@ -14,6 +14,5 @@ assertions:
   - action: publish.fix
     status: ok
     min_count: 1
-  - action: trail.push.app
-    status: ok
-    min_count: 1
+  # No `trail.push.app` gate: the push to the stash and the pool is native (`trail.push` in Rust),
+  # and Rust spans ship over OTLP, never into this journal. Delivery is proven by the stash observer, where a scenario requires one.

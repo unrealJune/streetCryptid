@@ -8,8 +8,8 @@ import { ONBOARDING_COPY } from '@/copy/onboarding';
  * resilience, and the stash adds a blind server on top of that for reach.
  *
  * There is deliberately no "direct only" route. Confining delivery to the intended recipient is
- * not a setting this app can express: a friend subscribes to your gossip topic, so a live
- * envelope reaches the swarm whether or not you pushed your namespace at them. Offering the
+ * not a setting this app can express: every friend replicates your namespace and joins its
+ * live-sync swarm, so an entry reaches that swarm whether or not you pushed it at them. Offering the
  * choice would have meant showing people a narrower picture of where their location goes than
  * what actually happens.
  *
@@ -35,7 +35,7 @@ export type DeliveryMode = (typeof DELIVERY_MODES)[number];
  * `mutual`, because that is what the app already does.
  *
  * Every publish live-syncs the author's namespace to every pool member (`durablePeerTickets`),
- * and every pool member bootstraps every other member's topic, so any friend with the app open
+ * and every pool member live-syncs every other member's namespace, so any friend with the app open
  * holds your entries as they are written and can hand them on once you go dark. That is peer
  * relay, it is the only behaviour that ships, and it is gated by two deterministic Rust tests
  * plus `scripts/e2e/relay-e2e.sh` on three devices. See `scripts/e2e/PEER-RELAY-STATUS.md`.
@@ -45,14 +45,19 @@ export const DEFAULT_DELIVERY_MODE: DeliveryMode = 'mutual';
 export const NEW_USER_DELIVERY_MODE: DeliveryMode = 'stash';
 
 /**
- * How long the stash holds a sealed envelope before dropping it.
+ * The longest the stash holds a sealed envelope before dropping it.
  *
- * MUST match the deployed trail-stash's own retention setting — this is a promise made in the
- * UI about someone else's data, and the countdown on the delivery diagram renders from it. It
- * lives here so the copy and the animation cannot drift apart, not because the client enforces
- * it: the client cannot. Changing the server means changing this.
+ * MUST match the deployed trail-stash's own retention setting (buttercup
+ * `apps/trail-stash/helmrelease.yaml`, `retentionHours: 48`) — this is a promise made in the UI
+ * about someone else's data, and the delivery diagram's countdown and Settings → Repeaters both
+ * render from it. It lives here so they cannot drift apart, not because the client enforces it:
+ * the client cannot. Changing the server means changing this. It said 30 minutes until
+ * 2026-11-08 while the stash kept 48 hours.
+ *
+ * It is the backstop, not the usual case: the stash keeps only each author's latest fix, so a
+ * newer one replaces the last long before the window ends (trail-stash `retention.rs`).
  */
-export const STASH_RETENTION_MS = 30 * 60 * 1000;
+export const STASH_RETENTION_MS = 48 * 60 * 60 * 1000;
 
 /** What the runtime can actually offer right now. Availability is not a preference. */
 export interface DeliveryAvailability {
@@ -64,9 +69,7 @@ export interface DeliveryModeCopy {
   readonly id: DeliveryMode;
   /** Sentence case, two to four words — the Shoreline rule for every headline and label. */
   readonly title: string;
-  /** Uppercase micro-label for the segmented control. */
-  readonly segment: string;
-  /** Over the explanation, under the segmented control; absent when the copy leaves it empty. */
+  /** Over the explanation; absent when the copy leaves it empty. */
   readonly heading?: string;
   readonly body?: string;
   /** A second, quieter line. Present only where the mode has a real caveat to state. */
@@ -90,7 +93,6 @@ export const DELIVERY_MODE_COPY: Readonly<Record<DeliveryMode, DeliveryModeCopy>
   mutual: {
     id: 'mutual',
     title: ONBOARDING_COPY.deliveryMutual.title,
-    segment: ONBOARDING_COPY.deliveryMutual.segment,
     heading: ONBOARDING_COPY.deliveryMutual.heading,
     body: mutualFriendRelayExplanation('unknown'),
     note: null,
@@ -98,7 +100,6 @@ export const DELIVERY_MODE_COPY: Readonly<Record<DeliveryMode, DeliveryModeCopy>
   stash: {
     id: 'stash',
     title: ONBOARDING_COPY.deliveryStash.title,
-    segment: ONBOARDING_COPY.deliveryStash.segment,
     heading: ONBOARDING_COPY.deliveryStash.heading,
     body: ONBOARDING_COPY.deliveryStash.body,
     note: null,

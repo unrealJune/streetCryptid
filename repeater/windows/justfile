@@ -1,0 +1,21 @@
+# The Windows repeater, as `just windows::<recipe>` from the repository root. Needs Windows,
+# PowerShell 7, the .NET SDK in global.json and the Visual Studio C++ build tools (README.md).
+# Recipes run here, in repeater/windows.
+
+set windows-shell := ["pwsh", "-NoProfile", "-Command"]
+
+# Build the app, the service and the host for one architecture (x64 or arm64).
+build arch="x64":
+    pwsh -NoProfile -File scripts/build.ps1 -Architecture {{arch}}
+
+# The Rust host and desktop server tests, the C# tests, format checks and the built host.
+test:
+    pwsh -NoProfile -File scripts/build.ps1 -Test -Configuration Debug
+
+# Build and package installers and the update feed for one architecture.
+package arch="x64" version="0.1.0-preview.1":
+    pwsh -NoProfile -File scripts/build.ps1 -Architecture {{arch}} -Package -Version {{version}}
+
+# The `windows-v*` tag the next push to main would cut, and why.
+next-version:
+    bash ../../scripts/next-repeater-version.sh windows

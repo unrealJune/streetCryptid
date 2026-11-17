@@ -1,0 +1,37 @@
+# Two replicas so a node drain or a rollout never takes the association files away: Apple's CDN
+# and Google's verifier treat a failed fetch as "this app may not open these links".
+replicaCount: 2
+
+image:
+  repository: ghcr.io/unrealjune/streetcrypt-id
+  # Empty means the chart's appVersion, which CI sets to the image it just pushed. Pin a tag here
+  # only to hold a release back.
+  tag: ''
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+nameOverride: ''
+fullnameOverride: ''
+
+podAnnotations: {}
+podLabels: {}
+
+service:
+  type: ClusterIP
+  port: 80
+
+# Keep one pod serving through voluntary disruptions. Ignored with a single replica.
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
+resources:
+  requests:
+    cpu: 10m
+    memory: 32Mi
+  limits:
+    memory: 128Mi
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

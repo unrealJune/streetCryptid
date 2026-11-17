@@ -95,9 +95,10 @@ pub trait GateStateStore: Send + Sync {
 
 /// Where a sealed envelope goes — the engine's only dependency on the network.
 ///
-/// One method rather than separate live and durable calls: both lanes carry the *same sealed
-/// bytes*, so splitting them here would invite an implementation that sealed twice and let
-/// per-recipient revocation diverge between them.
+/// Every envelope is written to this node's own iroh-docs namespace and nowhere else: replication
+/// is the whole transport. A friend whose replica is live receives the entry as iroh-docs hands it
+/// over, and one that is asleep reconciles it later from us or from anyone holding the namespace
+/// (the stash, a pool member). There is no second, live-only path to keep in step with this one.
 pub trait PublishSink: Send + Sync {
     fn publish(
         &self,
@@ -137,11 +138,11 @@ pub trait PublishSink: Send + Sync {
 
     /// Get everything just published **off the device**, once per drain that sent anything.
     ///
-    /// Not an optimisation and not a lifecycle hook: [`Self::publish`] writes the local replica and
-    /// broadcasts to a live swarm that, on a background wake, is empty. iroh-docs broadcasts a
-    /// local insert only for namespaces the live engine has marked as syncing, which a publish-only
-    /// context never does — so until something reconciles with a peer, an "published" envelope has
-    /// not left the phone.
+    /// Not an optimisation and not a lifecycle hook: [`Self::publish`] writes the local replica, and
+    /// iroh-docs announces a local insert only to the namespace's current live neighbours — on a
+    /// background wake, usually nobody: the friends are asleep and the stash keeps no standing
+    /// connection to us. Until something reconciles with a peer, a "published" envelope has not
+    /// left the phone.
     ///
     /// It is part of this trait rather than a call the platform layer makes afterwards because
     /// leaving it to the caller is exactly how it went missing: the JS orchestration used to do it,
@@ -163,7 +164,7 @@ pub trait PublishSink: Send + Sync {
 
 /// Whether a flush actually moved anything off the device.
 ///
-/// Two outcomes rather than a bare `Ok`, because they were the same value and it made the push
+/// Separate outcomes rather than a bare `Ok`, because they were the same value and it made the push
 /// watermark lie: a phone with nowhere to send returned `Ok`, the drain stamped `last_pushed_at`,
 /// and `device.health` reported a fresh push forever on a device that had never pushed at all.
 /// That is the same class of fault the native watermarks were introduced to end, reintroduced one
@@ -175,6 +176,15 @@ pub enum FlushOutcome {
     /// Nowhere to send: the stash is not opted into and the pool is empty. A real configuration,
     /// not a failure — and emphatically not a push.
     NoTargets,
+    /// A push was scheduled, but no receipt established that anything was received.
+    Scheduled,
+    /// There was somewhere to send, and the caller's time ran out before a push could start.
+    ///
+    /// A background iOS wake has about thirty seconds, and a push to friends who are asleep spends
+    /// its whole deadline on them. The envelopes are already in the replica, so nothing is lost:
+    /// the next push moves the whole namespace. What is owed is a wake to push from, which is why
+    /// the caller is told (`IngestOutcome::push_deferred`) rather than left to infer it.
+    Deferred,
 }
 
 /// What sealing one envelope actually achieved.
@@ -251,6 +261,11 @@ pub struct IngestOutcome {
     pub overflow_dropped: u32,
     /// Publishing is suspended on critical battery. Distinct from "nothing was due".
     pub suspended: bool,
+    /// Something this call sealed, or a recovery it started, is waiting in the replica for a push
+    /// the caller's budget left no time for ([`FlushOutcome::Deferred`]). Only a budgeted call
+    /// (`ingest_fix_within` / `heartbeat_fix_within`) can set it. The next push carries it; the
+    /// caller's job is to make sure there is a next wake.
+    pub push_deferred: bool,
 }
 
 /// What one [`DrainEngine::drain`] put on the wire.
@@ -260,6 +275,8 @@ pub struct Drained {
     pub published: u32,
     /// Of those, the ones at least one friend can open.
     pub reached: u32,
+    /// The push this drain owed was deferred for want of time. See [`FlushOutcome::Deferred`].
+    pub push_deferred: bool,
 }
 
 /// The off-grid envelope a change of `parked` queued, if any. See [`parked_changed`].
@@ -733,6 +750,7 @@ impl<S: PublishSink> DrainEngine<'_, S> {
         let watchers = self.recipients.watchers();
         let mut published = 0u32;
         let mut reached = 0u32;
+        let mut push_deferred = false;
 
         // Read once for the whole drain: every envelope this wake seals is minted under the same
         // circumstances, whether it fills the current slot or backfills five that came due while
@@ -831,13 +849,24 @@ impl<S: PublishSink> DrainEngine<'_, S> {
             }
             // Only a flush that actually reached a peer counts. `NoTargets` is a successful call
             // that pushed nothing, and stamping it would report a fresh push on a phone that has
-            // never had anywhere to send.
-            if matches!(self.sink.flush().await, Ok(FlushOutcome::Pushed)) {
-                let at = clock.at(self.clock);
-                self.stamp(|state| state.last_pushed_at = Some(at));
+            // never had anywhere to send. A repeater scheduled in the background with no receipt
+            // (`Scheduled`) is not a delivery either.
+            //
+            // `Deferred` stamps nothing either: the entries are still only in our replica.
+            match self.sink.flush().await {
+                Ok(FlushOutcome::Pushed) => {
+                    let at = clock.at(self.clock);
+                    self.stamp(|state| state.last_pushed_at = Some(at));
+                }
+                Ok(FlushOutcome::Deferred) => push_deferred = true,
+                Ok(FlushOutcome::Scheduled | FlushOutcome::NoTargets) | Err(_) => {}
             }
         }
-        Ok(Drained { published, reached })
+        Ok(Drained {
+            published,
+            reached,
+            push_deferred,
+        })
     }
 
     /// Read-modify-write one field of the gate state. The store is last-write-wins and every field
@@ -863,6 +892,7 @@ impl<S: PublishSink> DrainEngine<'_, S> {
             enqueued,
             published: drained.published,
             reached: drained.reached,
+            push_deferred: drained.push_deferred,
             pending: self.queue.pending(),
             slots_skipped,
             overflow_dropped,
@@ -924,6 +954,7 @@ fn trace_outcome(name: &'static str, outcome: &IngestOutcome) {
             slots_skipped = outcome.slots_skipped,
             overflow_dropped = outcome.overflow_dropped,
             suspended = outcome.suspended,
+            push_deferred = outcome.push_deferred,
             sc.drop_reason = reason.unwrap_or(""),
         )
     } else {
@@ -937,6 +968,7 @@ fn trace_outcome(name: &'static str, outcome: &IngestOutcome) {
             slots_skipped = outcome.slots_skipped,
             overflow_dropped = outcome.overflow_dropped,
             suspended = outcome.suspended,
+            push_deferred = outcome.push_deferred,
             sc.drop_reason = reason.unwrap_or(""),
         )
     };

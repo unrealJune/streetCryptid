@@ -97,7 +97,6 @@ class FakeNativeModule {
     publishProfile: [] as PublishProfileCall[],
     initiatePairByToken: [] as string[],
     respondPair: [] as { sessionId: string; accept: boolean }[],
-    subscribe: [] as { topic: string; bootstrap: string[] }[],
   };
 
   pairEvents: PairEvent[] = [];
@@ -138,16 +137,6 @@ class FakeNativeModule {
   async readProfile() {
     return null;
   }
-  async deriveTopic(id: string) {
-    return `topic-${id}`;
-  }
-  async subscribe(topic: string, bootstrap: string[]) {
-    this.calls.subscribe.push({ topic, bootstrap });
-    return `sub-${topic}`;
-  }
-  async unsubscribe() {}
-  async publish() {}
-  async docsWrite() {}
   async syncLatest() {}
   async readLatest() {
     return [];

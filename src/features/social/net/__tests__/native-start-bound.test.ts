@@ -71,17 +71,7 @@ class FakeNativeModule {
     return 'doc-self';
   }
   async importDocTicket() {}
-  async deriveTopic(id: string) {
-    return `topic-${id}`;
-  }
-  async subscribe(topic: string) {
-    return `sub-${topic}`;
-  }
-  async unsubscribe() {}
-  async publish() {}
-  async docsWrite() {}
   async syncTrail() {}
-  async pushTrail() {}
   async readTrail() {
     return [];
   }

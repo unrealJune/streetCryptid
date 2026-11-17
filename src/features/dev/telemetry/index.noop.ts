@@ -170,6 +170,19 @@ export function createShipper(_options: ShipperOptions): Shipper {
   };
 }
 
+/** Nothing can be sent from a stripped build, so there is nothing to consent to. */
+export async function isTelemetryExportEnabled(): Promise<boolean> {
+  return false;
+}
+
+export async function setTelemetryExportEnabled(): Promise<void> {}
+
+export function subscribeTelemetryExport(): () => void {
+  return () => {};
+}
+
+export function resetTelemetryExportForTesting(): void {}
+
 export const EVENT_LOG_MAX_ENTRIES = 0;
 
 export function recordEventLog(input: RecordEventLogEntry): EventLogEntry {

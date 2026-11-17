@@ -77,7 +77,7 @@ export interface LatestLocationPoint {
   receivedAt: number;
   /** How the fix reached this device. Absent on rows stored before provenance was recorded. */
   via?: FixTransport;
-  /** Endpoint that performed that hop, when one was recorded. Travels with {@link via}. */
+  /** Endpoint that served the entry, when one was recorded. Travels with {@link via}. */
   viaPeer?: string;
 }
 
@@ -100,11 +100,11 @@ export interface FriendPresence {
   state: PresenceState;
   /**
    * How {@link fix} reached this device. Since only the newest fix per friend is retained, this is
-   * the sole surviving surface for transport provenance.
+   * the sole surviving surface for delivery provenance.
    */
   via?: FixTransport;
   /**
-   * WHO handed {@link fix} over — an endpoint id, which may be the author, a mutual friend, the
+   * WHO served {@link fix} — an endpoint id, which may be the author, a mutual friend, the
    * stash, or a device this user has never paired with. Read with {@link via}, never apart from
    * it; `describeDelivery` in `core/fix-transport.ts` is the only thing that should interpret it.
    */
@@ -456,7 +456,7 @@ export const PRESENCE_SYNC_IDLE_MS = 90_000;
 /**
  * How long to wait before the next durable reconciliation while the app is open.
  *
- * Live gossip already delivers a moving friend's fixes the instant both nodes are connected, and
+ * Docs live sync already delivers a moving friend's fixes the instant both nodes are connected, and
  * when that is working this poll finds nothing and costs a range check. It exists for when it is
  * NOT working — the friend published from a headless wake to the stash and we were never dialled —
  * which on the measured fleet is the common case, not the exception.

@@ -1,5 +1,5 @@
 name: chaos-stash-unreachable
-description: "One simulator on a walking route, backgrounded, against a local trail-stash (ensure-local-stash.sh) that goes unreachable for a window mid-route via lib/netchaos.sh's pf-based block_host. Proves two separate things: local publish keeps working while the stash is unreachable (publish.fix does not stall just because delivery can't complete), and delivery catches up once reachability returns (a later trail.push.app succeeds). Needs sudo for pfctl -- run-matrix.sh primes it once up front so the password prompt happens in the foreground, not inside the backgrounded driver."
+description: "One simulator on a walking route, backgrounded, against a local trail-stash (ensure-local-stash.sh) that goes unreachable for a window mid-route via lib/netchaos.sh's pf-based block_host. Proves two separate things: local publish keeps working while the stash is unreachable (publish.fix does not stall just because delivery can't complete), and delivery catches up once reachability returns (a later native `trail.push` succeeds -- a Rust span, so read it in Tempo; this journal cannot see it). Needs sudo for pfctl -- run-matrix.sh primes it once up front so the password prompt happens in the foreground, not inside the backgrounded driver."
 kind: single
 devices: 1
 duration_seconds: 240
@@ -16,6 +16,4 @@ assertions:
   - action: publish.fix
     status: ok
     min_count: 1
-  - action: trail.push.app
-    status: ok
-    min_count: 1
+  # No `trail.push.app` gate: the push is native (`trail.push` in Rust) and never reaches this journal.

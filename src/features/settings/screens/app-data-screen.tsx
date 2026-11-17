@@ -1,5 +1,6 @@
 import { useColorScheme } from '@/hooks/use-color-scheme';
 import { CryptidThemes } from '@/constants/theme';
+import { DEV_TELEMETRY_ENABLED, getOtelConfig } from '@/features/dev/telemetry';
 import { useExplorationBackup } from '@/features/map/hooks/use-exploration-backup';
 import { useLocationSharing } from '@/features/social/hooks/use-location-sharing';
 
@@ -7,6 +8,7 @@ import { AppProvenanceDetails } from '../components/app-provenance';
 import { AuthorIdRow } from '../components/author-id-row';
 import { ExplorationBackupRow } from '../components/exploration-backup-row';
 import { SettingsPage, SettingsSection } from '../components/settings-page';
+import { TelemetrySharingRow } from '../components/telemetry-sharing-row';
 
 /**
  * What this install is holding and what it is running: the exploration history you
@@ -32,6 +34,14 @@ export default function AppDataScreen() {
           onRestore={restoreBackup}
         />
       </SettingsSection>
+
+      {/* Only where there is somewhere to send to: a stripped build, or one with no collector,
+          has nothing for the switch to stop. */}
+      {DEV_TELEMETRY_ENABLED && getOtelConfig() ? (
+        <SettingsSection label="DIAGNOSTICS">
+          <TelemetrySharingRow accent={chrome.green} />
+        </SettingsSection>
+      ) : null}
 
       <SettingsSection label="APP">
         <AuthorIdRow authorId={snapshot?.self?.endpointId ?? null} />

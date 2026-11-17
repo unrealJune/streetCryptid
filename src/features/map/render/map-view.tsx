@@ -22,7 +22,6 @@ import { Gesture, GestureDetector } from 'react-native-gesture-handler';
 import {
   cancelAnimation,
   Easing,
-  ReduceMotion,
   runOnJS,
   useAnimatedReaction,
   useDerivedValue,
@@ -32,6 +31,7 @@ import {
   withTiming,
   type SharedValue,
 } from 'react-native-reanimated';
+import { scheduleOnUI } from 'react-native-worklets';
 
 import {
   applyViewTransform,
@@ -87,6 +87,7 @@ import { makeLutImage } from './region-shader';
 import { regionImageLayout } from './shader-uniforms';
 import { getRevealMaskEffect } from './reveal-mask-shader';
 import { prevRectUniform, REVEAL_TARGET } from './reveal-mask';
+import { useCameraAnimation } from './use-camera-animation';
 import { useRegionBundle, type RegionBundle } from './use-region-bundle';
 import { clipLatticeFor, hexClipInner, hexClipUniforms } from './hex-clip';
 import { HexClippedImage } from './hex-clipped-image';
@@ -171,6 +172,9 @@ const CLUSTER_ZOOM_MIN_FACTOR = 1.5;
 const CLUSTER_ZOOM_MAX_FACTOR = 8;
 /** Locate-me camera animation length. */
 const LOCATE_ME_MS = 360;
+/** Camera easings, built once: worklets capture them rather than rebuilding one per animation. */
+const EASE_OUT_CUBIC = Easing.out(Easing.cubic);
+const EASE_IN_OUT_CUBIC = Easing.inOut(Easing.cubic);
 /**
  * Extra view-fractions per side for the loading skeleton's rect. 3.5 makes it 8× the committed
  * view on each axis — three zoom levels of head-room, which is more than one pinch can cover
@@ -413,7 +417,11 @@ export function MapView({
   const k = useSharedValue(1);
   const tx = useSharedValue(0);
   const ty = useSharedValue(0);
-  const locateProgress = useSharedValue(1);
+  const {
+    animate: animateCamera,
+    stop: stopCameraAnimation,
+    locating,
+  } = useCameraAnimation(k, tx, ty);
   /** Outstanding fling decay animations (x + y); commit when the last ends. */
   const decaysLeft = useSharedValue(0);
   // One-finger zoom bookkeeping: the last tap, and the touch that may turn into a zoom.
@@ -436,6 +444,14 @@ export function MapView({
   /** Pinch-only readout updates: the transform last measured, and one JS hop at a time. */
   const lastTracked = useSharedValue<ViewTransform>({ k: 1, tx: 0, ty: 0 });
   const trackInFlight = useSharedValue(false);
+  /** Worklet: stop every camera motion — a fling's decays and any camera animation — where it is. */
+  const stopMotion = useCallback(() => {
+    'worklet';
+    cancelAnimation(tx);
+    cancelAnimation(ty);
+    decaysLeft.value = 0;
+    stopCameraAnimation();
+  }, [tx, ty, decaysLeft, stopCameraAnimation]);
   const trailStrokeWidth = useDerivedValue(() => 2.5 / Math.max(0.001, k.value));
   const trailDotRadius = useDerivedValue(() => 2.8 / Math.max(0.001, k.value));
 
@@ -464,18 +480,13 @@ export function MapView({
       durationMs: number,
       onFinished: (finishedIndex: number) => void
     ) => {
-      const config = {
-        duration: durationMs,
-        easing: Easing.inOut(Easing.cubic),
-        reduceMotion: ReduceMotion.Never,
-      };
-      k.value = withTiming(to.k, config);
-      tx.value = withTiming(to.tx, config, (finished) => {
-        if (finished) runOnJS(onFinished)(index);
+      // Never shortened by reduced motion: the bench measures this exact flight.
+      scheduleOnUI(() => {
+        'worklet';
+        animateCamera(to, durationMs, EASE_IN_OUT_CUBIC, () => runOnJS(onFinished)(index));
       });
-      ty.value = withTiming(to.ty, config);
     },
-    [k, tx, ty]
+    [animateCamera]
   );
 
   useMapPerfRunner({
@@ -755,6 +766,7 @@ export function MapView({
     const prev = prevViewportRef.current;
     prevViewportRef.current = viewport;
     if (!prev) return;
+    scheduleOnUI(stopCameraAnimation);
     const cam = applyViewTransform(anchor, prev, { k: k.value, tx: tx.value, ty: ty.value });
     const t = viewTransformFor(anchor, viewport, cam);
     k.value = t.k;
@@ -775,6 +787,7 @@ export function MapView({
     const delta = obscuredLeft - framedBesideRef.current;
     if (delta === 0) return;
     framedBesideRef.current = obscuredLeft;
+    scheduleOnUI(stopCameraAnimation);
     const current = applyViewTransform(anchor, viewport, {
       k: k.value,
       tx: tx.value,
@@ -791,11 +804,7 @@ export function MapView({
 
   useEffect(() => {
     if (!viewport || !limits || !locateTarget) return;
-    cancelAnimation(k);
-    cancelAnimation(tx);
-    cancelAnimation(ty);
-    cancelAnimation(locateProgress);
-    decaysLeft.value = 0;
+    scheduleOnUI(stopMotion);
 
     const current = applyViewTransform(anchor, viewport, {
       k: k.value,
@@ -825,19 +834,13 @@ export function MapView({
       ),
       limits
     );
-    const config = {
-      duration: reducedMotion ? 0 : LOCATE_ME_MS,
-      easing: Easing.out(Easing.cubic),
-    };
+    const durationMs = reducedMotion ? 0 : LOCATE_ME_MS;
     // Start destination demand now, not after an animation callback crosses the bridge.
     commitCamera(to);
     lastPrefetch.value = to;
-    locateProgress.value = 0;
-    k.value = withTiming(to.k, config);
-    tx.value = withTiming(to.tx, config);
-    ty.value = withTiming(to.ty, config);
-    locateProgress.value = withTiming(1, config, (finished) => {
-      if (finished) runOnJS(commit)(to);
+    scheduleOnUI(() => {
+      'worklet';
+      animateCamera(to, durationMs, EASE_OUT_CUBIC, () => runOnJS(commit)(to), true);
     });
     // Shared values are stable references; requestId intentionally retriggers
     // when the user taps locate again at the same coordinates.
@@ -855,13 +858,6 @@ export function MapView({
   const separateCluster = useCallback(
     (cluster: readonly { readonly anchor: ScreenPoint }[]) => {
       if (!limits) return;
-      cancelAnimation(k);
-      cancelAnimation(tx);
-      cancelAnimation(ty);
-      cancelAnimation(locateProgress);
-      locateProgress.value = 1;
-      decaysLeft.value = 0;
-
       let minX = Infinity;
       let minY = Infinity;
       let maxX = -Infinity;
@@ -873,32 +869,37 @@ export function MapView({
         maxY = Math.max(maxY, point[1]);
       }
       const spreadAnchor = Math.max(maxX - minX, maxY - minY);
+      const centerX = (minX + maxX) / 2;
+      const centerY = (minY + maxY) / 2;
+      const durationMs = reducedMotion ? 0 : DOUBLE_TAP_MS;
 
-      const from: ViewTransform = { k: k.value, tx: tx.value, ty: ty.value };
-      const spreadScreen = spreadAnchor * from.k;
-      const wanted = CLUSTER_SEPARATION_FACTOR * CLUSTER_OVERLAP_PX;
-      const factor = Math.min(
-        CLUSTER_ZOOM_MAX_FACTOR,
-        Math.max(CLUSTER_ZOOM_MIN_FACTOR, wanted / Math.max(spreadScreen, 1))
-      );
-
-      // Pinch around where the puck actually sits on screen, so the group stays
-      // under the finger while the map opens up around it.
-      const centerAnchor: ScreenPoint = [(minX + maxX) / 2, (minY + maxY) / 2];
-      const focalX = centerAnchor[0] * from.k + from.tx;
-      const focalY = centerAnchor[1] * from.k + from.ty;
-      const to = applyPinch(from, factor, focalX, focalY, limits);
-
-      const cfg = { duration: reducedMotion ? 0 : DOUBLE_TAP_MS, easing: Easing.out(Easing.cubic) };
-      k.value = withTiming(to.k, cfg);
-      tx.value = withTiming(to.tx, cfg);
-      ty.value = withTiming(to.ty, cfg, (finished) => {
-        if (finished) runOnJS(commit)(to);
+      // On the UI thread, from the transform on screen there and then: a focal point computed on JS
+      // from a frame that has since moved on would not be where the puck is.
+      scheduleOnUI(() => {
+        'worklet';
+        stopMotion();
+        const from: ViewTransform = { k: k.value, tx: tx.value, ty: ty.value };
+        const spreadScreen = spreadAnchor * from.k;
+        const wanted = CLUSTER_SEPARATION_FACTOR * CLUSTER_OVERLAP_PX;
+        const factor = Math.min(
+          CLUSTER_ZOOM_MAX_FACTOR,
+          Math.max(CLUSTER_ZOOM_MIN_FACTOR, wanted / Math.max(spreadScreen, 1))
+        );
+        // Pinch around where the puck actually sits on screen, so the group stays
+        // under the finger while the map opens up around it.
+        const to = applyPinch(
+          from,
+          factor,
+          centerX * from.k + from.tx,
+          centerY * from.k + from.ty,
+          limits
+        );
+        animateCamera(to, durationMs, EASE_OUT_CUBIC, () => runOnJS(commit)(to));
       });
     },
     // Shared values are stable refs; `limits`/`commit` are the real inputs.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [limits, commit, reducedMotion]
+    [limits, commit, reducedMotion, stopMotion, animateCamera]
   );
 
   // A pending download must not stop the displayed camera advancing for labels.
@@ -930,7 +931,7 @@ export function MapView({
   useAnimatedReaction(
     () => ({ k: k.value, tx: tx.value, ty: ty.value }),
     (t, prev) => {
-      if (!limits || !prev || locateProgress.value < 1) return;
+      if (!limits || !prev || locating.value) return;
       if (hasScaleMotion(t, prev)) {
         wasScaling.value = true;
         if (!trackInFlight.value && shouldTrackScaleMotion(t, lastTracked.value)) {
@@ -986,15 +987,7 @@ export function MapView({
   const composedGesture = useMemo(() => {
     if (!limits) return Gesture.Tap().enabled(false);
 
-    const stopFling = () => {
-      'worklet';
-      cancelAnimation(tx);
-      cancelAnimation(ty);
-      cancelAnimation(k);
-      cancelAnimation(locateProgress);
-      locateProgress.value = 1;
-      decaysLeft.value = 0;
-    };
+    const stopFling = stopMotion;
 
     // Touch down, before activation: the map has not claimed the gesture yet, so a tap that only
     // dismisses a popover still reaches whatever it was meant for.
@@ -1065,14 +1058,12 @@ export function MapView({
         stopFling();
         const from: ViewTransform = { k: k.value, tx: tx.value, ty: ty.value };
         const to = applyPinch(from, DOUBLE_TAP_FACTOR, e.x, e.y, limits);
-        // Linear interpolation of (k, tx, ty) with one shared curve keeps the
-        // tapped point exactly fixed for the whole animation.
-        const cfg = { duration: DOUBLE_TAP_MS, easing: Easing.out(Easing.cubic) };
-        k.value = withTiming(to.k, cfg);
-        tx.value = withTiming(to.tx, cfg);
-        ty.value = withTiming(to.ty, cfg, (finished) => {
-          if (finished) runOnJS(commit)(to);
-        });
+        // Linear interpolation of (k, tx, ty) on ONE clock keeps the tapped point exactly fixed
+        // for the whole animation (see `useCameraAnimation`). Reduced motion lands at once, as
+        // `withTiming`'s system default did.
+        animateCamera(to, reducedMotion ? 0 : DOUBLE_TAP_MS, EASE_OUT_CUBIC, () =>
+          runOnJS(commit)(to)
+        );
       });
 
     // Tap, then touch-hold-drag. RNGH has no such gesture, so this one stays undecided while it
@@ -1156,7 +1147,7 @@ export function MapView({
 
     return Gesture.Race(quickZoom, doubleTap, Gesture.Simultaneous(pan, pinch));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [limits, commit, prefetchAt, onInteraction]);
+  }, [limits, commit, prefetchAt, onInteraction, stopMotion, animateCamera, reducedMotion]);
 
   // Desktop web: wheel / trackpad zoom at the cursor, like Google Maps. RN Web's
   // <View> doesn't forward an onWheel prop to the DOM node, so bind a non-passive
@@ -1169,6 +1160,8 @@ export function MapView({
     if (!node || typeof node.addEventListener !== 'function') return;
     const onWheel = (e: WheelEvent) => {
       e.preventDefault();
+      // Web runs worklets on this thread, so this stops a running camera animation synchronously.
+      stopMotion();
       const rect = node.getBoundingClientRect();
       const factor = Math.pow(2, -e.deltaY / 480); // one notch (±100) ≈ ±15% scale
       const t = applyPinch(
@@ -1187,7 +1180,7 @@ export function MapView({
     node.addEventListener('wheel', onWheel, { passive: false });
     return () => node.removeEventListener('wheel', onWheel);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [limits, commit]);
+  }, [limits, commit, stopMotion]);
 
   // Derived (not the raw shared value): Skia's prop binding tracks derived
   // values reliably on every platform, including web.

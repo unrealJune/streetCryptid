@@ -31,6 +31,17 @@ export type HoldableMethod =
   | 'transportDiagnostics'
   | 'nearbyBlePeers';
 
+const ACCEPTED = {
+  accepted: true,
+  rejection: null,
+  enqueued: 1,
+  published: 1,
+  pending: 0,
+  slotsSkipped: 0,
+  overflowDropped: 0,
+  suspended: false,
+};
+
 export class FakeNativeModule {
   calls = {
     publishProfile: [] as PublishProfileCall[],
@@ -45,9 +56,11 @@ export class FakeNativeModule {
     revokePairInvite: [] as string[],
     setPairingReady: [] as boolean[],
     importProfileTicket: [] as string[],
-    publishIntroduction: [] as string[],
-    subscribe: [] as { topic: string; bootstrap: string[] }[],
-    unsubscribe: [] as string[],
+    importDocTicket: [] as string[],
+    publishIntroduction: 0,
+    ingestFix: 0,
+    watchReplica: 0,
+    unwatchReplica: 0,
     shutdown: 0,
     pollPairEvents: 0,
     pollProfileEvents: 0,
@@ -174,37 +187,31 @@ export class FakeNativeModule {
   async importProfileTicket(ticket: string) {
     this.calls.importProfileTicket.push(ticket);
   }
-  async importDocTicket() {}
+  async importDocTicket(ticket: string) {
+    this.calls.importDocTicket.push(ticket);
+  }
   async readProfile(endpointId: string) {
     const profile = this.profiles.get(endpointId) ?? null;
     await this.gate('readProfile');
     return profile;
   }
-  async deriveTopic(id: string) {
-    return `topic-${id}`;
+  async ingestFix() {
+    this.calls.ingestFix += 1;
+    return ACCEPTED;
   }
-  async subscribe(topic: string, bootstrap: string[]) {
-    this.calls.subscribe.push({ topic, bootstrap });
-    return `sub-${topic}`;
+  async heartbeatFix() {
+    return { ...ACCEPTED, published: 0 };
   }
-  async unsubscribe(subscriptionId: string) {
-    this.calls.unsubscribe.push(subscriptionId);
+  async publishIntroduction() {
+    this.calls.publishIntroduction += 1;
+    return ACCEPTED;
   }
-  async publishIntroduction(subscriptionId: string) {
-    this.calls.publishIntroduction.push(subscriptionId);
-    return {
-      accepted: true,
-      rejection: null,
-      enqueued: 1,
-      published: 1,
-      pending: 0,
-      slotsSkipped: 0,
-      overflowDropped: 0,
-      suspended: false,
-    };
+  watchReplica() {
+    this.calls.watchReplica += 1;
   }
-  async publish() {}
-  async docsWrite() {}
+  unwatchReplica() {
+    this.calls.unwatchReplica += 1;
+  }
   async syncLatest() {}
   async readLatest() {
     return [];

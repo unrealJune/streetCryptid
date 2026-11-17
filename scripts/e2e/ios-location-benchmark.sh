@@ -37,7 +37,7 @@ social_db="$app_data/Documents/SQLite/streetcryptid.social.db"
 events_db="$app_data/Documents/SQLite/streetcryptid.events.db"
 
 observer_state="$("$SCRIPT_DIR/ensure-stash-observer.sh" "$DEVICE" "$OBSERVER_STATE_DIR")"
-observer_bin="$REPO_ROOT/modules/iroh-location/rust/target/debug/trail-stash-client"
+observer_bin="$REPO_ROOT/target/debug/trail-stash-client"
 
 observe_once() {
   perl -e 'alarm shift; exec @ARGV' 45 \
@@ -50,7 +50,7 @@ observe_scenario() {
     --timeout-seconds "$((SCENARIO_SECONDS + 30))"
 }
 
-printf 'profile\tscenario\tseconds\tbg_wakes\tfixes_delivered\tpublishes_ok\tpublish_errors\tstash_pushes\tavg_wake_ms\tmax_fix_age_ms\ttrail_points\tobserver_fixes\tobserver_avg_lag_ms\tobserver_max_lag_ms\n' >"$OUTPUT"
+printf 'profile\tscenario\tseconds\tbg_wakes\tfixes_delivered\tpublishes_ok\tpublish_errors\tavg_wake_ms\tmax_fix_age_ms\ttrail_points\tobserver_fixes\tobserver_avg_lag_ms\tobserver_max_lag_ms\n' >"$OUTPUT"
 
 run_scenario() {
   local profile="$1" scenario="$2"
@@ -108,7 +108,6 @@ run_scenario() {
           THEN json_extract(details, '$.attributes.fixes') ELSE 0 END), 0) AS fixes_delivered,
         count(*) FILTER (WHERE action = 'publish.fix' AND status = 'ok') AS publishes_ok,
         count(*) FILTER (WHERE action = 'publish.fix' AND status = 'error') AS publish_errors,
-        count(*) FILTER (WHERE action = 'trail.push.app' AND status = 'ok') AS stash_pushes,
         round(avg(CASE WHEN action = 'bg.wake'
           THEN json_extract(details, '$.duration_ms') END), 1) AS avg_wake_ms,
         round(max(CASE WHEN action = 'engine.ingest'
@@ -117,7 +116,7 @@ run_scenario() {
       WHERE timestamp >= $start_ms
     )
     SELECT '$profile', '$scenario', $SCENARIO_SECONDS, bg_wakes, fixes_delivered,
-           publishes_ok, publish_errors, stash_pushes, coalesce(avg_wake_ms, 0),
+           publishes_ok, publish_errors, coalesce(avg_wake_ms, 0),
            coalesce(max_fix_age_ms, 0), (SELECT count(*) FROM social.self_trail)
     FROM metrics;
   ")"

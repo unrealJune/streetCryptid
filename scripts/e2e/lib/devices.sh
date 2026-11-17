@@ -506,7 +506,7 @@ rendezvous_get() {
 # (ensure_stash_observer builds it as a side effect).
 stash_observe_once() {
   local state_dir="$1" timeout_seconds="${2:-30}"
-  local bin="$REPO_ROOT/modules/iroh-location/rust/target/debug/trail-stash-client"
+  local bin="$REPO_ROOT/target/debug/trail-stash-client"
   perl -e 'alarm shift; exec @ARGV' "$((timeout_seconds + 15))" \
     "$bin" --state-dir "$state_dir" watch --once --json --timeout-seconds "$timeout_seconds"
 }

@@ -1,4 +1,4 @@
-import type { ContactCard, IncomingFix } from '../../core/types';
+import type { ContactCard, Friend } from '../../core/types';
 import {
   createTelemetry,
   resetEventLogForTesting,
@@ -7,30 +7,31 @@ import {
 } from '@/features/dev/telemetry';
 
 /**
- * Wiring tests for the durable-trail / sync path in {@link LocationSharingService}, using a fake
- * native module. These prove the plumbing (import friend namespace on add, mirror to docs on
- * publish, trigger reconciliation, route backfill fixes into the trail, surface recovered count)
- * without a live iroh node — the real range-reconciliation is exercised end-to-end (two browsers /
- * two devices) per docs/social/ARCHITECTURE.md §9.
+ * Wiring tests for the docs-only delivery path in {@link LocationSharingService}, using a fake
+ * native module. These prove the plumbing — import a friend's namespace on add, hand every capture
+ * to the native gate, mirror the sharing set and the push targets, read the replica when the node
+ * announces a change — without a live iroh node. The replication itself is exercised against real
+ * nodes in `modules/iroh-location/rust/tests/` and end-to-end per docs/social/ARCHITECTURE.md §9.
  */
+
+type FakeFix = { lat: number; lon: number; accuracyM: number; headingDeg: number; ts: number };
 
 class FakeNativeModule {
   calls = {
-    publish: [] as unknown[][],
-    docsWrite: [] as unknown[][],
-    publishNull: [] as unknown[][],
-    docsWriteNull: [] as unknown[][],
+    ingestFix: [] as { fix: FakeFix; battery: unknown; intervalMs: number }[],
+    heartbeatFix: [] as { intervalMs: number; parked: boolean | null }[],
+    publishIntroduction: 0,
+    watchReplica: 0,
+    unwatchReplica: 0,
+    readLatest: 0,
     syncLatest: [] as { peerTickets: string[]; traceparent?: string }[],
     importDocTicket: [] as string[],
-    subscribe: [] as { topic: string; bootstrap: string[] }[],
-    unsubscribe: [] as string[],
-    docsWriteControl: [] as unknown[][],
-    pollResync: [] as { peer: string; recvPub: string }[],
+    importProfileTicket: [] as string[],
+    setSharingRecipients: [] as { recipients: string[]; watchers: string[] }[],
     forgetSession: [] as string[],
     forgetPairSessions: [] as string[],
     forgetDocTicket: [] as string[],
     forgetProfileTicket: [] as string[],
-    clearResync: 0,
     setDeliveryConfig: [] as {
       peerTickets: string[];
       stashBaseUrl: string | null;
@@ -38,17 +39,12 @@ class FakeNativeModule {
     }[],
   };
   private handlers: Record<string, (e: unknown) => void> = {};
-  readonly unsubscribeFailures = new Set<string>();
 
   // ── ratchet state the fake pretends to hold (FORWARD-SECRECY.md §4.5, §4.6) ──────────────
-  /** Recipients every ratcheted publish reports as dropped, as "<endpointId>:<reason>". */
-  droppedRecipients: string[] = [];
   /** Endpoint ids `isDesynced` should answer `true` for. */
   readonly desynced = new Set<string>();
-  /** Endpoint id → how many resyncs have already been driven with them. */
+  /** Endpoint id → how many restarts native has already driven with them. */
   readonly resyncCounts = new Map<string, number>();
-  /** Endpoint ids whose next `pollResync` should report a session installed. */
-  readonly resyncSucceeds = new Set<string>();
 
   /** Set false to model a binary that still clobbers the node on a second `createNode`. */
   adoptsNode = true;
@@ -77,35 +73,55 @@ class FakeNativeModule {
   }
   async importDocTicket(ticket: string) {
     this.calls.importDocTicket.push(ticket);
+    if (this.importFailures.has(ticket)) throw new Error(`import failed: ${ticket}`);
   }
-  async deriveTopic(id: string) {
-    return `topic-${id}`;
+  /** Doc tickets whose import should fail, as a docs engine that cannot open them would. */
+  readonly importFailures = new Set<string>();
+  async importProfileTicket(ticket: string) {
+    this.calls.importProfileTicket.push(ticket);
   }
-  async subscribe(topic: string, bootstrap: string[]) {
-    this.calls.subscribe.push({ topic, bootstrap });
-    return `sub-${topic}`;
-  }
-  async unsubscribe(subscriptionId: string) {
-    this.calls.unsubscribe.push(subscriptionId);
-    if (this.unsubscribeFailures.has(subscriptionId)) {
-      throw new Error(`unsubscribe failed: ${subscriptionId}`);
+
+  // ── the native gate (`publish.rs`), as far as the app can see it ─────────────────────────
+  /** What the next `ingestFix` reports. `published > 0` also writes our slot, as native does. */
+  ingestOutcome = {
+    accepted: true,
+    rejection: null as string | null,
+    enqueued: 1,
+    published: 1,
+    pending: 0,
+    slotsSkipped: 0,
+    overflowDropped: 0,
+    suspended: false,
+  };
+  seq = 0;
+  async ingestFix(fix: FakeFix, battery: unknown, intervalMs: number) {
+    this.calls.ingestFix.push({ fix, battery, intervalMs });
+    if (this.ingestOutcome.published > 0) {
+      this.seq += 1;
+      this.trailFixes.push({ author: 'aa11', seq: this.seq, fix });
     }
+    return { ...this.ingestOutcome };
   }
-  async publish(...args: unknown[]) {
-    this.calls.publish.push(args);
-    return this.droppedRecipients;
+  async heartbeatFix(_battery: unknown, intervalMs: number, parked: boolean | null) {
+    this.calls.heartbeatFix.push({ intervalMs, parked });
+    return { ...this.ingestOutcome, enqueued: 0, published: 0 };
   }
-  async docsWrite(...args: unknown[]) {
-    this.calls.docsWrite.push(args);
-    return this.droppedRecipients;
+  async publishIntroduction() {
+    this.calls.publishIntroduction += 1;
+    this.seq += 1;
+    return { ...this.ingestOutcome, published: 1 };
   }
-  async publishNull(...args: unknown[]) {
-    this.calls.publishNull.push(args);
-    return this.droppedRecipients;
+  async currentSeq() {
+    return this.seq;
   }
-  async docsWriteNull(...args: unknown[]) {
-    this.calls.docsWriteNull.push(args);
-    return this.droppedRecipients;
+  watchReplica() {
+    this.calls.watchReplica += 1;
+  }
+  unwatchReplica() {
+    this.calls.unwatchReplica += 1;
+  }
+  async setSharingRecipients(recipients: string[], watchers: string[]) {
+    this.calls.setSharingRecipients.push({ recipients, watchers });
   }
 
   async isDesynced(peerEndpointHex: string) {
@@ -113,15 +129,6 @@ class FakeNativeModule {
   }
   async resyncCount(peerEndpointHex: string) {
     return this.resyncCounts.get(peerEndpointHex) ?? 0;
-  }
-  async pollResync(peerEndpointHex: string, peerRecvPubHex: string) {
-    this.calls.pollResync.push({ peer: peerEndpointHex, recvPub: peerRecvPubHex });
-    if (!this.resyncSucceeds.has(peerEndpointHex)) return false;
-    this.desynced.delete(peerEndpointHex);
-    return true;
-  }
-  async clearResync() {
-    this.calls.clearResync += 1;
   }
   async forgetSession(peerEndpointHex: string) {
     this.calls.forgetSession.push(peerEndpointHex);
@@ -140,9 +147,6 @@ class FakeNativeModule {
     this.calls.forgetProfileTicket.push(ticket);
     return true;
   }
-  async docsWriteControl(...args: unknown[]) {
-    this.calls.docsWriteControl.push(args);
-  }
   async syncLatest(peerTickets: string[], traceparent?: string | null) {
     this.calls.syncLatest.push({
       peerTickets,
@@ -156,13 +160,10 @@ class FakeNativeModule {
   ) {
     this.calls.setDeliveryConfig.push({ peerTickets, stashBaseUrl, stashPsk });
   }
-  trailFixes: {
-    author: string;
-    seq: number;
-    fix: { lat: number; lon: number; accuracyM: number; headingDeg: number; ts: number };
-  }[] = [];
+  trailFixes: { author: string; seq: number; fix: FakeFix }[] = [];
   trailNulls: { author: string; seq: number; ts: number; kind: 'null'; fix?: undefined }[] = [];
   async readLatest() {
+    this.calls.readLatest += 1;
     // One overwritten slot per author: a read yields each author's current fix, nothing behind it.
     const current = new Map<string, (typeof this.trailFixes)[number]>();
     for (const f of this.trailFixes) {
@@ -183,10 +184,7 @@ class FakeNativeModule {
   async pruneTrail() {}
 
   /** What the native drain has published and not yet handed over — see `own_log.rs`. */
-  ownPublished: {
-    seq: number;
-    fix: { lat: number; lon: number; accuracyM: number; headingDeg: number; ts: number };
-  }[] = [];
+  ownPublished: { seq: number; fix: FakeFix }[] = [];
   async takeOwnPublished() {
     return this.ownPublished.splice(0);
   }
@@ -251,7 +249,11 @@ jest.mock('expo-sqlite', () => ({
 /** Drive an AppState transition through every listener the service installed. */
 
 // eslint-disable-next-line import/first
-import { LocationSharingService, type SharingSnapshot } from '../location-sharing';
+import {
+  LocationSharingService,
+  TRAIL_CHANGE_COALESCE_MS,
+  type SharingSnapshot,
+} from '../location-sharing';
 
 /**
  * A service started here owns a 4s pairing poll (and, once sharing is on, a live-request poll).
@@ -297,59 +299,80 @@ describe('LocationSharingService — durable trail wiring', () => {
   it('imports a friend docs namespace (their docTicket) when added', async () => {
     const svc = makeService();
     await svc.init('@me', 'mothman');
-    await svc.addFriend(friend);
-    expect(mockHolder.mod.calls.importDocTicket).toContain('doc-b');
-    expect(mockHolder.mod.calls.subscribe.some((s) => s.topic === 'topic-bb22')).toBe(true);
+    const paired: Friend = { ...friend, profileTicket: 'profile-b' };
+    await svc.addFriend(paired);
+    expect(mockHolder.mod.calls.importDocTicket).toEqual(['doc-b']);
+    expect(mockHolder.mod.calls.importProfileTicket).toEqual(['profile-b']);
   });
 
-  it('removes a friend, revokes sharing, and tears down their subscription', async () => {
+  it('removes a friend, revokes sharing, and never resurrects their dot', async () => {
     const svc = makeService();
     const snapshots: SharingSnapshot[] = [];
     svc.onChange((snapshot) => snapshots.push(snapshot));
     await svc.init('@me', 'mothman');
     await svc.addFriend(friend);
     await svc.shareWith(friend.endpointId);
-    mockHolder.mod.emit('onFix', {
+    mockHolder.mod.trailFixes.push({
       author: friend.endpointId,
       seq: 1,
       fix: { lat: 1, lon: 2, accuracyM: 3, headingDeg: 0, ts: 100 },
     });
-    await flush();
+    await svc.syncTrail(0);
+    expect((await svc.friendLatest()).some((p) => p.author === friend.endpointId)).toBe(true);
 
     await svc.removeFriend(friend.endpointId);
 
     const latest = snapshots.at(-1);
     expect(latest?.friends).toEqual([]);
     expect(latest?.sharingWith).toEqual([]);
-    expect(mockHolder.mod.calls.unsubscribe).toContain('sub-topic-bb22');
-    expect((await svc.friendLatest()).some((point) => point.author === friend.endpointId)).toBe(
-      false
-    );
+    expect(mockHolder.mod.calls.forgetDocTicket).toEqual(['doc-b']);
+    expect(mockHolder.mod.calls.setSharingRecipients.at(-1)).toEqual({
+      recipients: [],
+      watchers: [],
+    });
+    expect((await svc.friendLatest()).some((p) => p.author === friend.endpointId)).toBe(false);
 
-    mockHolder.mod.emit('onFix', {
+    // Their slot is still in our replica until the namespace is dropped, and a newer one can land
+    // in the meantime. Reading it must not bring them back.
+    mockHolder.mod.trailFixes.push({
       author: friend.endpointId,
       seq: 2,
       fix: { lat: 3, lon: 4, accuracyM: 3, headingDeg: 0, ts: 200 },
     });
-    await flush();
-    expect((await svc.friendLatest()).some((point) => point.author === friend.endpointId)).toBe(
-      false
-    );
+    await svc.syncTrail(0);
+    expect((await svc.friendLatest()).some((p) => p.author === friend.endpointId)).toBe(false);
   });
 
-  it('can re-add a friend after their old subscription fails to close', async () => {
+  it('imports a friend again when they are re-added after removal', async () => {
+    // `connectedFriends` is what keeps a friend from being imported twice. A removal that left
+    // them in it would make the re-add a silent no-op, and their trail would never reopen.
     const svc = makeService();
     await svc.init('@me', 'mothman');
     await svc.addFriend(friend);
-    mockHolder.mod.unsubscribeFailures.add('sub-topic-bb22');
 
     await svc.removeFriend(friend.endpointId);
     await svc.addFriend(friend);
 
-    const friendSubscriptions = mockHolder.mod.calls.subscribe.filter(
-      ({ topic }) => topic === 'topic-bb22'
+    expect(mockHolder.mod.calls.importDocTicket).toEqual(['doc-b', 'doc-b']);
+  });
+
+  it('retries a friend whose trail import failed instead of marking them connected', async () => {
+    // The namespace import is the only way their position can reach us. A failure is surfaced, and
+    // the friend stays unconnected so the next pass imports again rather than skipping them.
+    const svc = makeService();
+    await svc.init('@me', 'mothman');
+    mockHolder.mod.importFailures.add('doc-b');
+
+    await expect(svc.addFriend(friend)).rejects.toThrow('import failed: doc-b');
+
+    mockHolder.mod.importFailures.clear();
+    await (svc as unknown as { connectFriend(f: ContactCard): Promise<void> }).connectFriend(
+      friend
     );
-    expect(friendSubscriptions).toHaveLength(2);
+    await (svc as unknown as { connectFriend(f: ContactCard): Promise<void> }).connectFriend(
+      friend
+    );
+    expect(mockHolder.mod.calls.importDocTicket).toEqual(['doc-b', 'doc-b']);
   });
 
   it('publishes the configured cryptid metadata in its contact card', async () => {
@@ -363,31 +386,50 @@ describe('LocationSharingService — durable trail wiring', () => {
     });
   });
 
-  it('mirrors each published fix to the durable docs path with the same seq', async () => {
+  it('forces a supplied fix through the native gate, not a side door', async () => {
     const svc = makeService();
     await svc.init('@me', 'mothman');
     await svc.addFriend(friend);
     await svc.shareWith(friend.endpointId);
-    const seq = await svc.publishFix({ lat: 1, lon: 2, accuracyM: 5, headingDeg: 0, ts: 123 });
-    expect(seq).toBeGreaterThan(0);
-    expect(mockHolder.mod.calls.publish).toHaveLength(1);
-    expect(mockHolder.mod.calls.docsWrite).toHaveLength(1);
-    expect(mockHolder.mod.calls.publish[0][1]).toBe(seq);
-    expect(mockHolder.mod.calls.docsWrite[0][1]).toBe(seq);
-  });
-
-  it('forces a supplied fix through the publish path without sampling', async () => {
-    const svc = makeService();
-    Object.assign(svc, { mod: mockHolder.mod, status: 'ready' });
     const fix = { lat: 1, lon: 2, accuracyM: 5, headingDeg: 0, ts: 123 };
-    const publish = jest.spyOn(svc, 'publishFix').mockResolvedValue(9);
 
-    await expect(svc.forceLocationPush(fix, 'scheduled')).resolves.toBe(9);
+    await expect(svc.forceLocationPush(fix, 'scheduled')).resolves.toBe(1);
 
-    expect(publish).toHaveBeenCalledWith(fix, expect.any(Object));
+    expect(mockHolder.mod.calls.ingestFix).toHaveLength(1);
+    expect(mockHolder.mod.calls.ingestFix[0].fix).toMatchObject(fix);
+    // The slot was due, so the gate published it; nothing off the grid was needed.
+    expect(mockHolder.mod.calls.publishIntroduction).toBe(0);
   });
 
-  it('passes the local publish trace context across the native boundary', async () => {
+  it('sends a forced fix off the grid when its slot is already covered', async () => {
+    // Accepted but not published: the gate took the position into a slot that already went out.
+    // A developer pressing Push wants to watch a ping travel, so it goes out as an introduction.
+    const svc = makeService();
+    await svc.init('@me', 'mothman');
+    mockHolder.mod.ingestOutcome = { ...mockHolder.mod.ingestOutcome, published: 0 };
+
+    await svc.forceLocationPush({ lat: 1, lon: 2, accuracyM: 5, headingDeg: 0, ts: 123 });
+
+    expect(mockHolder.mod.calls.publishIntroduction).toBe(1);
+  });
+
+  it('reports a fix the gate refused rather than pretending it went out', async () => {
+    const svc = makeService();
+    await svc.init('@me', 'mothman');
+    mockHolder.mod.ingestOutcome = {
+      ...mockHolder.mod.ingestOutcome,
+      accepted: false,
+      rejection: 'low_accuracy',
+      published: 0,
+    };
+
+    await expect(
+      svc.forceLocationPush({ lat: 1, lon: 2, accuracyM: 900, headingDeg: 0, ts: 123 })
+    ).rejects.toThrow('low_accuracy');
+    expect(mockHolder.mod.calls.publishIntroduction).toBe(0);
+  });
+
+  it('passes the sync trace context across the native boundary', async () => {
     const parent: SpanContext = { traceId: 'a'.repeat(32), spanId: 'b'.repeat(16) };
     setTelemetryForTesting(
       createTelemetry({
@@ -397,16 +439,6 @@ describe('LocationSharingService — durable trail wiring', () => {
     );
     const svc = makeService();
     await svc.init('@me', 'mothman');
-    await svc.addFriend(friend);
-    await svc.shareWith(friend.endpointId);
-
-    await svc.publishFix({ lat: 1, lon: 2, accuracyM: 5, headingDeg: 0, ts: 123 }, parent);
-
-    // Last argument, rather than a fixed index: the epoch parameter was removed from both calls
-    // when the mesh and docs epochs were split (FORWARD-SECRECY.md §7 step 4).
-    const publishTraceparent = mockHolder.mod.calls.publish[0].at(-1);
-    expect(publishTraceparent).toMatch(new RegExp(`^00-${parent.traceId}-[0-9a-f]{16}-01$`));
-    expect(mockHolder.mod.calls.docsWrite[0].at(-1)).toBe(publishTraceparent);
 
     await svc.syncTrail(0, parent);
 
@@ -530,59 +562,6 @@ describe('LocationSharingService — durable trail wiring', () => {
     });
   });
 
-  it('records configured stash replication on the publish trace', async () => {
-    mockHolder.stashConfig = {
-      baseUrl: 'https://stash.example.com',
-      ticket: 'ticket-stash',
-      psk: null,
-    };
-    const sent: {
-      resourceSpans?: {
-        scopeSpans?: {
-          spans?: { name: string; attributes: unknown; events: unknown }[];
-        }[];
-      }[];
-    }[] = [];
-    const telemetry = createTelemetry({
-      endpoint: 'http://collector.test',
-      transport: async (_url, body) => {
-        sent.push(JSON.parse(body) as (typeof sent)[number]);
-      },
-    });
-    setTelemetryForTesting(telemetry);
-    const svc = makeService({
-      stash: { configured: true, registerNamespace: async () => {} },
-    });
-    await svc.init('@me', 'mothman');
-    await svc.setDeliveryMode('stash');
-
-    await svc.publishFix({ lat: 1, lon: 2, accuracyM: 5, headingDeg: 0, ts: 123 });
-    await telemetry.flush();
-
-    const publishSpan = sent
-      .flatMap((payload) => payload.resourceSpans?.[0]?.scopeSpans?.[0]?.spans ?? [])
-      .find((span) => span.name === 'publish.fix');
-    if (!publishSpan) throw new Error('publish.fix span was not exported');
-    expect(publishSpan.attributes).toEqual(
-      expect.arrayContaining([
-        { key: 'stash.client_configured', value: { boolValue: true } },
-        { key: 'stash.ticket_configured', value: { boolValue: true } },
-        { key: 'stash.opted_in', value: { boolValue: true } },
-        { key: 'stash.replication_enabled', value: { boolValue: true } },
-      ])
-    );
-    expect(publishSpan.events).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          name: 'docs.write.completed',
-          attributes: expect.arrayContaining([
-            { key: 'stash.replication_enabled', value: { boolValue: true } },
-          ]),
-        }),
-      ])
-    );
-  });
-
   it('syncTrail reads the durable replica into the trail (silent reconciliation)', async () => {
     const svc = makeService();
     await svc.init('@me', 'mothman');
@@ -633,25 +612,83 @@ describe('LocationSharingService — durable trail wiring', () => {
     expect(mockHolder.mod.calls.syncLatest.length).toBe(syncsBefore);
   });
 
-  it('routes a backfill onFix into the trail and flags it', async () => {
+  it('reads a friend fix into the trail when the node announces a replica change', async () => {
+    // The live path now: iroh-docs replicates the friend's slot, the node announces which authors
+    // changed, and the app reads the replica. No dial, and no second copy of the fix on any event.
     const svc = makeService();
-    const received: IncomingFix[] = [];
-    svc.onFix((f) => received.push(f));
     await svc.init('@me', 'mothman');
     await svc.addFriend(friend);
+    expect(mockHolder.mod.calls.watchReplica).toBe(1);
+    let repaints = 0;
+    svc.onTrailChange(() => {
+      repaints += 1;
+    });
+    const syncsBefore = mockHolder.mod.calls.syncLatest.length;
 
-    mockHolder.mod.emit('onFix', {
-      author: 'bb22',
+    mockHolder.mod.trailFixes.push({
+      author: friend.endpointId,
       seq: 5,
       fix: { lat: 10, lon: 20, accuracyM: 3, headingDeg: 0, ts: 999 },
-      backfill: true,
     });
+    mockHolder.mod.emit('onReplicaChanged', { authors: [friend.endpointId] });
+    mockHolder.mod.emit('onReplicaChanged', { authors: [friend.endpointId] });
+    await new Promise((r) => setTimeout(r, TRAIL_CHANGE_COALESCE_MS + 50));
     await flush();
 
-    expect(received).toHaveLength(1);
-    expect(received[0].backfill).toBe(true);
     const latest = await svc.friendLatest();
-    expect(latest.some((p) => p.author === 'bb22' && p.seq === 5)).toBe(true);
+    expect(latest.some((p) => p.author === friend.endpointId && p.seq === 5)).toBe(true);
+    // The repaint fan-out has its own coalescing window after the read.
+    await new Promise((r) => setTimeout(r, TRAIL_CHANGE_COALESCE_MS + 50));
+    expect(repaints).toBe(1);
+    expect(mockHolder.mod.calls.syncLatest.length).toBe(syncsBefore);
+  });
+
+  it('coalesces a burst of replica announcements into one read', async () => {
+    const svc = makeService();
+    await svc.init('@me', 'mothman');
+    await svc.addFriend(friend);
+    const readsBefore = mockHolder.mod.calls.readLatest;
+
+    for (let i = 0; i < 5; i += 1) {
+      mockHolder.mod.emit('onReplicaChanged', { authors: [friend.endpointId] });
+    }
+    await new Promise((r) => setTimeout(r, TRAIL_CHANGE_COALESCE_MS + 50));
+    await flush();
+
+    expect(mockHolder.mod.calls.readLatest - readsBefore).toBe(1);
+  });
+
+  it('ignores a replica change that names nobody it pools with', async () => {
+    const svc = makeService();
+    await svc.init('@me', 'mothman');
+    await svc.addFriend(friend);
+    const readsBefore = mockHolder.mod.calls.readLatest;
+
+    mockHolder.mod.emit('onReplicaChanged', { authors: ['ffff'] });
+    await new Promise((r) => setTimeout(r, TRAIL_CHANGE_COALESCE_MS + 50));
+    await flush();
+
+    expect(mockHolder.mod.calls.readLatest).toBe(readsBefore);
+  });
+
+  it('stops watching the replica at shutdown', async () => {
+    const svc = makeService();
+    await svc.init('@me', 'mothman');
+
+    await svc.shutdownAsync();
+
+    expect(mockHolder.mod.calls.unwatchReplica).toBe(1);
+  });
+
+  it('starts on a binary that cannot announce replica changes', async () => {
+    // A phone can run an older binary than the bundle. With no announcements the presence pull
+    // clock still reads the replica, so this is slower, not broken.
+    (mockHolder.mod as { watchReplica?: unknown }).watchReplica = undefined;
+    (mockHolder.mod as { unwatchReplica?: unknown }).unwatchReplica = undefined;
+    const svc = makeService();
+
+    await expect(svc.init('@me', 'mothman')).resolves.not.toThrow();
+    await expect(svc.shutdownAsync()).resolves.not.toThrow();
   });
 
   it('keeps only the newest fix per friend in the trail cache', async () => {
@@ -659,19 +696,18 @@ describe('LocationSharingService — durable trail wiring', () => {
     await svc.init('@me', 'mothman');
     await svc.addFriend(friend);
 
-    mockHolder.mod.emit('onFix', {
+    mockHolder.mod.trailFixes.push({
       author: 'bb22',
       seq: 51,
       fix: { lat: 10, lon: 20, accuracyM: 3, headingDeg: 0, ts: 1001 },
-      backfill: false,
     });
-    mockHolder.mod.emit('onFix', {
+    await svc.syncTrail(0);
+    mockHolder.mod.trailFixes.push({
       author: 'bb22',
       seq: 52,
       fix: { lat: 11, lon: 21, accuracyM: 3, headingDeg: 0, ts: 1002 },
-      backfill: false,
     });
-    await flush();
+    await svc.syncTrail(0);
 
     // A friend collapses to their newest fix — their history is not retained.
     const full = await svc.friendLatest();
@@ -701,7 +737,7 @@ describe('LocationSharingService — durable trail wiring', () => {
     expect(recovered).toBe(0);
   });
 
-  it('surfaces live fix and null ratchet responses per friend', async () => {
+  it('surfaces fix and null ratchet responses per friend from the replica', async () => {
     const svc = makeService();
     let activity: SharingSnapshot['ratchetActivity'] = {};
     svc.onChange((snapshot) => {
@@ -709,44 +745,29 @@ describe('LocationSharingService — durable trail wiring', () => {
     });
     await svc.init('@me', 'mothman');
     await svc.addFriend(friend);
-
-    mockHolder.mod.emit('onFix', {
-      author: friend.endpointId,
-      seq: 21,
-      fix: { lat: 1, lon: 2, accuracyM: 3, headingDeg: 0, ts: 900 },
-    });
-    mockHolder.mod.emit('onOpaque', { author: friend.endpointId, seq: 22, kind: 'null' });
-
-    expect(activity[friend.endpointId]).toMatchObject({
-      fix: { seq: 21, source: 'live' },
-      null: { seq: 22, source: 'live' },
-    });
-  });
-
-  it('surfaces a null ratchet response recovered from the durable lane', async () => {
-    const svc = makeService();
-    let activity: SharingSnapshot['ratchetActivity'] = {};
-    svc.onChange((snapshot) => {
-      activity = snapshot.ratchetActivity;
-    });
-    await svc.init('@me', 'mothman');
-    await svc.addFriend(friend);
-    mockHolder.mod.trailNulls = [{ author: friend.endpointId, seq: 31, ts: 1_000, kind: 'null' }];
+    mockHolder.mod.trailFixes = [
+      {
+        author: friend.endpointId,
+        seq: 21,
+        fix: { lat: 1, lon: 2, accuracyM: 3, headingDeg: 0, ts: 900 },
+      },
+    ];
+    mockHolder.mod.trailNulls = [{ author: friend.endpointId, seq: 22, ts: 1_000, kind: 'null' }];
 
     await svc.syncTrail(0);
 
-    expect(activity[friend.endpointId]?.null).toMatchObject({
-      seq: 31,
-      source: 'durable',
+    expect(activity[friend.endpointId]).toMatchObject({
+      fix: { seq: 21 },
+      null: { seq: 22 },
     });
   });
 });
 
 describe('LocationSharingService — native delivery targets', () => {
-  // Publishing is not delivery. `docsWrite` writes the LOCAL replica and iroh-docs broadcasts a
-  // local insert only for namespaces the live engine has marked as syncing, which a publish-only
-  // context never does — so a native drain that does not know who to push to seals correctly,
-  // reports success, and delivers nothing. Two phones ran a full day in that state on 2026-08-31.
+  // Publishing is not delivery. A publish writes the LOCAL replica, and iroh-docs' live engine only
+  // reaches peers already in our namespace's swarm — nobody, on a background wake — so a native
+  // drain that does not know who to push to seals correctly, reports success, and delivers
+  // nothing. Two phones ran a full day in that state on 2026-08-31.
   // These assert the app tells native where to send, at every point the answer can change.
   beforeEach(() => {
     mockHolder.mod = new FakeNativeModule();
@@ -915,7 +936,7 @@ describe('LocationSharingService — native delivery targets', () => {
   });
 });
 
-describe('LocationSharingService — symmetric lanes (null fixes)', () => {
+describe('LocationSharingService — the sharing set native seals for', () => {
   const watcherFriend: ContactCard = {
     endpointId: 'cc33',
     handle: '@cee',
@@ -929,121 +950,81 @@ describe('LocationSharingService — symmetric lanes (null fixes)', () => {
     mockHolder.mod = new FakeNativeModule();
     mockHolder.stashConfig = null;
     setTelemetryForTesting(undefined);
-    // The durable journal is what the shipper drains, so spans carry between tests unless it is
-    // cleared here too — the telemetry singleton is no longer the whole of the exported state.
     resetEventLogForTesting();
   });
 
-  /** A pool where we share with `friend` and merely watch `watcherFriend`. */
-  async function mixedEdges(): Promise<LocationSharingService> {
+  // Native seals a fix for the recipients and a null for the watchers on every tick
+  // (FORWARD-SECRECY.md §4.7). The app's whole part is to say which friend is which.
+  it('names sharing recipients and watch-only friends separately, and never both', async () => {
     const svc = makeService();
     await svc.init('@me', 'mothman');
     await svc.addFriend(friend);
     await svc.addFriend(watcherFriend);
     await svc.shareWith(friend.endpointId);
-    return svc;
-  }
 
-  it('publishes a null fix to the friends it is not sharing with, on the same tick', async () => {
-    const svc = await mixedEdges();
-
-    await svc.publishFix({ lat: 1, lon: 2, accuracyM: 5, headingDeg: 0, ts: 123 });
-
-    expect(mockHolder.mod.calls.publishNull).toHaveLength(1);
-    expect(mockHolder.mod.calls.docsWriteNull).toHaveLength(1);
-    // (subscriptionId, seq, ts, watcherEndpoints, traceparent) — endpoint ids, not receiving
-    // keys: the null lane is envelope v3 now, addressed by ratchet session (§4.7).
-    expect(mockHolder.mod.calls.publishNull[0][2]).toBe(123);
-    expect(mockHolder.mod.calls.publishNull[0][3]).toEqual([watcherFriend.endpointId]);
-    expect(mockHolder.mod.calls.docsWriteNull[0][3]).toEqual([watcherFriend.endpointId]);
+    const latest = mockHolder.mod.calls.setSharingRecipients.at(-1);
+    expect(latest).toEqual({
+      recipients: [friend.endpointId],
+      watchers: [watcherFriend.endpointId],
+    });
   });
 
-  it('never addresses the same friend on both lanes', async () => {
-    const svc = await mixedEdges();
-
-    await svc.publishFix({ lat: 1, lon: 2, accuracyM: 5, headingDeg: 0, ts: 123 });
-
-    const shared = mockHolder.mod.calls.publish[0][3] as string[];
-    const watched = mockHolder.mod.calls.publishNull[0][3] as string[];
-    expect(shared).toEqual([friend.endpointId]);
-    expect(watched).toEqual([watcherFriend.endpointId]);
-    expect(shared.filter((k) => watched.includes(k))).toEqual([]);
-  });
-
-  it('gives the null fix its own seq, so no two envelopes share (author, seq)', async () => {
-    const svc = await mixedEdges();
-
-    const seq = await svc.publishFix({ lat: 1, lon: 2, accuracyM: 5, headingDeg: 0, ts: 123 });
-
-    const nullSeq = mockHolder.mod.calls.publishNull[0][1] as number;
-    expect(nullSeq).not.toBe(seq);
-    expect(mockHolder.mod.calls.docsWriteNull[0][1]).toBe(nullSeq);
-    // Monotonic, like every other envelope we sign.
-    expect(nullSeq).toBeGreaterThan(seq);
-  });
-
-  it('publishes nothing on the null lane when every friend is a sharing recipient', async () => {
+  it('moves a friend back to the watcher set when sharing is revoked', async () => {
     const svc = makeService();
     await svc.init('@me', 'mothman');
     await svc.addFriend(friend);
     await svc.shareWith(friend.endpointId);
 
-    await svc.publishFix({ lat: 1, lon: 2, accuracyM: 5, headingDeg: 0, ts: 123 });
+    await svc.revoke(friend.endpointId);
 
-    expect(mockHolder.mod.calls.publish).toHaveLength(1);
-    expect(mockHolder.mod.calls.publishNull).toHaveLength(0);
+    expect(mockHolder.mod.calls.setSharingRecipients.at(-1)).toEqual({
+      recipients: [],
+      watchers: [friend.endpointId],
+    });
   });
 
-  it('still publishes the watcher lane for a device that shares with nobody', async () => {
+  it('seals the introduction only after the new sharing set has reached native', async () => {
+    // Native seals for the set IT holds, so an introduction that overtook the mirror would go out
+    // sealed for yesterday's set and the new friend could not open it.
     const svc = makeService();
     await svc.init('@me', 'mothman');
-    await svc.addFriend(watcherFriend);
-
-    await svc.publishFix({ lat: 1, lon: 2, accuracyM: 5, headingDeg: 0, ts: 123 });
-
-    expect(mockHolder.mod.calls.publishNull).toHaveLength(1);
-    expect(mockHolder.mod.calls.publishNull[0][3]).toEqual([watcherFriend.endpointId]);
-  });
-
-  // The real fix is already on the wire and its seq returned by the time the null lane runs, so a
-  // failure here must not fail the tick — that would make the outbox retain and re-publish a fix
-  // that already went out.
-  it('does not fail the tick when the null lane throws', async () => {
-    const svc = await mixedEdges();
-    mockHolder.mod.publishNull = async () => {
-      throw new Error('gossip broadcast failed');
+    await svc.addFriend(friend);
+    await svc.shareWith(friend.endpointId);
+    const order: string[] = [];
+    let release = () => {};
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    mockHolder.mod.setSharingRecipients = async (recipients: string[], watchers: string[]) => {
+      await held;
+      order.push(`recipients:${recipients.join(',')}|${watchers.join(',')}`);
+    };
+    mockHolder.mod.publishIntroduction = async () => {
+      order.push('introduction');
+      return { ...mockHolder.mod.ingestOutcome, published: 1 };
     };
 
-    await expect(
-      svc.publishFix({ lat: 1, lon: 2, accuracyM: 5, headingDeg: 0, ts: 123 })
-    ).resolves.toBeGreaterThan(0);
+    await svc.revoke(friend.endpointId);
+    await svc.shareWith(friend.endpointId);
+    const intro = (
+      svc as unknown as { publishIntroduction(): Promise<void> }
+    ).publishIntroduction();
+    release();
+    await intro;
 
-    expect(mockHolder.mod.calls.publish).toHaveLength(1);
-  });
-
-  // Swift bindings only regenerate on macOS, so an installed iOS binary can predate this API.
-  it('skips the null lane on a binary without the native export', async () => {
-    const svc = await mixedEdges();
-    // A class method lives on the prototype, so it is overwritten rather than deleted — the shape
-    // an older binary presents is `typeof mod.publishNull !== 'function'`, which this reproduces.
-    (mockHolder.mod as unknown as Record<string, unknown>).publishNull = undefined;
-
-    await expect(
-      svc.publishFix({ lat: 1, lon: 2, accuracyM: 5, headingDeg: 0, ts: 123 })
-    ).resolves.toBeGreaterThan(0);
-
-    expect(mockHolder.mod.calls.docsWriteNull).toHaveLength(0);
+    expect(order.at(-1)).toBe('introduction');
+    expect(order).toContain(`recipients:${friend.endpointId}|`);
   });
 });
 
 /**
- * Forward-secrecy health surfacing and §4.6 recovery — FORWARD-SECRECY.md §4.5, §4.6 / §7 step 7.
+ * Forward-secrecy health surfacing — FORWARD-SECRECY.md §4.5, §4.6 / §7 step 7.
  *
- * The schedule cannot heal itself and a short wrap list is not a partial success: something has to
- * notice that a friend stopped receiving fixes, say which of the three lookalike reasons it is,
- * and run the resync exchange. These pin that something.
+ * Sealing and recovery are native (`publish.rs`, `restart.rs`); a short wrap list is not a
+ * partial success, so the app has to read what native reports and say which of the lookalike
+ * reasons a friend stopped receiving fixes. These pin that reading.
  */
-describe('LocationSharingService — session health and resync', () => {
+describe('LocationSharingService — session health', () => {
   const watcher: ContactCard = {
     endpointId: 'cc33',
     handle: '@cee',
@@ -1073,7 +1054,7 @@ describe('LocationSharingService — session health and resync', () => {
   /**
    * A getter for the latest session-health map the service has emitted, read through its public
    * change stream. A getter rather than a value because each emit hands over a *new* object — a
-   * captured reference would pin the empty one from before the publish.
+   * captured reference would pin the empty one from before the read.
    */
   function healthOf(svc: LocationSharingService): () => Record<string, string> {
     let latest: Record<string, string> = {};
@@ -1088,9 +1069,9 @@ describe('LocationSharingService — session health and resync', () => {
     // so a friend paired before envelope v3 needs the two humans in a room again.
     const svc = await shared();
     const health = healthOf(svc);
-    mockHolder.mod.droppedRecipients = [`${friend.endpointId}:no_session`];
+    mockHolder.mod.sealDroppedPeers = [`${friend.endpointId}:no_session`];
 
-    await svc.publishFix({ lat: 1, lon: 2, accuracyM: 5, headingDeg: 0, ts: 123 });
+    await svc.syncTrail(0);
 
     expect(health()[friend.endpointId]).toBe('needs-repair');
   });
@@ -1100,9 +1081,9 @@ describe('LocationSharingService — session health and resync', () => {
     // a day" and resolves itself the moment it does, which is not a re-pair.
     const svc = await shared();
     const health = healthOf(svc);
-    mockHolder.mod.droppedRecipients = [`${friend.endpointId}:lapsed`];
+    mockHolder.mod.sealDroppedPeers = [`${friend.endpointId}:lapsed`];
 
-    await svc.publishFix({ lat: 1, lon: 2, accuracyM: 5, headingDeg: 0, ts: 123 });
+    await svc.syncTrail(0);
 
     expect(health()[friend.endpointId]).toBe('lapsed');
   });
@@ -1112,83 +1093,62 @@ describe('LocationSharingService — session health and resync', () => {
     // itself on the next tick, so putting it in front of a human would be noise.
     const svc = await shared();
     const health = healthOf(svc);
-    mockHolder.mod.droppedRecipients = [`${friend.endpointId}:no_sending_chain`];
+    mockHolder.mod.sealDroppedPeers = [`${friend.endpointId}:no_sending_chain`];
 
-    await svc.publishFix({ lat: 1, lon: 2, accuracyM: 5, headingDeg: 0, ts: 123 });
+    await svc.syncTrail(0);
 
     expect(health()).toEqual({});
   });
 
   it('clears a drop once the friend is reachable again', async () => {
-    // Rebuilt per publish rather than accumulated, so recovery needs no separate clearing path.
+    // Rebuilt from each seal report rather than accumulated, so recovery needs no clearing path.
     const svc = await shared();
     const health = healthOf(svc);
-    mockHolder.mod.droppedRecipients = [`${friend.endpointId}:no_session`];
-    await svc.publishFix({ lat: 1, lon: 2, accuracyM: 5, headingDeg: 0, ts: 123 });
+    mockHolder.mod.sealDroppedPeers = [`${friend.endpointId}:no_session`];
+    await svc.syncTrail(0);
     expect(health()[friend.endpointId]).toBe('needs-repair');
 
-    mockHolder.mod.droppedRecipients = [];
-    await svc.publishFix({ lat: 1, lon: 2, accuracyM: 5, headingDeg: 0, ts: 456 });
+    mockHolder.mod.sealDroppedPeers = [];
+    await svc.syncTrail(0);
 
     expect(health()).toEqual({});
   });
 
-  it('runs the resync exchange for a desynced friend and reports recovery', async () => {
-    const svc = await shared();
-    const health = healthOf(svc);
-    mockHolder.mod.desynced.add(friend.endpointId);
-    mockHolder.mod.resyncSucceeds.add(friend.endpointId);
-
-    await svc.publishFix({ lat: 1, lon: 2, accuracyM: 5, headingDeg: 0, ts: 123 });
-
-    expect(mockHolder.mod.calls.pollResync).toEqual([
-      { peer: friend.endpointId, recvPub: friend.recvPublic },
-    ]);
-    expect(health()).toEqual({});
-    // The ephemeral outlives the restore: a peer may still apply our record, and only that secret
-    // lets us join the root it moved to. The native driver drops it once the record expires.
-    expect(mockHolder.mod.calls.clearResync).toBe(0);
-  });
-
-  it('leaves a friend marked desynced while the exchange is still in flight', async () => {
-    // The peer has not published their half yet. Ordinary: the two sides notice at different
-    // times, which is exactly why `pollResync` publishes ours before looking for theirs.
+  it('leaves a friend marked desynced while native recovery is still in flight', async () => {
     const svc = await shared();
     const health = healthOf(svc);
     mockHolder.mod.desynced.add(friend.endpointId);
 
-    await svc.publishFix({ lat: 1, lon: 2, accuracyM: 5, headingDeg: 0, ts: 123 });
+    await svc.syncTrail(0);
 
     expect(health()[friend.endpointId]).toBe('desynced');
-    // ...and we must NOT drop the ephemeral, or the peer's half arrives with nothing to meet it.
-    expect(mockHolder.mod.calls.clearResync).toBe(0);
   });
 
-  it('stops resyncing and asks for a re-pair once recovery keeps failing', async () => {
+  it('asks for a re-pair once native recovery keeps failing', async () => {
     // "A resync loop surfaces a 're-pair with this friend' prompt rather than retrying forever."
-    // A session rebuilt three times that still does not work will not be fixed by a fourth.
+    // A session restarted three times that still does not work will not be fixed by a fourth.
     const svc = await shared();
     const health = healthOf(svc);
     mockHolder.mod.desynced.add(friend.endpointId);
     mockHolder.mod.resyncCounts.set(friend.endpointId, 3);
 
-    await svc.publishFix({ lat: 1, lon: 2, accuracyM: 5, headingDeg: 0, ts: 123 });
+    await svc.syncTrail(0);
 
-    expect(mockHolder.mod.calls.pollResync).toEqual([]);
     expect(health()[friend.endpointId]).toBe('recovery-failed');
   });
 
   it('checks watch-only friends too, not just the ones we share with', async () => {
     // A watcher edge is a session like any other — it is how our own fixes stay openable by them
-    // — so recovery must cover it. Watching only their lane would leave half the pool unhealable.
+    // — so its health must be read too, or half the pool could break unseen.
     const svc = makeService();
+    const health = healthOf(svc);
     await svc.init('@me', 'mothman');
     await svc.addFriend(watcher);
     mockHolder.mod.desynced.add(watcher.endpointId);
 
-    await svc.publishFix({ lat: 1, lon: 2, accuracyM: 5, headingDeg: 0, ts: 123 });
+    await svc.syncTrail(0);
 
-    expect(mockHolder.mod.calls.pollResync.map((c) => c.peer)).toEqual([watcher.endpointId]);
+    expect(health()[watcher.endpointId]).toBe('desynced');
   });
 
   it('forgets the ratchet session when a friend is removed', async () => {
@@ -1403,43 +1363,5 @@ describe('LocationSharingService — what the native drain did while JS was away
     const own = await svc.selfTrail(0);
     expect(own.map((p) => p.seq)).toEqual(expect.arrayContaining([41, 42, 43]));
     expect(mockHolder.mod.ownPublished).toHaveLength(0);
-  });
-
-  // Session health used to be written only by the JS publish path, which native replaced — so a
-  // friend dropped from every envelope for a week looked healthy in the app.
-  it('reads per-friend drops from the native seal report', async () => {
-    const svc = makeService();
-    await svc.init('@me', 'mothman');
-    await svc.addFriend(friend);
-    await svc.shareWith(friend.endpointId);
-    let latest: Record<string, string> = {};
-    svc.onChange((s) => {
-      latest = s.sessions.byFriend;
-    });
-
-    mockHolder.mod.sealDroppedPeers = [`${friend.endpointId}:lapsed`];
-    await svc.syncTrail(0);
-    expect(latest[friend.endpointId]).toBe('lapsed');
-
-    mockHolder.mod.sealDroppedPeers = [];
-    await svc.syncTrail(0);
-    expect(latest[friend.endpointId]).toBeUndefined();
-  });
-
-  it('reports a recovery native has given up on', async () => {
-    const svc = makeService();
-    await svc.init('@me', 'mothman');
-    await svc.addFriend(friend);
-    let latest: Record<string, string> = {};
-    svc.onChange((s) => {
-      latest = s.sessions.byFriend;
-    });
-
-    mockHolder.mod.desynced.add(friend.endpointId);
-    mockHolder.mod.resyncCounts.set(friend.endpointId, 3);
-    await svc.syncTrail(0);
-
-    expect(latest[friend.endpointId]).toBe('recovery-failed');
-    expect(mockHolder.mod.calls.pollResync).toHaveLength(0);
   });
 });

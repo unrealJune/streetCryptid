@@ -11,18 +11,22 @@ if (!config.resolver.assetExts.includes('wasm')) {
 /**
  * Keep Metro out of the Rust build directories.
  *
- * `modules/iroh-location/rust/target` is 120+ GB of cargo intermediates on a
- * machine that has built the crate a few times, and `rust-wasm/target` adds
- * several more. Metro's file map crawls and then WATCHES everything under the
- * project root, so without this the watcher hits its start-up timeout and the
- * dev server dies with "Failed to start watch mode" before it serves anything.
+ * The Cargo workspace's `target/` at the project root is 120+ GB of cargo
+ * intermediates on a machine that has built the crates a few times. Metro's
+ * file map crawls and then WATCHES everything under the project root, so
+ * without this the watcher hits its start-up timeout and the dev server dies
+ * with "Failed to start watch mode" before it serves anything. The per-crate
+ * `modules/iroh-location/{rust,rust-wasm}/target` directories predate the
+ * workspace and stay blocked for checkouts that still have them on disk.
  *
  * Nothing under `target/` is ever imported: the checked-in build outputs the
  * bundler does need are `modules/iroh-location/web/` (the wasm-pack bundle) and
  * the generated bindings under `android/` and `ios/`, none of which live here.
  */
+const escapeRegExp = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 config.resolver.blockList = [
   ...[config.resolver.blockList ?? []].flat(),
+  new RegExp(`^${escapeRegExp(path.join(__dirname, 'target'))}[/\\\\].*`),
   /[/\\]modules[/\\]iroh-location[/\\](rust|rust-wasm)[/\\]target[/\\].*/,
 ];
 

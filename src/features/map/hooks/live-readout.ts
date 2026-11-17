@@ -26,6 +26,12 @@ export interface LiveReadout {
   readonly sectorsVisible: boolean;
   /** Nearest prominent place name to the live camera center, or null. */
   readonly placeName: string | null;
+  /**
+   * The place name at the last committed camera — like `settledCoverage`, for consumers whose
+   * re-render is expensive. The map screen's accessibility label reads this one: subscribed to the
+   * live name, every neighbourhood a pan crossed re-rendered the whole screen mid-gesture.
+   */
+  readonly settledPlaceName: string | null;
 }
 
 export interface LiveReadoutStore {
@@ -40,6 +46,7 @@ const INITIAL: LiveReadout = {
   settledCoverage: 0,
   sectorsVisible: true,
   placeName: null,
+  settledPlaceName: null,
 };
 
 /** Whole percents: the finest step the island can show, so finer changes notify nobody. */

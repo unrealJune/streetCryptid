@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Starts (or reuses) a local trail-stash instance for network-segmentation/chaos testing, so
-# those tests never touch production infra. Formalizes the manual "clone trail-stash, cargo run
-# it, point .env.local at it" workflow used to validate cb39f47's durable-delivery receipt path
+# those tests never touch production infra. Built from repeater/server in this repository.
+# Formalizes the manual "build trail-stash, cargo run it, point .env.local at it" workflow used to validate cb39f47's durable-delivery receipt path
 # into a repeatable script, against trail-stash's real `bin/trail-stash.rs` interface: required
 # `TRAIL_STASH_SECRET_KEY`, `TRAIL_STASH_PRINT_TICKET=1` to have it print its own dial ticket, and
 # `GET /healthz` for readiness.
@@ -22,14 +22,14 @@
 # exact lines to add instead.
 #
 # Env:
-#   TRAIL_STASH_REPO       — path to a local github.com/unrealJune/trail-stash checkout.
-#                             Default: ~/trail-stash
 #   TRAIL_STASH_LOCAL_PORT — control-API port. Default: 8799 (deliberately NOT trail-stash's own
 #                             8787 default, so a real local deployment and this one never collide).
 set -euo pipefail
 
 STATE_DIR="${TRAIL_STASH_LOCAL_STATE_DIR:-$HOME/Library/Application Support/streetcryptid/e2e-local-stash}"
-REPO="${TRAIL_STASH_REPO:-$HOME/trail-stash}"
+# The stash lives in this repository (repeater/server), a member of its Cargo workspace.
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+TARGET_DIR="${CARGO_TARGET_DIR:-$REPO/target}"
 PORT="${TRAIL_STASH_LOCAL_PORT:-8799}"
 HEALTH_TIMEOUT_SECONDS=30
 
@@ -44,12 +44,6 @@ command -v curl >/dev/null 2>&1 || {
   exit 1
 }
 
-[ -f "$REPO/rust/Cargo.toml" ] || {
-  echo "error: no trail-stash checkout at $REPO (expected $REPO/rust/Cargo.toml)" >&2
-  echo "       clone it: git clone https://github.com/unrealJune/trail-stash \"$REPO\"" >&2
-  echo "       or set TRAIL_STASH_REPO to point at an existing checkout" >&2
-  exit 1
-}
 
 mkdir -p "$STATE_DIR"
 SECRET_FILE="$STATE_DIR/secret_key"
@@ -129,8 +123,8 @@ cmd_start() {
   [ -f "$SECRET_FILE" ] || openssl rand -hex 32 >"$SECRET_FILE"
   [ -f "$PSK_FILE" ] || openssl rand -hex 32 >"$PSK_FILE"
 
-  log "building (cargo build --features live)"
-  cargo build --features live --manifest-path "$REPO/rust/Cargo.toml" --quiet
+  log "building (cargo build -p trail-stash --features live)"
+  (cd "$REPO" && cargo build --locked -p trail-stash --features live --bin trail-stash --quiet)
 
   log "starting on port $PORT"
   : >"$LOG_FILE"
@@ -138,7 +132,7 @@ cmd_start() {
     TRAIL_STASH_PSK="$(cat "$PSK_FILE")" \
     TRAIL_STASH_PRINT_TICKET=1 \
     PORT="$PORT" \
-    nohup "$REPO/rust/target/debug/trail-stash" >"$LOG_FILE" 2>&1 &
+    nohup "$TARGET_DIR/debug/trail-stash" >"$LOG_FILE" 2>&1 &
   echo "$!" >"$PID_FILE"
 
   local waited=0

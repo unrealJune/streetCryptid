@@ -828,13 +828,22 @@ impl NodeHost {
         })
     }
 
+    /// Whether `node` (an address, as [`Self::heal_isolated`] takes it) is the node this host
+    /// currently holds.
+    pub(crate) fn is_current(&self, node: usize) -> bool {
+        self.host
+            .current()
+            .is_some_and(|current| Arc::as_ptr(&current) as usize == node)
+    }
+
     /// Rebuild an isolated node that no app holds, from the stored settings. `node` is the
     /// address of the node asking, so a node this host did not build (a test's) is never healed
     /// in its place, and a heal that lost a race to another rebuild does nothing.
     ///
     /// Never with an app lease: the app's subscriptions, listeners and pairing sessions belong to
     /// the node being replaced, and only the app can rewire them — it heals through `rebindNode`,
-    /// which reads the same [`crate::isolation::IsolationStatus::rebuild_due`].
+    /// which reads the same [`crate::isolation::IsolationStatus::rebuild_due`]. A node whose docs
+    /// engine is gone heals the same way (`isolation.rs`).
     pub(crate) async fn heal_isolated(&self, node: usize) -> bool {
         let host = &self.host;
         let healed = host

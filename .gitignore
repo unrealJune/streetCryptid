@@ -52,6 +52,9 @@ store.config.json
 infra/*
 !infra/otel/
 
+# Packaged Helm charts (helm package)
+*.tgz
+
 # typescript
 *.tsbuildinfo
 

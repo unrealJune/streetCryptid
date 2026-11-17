@@ -1,0 +1,2 @@
+# One rustfmt configuration for every crate in the workspace (`cargo fmt --all`).
+edition = "2021"

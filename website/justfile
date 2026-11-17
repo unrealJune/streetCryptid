@@ -1,0 +1,21 @@
+# streetcrypt.id, as `just website::<recipe>` from the repository root. Recipes run here, in website/.
+
+# Static checks: the association files, the pages, the installer script.
+test:
+    bun test test
+
+# Everything CI's website lane runs except the image build.
+check: test
+    cd .. && bunx prettier --check website
+    helm lint --strict charts/streetcrypt-id
+
+# Build the image exactly as the release does.
+image tag="streetcrypt-id:dev":
+    docker build -f Dockerfile -t {{tag}} .
+
+# Build and serve on http://localhost:{{port}}, then smoke-test it. Stop with `docker rm -f streetcrypt-id-dev`.
+serve port="8080": (image)
+    docker rm -f streetcrypt-id-dev >/dev/null 2>&1 || true
+    docker run -d --name streetcrypt-id-dev -p {{port}}:8080 streetcrypt-id:dev
+    sleep 1
+    bash test/smoke.sh http://localhost:{{port}}

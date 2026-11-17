@@ -115,7 +115,7 @@ Availability`, esp-idf #16743, closed-source blob). Do not put Aware-on-ESP32 on
 ### 3.1 Reuse, don't invent
 
 The **inner envelope is `crypto::seal` from `modules/iroh-location/rust`, unchanged**
-(same as live-mode control messages: "same envelope, different payload" — payload here
+(as the since-retired live-mode control messages did: "same envelope, different payload" — payload here
 is the normal `LocationFix`). All revocation, per-recipient wrap, and signature
 semantics carry over.
 

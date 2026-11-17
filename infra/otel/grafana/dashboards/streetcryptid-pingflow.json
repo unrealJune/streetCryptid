@@ -68,7 +68,7 @@
                 },
                 "size": 16,
                 "text": {
-                  "fixed": "📡 BROADCAST\n\npublish.fix (sender phone)\ngossip + docs.write",
+                  "fixed": "📡 PUBLISH\n\npublish.fix (sender phone)\ndocs write + trail.push",
                   "mode": "fixed"
                 },
                 "valign": "top"
@@ -200,7 +200,7 @@
                 },
                 "size": 16,
                 "text": {
-                  "fixed": "📱 RECEIVERS\n\ntrail.sync.app (backfill)\nfix.received.app (live)",
+                  "fixed": "📱 RECEIVERS\n\ntrail.sync.app (reconcile)\nfix.received.app (surfaced)",
                   "mode": "fixed"
                 },
                 "valign": "top"
@@ -451,7 +451,7 @@
         "type": "tempo",
         "uid": "${tempo}"
       },
-      "description": "How often each device backfills from stash/peers.",
+      "description": "How often each device reconciles its replica with the stash and its friends.",
       "fieldConfig": {
         "defaults": {
           "custom": {
@@ -498,7 +498,7 @@
           "tableType": "spans"
         }
       ],
-      "title": "Receiving — trail.sync.app (backfill) /s by author",
+      "title": "Receiving — trail.sync.app (reconcile) /s by author",
       "type": "timeseries"
     },
     {
@@ -616,7 +616,7 @@
         "type": "tempo",
         "uid": "${tempo}"
       },
-      "description": "Friend fixes recovered per backfill.",
+      "description": "Friend fixes recovered per reconcile.",
       "fieldConfig": {
         "defaults": {
           "custom": {
@@ -663,7 +663,7 @@
           "tableType": "spans"
         }
       ],
-      "title": "Backfill volume — recovered fixes by author",
+      "title": "Recovered — friend fixes per reconcile, by author",
       "type": "timeseries"
     },
     {
@@ -671,7 +671,7 @@
         "type": "tempo",
         "uid": "${tempo}"
       },
-      "description": "Live delivery to the app. Zero = live receive dead.",
+      "description": "One per new friend fix the app surfaced from its replica, however it arrived (a live docs broadcast, a pull, or the stash). Zero while friends are publishing = receive dead.",
       "fieldConfig": {
         "defaults": {
           "custom": {
@@ -718,7 +718,7 @@
           "tableType": "spans"
         }
       ],
-      "title": "Live receive — fix.received.app /s by author",
+      "title": "Received — fix.received.app /s by author",
       "type": "timeseries"
     },
     {
@@ -1306,7 +1306,7 @@
         "type": "loki",
         "uid": "${loki}"
       },
-      "description": "Receiver trail.backfill + stash lines mentioning this entry_hash.",
+      "description": "Receiver trail.sync + stash lines mentioning this entry_hash.",
       "gridPos": {
         "h": 8,
         "w": 24,

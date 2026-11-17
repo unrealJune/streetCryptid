@@ -380,11 +380,18 @@ jobs:
       EAS_BUILD_GIT_COMMIT_HASH: ${{ needs.version.outputs.sha }}
       EAS_LOCAL_BUILD_SKIP_CLEANUP: '0'
       # No SC_ANDROID_ABIS and no reactNativeArchitectures override here: a store bundle ships every
-      # ABI. Only the Gradle settings are shared with the pull-request builds, and this job is where
+      # ABI. The Gradle settings are the pull-request builds' plus workers.max, and this job is where
       # ~/.gradle/caches/build-cache-1 is filled for a ref every pull request can read.
+      #
+      # workers.max=2 is release-only. AGP runs each ABI's CMake build as its own worker and ninja
+      # inside it at nproc+2, so three ABIs on the default four workers put ~15 compilers beside a
+      # 5 GB Gradle heap: on 2026-11-15 the resource lines fell from 14 GB available to 0.9 GB at
+      # load 15 in five minutes, and the runner was shut down. Two workers keeps the native peak
+      # inside the runner; caching, not parallelism, is what makes the next run fast.
       GRADLE_OPTS: >-
         -Dorg.gradle.parallel=true
         -Dorg.gradle.caching=true
+        -Dorg.gradle.workers.max=2
         -Dorg.gradle.jvmargs=-Xmx5g
     steps:
       # Checked before a 40-minute build rather than after it: a release that builds and then
@@ -447,16 +454,21 @@ jobs:
       - name: Add swap for the three-ABI native build
         run: |
           set -euo pipefail
-          if ! mountpoint -q /mnt; then
-            echo "::notice::No ephemeral /mnt on this runner; building without extra swap."
-            exit 0
+          # ubuntu-24.04 images from 2026-11 have no separate /mnt disk, and this step used to
+          # exit here: the 2026-11-14 and 11-15 releases ran out of memory with no swap added. The
+          # root disk has ~88 GB free once the setup action has pruned the image, so fall back to it.
+          swap_dir=/
+          if mountpoint -q /mnt; then
+            swap_dir=/mnt
           fi
-          sudo fallocate -l 12G /mnt/sc-build.swap
-          sudo chmod 600 /mnt/sc-build.swap
-          sudo mkswap /mnt/sc-build.swap > /dev/null
-          sudo swapon /mnt/sc-build.swap
+          swap_file="${swap_dir%/}/sc-build.swap"
+          sudo fallocate -l 12G "$swap_file"
+          sudo chmod 600 "$swap_file"
+          sudo mkswap "$swap_file" > /dev/null
+          sudo swapon "$swap_file"
           swapon --show
           free -m
+          echo "systemd-oomd: $(systemctl is-active systemd-oomd 2>/dev/null || true)"
 
       - name: Build the store bundle locally
         id: build

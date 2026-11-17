@@ -132,7 +132,7 @@ async function session<T>(opts: HeadlessSession<T>): Promise<T> {
   await reportStrandedTeardown(createPersistentKV(), 'headless');
   // Never run headless while a mounted runtime owns the node: it does this work itself. Spinning up
   // a second node would call createNode → clearRuntime and tear down the FOREGROUND node mid-flight
-  // (breaking its gossip subscription and pairing poll). The batch is already persisted (senders
+  // (breaking its replica watch and pairing poll). The batch is already persisted (senders
   // enqueue before calling us), so nothing is lost — the foreground engine flushes/syncs on its
   // next cycle.
   const refusedBefore = refusalReason();
@@ -290,9 +290,6 @@ export async function ensureSharingArmedHeadless(
     const policy = createSamplingPolicy({
       ...benchmarkProfileOverrides(await loadIosLocationBenchmarkProfile(kv)),
     });
-    // Ambient cadence only. A self-heal never restores live mode: the watcher's window has almost
-    // certainly lapsed by now, and resurrecting a 4-second cadence unattended is how this failure
-    // mode compounds instead of ending.
     const decision = policy.decide({ battery: await createBatterySource().read() });
     span.setAttribute('decision.interval_ms', decision.timeIntervalMs);
     // Restart the native runtime rather than an OS task. On Android this is the documented
@@ -343,14 +340,13 @@ export function ingestFixesHeadless(
     trigger: 'drain',
     run: async (service) => {
       let published = 0;
+      // Each ingest pushes on its own: the native drain writes the replica and then reconciles it
+      // with the pool and the stash before it returns (`NodeSink::flush`), so a published envelope
+      // has already left the phone by the time the `finally` in `session()` shuts the node down.
+      // A second push from here would only be a second cold dial per member, on iOS's budget.
       for (const fix of fixes) {
         published += await service.ingestNativeFix(fix, parent);
       }
-      // `publishFix` only broadcasts live (to a swarm that is usually empty out here) and writes
-      // the LOCAL docs replica. Without this push the envelopes never leave the phone, so a friend
-      // who wasn't online at this exact moment never sees them — the whole reason the stash exists.
-      // Must happen before the `finally` in `session()` shuts the node down.
-      if (published > 0) await service.pushTrail(parent);
       return published;
     },
   });

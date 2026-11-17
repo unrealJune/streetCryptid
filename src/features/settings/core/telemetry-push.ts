@@ -57,6 +57,10 @@ function kib(bytes: number): string {
 export function describeTelemetryPush(result: TelemetryPushResult): string[] {
   const lines: string[] = [];
   const { js, native } = result;
+  if (js?.disabled) {
+    // Rust is switched off with it, so its line would only say "not configured".
+    return ['Sending is off (Settings → App & Data)'];
+  }
   if (!js) {
     lines.push('JS: no collector configured');
   } else if (!js.reachable) {

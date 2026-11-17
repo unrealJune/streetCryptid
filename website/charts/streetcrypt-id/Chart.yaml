@@ -1,0 +1,15 @@
+apiVersion: v2
+name: streetcrypt-id
+description: >-
+  streetcrypt.id: the App Link / Universal Link association files, the pairing and repeater-claim
+  fallback pages, and the repeater setup guide, served by Caddy.
+type: application
+# CI stamps both on every publish (.github/workflows/release-website.yml): version 0.1.<run>,
+# appVersion the same, which is also the image tag. These are what a local `helm template` sees.
+version: 0.1.0
+appVersion: '0.1.0'
+home: https://streetcrypt.id
+sources:
+  - https://github.com/unrealJune/streetCryptid/tree/main/website
+maintainers:
+  - name: June Philip

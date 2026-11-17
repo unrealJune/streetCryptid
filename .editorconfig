@@ -1,0 +1,35 @@
+# One set of whitespace rules for every product in the repository: the Expo app (TypeScript),
+# the Rust crates, the Windows repeater (C#, XAML, PowerShell), and the YAML and Markdown around
+# them. Prettier (app, Markdown, YAML), rustfmt (rustfmt.toml) and `dotnet format` read this too.
+# Line endings are .gitattributes's: Windows checkouts are CRLF, and `dotnet format` would flag
+# every line of them against an end_of_line here.
+root = true
+
+[*]
+charset = utf-8
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+indent_size = 2
+
+[*.{rs,py}]
+indent_size = 4
+
+[*.{cs,xaml,csproj,props,targets,ps1}]
+indent_size = 4
+
+[*.md]
+# A trailing double space is a Markdown line break.
+trim_trailing_whitespace = false
+
+[{justfile,*.just}]
+indent_size = 4
+
+[Makefile]
+indent_style = tab
+
+# Generated or vendored: written by their own tools, byte for byte.
+[{modules/iroh-location/ios/generated/**,modules/iroh-location/android/src/main/java/uniffi/**,third_party/**,modules/iroh-location/rust/third_party/**}]
+trim_trailing_whitespace = unset
+insert_final_newline = unset
+indent_size = unset

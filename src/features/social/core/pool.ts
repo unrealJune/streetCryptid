@@ -10,12 +10,6 @@ import type { ProfileView } from 'iroh-location';
  *                 friend just removes them here; because every fix uses a fresh random
  *                 content key, dropped friends can't read new fixes even though they may
  *                 still replicate the (undecryptable) ciphertext. See ARCHITECTURE.md §6.
- *
- * `sharingWith` is also the authorisation boundary for **live mode** (§9c): a friend we already
- * share with may switch us to the real-time cadence, with no further per-friend permission. That
- * is deliberate — sharing is itself an explicit grant on top of an SAS-verified bilateral pairing,
- * and live mode reveals nothing new, only the same stream more often. It stays bounded by a TTL and
- * visibly interruptible instead of gated behind another toggle.
  */
 export interface PoolState {
   readonly friends: Readonly<Record<string, Friend>>;

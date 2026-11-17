@@ -16,8 +16,9 @@ cleanup() {
 trap cleanup EXIT
 
 work="$test_root/repo"
-mkdir -p "$work/scripts"
+mkdir -p "$work/scripts/lib"
 cp "$repo_root/scripts/next-version.sh" "$repo_root/scripts/apply-version.sh" "$work/scripts/"
+cp "$repo_root/scripts/lib/conventional-commits.sh" "$work/scripts/lib/"
 
 write_manifests() {
   local version="$1"
@@ -41,9 +42,13 @@ EOF
 EOF
 }
 
+# Every commit touches a file: next-version.sh scopes its range by path, and git prunes a commit
+# that changes nothing from a path-limited log.
 commit() {
   local message="$1"
-  git -C "$work" commit --quiet --allow-empty -m "$message"
+  echo "$message" >> "$work/CHANGES"
+  git -C "$work" add -A
+  git -C "$work" commit --quiet -m "$message"
 }
 
 field() {
@@ -119,6 +124,72 @@ commit "chore: shuffle comments"
 git -C "$work" checkout --quiet -
 git -C "$work" merge --quiet --no-ff -m "feat: merge the topic branch" topic
 assert_bump "merge subject ignored" false none 1.0.0
+
+# The repeater products release under their own tags. A server tag is never the app's previous
+# release, and a commit confined to repeater/server or repeater/windows never cuts a store release.
+git -C "$work" tag v1.3.0
+git -C "$work" tag server-v9.9.9
+commit_in() {
+  local path="$1" message="$2"
+  mkdir -p "$work/$(dirname "$path")"
+  echo "$message" >> "$work/$path"
+  git -C "$work" add -A
+  git -C "$work" commit --quiet -m "$message"
+}
+commit_in repeater/server/src/lib.rs "feat(server): a repeater feature"
+commit_in repeater/windows/app/App.cs "fix(windows): a desktop fix"
+assert_bump "server tags are not app releases" false none 1.0.0
+expect "previous tag skips server-v" v1.3.0 "$(field previous_tag "$(next_version)")"
+
+commit_in repeater/protocol/src/roster.rs "fix(protocol): the phone links this"
+assert_bump "protocol changes still release the app" true patch 1.0.1
+
+git -C "$work" tag v1.4.0
+commit_in repeater/server/README.md "$(printf 'feat(server)!: drop the v0 API
+
+BREAKING CHANGE: server only.')"
+assert_bump "a breaking server change is not an app major" false none 1.0.0
+
+# Another repository's history merged in with --allow-unrelated-histories is not the app's, even
+# where it touches a path the app links (repeater/protocol): it never sat behind an app tag, so it
+# would otherwise all land in one range. What is built on top of it afterwards still counts.
+git -C "$work" tag v1.6.0
+imported="$test_root/imported"
+git init --quiet "$imported"
+git -C "$imported" config user.email "import-test@example.com"
+git -C "$imported" config user.name "Import Test"
+git -C "$imported" config core.autocrlf false
+mkdir -p "$imported/repeater/protocol/src"
+echo 'pub fn roster() {}' > "$imported/repeater/protocol/src/lib.rs"
+git -C "$imported" add -A
+git -C "$imported" commit --quiet -m "feat(repeater)!: a whole other product's history"
+git -C "$work" fetch --quiet "$imported" HEAD
+git -C "$work" merge --quiet --allow-unrelated-histories --no-edit -m "chore: import" FETCH_HEAD
+assert_bump "imported history is not an app release" false none 1.0.0
+
+# A branch made BEFORE the previous tag and merged after it still counts.
+git -C "$work" checkout --quiet -b old-branch v1.4.0
+commit_in src/old.ts "feat(map): finished on a branch older than the last release"
+git -C "$work" checkout --quiet -
+git -C "$work" merge --quiet --no-ff --no-edit -m "merge an old branch" old-branch
+assert_bump "a branch older than the previous tag still counts" true minor 1.1.0
+
+git -C "$work" tag v1.7.0
+commit_in repeater/protocol/src/lib.rs "fix(protocol): built on the imported crate"
+assert_bump "work on imported code after the import counts" true patch 1.0.1
+
+# What never ships in the app does not release it, whatever the commit type: workflows, docs,
+# the justfile, the ignore/attribute files, and the Windows client at its old path.
+git -C "$work" tag v1.8.0
+commit_in .github/workflows/release.yml "feat(ci): a new release job"
+commit_in docs/PLAN.md "feat(docs): a plan"
+commit_in justfile "feat(just): a recipe"
+commit_in .gitattributes "fix: line endings"
+commit_in .prettierignore "fix: ignore a directory"
+commit_in apps/repeater/windows/App.cs "feat(repeater): the Windows client before its move"
+assert_bump "tooling, docs and the old Windows path" false none 1.0.0
+commit_in src/screen.ts "fix(app): what ships"
+assert_bump "the app still counts" true patch 1.0.1
 
 # Version bookkeeping is only trustworthy when both manifests agree.
 write_manifests 1.0.0

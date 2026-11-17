@@ -8,6 +8,13 @@ and drives both devices through a deep-link command channel rather than app rest
 This is a record of what was found and what changed, so the next person does not have to
 rediscover any of it.
 
+> **Since 2026-11 location is docs-only** (`docs/social/ARCHITECTURE.md` §5). The app gossip lane
+> described below is gone, so every fix a pool member sees reached it by replication and is in its
+> replica — the "live gossip does not put anything there" trap can no longer occur. The push is
+> native now (`LocationNode::push_trail(Vec<String>)`, span `trail.push`), driven by the drain
+> with the list the app hands it through `setDeliveryConfig` (still `durablePeerTickets()`).
+> The rest is kept as the history it is.
+
 ## The property
 
 ARCHITECTURE.md §1.3 and §6 say a device recovers what it missed from _any_ pool member:

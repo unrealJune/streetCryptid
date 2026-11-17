@@ -47,8 +47,8 @@ interface FriendsIslandProps {
  * The drawer's FRIENDS body (`renders/social-roster-*`): the same panel swapped from "where you
  * are" to "who is out there", without ever leaving the map.
  *
- * Hairline dividers, not cards. One signal color per friend. Offline rows dim instead of
- * vanishing, so the roster's shape is stable. There is deliberately no "shared ground" bar here —
+ * Hairline dividers, not cards. One signal color per friend. Offline rows follow reachable friends
+ * and dim instead of vanishing. There is deliberately no "shared ground" bar here —
  * the mock showed one, but the app has no overlap metric yet and a fabricated number would break
  * the one-honest-signal rule.
  *
@@ -76,6 +76,7 @@ export function FriendsIsland({
   const { chrome } = theme;
   const { distanceUnit, ready: displayPreferencesReady } = useDisplayPreferences();
   const nearby = friends.filter((friend) => friend.nearby).length;
+  const sortedFriends = [...friends].sort((a, b) => Number(b.online) - Number(a.online));
 
   return (
     <View style={minimized ? islandBody.minimized : islandBody.expanded}>
@@ -120,7 +121,7 @@ export function FriendsIsland({
             <Text style={[styles.empty, { color: chrome.steel }]}>No cryptids yet!</Text>
           ) : (
             <View style={styles.list}>
-              {friends.map((friend, index) => (
+              {sortedFriends.map((friend, index) => (
                 <FriendRow
                   distanceUnit={displayPreferencesReady ? distanceUnit : null}
                   divider={index > 0}
@@ -183,13 +184,12 @@ function FriendRow({
         onPress={() => onSelect(friend.id)}
         style={({ pressed }) => [
           styles.rowMain,
-          { opacity: !friend.locatable ? 0.55 : pressed ? 0.58 : 1 },
+          { opacity: !friend.online ? 0.58 : !friend.locatable ? 0.55 : pressed ? 0.58 : 1 },
         ]}
       >
         <CryptidAvatar
           art={friend.sigil || 'unknown'}
           color={friend.color}
-          muted={!friend.online}
           name={friend.cryptidName ?? 'Unknown form'}
           style={styles.avatar}
         />

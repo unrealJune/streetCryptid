@@ -21,7 +21,7 @@ STATE_DIR="${2:-$HOME/Library/Application Support/streetcryptid/e2e-stash-observ
 PAIRED_MARKER="$STATE_DIR/paired-$(printf '%s' "$DEVICE" | tr -c 'A-Za-z0-9_.-' '_')"
 # The invite is delivered by the phone's own flow (`openLink`), not pushed from here — see the
 # pairing block below for why — so this script needs no per-platform invite target at all.
-BIN="$REPO_ROOT/modules/iroh-location/rust/target/debug/trail-stash-client"
+BIN="$REPO_ROOT/target/debug/trail-stash-client"
 
 log() { echo "[stash-observer] $*" >&2; }
 

@@ -15,9 +15,9 @@ import uniffi.iroh_location.FriendPullEvent
 import uniffi.iroh_location.FriendPullOutcome
 import uniffi.iroh_location.IngestOutcome
 import uniffi.iroh_location.LocationFix
+import uniffi.iroh_location.LocationNode
 import uniffi.iroh_location.NodeHolder
 import uniffi.iroh_location.PullReport
-import uniffi.iroh_location.Subscription
 import uniffi.iroh_location.recordFriendPull
 
 /**
@@ -54,16 +54,13 @@ internal object NativeBackgroundRuntime {
   @Volatile private var loggedNoIdentity = false
 
   /**
-   * The own-topic subscription on the process's node, taking the background lease if needed.
+   * The process's node, taking the background lease if needed.
    *
    * `null` when the device has no identity yet — a fresh install whose app has never run, where
    * minting one would create an identity no friend has ever paired with — or when the node could
    * not be started. Both are retried by the next capture.
-   *
-   * `ownSubscription(…, null)` never replaces the app's listener: if JS is alive it keeps hearing
-   * its own topic, and if it is not, the subscription is silent and the replica still fills.
    */
-  private suspend fun ownSubscription(context: Context): Subscription? {
+  private suspend fun acquireNode(context: Context): LocationNode? {
     val app = context.applicationContext
     IrohAndroidBootstrap.install(app)
     val node =
@@ -77,19 +74,11 @@ internal object NativeBackgroundRuntime {
         Log.w(TAG, "background node unavailable; the next capture retries", e)
         return null
       }
-    if (node == null) {
-      if (!loggedNoIdentity) {
-        Log.i(TAG, "no device identity yet; the app has not been opened")
-        loggedNoIdentity = true
-      }
-      return null
+    if (node == null && !loggedNoIdentity) {
+      Log.i(TAG, "no device identity yet; the app has not been opened")
+      loggedNoIdentity = true
     }
-    return try {
-      node.ownSubscription(emptyList(), null)
-    } catch (e: Exception) {
-      Log.w(TAG, "own-topic subscription unavailable; the next capture retries", e)
-      null
-    }
+    return node
   }
 
   /**
@@ -127,11 +116,10 @@ internal object NativeBackgroundRuntime {
     intervalMs: ULong,
   ): Capture {
     if (IrohLocationModule.appIsWired()) return Capture.HandToApp
-    val sub = ownSubscription(context) ?: return Capture.Unavailable
+    val node = acquireNode(context) ?: return Capture.Unavailable
     return try {
       val outcome =
-        sub.ingestFix(
-          SUBSCRIPTION_ID,
+        node.ingestFix(
           fix,
           battery,
           intervalMs,
@@ -168,11 +156,10 @@ internal object NativeBackgroundRuntime {
     intervalMs: ULong,
   ): Capture {
     if (IrohLocationModule.appIsWired()) return Capture.HandToApp
-    val sub = ownSubscription(context) ?: return Capture.Unavailable
+    val node = acquireNode(context) ?: return Capture.Unavailable
     return try {
       val outcome =
-        sub.heartbeatFix(
-          SUBSCRIPTION_ID,
+        node.heartbeatFix(
           battery,
           intervalMs,
           System.currentTimeMillis().toULong(),
@@ -195,8 +182,8 @@ internal object NativeBackgroundRuntime {
    *
    * The Android half of iOS's `pullFriendFixes`. With no JS alive, nothing else reconciles against
    * the stash, so without this a phone whose app the OS had killed published its own position on
-   * time while every friend's dot on ITS map stayed wherever it was when the app died. Live gossip
-   * still arrives, but only while both phones are online at the same moment; the stash is the part
+   * time while every friend's dot on ITS map stayed wherever it was when the app died. A friend's
+   * live push still lands while both phones are online at the same moment; the stash is the part
    * that needs a pull.
    *
    * Floored at one pull per [SYNC_FLOOR_MS], durably, because `syncLatest` dials every delivery
@@ -354,11 +341,4 @@ internal object NativeBackgroundRuntime {
 
   /** Process-lifetime, never cancelled: see [stopDetached]. */
   private val releaseScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-
-  /**
-   * Accepted for API parity and ignored: a node owns a single trail namespace, so the Rust side
-   * takes this as `_subscription_id`. Named rather than passed as `""` so a reader does not go
-   * looking for the map it would have to have come from.
-   */
-  private const val SUBSCRIPTION_ID = "background"
 }

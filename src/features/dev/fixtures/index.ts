@@ -123,6 +123,8 @@ function fixtureFriends(
       },
       receivedAt: now - person.contactAgeS * 1000,
       via: person.via,
+      // A `docs` label names who served the entry; for a demo person that is their own phone.
+      ...(person.via === 'docs' ? { viaPeer: endpointId } : {}),
     });
   });
 

@@ -33,15 +33,13 @@ export interface TrailPoint {
   receivedAt: number;
   /**
    * How the point reached this device (friend points only; our own are unlabelled). Absent on rows
-   * stored before provenance was recorded.
+   * stored before provenance was recorded, or whose label predates the docs-only transport.
    *
-   * First writer wins: a fix received live and later re-seen during reconciliation keeps its live
-   * label, because that is how it actually got here. The one exception is
-   * {@link UNRESOLVED_VIA} — see {@link mergeProvenance}.
+   * First writer wins, except that {@link UNRESOLVED_VIA} yields — see {@link mergeProvenance}.
    */
   via?: FixTransport;
   /**
-   * WHO performed that hop — the endpoint that handed the envelope over. Kept as one unit with
+   * WHO served the entry — the endpoint that replicated it into this device. Kept as one unit with
    * {@link via}: a label from one delivery beside a peer from another would read as a fact and be
    * a fiction, which is the only way this row can lie. See {@link mergeProvenance}.
    */
@@ -49,12 +47,10 @@ export interface TrailPoint {
 }
 
 /**
- * The label derived from the `backfill` flag alone, when the delivery carried none: "read back out
- * of the durable replica, serving peer unknown".
+ * The label for a fix that carried none: "read back out of the replica, serving peer unknown".
  *
- * It is deliberately weaker than every label the native layer supplies, because
- * `refreshTrailFromReplica` re-reads the whole replica after each sync and can beat the backfill
- * callback that carries the precise one (`stash` vs `docs`) to the store.
+ * It is deliberately weaker than `docs`, which names the peer that served the entry, so a later
+ * read of the same fix that does name one can sharpen it.
  */
 export const UNRESOLVED_VIA: FixTransport = 'sync';
 
@@ -65,13 +61,13 @@ export interface Provenance {
 }
 
 /**
- * Provenance kept on upsert: first writer wins, except that {@link UNRESOLVED_VIA} yields to any
- * label that actually names the serving peer or link. Mirrored in the SQLite `ON CONFLICT` clause.
+ * Provenance kept on upsert: first writer wins, except that {@link UNRESOLVED_VIA} yields to a
+ * label that names the serving peer. Mirrored in the SQLite `ON CONFLICT` clause.
  *
  * The pair moves together or not at all. Adopting an incoming `viaPeer` next to a `via` from an
- * earlier delivery would produce a sentence nothing ever observed — "relayed by the stash", say,
- * from a live label and a reconciliation peer — so the whole record is replaced or the whole
- * record survives. An incoming record with no `via` names no delivery and never replaces one.
+ * earlier read would produce a sentence nothing ever observed, so the whole record is replaced or
+ * the whole record survives. An incoming record with no `via` names no delivery and never replaces
+ * one.
  */
 export function mergeProvenance(existing: Provenance, incoming: Provenance): Provenance {
   if (!incoming.via) return existing;
@@ -203,7 +199,7 @@ export function createTrailStore(opts: TrailStoreOptions): TrailStore {
         seq: incoming.seq,
         fix: incoming.fix,
         receivedAt: incoming.receivedAt ?? now(),
-        via: incoming.via ?? (incoming.backfill ? UNRESOLVED_VIA : 'live'),
+        via: incoming.via ?? UNRESOLVED_VIA,
         ...(incoming.viaPeer ? { viaPeer: incoming.viaPeer } : {}),
       });
     },

@@ -69,7 +69,7 @@ done
 log "Edge 1/3: pairing $DEVICE_A <-> $DEVICE_B"
 bash "$SCRIPT_DIR/pairing-e2e.sh" "$DEVICE_A" "$DEVICE_B" >&2
 
-STASH_CLI="$REPO_ROOT/modules/iroh-location/rust/target/debug/trail-stash-client"
+STASH_CLI="$REPO_ROOT/target/debug/trail-stash-client"
 # One retry per edge. The SAS handshake has a real deadline, and the observer's side of it starts
 # a fresh CLI process — iroh node, relay discovery, first dial — against a state directory the
 # PREVIOUS edge's process has only just released. Back to back, that occasionally misses the
@@ -210,17 +210,17 @@ for line in sys.stdin:
 
 deadline="$(($(date +%s) + TIMEOUT_SECONDS))"
 while [ "$(date +%s)" -lt "$deadline" ]; do
+  # The push to the stash is native (`trail.push` in Rust) and leaves no row in the app's journal;
+  # the observer decrypting a device's fix FROM the stash, below, is what proves it was pushed.
   if [ "$a_pipeline" -eq 0 ] &&
-    [ "$(device_event_log_count "$DEVICE_A" "$START_MS" publish.fix ok)" -gt 0 ] &&
-    [ "$(device_event_log_count "$DEVICE_A" "$START_MS" trail.push.app ok)" -gt 0 ]; then
+    [ "$(device_event_log_count "$DEVICE_A" "$START_MS" publish.fix ok)" -gt 0 ]; then
     a_pipeline=1
-    log "  device A pipeline: publish + stash push OK"
+    log "  device A pipeline: publish OK"
   fi
   if [ "$b_pipeline" -eq 0 ] &&
-    [ "$(device_event_log_count "$DEVICE_B" "$START_MS" publish.fix ok)" -gt 0 ] &&
-    [ "$(device_event_log_count "$DEVICE_B" "$START_MS" trail.push.app ok)" -gt 0 ]; then
+    [ "$(device_event_log_count "$DEVICE_B" "$START_MS" publish.fix ok)" -gt 0 ]; then
     b_pipeline=1
-    log "  device B pipeline: publish + stash push OK"
+    log "  device B pipeline: publish OK"
   fi
 
   if [ "$a_observed" -eq 0 ] || [ "$b_observed" -eq 0 ]; then

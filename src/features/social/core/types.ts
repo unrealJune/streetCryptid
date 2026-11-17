@@ -77,7 +77,8 @@ export interface ContactCard {
   /**
    * iroh-docs read-ticket granting replication of this device's durable trail namespace — the
    * swarm-join half of a sharing grant (the decrypt half is {@link recvPublic}). Optional for
-   * backward compatibility with live-only cards; absent ⇒ live gossip only, no offline recovery.
+   * backward compatibility with older cards; absent ⇒ nothing of theirs can be read, since the
+   * docs namespace is the only location channel.
    * See docs/social/ARCHITECTURE.md §6.
    */
   docTicket?: string;
@@ -126,19 +127,14 @@ export interface SelfIdentity {
 }
 
 /**
- * How a fix reached THIS device — the last hop in, not a claim about the author's own link.
- * Gossip is epidemic, so a live fix may have been forwarded by any neighbour in the swarm.
+ * How a friend's fix reached THIS device. Every fix arrives the same way — iroh-docs replication of
+ * the author's trail namespace, read back out of the local replica — so the label does not name a
+ * transport. It says whether this device knows WHO served the entry.
  *
- * - `relay`  — live, arrived over an iroh relay path.
- * - `direct` — live, arrived over a direct (routable IP) path.
- * - `lan`    — live, arrived over a private/link-local IP path.
- * - `ble`    — live, arrived over the BLE (custom) transport.
- * - `live`   — live gossip, last hop unknown (older binaries; no path info).
- * - `docs`   — recovered by range-reconciliation with a peer's durable trail.
- * - `stash`  — recovered from the trail stash mirror.
- * - `sync`   — recovered from the durable trail, source unknown.
+ * - `docs` — replicated in from a named peer ({@link IncomingFix.viaPeer}) since the last read.
+ * - `sync` — read back out of the local replica; nobody was recorded serving it on this pass.
  */
-export type FixTransport = 'relay' | 'direct' | 'lan' | 'ble' | 'live' | 'docs' | 'stash' | 'sync';
+export type FixTransport = 'docs' | 'sync';
 
 /** An inbound decrypted fix from a friend. */
 export interface IncomingFix {
@@ -146,32 +142,24 @@ export interface IncomingFix {
   seq: number;
   fix: LocationFix;
   receivedAt: number;
-  /** True when recovered via durable range-reconciliation (iroh-docs) rather than live gossip. */
-  backfill?: boolean;
-  /**
-   * The last hop this fix took into this device. Absent ⇒ unknown, and the trail store falls back
-   * to the coarse live/sync split implied by {@link backfill}.
-   */
+  /** How the fix reached this device. Absent ⇒ the trail store records it as unresolved (`sync`). */
   via?: FixTransport;
   /**
-   * WHO performed that last hop — the endpoint that handed this device the envelope. Not a claim
-   * about the author's own link, and frequently not {@link IncomingFix.author}: gossip is
-   * epidemic, so any device in the author's swarm can carry their fix here, and reconciliation is
-   * served by whichever peer holds the entry. May be an endpoint this device has never paired
-   * with. Absent ⇒ nobody delivered it on this path (read back from the replica), or the native
-   * binary predates attribution.
+   * WHO served the entry — the endpoint that replicated it into this device's replica. Not a claim
+   * about the author's own link, and frequently not {@link IncomingFix.author}: any device holding
+   * the author's namespace (a mutual friend, the trail stash) can serve it during reconciliation,
+   * including one this device has never paired with. Absent ⇒ the entry was already in the replica
+   * when it was read, or the native binary predates attribution.
    */
   viaPeer?: Hex;
 }
 
 export type RatchetAckKind = 'fix' | 'null';
-export type RatchetAckSource = 'live' | 'durable';
 
 export interface RatchetAck {
   seq: number;
   /** When this device successfully opened the friend's response. */
   receivedAt: number;
-  source: RatchetAckSource;
 }
 
 /** Latest signed return-envelope activity for one friend. */
