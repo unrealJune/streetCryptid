@@ -6,7 +6,7 @@ export const PERMISSIONS_PAGE_COPY: PageCopyText = {
   title: 'Permissions',
   titleSingle: 'One permission',
   subtitle:
-    'We need your approval to use the following device features. You can change your mind later in Settings. streetCryptid works best with all of them, but you can skip any you want.',
+    'Here’s what streetCryptid needs from your phone, and why. It works best with everything on, but you can say no to any of it and change your mind later in Settings.',
   continue: 'Continue',
   notNow: 'Not now',
   railOk: 'OK',
@@ -24,6 +24,7 @@ export const PERMISSION_STEP_COPY: Record<PermissionStepId, StepCopyText> = {
     name: 'Location',
     title: 'Before we turn on location',
     lede: 'streetCryptid uses your location while the app is closed or in the background.',
+    summary: 'Fill in your map and share with friends.',
     cards: [
       {
         label: 'TERRITORY EXPLORATION',
@@ -37,15 +38,16 @@ export const PERMISSION_STEP_COPY: Record<PermissionStepId, StepCopyText> = {
       },
     ],
     note: {
-      ios: 'Next, your iPhone will ask to allow location access. After that, it will ask for background access.',
-      default: 'Next, your device will ask you to allow location access.',
+      ios: 'Next, your phone will ask to allow location access, then ask again for background access.',
+      default: 'Next, your phone will ask to allow location access.',
     },
     action: 'Turn on location',
   },
   'background-location': {
     name: 'Location all the time',
     title: 'Allow all the time',
-    lede: 'Most of your walking happens with the app closed. Background access is what lets streetCryptid keep up then.',
+    lede: 'Most of your walking happens with the app closed. Background access lets streetCryptid keep up then.',
+    summary: 'Keep working while the app is closed.',
     cards: [
       {
         label: 'WHILE THE APP IS CLOSED',
@@ -54,16 +56,16 @@ export const PERMISSION_STEP_COPY: Record<PermissionStepId, StepCopyText> = {
       },
     ],
     note: {
-      ios: 'Next, your iPhone will ask whether to change to “Always Allow.”',
-      android: 'We will open the app’s settings: choose “Allow all the time,” then come back.',
+      ios: 'Next, your phone will ask whether to change to “Always Allow.”',
+      android: 'We’ll open streetCryptid’s settings. Choose “Allow all the time,” then come back.',
     },
     action: 'Allow all the time',
   },
   bluetooth: {
     name: 'Bluetooth',
     title: 'Bluetooth, for Bump',
-    lede: 'Bump pairs two phones held together, when you’re next to a friend.',
-    summary: 'Pair with your friends!',
+    lede: 'Bump pairs your phone with a friend’s when you hold them together.',
+    summary: 'Pair with a friend in person.',
     cards: [
       {
         label: 'PAIRING IN PERSON',
@@ -73,30 +75,31 @@ export const PERMISSION_STEP_COPY: Record<PermissionStepId, StepCopyText> = {
     ],
     note: {
       android: 'Android calls this “Nearby devices.”',
-      ios: 'Next, your iPhone will ask to allow Bluetooth.',
+      ios: 'Next, your phone will ask to allow Bluetooth.',
     },
     action: 'Allow Bluetooth',
   },
   'local-network': {
     name: 'Local network',
     title: 'Phones on your Wi-Fi',
-    lede: 'When a friend is on the same Wi-Fi, your phones can talk to each other directly, minimizing network exposure and missed updates.',
+    lede: 'When a friend is on the same Wi-Fi, your phones can talk directly, so fewer updates go missing and less goes over the internet.',
     summary: 'Reach friends on the same Wi-Fi directly.',
     cards: [],
     note: {
-      ios: 'Next, your iPhone will ask to find and connect to devices on your local network.',
+      ios: 'Next, your phone will ask to find and connect to devices on your local network.',
     },
     action: 'Allow local network',
   },
   notifications: {
     name: 'Notifications',
     title: 'A notification while sharing',
-    lede: 'Android shows a notification for as long as streetCryptid shares your location in the background.',
+    lede: 'While streetCryptid shares your location in the background, Android requires a notification that says so.',
+    summary: 'Show when sharing is on.',
     cards: [
       {
         label: 'ALWAYS VISIBLE',
         tone: 'amber',
-        body: 'We are required to show a notification while sharing your location in the background.',
+        body: 'It stays up for as long as sharing is on, so you can always tell.',
       },
     ],
     note: {},
@@ -105,8 +108,8 @@ export const PERMISSION_STEP_COPY: Record<PermissionStepId, StepCopyText> = {
   battery: {
     name: 'Battery',
     title: 'Keep sharing when the app is closed',
-    lede: 'Android sometimes stops apps in the background to save memory. When it stops streetCryptid, it won’t let sharing start again until you open the app.',
-    summary: 'Unrestricted battery use',
+    lede: 'To save memory, Android sometimes closes apps in the background. When it closes streetCryptid, sharing stays off until you open the app again.',
+    summary: 'Stop Android from switching sharing off.',
     cards: [
       {
         label: 'SET BATTERY USE TO UNRESTRICTED',
@@ -116,8 +119,8 @@ export const PERMISSION_STEP_COPY: Record<PermissionStepId, StepCopyText> = {
     ],
     note: {
       default:
-        'You can change this any time in Settings → Apps → streetCryptid → Battery. If you skip it, we’ll send a notification whenever sharing stops so you can turn it back on.',
+        'You can change this anytime in Settings → Apps → streetCryptid → Battery. If you skip it, we’ll notify you whenever sharing stops so you can turn it back on.',
     },
-    action: 'Allow',
+    action: 'Allow unrestricted battery',
   },
 };

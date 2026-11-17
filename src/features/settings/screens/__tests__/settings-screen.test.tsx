@@ -82,7 +82,7 @@ describe('SettingsScreen', () => {
     const byHref = new Map(rows().map((row) => [row.href, row.value]));
 
     expect(byHref.has('/settings/transports')).toBe(false);
-    expect(byHref.get('/settings/delivery')).toBe('Mutuals + Stash Server');
+    expect(byHref.get('/settings/delivery')).toBe('Mutual Friends + Stash');
     expect(byHref.get('/settings/appearance')).toBe('Seattle · Light');
     // Transports moved behind Advanced, so Advanced is where their state has to surface:
     // a row that reports nothing is what made this menu look unfinished.
@@ -151,7 +151,7 @@ describe('SettingsScreen', () => {
     act(() => renderer.unmount());
     snapshot.delivery = { mode: 'stash', effectiveMode: 'stash' };
     expect(rows().find((row) => row.href === '/settings/delivery')?.value).toBe(
-      'Mutuals + Stash Server'
+      'Mutual Friends + Stash'
     );
 
     snapshot.delivery = { mode: 'stash', effectiveMode: 'stash' };

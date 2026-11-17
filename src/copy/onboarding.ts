@@ -51,14 +51,14 @@ export const ONBOARDING_COPY: {
     start: 'Get started',
     railStart: 'Start',
     heading: 'Find your cryptids in the world.',
-    body: 'Share your location with your friends and track where you’ve been. We promise to never save, sell, or snoop on your trail.',
+    body: 'Share your location with friends and see where you’ve been. We’ll never save, sell, or snoop on your trail.',
   },
   profile: {
     title: 'Set up your profile',
-    intro: 'Choose how you appear to friends. You can change this later.',
+    intro: 'Choose how friends see you. You can change this later.',
   },
   privacy: {
-    title: 'Quick message from us',
+    title: 'A quick note from us',
     back: 'Back',
     backLabel: 'Back to profile',
     continue: 'Continue',
@@ -66,8 +66,8 @@ export const ONBOARDING_COPY: {
     railContinue: 'Next',
     lede: 'What makes streetCryptid different?',
     letter:
-      'streetCryptid was designed to be privacy focused from the ground up. We don’t collect logs, telemetry, or other data.\n\nWe’ve also taken steps to ensure that the way we share your location is also private. To facilitate this, we try to rely on peer-to-peer connections between friends. This means that your location can travel directly between your friend network without us ever needing to store it on a server for others to read. This also means that all of your friends need their phone to be listening when you send out your location. This is pretty hard.\n\nWe also offer a more resilient option, that uses a server to store your location updates for your friends to read when they come back online. This is called the “stash” option, and it is encrypted so that only your friends can read it. Like this app, the server is open source and designed to hold no information about you. We make it an option for folks that may not need the extra privacy, but want to make sure their friends can always see their location updates. You can always host your own server if you don’t trust us.\n\nRead more about our privacy preserving decisions on our [website](https://streetcrypt.id).',
-    signoff: '— the streetCryptid team.',
+      'We built streetCryptid around privacy from the start. We don’t collect logs, telemetry, or any other data.\n\nSharing your location is private too. Wherever we can, it travels straight from your phone to your friends’ phones, so it never sits on a server for anyone else to read. The catch is that a friend’s phone has to be listening when you send it, and phones in pockets often aren’t.\n\nSo there’s also a more reliable option: the stash. It’s a server that holds your latest location until your friends come back online, encrypted so only they can read it. Like the app, it’s open source and built to know nothing about you. It’s for folks who don’t need the extra privacy and want friends to always see where they are. If you don’t trust us, you can run your own.\n\nRead more about how we protect your privacy on our [website](https://streetcrypt.id).',
+    signoff: 'The streetCryptid team',
   },
   delivery: {
     title: 'Delivery',
@@ -85,13 +85,13 @@ export const ONBOARDING_COPY: {
   deliveryMutual: {
     title: 'Mutual Friends',
     segment: 'MUTUAL FRIENDS',
-    heading: 'Mutual friend relay',
-    body: 'Because of restrictions on background processing on {platform}, this method is not reliable for daily usage unless you’re working with a very large pool of mutual friends. Enabling this setting may cause you to have unreliable or missed location updates.',
+    heading: 'Friends pass your location along',
+    body: 'Background limits on {platform} mean your friends’ phones often aren’t listening when you share. Unless you have a lot of mutual friends, expect late or missed location updates.',
   },
   deliveryStash: {
-    title: 'Mutuals + Stash Server',
+    title: 'Mutual Friends + Stash',
     segment: 'STASH',
-    heading: 'Mutuals + Stash Server',
-    body: 'If your friends are offline and can’t receive your location updates, using stash will allow friends to catch up with your location updates when they come back online. Stash entries are encrypted and can only be read by your friends, and are auto deleted after a short period of time.',
+    heading: 'The stash covers for offline friends',
+    body: 'When friends are offline, the stash holds your latest location until they’re back. It’s encrypted so only your friends can read it, and it’s deleted after a short time.',
   },
 };
