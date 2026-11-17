@@ -6,7 +6,7 @@
     <title>Run a repeater · streetCryptid</title>
     <meta
       name="description"
-      content="Set up a streetCryptid repeater: a computer that keeps your sealed location for friends while your phone sleeps, and can never read it."
+      content="Set up a streetCryptid repeater on Windows or Linux and claim it from your phone."
     />
     <meta name="theme-color" content="#eef2f5" media="(prefers-color-scheme: light)" />
     <meta name="theme-color" content="#0a1420" media="(prefers-color-scheme: dark)" />
@@ -30,10 +30,7 @@
       <main class="centred" id="claim-view" hidden>
         <div class="card" id="claim" hidden>
           <h1>Claim this repeater</h1>
-          <p>
-            A computer running a streetCryptid repeater is waiting for its owner. Open this on the
-            phone that will own it, with streetCryptid installed.
-          </p>
+          <p>Open this on the phone that will own the repeater, with streetCryptid installed.</p>
 
           <!-- The custom scheme still resolves on builds that predate the /repeater App Link,
                and on installs where verification has not landed yet. -->
@@ -48,8 +45,9 @@
               <button class="copy" id="copy" type="button" aria-live="polite">Copy</button>
             </div>
             <p>
-              If the button doesn't work, paste the text above into the app under Settings &gt;
-              Repeaters. The code on the repeater's screen is replaced every 30 minutes.
+              If <strong>Open in app</strong> doesn't work, copy this link, then in streetCryptid go
+              to <strong>Settings</strong> &gt; <strong>Repeaters</strong> &gt;
+              <strong>Add a repeater</strong> and tap <strong>PASTE LINK</strong>.
             </p>
           </div>
         </div>
@@ -57,32 +55,21 @@
         <div class="card" id="incomplete" hidden>
           <div class="stack">
             <h1>This claim link is incomplete</h1>
-            <p>
-              The part that names the repeater is not in this URL, usually because the code was
-              scanned partly or something in between stripped everything after the <code>#</code>.
-              Scan the code on the repeater's screen again.
-            </p>
+            <p>Scan the code on the repeater's screen again.</p>
           </div>
 
           <a class="primary" href="/repeater">How to set up a repeater</a>
-
-          <p class="footnote">Nothing was recorded · this page received no claim to record</p>
         </div>
       </main>
 
       <main class="guide" id="guide">
         <div class="guide-head">
-          <span class="micro">Repeaters</span>
           <h1>Run a repeater</h1>
-          <p class="lede">
-            A computer that stays on and keeps your sealed location for friends while your phone
-            sleeps. It holds ciphertext only, in memory, and can never read where you are.
-          </p>
         </div>
 
         <p class="notice" id="on-phone" hidden>
-          You're on a phone. A repeater runs on a computer that stays on: open
-          <strong>streetcrypt.id/repeater</strong> there, then come back to this phone to claim it.
+          Open <strong>streetcrypt.id/repeater</strong> on the computer that will run the repeater,
+          then claim it with this phone.
         </p>
 
         <section class="sheet-card">
@@ -102,10 +89,8 @@
           <div class="panel" role="tabpanel" id="os-windows" aria-labelledby="tab-windows">
             <ol class="steps">
               <li>
-                <h2>Install</h2>
-                <p>
-                  Windows 10 (2004) or Windows 11, x64 or ARM64. No administrator rights needed.
-                </p>
+                <h2>Install it</h2>
+                <p>Needs Windows 10 (2004) or Windows 11, x64 or ARM64.</p>
 
                 <div class="tabs small" role="tablist" aria-label="Install with" data-tabs="win">
                   <button role="tab" type="button" id="tab-win-ps" aria-controls="win-ps">
@@ -155,51 +140,54 @@
                 </div>
 
                 <p class="caveat">
-                  <strong>This is an unsigned preview.</strong> Windows will say it protected your
-                  PC from an unrecognised app. Choose <em>More info</em>, then <em>Run anyway</em>.
-                  The script keeps that warning on purpose rather than slipping past it;
-                  <a href="/repeater/install.ps1">read it first</a> if you like.
+                  <strong>This preview isn't signed yet.</strong> When Windows says it protected
+                  your PC, choose <strong>More info</strong>, then <strong>Run anyway</strong>.
+                  <a href="/repeater/install.ps1">Read the script</a> first if you want.
                 </p>
               </li>
 
               <li>
                 <h2>Set it up</h2>
-                <p>
-                  The app opens to a short setup. Nothing is registered until you press
-                  <em>Continue</em>.
-                </p>
                 <ul class="options">
                   <li>
-                    <strong>Run as a Windows service</strong>, so it keeps carrying with nobody
-                    signed in. Windows asks for administrator approval once.
+                    Leave <strong>Run as a Windows service</strong> on so it runs with nobody signed
+                    in. Windows asks for administrator approval once.
                   </li>
                   <li>
-                    <strong>Keep this PC awake on mains power.</strong> A sleeping PC carries
-                    nothing; on battery it sleeps as usual.
+                    Turn on <strong>Keep awake on mains power</strong>. A sleeping PC can't carry
+                    anything.
                   </li>
-                  <li><strong>Send diagnostics</strong> is off unless you leave it on.</li>
+                  <li>
+                    Turn off <strong>Send diagnostics</strong> if you don't want to send them.
+                  </li>
+                  <li>Press <strong>CONTINUE</strong>.</li>
                 </ul>
               </li>
 
               <li>
                 <h2>Claim it</h2>
-                <p>
-                  The PC now shows a claim code. On your phone, open streetCryptid →
-                  <em>Settings</em> → <em>Repeaters</em> → <em>Add a repeater</em>, and point the
-                  camera at it. Whoever claims it first owns it.
-                </p>
+                <ul class="options">
+                  <li>
+                    Point your phone's camera at the code on the PC's screen and open the link in
+                    streetCryptid.
+                  </li>
+                  <li>
+                    Leave <strong>Carry my location</strong> on. Turn on
+                    <strong>Open to anyone</strong> only if anyone should be able to ask it to carry
+                    their location.
+                  </li>
+                  <li>Tap <strong>CLAIM</strong>.</li>
+                </ul>
                 <p class="footnote">
-                  The code is single-use and replaced every 30 minutes. Don't post a screenshot of
-                  it.
+                  The code works once and changes every 30 minutes. Don't share a screenshot of it.
                 </p>
               </li>
 
               <li>
-                <h2>Let it carry</h2>
+                <h2>Offer it to friends</h2>
                 <p>
-                  Turn on <em>Carry my location on your repeaters</em>. When you pair with someone
-                  you can offer them your repeaters too, and they choose whether to have theirs
-                  carried.
+                  When you pair with someone, tap <strong>MY REPEATERS</strong> and pick this one.
+                  They choose whether to use it.
                 </p>
               </li>
             </ol>
@@ -210,8 +198,7 @@
             <div class="soon">
               <h2>Not on macOS yet</h2>
               <p>
-                There's no Mac repeater yet. Any Windows or Linux computer that stays on will do in
-                the meantime, and you can claim it from an iPhone.
+                Use any Windows or Linux computer that stays on. You can claim it from an iPhone.
               </p>
               <button class="outline" type="button" data-show-tab="tab-windows">
                 Set up on Windows
@@ -223,11 +210,8 @@
           <div class="panel" role="tabpanel" id="os-linux" aria-labelledby="tab-linux">
             <ol class="steps">
               <li>
-                <h2>Download</h2>
-                <p>
-                  Any 64-bit Linux, x86_64 or aarch64 (a Raspberry Pi 4 or 5 will do). One binary;
-                  nothing needs root to try it.
-                </p>
+                <h2>Download it</h2>
+                <p>Needs 64-bit Linux, x86_64 or aarch64. A Raspberry Pi 4 or 5 works.</p>
                 <div class="downloads">
                   <a
                     class="outline"
@@ -235,6 +219,10 @@
                     >Latest Linux release</a
                   >
                 </div>
+                <p class="caveat">
+                  <strong>Check the download</strong> against the release's
+                  <code>SHA256SUMS</code> before you run it.
+                </p>
                 <div class="cmd">
                   <code
                     >tar xzf streetcryptid-repeater-*-$(uname -m)-linux.tar.gz &amp;&amp; cd
@@ -242,10 +230,6 @@
                   >
                   <button class="copy" type="button" aria-live="polite">Copy</button>
                 </div>
-                <p class="caveat">
-                  <strong>This is a preview.</strong> Check the download against the release's
-                  <code>SHA256SUMS</code> before you run it.
-                </p>
               </li>
 
               <li>
@@ -254,75 +238,63 @@
                   <code>./streetcryptid-repeater run</code>
                   <button class="copy" type="button" aria-live="polite">Copy</button>
                 </div>
-                <p>
-                  The terminal shows a claim code. On your phone, open streetCryptid →
-                  <em>Settings</em> → <em>Repeaters</em> → <em>Add a repeater</em>, and point the
-                  camera at it. Whoever claims it first owns it.
-                </p>
+                <ul class="options">
+                  <li>
+                    Point your phone's camera at the code in the terminal and open the link in
+                    streetCryptid.
+                  </li>
+                  <li>
+                    Leave <strong>Carry my location</strong> on. Turn on
+                    <strong>Open to anyone</strong> only if anyone should be able to ask it to carry
+                    their location.
+                  </li>
+                  <li>Tap <strong>CLAIM</strong>.</li>
+                </ul>
                 <p class="footnote">
-                  The code is single-use and replaced every 30 minutes. Don't post a screenshot of
-                  it, or paste it into a log.
+                  The code works once and changes every 30 minutes. Don't share a screenshot of it
+                  or paste it into a log.
                 </p>
               </li>
 
               <li>
                 <h2>Keep it running</h2>
-                <p>Opt in to a systemd service, for you or for the whole machine from boot:</p>
+                <p>
+                  Stop it with <strong>Ctrl-C</strong>, then install it as a service that starts at
+                  boot:
+                </p>
                 <div class="cmd">
                   <code>sudo ./streetcryptid-repeater install --system</code>
                   <button class="copy" type="button" aria-live="polite">Copy</button>
                 </div>
                 <ul class="options">
                   <li>
-                    <strong>Your identity moves into the service</strong>, so it is the same
-                    repeater you just claimed. Without <code>--system</code> it runs as you, while
-                    you are signed in (<code>--linger</code>: after you sign out too).
+                    Drop <code>sudo</code> and <code>--system</code> to run it only while you're
+                    signed in. Add <code>--linger</code> to keep it running after you sign out.
                   </li>
                   <li>
-                    <strong>Keep awake</strong> and <strong>send diagnostics</strong> are
-                    <code>streetcryptid-repeater settings</code>; diagnostics are off unless you
-                    turn them on.
+                    Run <code>./streetcryptid-repeater settings --keep-awake on</code> so the
+                    machine doesn't sleep on mains power. Diagnostics stay off unless you add
+                    <code>--telemetry on</code>.
                   </li>
                   <li>
-                    <code>streetcryptid-repeater status</code> says what it is carrying;
-                    <code>claim</code> shows the code again.
+                    Run <code>./streetcryptid-repeater status</code> to see what it's carrying, or
+                    <code>./streetcryptid-repeater claim</code> to show the code again.
+                  </li>
+                  <li>
+                    Put <code>sudo</code> in front of these until you sign out and back in after a
+                    <code>--system</code> install.
                   </li>
                 </ul>
               </li>
 
               <li>
-                <h2>Let it carry</h2>
+                <h2>Offer it to friends</h2>
                 <p>
-                  Turn on <em>Carry my location on your repeaters</em>. When you pair with someone
-                  you can offer them your repeaters too, and they choose whether to have theirs
-                  carried.
+                  When you pair with someone, tap <strong>MY REPEATERS</strong> and pick this one.
+                  They choose whether to use it.
                 </p>
               </li>
             </ol>
-          </div>
-        </section>
-
-        <section class="facts">
-          <div>
-            <span class="micro">What it keeps</span>
-            <p>
-              Who it carries, on disk, so a restart comes back carrying the same people. What it
-              carries stays in memory and is gone on restart until their phones sync again.
-            </p>
-          </div>
-          <div>
-            <span class="micro">What it can see</span>
-            <p>
-              Sealed envelopes and whose trail each one is in. Never a position: it holds no keys
-              that open them, the same as the hosted stash.
-            </p>
-          </div>
-          <div>
-            <span class="micro">Stopping</span>
-            <p>
-              Remove it in the app and it stops carrying anyone and shows a new claim code.
-              Uninstalling removes the app; its identity is kept unless you delete it.
-            </p>
           </div>
         </section>
       </main>
