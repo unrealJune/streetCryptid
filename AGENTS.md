@@ -257,6 +257,18 @@ failed` for the life of the process. On 2026-11-15 a single panicking accept tas
   registered around a spot the phone has already left never reports an exit — and for the same
   reason a crossing must NOT re-centre on `manager.location`, the fix just left, or `outside`
   repeats forever. `location.moving_fence_armed` reports what the OS holds.
+  **A crossing is not answered until the fence is redrawn, and the process stays awake for it.**
+  After an exit the phone is outside every fence it holds, and a relaunched process suspended
+  before the next fresh fix (seconds, at the speed a car crosses 150 m) has nothing left that can
+  wake it once it parks: on 2026-11-16 `14befa639f`'s last event was such a crossing at 13 m/s,
+  followed by seventeen hours of silence and "out of contact" on every friend's map
+  (`7d684c129f` the day before). `crossedMovingFence` therefore takes background time and lifts the
+  distance filter (`holdForFenceRearm`) until a fence is drawn — by the next fix, or after 20 s
+  or at iOS's expiry from the newest position, widened by how far the phone may have gone
+  (`fenceRearmDue`, `location.runtime{event=fence_rearm}`) — and the fence reaches ten seconds of
+  travel ahead of a moving fix, so a car is not already outside it when Core Location first looks.
+  `location.moving_fence` (`armed` / `adopted` / `crossed` / `fallback` / `none`) is on every
+  `location.runtime` event; `crossed` as the last word before a silence is this bug back.
 - **One drain run at a time, per node (`publish::DrainLock`).** "Idempotent per slot" held only for
   SEQUENTIAL callers: UniFFI polls each foreign call on the host's thread, so concurrent
   `heartbeat_fix`/`ingest_fix` calls both found the slot due, and two drains peeked the same outbox

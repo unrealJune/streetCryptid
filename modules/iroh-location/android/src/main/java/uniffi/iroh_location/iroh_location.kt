@@ -8146,6 +8146,25 @@ data class LocationRuntimeEvent (
      * An OS error description, for the error kinds only.
      */
     var `detail`: kotlin.String?
+    , 
+    /**
+     * What the moving fence is (iOS): `none` (no region held), `armed` (centred on a fresh fix the
+     * phone is believed inside), `adopted` (a region an earlier process registered), `crossed`
+     * (the phone left it and no fix has redrawn it yet) or `fallback` (redrawn without a fresh
+     * fix). `crossed` at the end of a process's life is a phone outside the only fence that could
+     * wake it: on 2026-11-16 that shape preceded 17 h of silence from a driving iPhone.
+     */
+    var `movingFence`: kotlin.String? = null 
+    , 
+    /**
+     * How long the moving fence has been in that state.
+     */
+    var `movingFenceAgeMs`: kotlin.ULong? = null 
+    , 
+    /**
+     * The radius the moving fence was registered with.
+     */
+    var `movingFenceRadiusM`: kotlin.Double? = null 
     
 ){
     
@@ -8182,6 +8201,9 @@ public object FfiConverterTypeLocationRuntimeEvent: FfiConverterRustBuffer<Locat
             FfiConverterBoolean.read(buf),
             FfiConverterBoolean.read(buf),
             FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalULong.read(buf),
+            FfiConverterOptionalDouble.read(buf),
         )
     }
 
@@ -8205,7 +8227,10 @@ public object FfiConverterTypeLocationRuntimeEvent: FfiConverterRustBuffer<Locat
             FfiConverterBoolean.allocationSize(value.`candidatePending`) +
             FfiConverterBoolean.allocationSize(value.`anchorArmed`) +
             FfiConverterBoolean.allocationSize(value.`fenceRegistered`) +
-            FfiConverterOptionalString.allocationSize(value.`detail`)
+            FfiConverterOptionalString.allocationSize(value.`detail`) +
+            FfiConverterOptionalString.allocationSize(value.`movingFence`) +
+            FfiConverterOptionalULong.allocationSize(value.`movingFenceAgeMs`) +
+            FfiConverterOptionalDouble.allocationSize(value.`movingFenceRadiusM`)
     )
 
     override fun write(value: LocationRuntimeEvent, buf: ByteBuffer) {
@@ -8229,6 +8254,9 @@ public object FfiConverterTypeLocationRuntimeEvent: FfiConverterRustBuffer<Locat
             FfiConverterBoolean.write(value.`anchorArmed`, buf)
             FfiConverterBoolean.write(value.`fenceRegistered`, buf)
             FfiConverterOptionalString.write(value.`detail`, buf)
+            FfiConverterOptionalString.write(value.`movingFence`, buf)
+            FfiConverterOptionalULong.write(value.`movingFenceAgeMs`, buf)
+            FfiConverterOptionalDouble.write(value.`movingFenceRadiusM`, buf)
     }
 }
 
@@ -10461,7 +10489,7 @@ enum class LocationRuntimeKind {
      */
     VISIT,
     /**
-     * The stop-anchor fence reported an exit.
+     * A fence reported an exit: the stop anchor's, or (`reason=moving_fence`) the moving fence's.
      */
     FENCE_EXIT,
     /**
@@ -10490,7 +10518,15 @@ enum class LocationRuntimeKind {
      * assertions an earlier one never ended: it was killed holding them); `detail` says which
      * lane and how long it had been held. The durable `wake.publish_*` counters say the same.
      */
-    PUBLISH_ASSERTION;
+    PUBLISH_ASSERTION,
+    /**
+     * The moving fence was redrawn without a fresh fix, because the wait for one after a crossing
+     * ran out. `reason` is `deadline` (our own bound) or `expired` (iOS ended the background time
+     * first); `detail` carries the radius and how old the position it was centred on was. Rare by
+     * design: every ordinary crossing is answered by the next fix, and this is the backstop that
+     * keeps a suspended process from being left outside the only fence that could wake it.
+     */
+    FENCE_REARM;
 
     
 
