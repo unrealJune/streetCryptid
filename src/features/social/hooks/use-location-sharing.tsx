@@ -49,16 +49,17 @@ import { ExpoLocationProvider } from '@/features/social/net/expo-location-provid
 import { ServiceSupervisor } from '@/features/social/net/service-supervisor';
 import { buildTransportReport, type TransportReport } from '@/features/social/net/transports';
 import {
-  ensureLocalNetworkPermission,
   ensurePairingPermissions,
+  hasPairingPermissions,
 } from '@/features/social/net/pairing-permissions';
 
 export type { LocationRuntimeStatus };
 
 /**
  * Google Play requires a "prominent disclosure" screen — shown in-app, before the OS runtime
- * permission prompt — for any app requesting ACCESS_BACKGROUND_LOCATION. `pending` gates the app
- * behind `LocationDisclosureScreen`; `loading` is the brief KV read on boot.
+ * permission prompt — for any app requesting ACCESS_BACKGROUND_LOCATION. `PermissionsGate`'s
+ * location step is that screen, and answers `pending` before this provider mounts; `loading` is the
+ * brief KV read on boot.
  */
 /** Options for {@link LocationSharingContextValue.locateNow}. */
 export interface LocateOptions {
@@ -81,7 +82,7 @@ interface LocationSharingContextValue {
   friends: FriendPresence[];
   locationStatus: LocationRuntimeStatus;
   error: string | null;
-  /** Status of the in-app background-location disclosure gate (see `LocationDisclosureScreen`). */
+  /** The in-app background-location disclosure (the location step of `PermissionsGate`). */
   disclosureStatus: LocationDisclosureStatus;
   /** Record the user's choice on the disclosure screen; `true` proceeds to request OS permission. */
   acknowledgeLocationDisclosure(accepted: boolean): Promise<void>;
@@ -356,29 +357,23 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
       try {
         // Draw from local storage FIRST, before anything touches the node. Friends and their last
         // known positions are already on disk, so the map has no reason to sit empty through node
-        // construction and two permission prompts — and no reason to go blank at all if the node
-        // fails. The read path is independent of the sending path; this is where that starts.
+        // construction — and no reason to go blank at all if the node fails. The read path is independent of the sending path; this is where that starts.
         await service.hydrateFromStore();
         if (!active) return;
         await refreshTrail(service);
         // Join the attempt in flight, or begin one: exactly one per process, whatever mounts. The
         // supervisor bounds the wait by the watchdog, owns the retry latch, and reports a stall.
         const result = await supervisor.attempt(async (svc) => {
-          await ensureLocalNetworkPermission();
-          // REQUEST Bluetooth here (not just check), for two reasons:
+          // CHECK Bluetooth here, never ask: `PermissionsGate` has already asked, in front of this
+          // provider, one permission per explained step. Asking from init is what used to put an
+          // unexplained Bluetooth and nearby-devices dialog over the location disclosure.
           //
-          // 1. The BLE transport attaches when the native node is CONSTRUCTED, so a grant that
-          //    arrives later leaves BLE detached until an explicit `ensureBleReady()` rebind.
-          //    Asking before `init` means the common path needs no rebind at all.
-          // 2. It breaks a deadlock. The only other prompt lives behind the Bump button, and the
-          //    strip hides that button whenever BLE reports unavailable — which is exactly what
-          //    ungranted permissions cause. A phone that had never been asked could therefore
-          //    never reach the ask, and just showed "Bluetooth is not available on this device
-          //    or build" forever.
-          //
-          // Cheap to repeat: once decided, `requestMultiple` resolves from the stored grant
-          // without showing UI, same as the local-network request above.
-          bluetoothPermissionGranted.current = await ensurePairingPermissions();
+          // The read still has to happen before `init`, because the BLE transport attaches when the
+          // native node is CONSTRUCTED: a grant arriving later leaves BLE detached until an explicit
+          // `ensureBleReady()` rebind. That rebind is the Bump button's path, and so is the ask for
+          // anyone who said "Not now" — the pairing screen no longer hides Bump behind an
+          // unauthorized radio (`deriveActivePairingStage`), so that path is always reachable.
+          bluetoothPermissionGranted.current = await hasPairingPermissions();
           await svc.init(
             initialProfile.handle,
             initialProfile.sigil,

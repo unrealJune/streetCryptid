@@ -14,6 +14,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { useColorScheme } from '@/hooks/use-color-scheme';
 import { ThemedText } from '@/components/themed-text';
+import { ONBOARDING_COPY } from '@/copy/onboarding';
 import { SIGNAL_COLOR_OPTIONS, signalColorInk } from '@/constants/signal-colors';
 import { CryptidThemes, Fonts, Spacing } from '@/constants/theme';
 import { LEADING_SCROLL_BAR, useSystemRail } from '@/hooks/use-system-rail';
@@ -623,11 +624,11 @@ export function CryptidProfileEditor({
           <View style={styles.headerRow}>
             <View style={styles.headerCopy}>
               <ThemedText style={styles.title}>
-                {mode === 'onboarding' ? 'Set up your profile' : 'Profile'}
+                {mode === 'onboarding' ? ONBOARDING_COPY.profile.title : 'Profile'}
               </ThemedText>
-              {mode === 'onboarding' ? (
+              {mode === 'onboarding' && ONBOARDING_COPY.profile.intro ? (
                 <ThemedText type="small" themeColor="textSecondary" style={styles.intro}>
-                  Choose how you appear to friends. You can change this later.
+                  {ONBOARDING_COPY.profile.intro}
                 </ThemedText>
               ) : null}
             </View>

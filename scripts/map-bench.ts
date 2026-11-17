@@ -393,6 +393,15 @@ async function waitForApp(page: Page, timeoutMs = 120_000): Promise<void> {
 
 /** First run, abbreviated from `store-shots.ts`: every step probed, none assumed. */
 async function onboard(page: Page, beforeMap: () => Promise<unknown>): Promise<void> {
+  // The first-launch splash stands in front of the persona step. One action, nothing stored.
+  // Waiting for either screen keeps an already-onboarded run from paying this wait twice.
+  const splash = `!!document.querySelector('[data-testid="onboarding-splash"]')`;
+  if (await waitFor(page, `${splash} || !!document.querySelector('input')`, 20_000)) {
+    if (await page.eval<boolean>(splash).catch(() => false)) {
+      await sleep(600);
+      await clickText(page, 'Get started');
+    }
+  }
   if (await waitFor(page, `document.querySelector('input')`, 20_000)) {
     await clickText(page, 'Randomize persona');
     await sleep(500);

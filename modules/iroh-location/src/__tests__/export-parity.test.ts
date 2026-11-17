@@ -66,6 +66,12 @@ const IOS_ONLY: Record<string, string> = {
     'BackgroundWakeLedger samples the CPU budget iOS grants a wake; a foreground service has none',
   resetBackgroundWakeStats: 'the other half of takeBackgroundWakeStats',
   takeCrashDiagnostics: 'MetricKit, which exists only on iOS',
+  bluetoothAuthorization:
+    'CBManager.authorization; Android reads its Bluetooth runtime permissions through PermissionsAndroid',
+  requestBluetoothAccess:
+    'iOS has no request API: the alert appears when a CBManager is created; Android asks from JS',
+  requestLocalNetworkAccess:
+    'iOS has no request API: a Bonjour probe raises the alert; Android asks ACCESS_LOCAL_NETWORK from JS',
 };
 
 /** Exported by Android only, on purpose. */

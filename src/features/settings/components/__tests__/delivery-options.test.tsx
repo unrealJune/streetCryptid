@@ -26,8 +26,8 @@ describe('DeliveryOptions', () => {
       );
     });
     const json = JSON.stringify(renderer.toJSON());
-    expect(json).toContain('Mutual friend relay');
-    expect(json).toContain(`background processing on ${Platform.OS === 'ios' ? 'iOS' : 'Android'}`);
+    expect(json).toContain('Friends pass your location along');
+    expect(json).toContain(`Background limits on ${Platform.OS === 'ios' ? 'iOS' : 'Android'}`);
     expect(json).not.toContain('They cannot read');
     expect(json).not.toContain('shared pool');
   });
@@ -43,8 +43,8 @@ describe('DeliveryOptions', () => {
       );
     });
     const json = JSON.stringify(renderer.toJSON());
-    expect(json).toContain('Mutuals + Stash Server');
-    expect(json).toContain('Stash entries are encrypted');
+    expect(json).toContain('The stash covers for offline friends');
+    expect(json).toContain('encrypted so only your friends can read it');
     expect(json).toContain('No stash server is configured');
     expect(json).not.toContain('30 minutes');
     // On a build with no stash the switch shows, off and inert.

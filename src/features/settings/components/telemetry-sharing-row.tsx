@@ -46,7 +46,7 @@ export function TelemetrySharingRow({ accent }: { readonly accent: string }) {
         />
       </View>
       <ThemedText type="small" themeColor="textSecondary">
-        Sends this build&apos;s debug logs and traces to the Street Cryptid developers to help fix
+        Sends this build&apos;s debug logs and traces to the streetCryptid developers to help fix
         delivery problems. Turning it off stops sending immediately, and anything recorded while it
         is off is never sent.
       </ThemedText>

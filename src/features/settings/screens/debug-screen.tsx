@@ -7,13 +7,14 @@ import { DebugLocationControls } from '../components/debug-location-controls';
 import { FriendConnectionDetailsRow } from '../components/friend-connection-details-row';
 import { EventLogPanel } from '../components/event-log-panel';
 import { GlassStatusRow } from '../components/glass-status-row';
+import { OnboardingReplayRow } from '../components/onboarding-replay-row';
 import { SettingsPage, SettingsSection } from '../components/settings-page';
 import { TelemetryPushControls } from '../components/telemetry-push-controls';
 import { pushAllTelemetry } from '../core/telemetry-push';
 
 /**
- * Force a publish, push queued telemetry, reveal connection details, and read the local event
- * journal.
+ * Force a publish, push queued telemetry, reveal connection details, replay onboarding, and read
+ * the local event journal.
  */
 export default function DebugScreen() {
   const scheme = useColorScheme();
@@ -34,6 +35,10 @@ export default function DebugScreen() {
           warningColor={chrome.amber}
           onPush={forceLocationPush}
         />
+      </SettingsSection>
+
+      <SettingsSection label="ONBOARDING">
+        <OnboardingReplayRow accent={chrome.green} />
       </SettingsSection>
 
       {/* The journal does not exist in a stripped build, so the viewer would render a
