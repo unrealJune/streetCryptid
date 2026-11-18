@@ -70,7 +70,26 @@ public class IrohBackgroundAppDelegateSubscriber: ExpoAppDelegateSubscriber {
 
   /// What depends on the kind of launch. Called exactly once per process, on main, by
   /// `IrohLaunchClassifier`.
+  ///
+  /// Everything in it reads or writes app data, so on a launch before the phone's first unlock it
+  /// waits for that unlock (`ProtectedDataGate`). Meanwhile a launch that was sharing asks for a
+  /// refresh wake, because a phone that reboots and then sits still has no other way back.
   static func finishLaunch(background: Bool, locationLaunch: Bool, via: String) {
+    let ranNow = ProtectedDataGate.whenAvailable {
+      finishUnlockedLaunch(background: background, locationLaunch: locationLaunch, via: via)
+    }
+    guard !ranNow else { return }
+    let armed = BackgroundLocationRuntime.wasArmed
+    NSLog(
+      "[iroh-location] bootstrap: launch before first unlock, via=\(via) location_launch="
+        + "\(locationLaunch) armed_marker=\(armed)")
+    if armed {
+      NativeRefreshTask.schedule()
+      ProtectedDataGate.holdForUnlock()
+    }
+  }
+
+  private static func finishUnlockedLaunch(background: Bool, locationLaunch: Bool, via: String) {
     // The wake ledger, before anything can spend the budget it is measuring. A scene-classified
     // launch reaches here a moment after `willFinishLaunching`, inside the same launch transaction.
     BackgroundWakeLedger.noteLaunch(background: background)
@@ -134,6 +153,9 @@ public class IrohBackgroundAppDelegateSubscriber: ExpoAppDelegateSubscriber {
   /// DEBUG never defers: `expo-dev-launcher` owns the React delegate seam in dev-client builds, so
   /// deferring there is both unnecessary and hard to reason about.
   static func decideReactNativeDeferral(background: Bool) -> Bool {
+    // Before the first unlock the flag cannot be written, and the generated SceneDelegate holds a
+    // scene back on its own while protected data is unavailable.
+    guard ProtectedDataGate.isAvailable else { return true }
     let defaults = UserDefaults.standard
 #if DEBUG
     let defer_ = false
@@ -155,6 +177,7 @@ public class IrohBackgroundAppDelegateSubscriber: ExpoAppDelegateSubscriber {
   }
 
   public func applicationWillEnterForeground(_ application: UIApplication) {
+    ProtectedDataGate.poll(via: "foreground")
     BackgroundWakeLedger.enterForeground()
   }
 }
@@ -189,6 +212,9 @@ enum IrohLaunchClassifier {
     observer = NotificationCenter.default.addObserver(
       forName: sceneWillConnect, object: nil, queue: nil
     ) { note in
+      // A launch iOS made while the phone was locked (a prewarm, a location relaunch) and that
+      // someone is now opening: finish it before React starts and calls into the runtime.
+      ProtectedDataGate.poll(via: "scene")
       let background = (note.object as? UIScene)?.activationState == .background
       if decide(background: background, locationLaunch: locationLaunch, via: "scene") { return }
       // Already classified: a background launch, and now a scene — usually someone opening the

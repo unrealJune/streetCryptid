@@ -457,6 +457,21 @@ failed` for the life of the process. On 2026-11-15 a single panicking accept tas
   it until the process was reclaimed. `location.delegate_on_main` in `device.health` must read
   `true`; `location.wake_reason` stuck on `seed` with `last_wake_age_ms` climbing on a moving phone
   is what `false` looks like.
+- **A launch before the first unlock waits for it** (`ProtectedDataGate.swift`). After a reboot
+  iOS can relaunch the app for a fence, visit or significant change while the phone is still
+  locked, when every `untilFirstUserAuthentication` file reads back empty or fails: `UserDefaults`
+  (so `wasArmed` said off and nothing armed), the Rust stores, the telemetry spool, the keychain.
+  A fence exit then still ran `enterMoving`, whose `persistState` wrote `sc.bg.armed = false` over
+  a domain it could not read. On 2026-11-17 two friends' phones ran flat 25 minutes apart and
+  neither came back by itself. So `restorePersistedState` and `finishLaunch` go through
+  `whenAvailable`; every wake (`didUpdateLocations` / `didVisit` / `didExitRegion`, the refresh
+  task, the unlock notification) calls `poll`; `persistState` writes nothing while deferred; and
+  `ArmedMarker`, a one-byte file with no data protection, lets a locked launch know it was sharing,
+  so it can ask for a refresh wake (a phone that reboots and then sits still has no other way
+  back). The generated `SceneDelegate` holds a scene back while locked too. The locked part cannot
+  report itself; the first `started` after it does (`bg=`, `reboot=`, `wait_ms=`, `locked=` in
+  `location.detail`, see `infra/otel/README.md`). Anything new that reads or writes app data at
+  launch goes behind the gate.
 - **`start()` claims every durable store before it touches the network, and must keep doing so.**
   Until 2026-09-28 the native runtime's node had never started on either platform: `start_stored`
   read its config from a store only `start` opens, so it was `NotStarted` on every fresh node and

@@ -106,6 +106,10 @@ const REPLACEMENT_BODY = `class SceneDelegate: ExpoAppSceneDelegate {
 #if DEBUG
     return true
 #else
+    // Before the phone's first unlock since boot UserDefaults reads back empty, so the flag would
+    // say "start". No scene can come to the foreground while locked, and the one held here is
+    // started on its way there.
+    guard UIApplication.shared.isProtectedDataAvailable else { return false }
     return !UserDefaults.standard.bool(forKey: "sc.bg.rn_deferred")
 #endif
   }

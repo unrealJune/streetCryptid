@@ -90,6 +90,20 @@ describe('withDeferredReactNativeStart', () => {
     expect(connect.slice(0, connect.indexOf('static func'))).not.toContain('activationState');
   });
 
+  /**
+   * Before the phone's first unlock UserDefaults reads back empty, which would read as "start".
+   * A scene connecting then is held back until it comes to the foreground. See ProtectedDataGate.
+   */
+  it('holds the scene back before the first unlock, ahead of reading the flag', () => {
+    const out = patchSceneDelegate(SCENE_TEMPLATE);
+    const release = out.slice(out.indexOf('#else'), out.indexOf('#endif'));
+    const gate = release.indexOf(
+      'guard UIApplication.shared.isProtectedDataAvailable else { return false }'
+    );
+    expect(gate).toBeGreaterThan(-1);
+    expect(gate).toBeLessThan(release.indexOf('sc.bg.rn_deferred'));
+  });
+
   /** Coming to the foreground — someone opened the app — is what starts a deferred React. */
   it.each(['sceneWillEnterForeground(_ scene: UIScene)', 'sceneDidBecomeActive(_ scene: UIScene)'])(
     'starts React before forwarding %s',

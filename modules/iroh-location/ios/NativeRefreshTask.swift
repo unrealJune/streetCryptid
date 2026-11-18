@@ -104,7 +104,14 @@ enum NativeRefreshTask {
     }
     let completion = Completion(task)
     let work = Task {
-      await BackgroundLocationRuntime.shared.serviceRefresh()
+      // This may be the first time the process has run since the phone was unlocked after a
+      // reboot: finish the launch that has been waiting for it, which starts the runtime. Still
+      // locked, there is nothing to do but leave the next request (above) behind.
+      let unlocked = await MainActor.run { () -> Bool in
+        ProtectedDataGate.poll(via: "refresh")
+        return ProtectedDataGate.isAvailable && !ProtectedDataGate.isDeferring
+      }
+      if unlocked { await BackgroundLocationRuntime.shared.serviceRefresh() }
       completion.finish(success: true)
     }
     task.expirationHandler = {
