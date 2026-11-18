@@ -81,7 +81,9 @@ describe('PermissionJourneyScreen', () => {
   it('collapses an answered row to its outcome and opens the next', () => {
     render(FIRST);
     render(SECOND);
-    expect(texts()).not.toContain(COPY.location.title);
+    // The open row's lede, not its title: the location title is now just its name, which the
+    // collapsed row shows too.
+    expect(texts()).not.toContain(COPY.location.lede);
     expect(texts()).toContain(PERMISSIONS_PAGE_COPY.outcome.allowed);
     expect(texts()).toContain(COPY['background-location'].title);
     expect(texts()).not.toContain(COPY['background-location'].summary);

@@ -72,7 +72,7 @@ export function useArmedBump(active: boolean): ArmedBump {
     try {
       await armBump();
     } catch (armError: unknown) {
-      setError(armError instanceof Error ? armError.message : 'Bump could not start.');
+      setError(armError instanceof Error ? armError.message : 'Pairing couldn’t start.');
       throw armError;
     } finally {
       armingRef.current = false;

@@ -104,8 +104,9 @@ describe('copy', () => {
   it('never claims a carrier can read what it carries', () => {
     // The one promise the whole screen rests on. If a rewrite ever softens this, the test is
     // the place that should complain.
-    expect(DELIVERY_MODE_COPY.stash.body).toMatch(/only your friends can read it/i);
-    expect(DELIVERY_MODE_COPY.stash.body).toMatch(/deleted after a short time/i);
+    expect(DELIVERY_MODE_COPY.stash.body).toMatch(/only your friends hold the key/i);
+    expect(DELIVERY_MODE_COPY.stash.body).toMatch(/we can’t see where you are/i);
+    expect(DELIVERY_MODE_COPY.stash.body).toMatch(/for a little while/i);
   });
 
   it.each([
@@ -115,8 +116,8 @@ describe('copy', () => {
   ])(
     'names the current %s platform in the mutual-friend reliability warning',
     (platform, label) => {
-      expect(mutualFriendRelayExplanation(platform)).toContain(`Background limits on ${label}`);
-      expect(mutualFriendRelayExplanation(platform)).toContain('late or missed location updates');
+      expect(mutualFriendRelayExplanation(platform)).toContain(`On ${label}, apps`);
+      expect(mutualFriendRelayExplanation(platform)).toContain('late or missed updates');
       expect(mutualFriendRelayExplanation(platform)).not.toContain('They cannot read');
     }
   );

@@ -169,7 +169,7 @@ describe('delivery onboarding', () => {
     await finish();
     expect(onComplete).not.toHaveBeenCalled();
     expect(renderer.root.findByType(DeliveryOptions)).toBeTruthy();
-    expect(JSON.stringify(renderer.toJSON())).toContain('Could not finish setup');
+    expect(JSON.stringify(renderer.toJSON())).toContain('Couldn’t finish setup');
     await finish();
     expect(onComplete).toHaveBeenCalledTimes(1);
   });
@@ -196,7 +196,7 @@ describe('delivery onboarding', () => {
     expect(mockSaveProfile).not.toHaveBeenCalled();
     await act(async () => {
       renderer.root
-        .findByProps({ accessibilityLabel: 'Retry loading delivery preferences' })
+        .findByProps({ accessibilityLabel: 'Retry loading delivery settings' })
         .props.onPress();
     });
     expect(renderer.root.findByType(DeliveryOptions).props.selected).toBe('mutual');

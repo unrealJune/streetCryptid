@@ -348,14 +348,14 @@ describe('ActivePairingScreen', () => {
     });
   });
 
-  it('names the reason when Bump could not start, rather than reporting a miss', async () => {
+  it('names the reason when pairing could not start, rather than reporting a miss', async () => {
     mockBump.error = 'Another pairing action is already in progress.';
     mockSharing.pairing = { ...pairing(), bump: { ...pairing().bump, stage: 'idle' } };
     await act(async () => {
       renderer = create(<ActivePairingScreen />);
     });
     const text = JSON.stringify(renderer.toJSON());
-    expect(text).toContain('BUMP COULD NOT START');
+    expect(text).toContain('PAIRING COULD NOT START');
     expect(text).toContain('Another pairing action is already in progress.');
     expect(text).not.toContain('NOTHING FOUND');
   });
@@ -386,7 +386,7 @@ describe('ActivePairingScreen', () => {
     const text = JSON.stringify(renderer.toJSON());
     expect(text).toContain('SHAKE TO ADD A NEARBY FRIEND');
     expect(text).toContain('SHAKE TO START');
-    expect(text).not.toContain('BUMP ARMED');
+    expect(text).not.toContain('READY TO SHAKE');
     expect(text).not.toContain('top edges');
     const button = action('make a link');
     expect(button.props.style[1].backgroundColor).toBe('transparent');

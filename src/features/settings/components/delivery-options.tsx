@@ -141,8 +141,8 @@ export function DeliveryOptions({
       />
       {isDeliveryModeDowngraded(selected, availability) ? (
         <ThemedText type="small" style={{ color: chrome.amber }}>
-          No stash server is configured for this build, so delivery uses mutual friends. Your choice
-          is remembered.
+          This build has no hosted repeater, so your location only travels through friends. We’ll
+          remember your choice.
         </ThemedText>
       ) : null}
       {footnote}

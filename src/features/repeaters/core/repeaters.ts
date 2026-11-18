@@ -342,7 +342,7 @@ export function rosterRowDetail(roster: RosterView): string {
   if (!roster.mine) parts.push(roster.open ? 'open' : 'invite only');
   parts.push(count(roster.carried, 'person', 'people'));
   if (roster.mine && !roster.carriesMe) parts.push('not carrying you');
-  if (roster.waiting) parts.push('waiting for a repeater');
+  if (roster.waiting) parts.push('waiting for acknowledgement');
   if (!roster.mine && !roster.carriesMe) {
     if (roster.wanted) parts.push('waiting for their invite');
     else if (roster.offeredBy.length > 0) {
@@ -366,9 +366,9 @@ export function vouchLine(roster: RosterView): string | null {
     : null;
 }
 
-/** The owner's name alone ("lunarhare", "a41f9c"), for sentences: never "Your". */
+/** The owner's name alone ("@lunarhare", "a41f9c"), for sentences: never "Your". */
 export function ownerName(roster: RosterView): string {
-  return roster.ownerLabel.replace(/’s repeaters$/, '').replace(/^@/, '');
+  return roster.ownerLabel.replace(/’s repeaters$/, '');
 }
 
 export interface EnrollFact {
@@ -390,7 +390,7 @@ export function enrollFacts(roster: RosterView): EnrollFact[] {
       good: true,
       text: 'Friends pick up your sealed location from them while your phone sleeps.',
     },
-    { good: true, text: 'They can never read it. Kept in memory, never on their disk.' },
+    { good: true, text: 'The repeaters can never read it. Kept in memory, never on disk.' },
     {
       good: false,
       text:

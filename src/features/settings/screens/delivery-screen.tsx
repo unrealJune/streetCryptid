@@ -30,7 +30,7 @@ export default function DeliveryScreen() {
     try {
       await setDeliveryMode(mode);
     } catch {
-      setError('Could not save the delivery mode. Try again.');
+      setError('Couldn’t save that. Try again.');
     } finally {
       setPending(null);
     }

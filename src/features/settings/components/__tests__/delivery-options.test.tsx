@@ -27,7 +27,7 @@ describe('DeliveryOptions', () => {
     });
     const json = JSON.stringify(renderer.toJSON());
     expect(json).toContain('Friends pass your location along');
-    expect(json).toContain(`Background limits on ${Platform.OS === 'ios' ? 'iOS' : 'Android'}`);
+    expect(json).toContain(`On ${Platform.OS === 'ios' ? 'iOS' : 'Android'}, apps`);
     expect(json).not.toContain('They cannot read');
     expect(json).not.toContain('shared pool');
   });
@@ -43,9 +43,9 @@ describe('DeliveryOptions', () => {
       );
     });
     const json = JSON.stringify(renderer.toJSON());
-    expect(json).toContain('The stash covers for offline friends');
-    expect(json).toContain('encrypted so only your friends can read it');
-    expect(json).toContain('No stash server is configured');
+    expect(json).toContain('A repeater covers for sleeping phones');
+    expect(json).toContain('Only your friends hold the key');
+    expect(json).toContain('This build has no hosted repeater');
     expect(json).not.toContain('30 minutes');
     // On a build with no stash the switch shows, off and inert.
     const toggle = renderer.root.findByType(Switch);
@@ -71,7 +71,7 @@ describe('DeliveryOptions', () => {
     expect(onSelect).toHaveBeenLastCalledWith('stash');
     act(() => toggle.props.onValueChange(false));
     expect(onSelect).toHaveBeenLastCalledWith('mutual');
-    expect(JSON.stringify(renderer.toJSON())).toContain('for at most 48 hours');
+    expect(JSON.stringify(renderer.toJSON())).toContain('for up to 48 hours');
     expect(JSON.stringify(renderer.toJSON())).toContain('repeaters live elsewhere');
   });
 });

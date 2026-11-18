@@ -98,7 +98,7 @@ export function describeDelivery(input: DeliveryProvenanceInput): DeliveryProven
     return {
       kind: 'unknown',
       headline: 'Server not recorded',
-      detail: `This fix was read back out of this phone's replica, so no peer was recorded serving ${authorHandle}'s entry.`,
+      detail: `This location was read back from this phone's own copy, so nothing recorded who served ${authorHandle}'s update.`,
     };
   }
 
@@ -106,8 +106,8 @@ export function describeDelivery(input: DeliveryProvenanceInput): DeliveryProven
   if (stash && peer === stash) {
     return {
       kind: 'stash',
-      headline: 'Served by the trail stash',
-      detail: `The stash held ${authorHandle}'s sealed fix until this device asked for it. It could not read it.`,
+      headline: 'Served by the official hosted repeater',
+      detail: `The repeater held ${authorHandle}'s sealed location until this phone asked for it. It couldn't read it.`,
     };
   }
 
@@ -115,7 +115,7 @@ export function describeDelivery(input: DeliveryProvenanceInput): DeliveryProven
     return {
       kind: 'author',
       headline: `Straight from ${authorHandle}'s phone`,
-      detail: 'No other device carried this one — it came from the phone that made it.',
+      detail: 'No other device carried this one. It came from the phone that made it.',
     };
   }
 
@@ -124,14 +124,14 @@ export function describeDelivery(input: DeliveryProvenanceInput): DeliveryProven
     return {
       kind: 'friend',
       headline: `Served by ${handle}`,
-      detail: `Replicated from ${handle}'s copy of ${authorHandle}'s trail. Sealed the whole way — ${handle} could not read it.`,
+      detail: `Passed along from ${handle}'s copy of ${authorHandle}'s location. Sealed the whole way, so ${handle} couldn't read it.`,
     };
   }
 
   return {
     kind: 'stranger',
     headline: "Served by a device you haven't paired with",
-    detail: `Another of ${authorHandle}'s friends served this from their copy. Sealed the whole way — they could not read it.`,
+    detail: `Another of ${authorHandle}'s friends served this from their copy. Sealed the whole way, so they couldn't read it.`,
     peerId: shortEndpoint(peer),
   };
 }

@@ -187,7 +187,7 @@ export function PairingRepeaterCards({
         <OfferCard
           chrome={chrome}
           label="THEIR REPEATERS"
-          text={`${from} offers you ${count(theirs.length)} · accepting ${offer.accepting.size}`}
+          text={`${from} is sharing ${count(theirs.length)}. You’re joining ${offer.accepting.size}.`}
           accent
           disabled={disabled}
           onPress={() => setOpen('theirs')}
@@ -196,11 +196,11 @@ export function PairingRepeaterCards({
       {mine.length > 0 ? (
         <OfferCard
           chrome={chrome}
-          label="MY REPEATERS"
+          label="SHARE REPEATERS"
           text={
             offer.offering.size === 0
-              ? 'Offering none'
-              : `Offering ${offer.offering.size} of ${count(mine.length)}`
+              ? 'Sharing none'
+              : `Sharing ${offer.offering.size} of ${count(mine.length)}`
           }
           disabled={disabled}
           onPress={() => setOpen('mine')}
@@ -210,9 +210,9 @@ export function PairingRepeaterCards({
         visible={open === 'mine'}
         chrome={chrome}
         title={
-          friendLabel ? `OFFER ${friendLabel.toUpperCase()} MY REPEATERS` : 'OFFER MY REPEATERS'
+          friendLabel ? `SHARE REPEATERS WITH ${friendLabel.toUpperCase()}` : 'SHARE REPEATERS'
         }
-        detail="Whoever you pair with can choose to carry their location on these. Inviting them happens when you acknowledge."
+        detail={`Invite ${friendLabel ?? 'whoever you pair with'} to repeaters you use. They choose whether to join, once you acknowledge.`}
         rosters={mine}
         chosen={offer.offering}
         onToggle={offer.setOffering}
@@ -223,7 +223,7 @@ export function PairingRepeaterCards({
         visible={open === 'theirs'}
         chrome={chrome}
         title={`CARRY YOUR LOCATION ON ${from.toUpperCase()}’S REPEATERS?`}
-        detail="Applied when you acknowledge. An invite-only one carries you once their invite arrives."
+        detail="Starts when you acknowledge. Invite-only ones start once their invite arrives."
         rosters={theirs}
         chosen={offer.accepting}
         onToggle={offer.setAccepting}

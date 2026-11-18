@@ -252,7 +252,7 @@ describe('enrollFacts', () => {
     const facts = enrollFacts(sections.throughFriends[0]);
     expect(facts.map((f) => f.good)).toEqual([true, true, false]);
     expect(facts[2].text).toBe(
-      'The 6 people it carries can see you’re carried. sam can remove you.'
+      'The 6 people it carries can see you’re carried. @sam can remove you.'
     );
     expect(rosterLine(sections.throughFriends[0])).toBe(
       '0 machines · invite only · carrying 6 people'
@@ -334,7 +334,7 @@ describe('rosterRowDetail', () => {
       rosterRowDetail(
         view({ owner: SAM, carriesMe: true, waiting: true, repeaters: ['a'], carried: 2 })
       )
-    ).toBe('1 machine · invite only · 2 people · waiting for a repeater');
+    ).toBe('1 machine · invite only · 2 people · waiting for acknowledgement');
     // Only while it carries me: a stale flag on a roster I left says nothing.
     expect(
       rosterRowDetail(view({ owner: SAM, waiting: true, repeaters: ['a'], carried: 2 }))

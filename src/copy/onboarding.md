@@ -30,8 +30,7 @@ Find your cryptids in the world.
 
 ### body
 
-Share your location with friends and see where you’ve been. We’ll never save, sell, or snoop on
-your trail.
+Share your location with friends and see where you’ve been. We’ll never sell it or snoop on it.
 
 ### start
 
@@ -72,16 +71,11 @@ What makes streetCryptid different?
 We built streetCryptid around privacy from the start. We don’t collect logs, telemetry, or any
 other data.
 
-Sharing your location is private too. Wherever we can, it travels straight from your phone to your
-friends’ phones, so it never sits on a server for anyone else to read. The catch is that a friend’s
-phone has to be listening when you send it, and phones in pockets often aren’t.
+Your location goes straight from your phone to your friends’ phones whenever it can. When their
+phones are asleep, a repeater can hold it for them, sealed so only they can open it. You’ll pick one
+next.
 
-So there’s also a more reliable option: the stash. It’s a server that holds your latest location
-until your friends come back online, encrypted so only they can read it. Like the app, it’s open
-source and built to know nothing about you. It’s for folks who don’t need the extra privacy and want
-friends to always see where they are. If you don’t trust us, you can run your own.
-
-Read more about how we protect your privacy on our [website](https://streetcrypt.id).
+More on how it all works on our [website](https://streetcrypt.id).
 
 ### caveat
 
@@ -128,15 +122,15 @@ Loading delivery preferences…
 
 ### load-error
 
-Could not load delivery preferences. Try again.
+Couldn’t load your delivery settings. Try again.
 
 ### retry
 
-Retry loading delivery preferences
+Retry loading delivery settings
 
 ### save-error
 
-Could not finish setup. Try again.
+Couldn’t finish setup. Try again.
 
 ### back
 
@@ -173,13 +167,13 @@ too. `{platform}` becomes iOS, Android, the web or "your device".
 
 <!-- The name in Settings' Delivery row. -->
 
-Mutual Friends
+Friends only
 
 ### segment
 
 <!-- The uppercase label on the switch between the two routes. -->
 
-MUTUAL FRIENDS
+FRIENDS ONLY
 
 ### heading
 
@@ -189,24 +183,24 @@ Friends pass your location along
 
 ### body
 
-Background limits on {platform} mean your friends’ phones often aren’t listening when you share.
-Unless you have a lot of mutual friends, expect late or missed location updates.
+On {platform}, apps can only do so much in the background, so your friends’ phones often aren’t
+listening when you share. Without a repeater, expect late or missed updates.
 
 ## delivery-stash
 
 ### title
 
-Mutual Friends + Stash
+Official hosted repeater
 
 ### segment
 
-STASH
+REPEATER
 
 ### heading
 
-The stash covers for offline friends
+A repeater covers for sleeping phones
 
 ### body
 
-When friends are offline, the stash holds your latest location until they’re back. It’s
-encrypted so only your friends can read it, and it’s deleted after a short time.
+When your friends’ phones can’t hear you, our repeater holds your latest location for a little
+while. Only your friends hold the key, so we can’t see where you are.

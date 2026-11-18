@@ -16,7 +16,7 @@ import {
   Segmented,
 } from '../components/grouped-list';
 import { useRepeaterChrome } from '../components/repeater-chrome';
-import { inviteCandidates, rosterLine } from '../core/repeaters';
+import { inviteCandidates } from '../core/repeaters';
 import { useRepeaters } from '../hooks/use-repeaters';
 
 /**
@@ -58,7 +58,7 @@ export default function MyRepeatersScreen() {
               <GroupRow
                 first
                 title="No repeaters yet"
-                text="Run trail-stash on a computer that stays on, then scan the code it shows."
+                text="Run a repeater on any computer, then scan the QR code it shows."
               />
               <AddRow label="Add a repeater" accent={chrome.green} onPress={addRepeater} />
             </GroupCard>
@@ -99,7 +99,7 @@ export default function MyRepeatersScreen() {
     ) : null;
 
   return (
-    <SettingsPage title="Your repeaters" backLabel="Repeaters" subtitle={rosterLine(mine)}>
+    <SettingsPage title="Your repeaters" backLabel="Repeaters">
       {errorText ? (
         <ThemedText accessibilityRole="alert" type="small" style={{ color: chrome.amber }}>
           {errorText}
@@ -112,10 +112,10 @@ export default function MyRepeatersScreen() {
           title="Carry my location"
           text={
             mine.waiting
-              ? 'On. Waiting for one of these machines to come online; it goes to them then.'
+              ? 'On. Waiting for acknowledgement.'
               : mine.carriesMe
                 ? 'On these machines, sealed, for friends to pick up while your phone sleeps.'
-                : 'Off. These machines do not keep your location.'
+                : 'Off. These machines don’t keep your location.'
           }
           right={
             <RowSwitch
@@ -183,7 +183,7 @@ export default function MyRepeatersScreen() {
           />
           <ThemedText type="small" themeColor="textSecondary">
             {mine.open
-              ? 'Anyone who learns of it may ask it to carry them.'
+              ? 'All your friends and their friends can choose to use it.'
               : 'Only people you invite. Nobody already carried is dropped.'}
           </ThemedText>
         </Group>
@@ -274,8 +274,8 @@ export default function MyRepeatersScreen() {
             {mine.open ? (
               <GroupRow
                 first
-                title="Anyone may join already"
-                text="Invite someone only to let back a person who was removed."
+                title="Your friends can already join"
+                text="Invites here are only for letting back someone you removed."
                 dimmed
               />
             ) : null}

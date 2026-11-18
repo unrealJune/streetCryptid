@@ -106,7 +106,7 @@ export default function ClaimRepeaterScreen() {
   async function pasteLink() {
     const clip = await Clipboard.getStringAsync().catch(() => '');
     if (!clip.trim()) {
-      setState({ step: 'add', error: 'Nothing to paste. Copy the link the repeater printed.' });
+      setState({ step: 'add', error: 'Nothing to paste. Copy the link the repeater gave you.' });
       return;
     }
     takeLink(clip.trim());
@@ -142,8 +142,7 @@ export default function ClaimRepeaterScreen() {
           detail={
             unsupported
               ? 'Repeaters need the installed app, on a build that has them.'
-              : (state.error ??
-                'Point your phone’s camera at the code on the repeater’s screen, or paste the link it printed.')
+              : (state.error ?? 'Scan the QR code on the repeater, or paste the link it gave you.')
           }
           marginBottom={Math.max(insets.bottom, Spacing.two)}
         >
@@ -227,8 +226,8 @@ export default function ClaimRepeaterScreen() {
                 title="Open to anyone"
                 text={
                   open
-                    ? 'Anyone who learns of it may ask it to carry their location.'
-                    : 'Only people you invite may ask it to carry their location.'
+                    ? 'All your friends and their friends can choose to use it.'
+                    : 'Only people you invite can use it.'
                 }
                 value={open}
                 onChange={setOpen}
@@ -324,13 +323,11 @@ export default function ClaimRepeaterScreen() {
           detail={[
             state.firstRepeater
               ? state.open
-                ? 'Open to anyone'
-                : 'Invite only'
-              : 'Joined your roster',
-            state.carry ? 'carries your location' : 'not carrying you',
-          ]
-            .filter(Boolean)
-            .join(' · ')}
+                ? 'Your friends and their friends can use it.'
+                : 'Only people you invite can use it.'
+              : 'Added to your repeaters.',
+            state.carry ? 'It’s carrying your location.' : 'It isn’t carrying your location.',
+          ].join(' ')}
           marginBottom={Math.max(insets.bottom, Spacing.two)}
         >
           <PanelActions>

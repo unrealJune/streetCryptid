@@ -34,9 +34,9 @@ export function StashCard({
   return (
     <View style={[styles.card, { borderColor: theme.backgroundSelected }]}>
       <View style={styles.copy}>
-        <ThemedText type="smallBold">streetCryptid stash</ThemedText>
+        <ThemedText type="smallBold">Official hosted repeater</ThemedText>
         <ThemedText type="small" themeColor="textSecondary">
-          {`Hosted, owned by nobody · keeps only your latest sealed fix, for at most ${retention}, in memory`}
+          {`Keeps only your latest location, for up to ${retention}, in memory.`}
         </ThemedText>
       </View>
       <View style={[styles.option, { borderTopColor: theme.backgroundSelected }]}>
@@ -44,13 +44,13 @@ export function StashCard({
           <ThemedText type="small">Carry my location</ThemedText>
           {carriesMe ? null : (
             <ThemedText type="small" themeColor="textSecondary">
-              Off. Friends catch up from each other only.
+              Off. Your location only travels through friends’ phones.
             </ThemedText>
           )}
         </View>
         <Switch
           accessibilityRole="switch"
-          accessibilityLabel="Carry my location on the streetCryptid stash"
+          accessibilityLabel="Carry my location on the official hosted repeater"
           disabled={busy || !available}
           value={carriesMe && available}
           onValueChange={onCarryChange}
