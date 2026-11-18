@@ -624,6 +624,24 @@ Read a pulse like this:
   what preceded seventeen hours of silence from `14befa639f` that day. A crossing now holds
   background time until the fence is redrawn, so `crossed` should never be the last word.
 
+**After a reboot, read the `started` event's `location.detail`** (2026-11-18). iOS can relaunch the
+app before the owner's first unlock, when `UserDefaults`, the stores and the telemetry spool are
+all unreadable, so `ProtectedDataGate.swift` holds the launch until the unlock and the locked
+process cannot report anything itself. The first `start()` afterwards does:
+`bg=1 boot_age_s=5400 reboot=1 wait_ms=812000 via=location locked=launch:2,location:3`.
+
+- `reboot=1 bg=1`: iOS brought the runtime back after a boot on its own. `wait_ms` / `via`
+  (`unlock`, `location`, `refresh`, `scene`, `foreground`, `next_call`) say how long it waited and what ran it.
+- `reboot=1 bg=0` and no `locked=`: nothing launched it between the boot and the owner opening the
+  app, `boot_age_s` later. The phone had no way back by itself.
+- `locked=` counts wakes that found the phone locked, kept in an unprotected file, so launches
+  that died before the unlock are counted by the next one.
+- `armed_mismatch=1`: `UserDefaults` said sharing was off while the unprotected marker said on, so
+  something overwrote the intent.
+
+On Android the same event's detail is `trigger=<boot|package-replaced|watchdog|app-or-redeliver>
+boot_age_s=N`, so whether the boot receiver brought a phone back is visible too.
+
 **Android emits it too, since 2026-10-13** (`LocationRuntimeReporter.kt`, `os.type = android`),
 from the foreground service: `started` (`location.reason = service`) when the service is created,
 `pulse` / `main_stalled` on the same five-minute timer with a main-looper probe (the platform

@@ -443,7 +443,14 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
     // With `Always` there is no blue pill, and asking for one would advertise a background session
     // the user has already consented to in the permission sheet.
     manager.showsBackgroundLocationIndicator = false
-    restorePersistedState()
+    // Before the phone's first unlock since boot, `UserDefaults` reads back empty, and restoring
+    // from it would rebuild a fresh state machine. Wait for the unlock instead (`ProtectedDataGate`).
+    // Off main is the misuse `delegateOnMain` already reports; restore directly there as before.
+    if Thread.isMainThread {
+      ProtectedDataGate.whenAvailable { [unowned self] in self.restorePersistedState() }
+    } else {
+      restorePersistedState()
+    }
   }
 
   /// Whether this runtime holds a lease on the process's node right now.
@@ -558,6 +565,10 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
   /// to come back.
   func start() {
     guard !running else { return }
+    // Read before `persistState` below rewrites both: sharing recorded as off in `UserDefaults`
+    // while the unprotected marker still says on is a defaults write clobbering the intent.
+    let armedMismatch =
+      ArmedMarker.read() && (UserDefaults.standard.object(forKey: Self.armedKey) as? Bool) == false
 
     // Rung 1. Armed always, never stopped, and first. This is the only mechanism that relaunches a
     // *terminated* app, and standard location updates emphatically are not one.
@@ -604,7 +615,13 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
     manager.startUpdatingLocation()
     NativeRefreshTask.schedule()
     reporter.startPulse()
-    reporter.event(.started, reason: lastWakeReason.rawValue)
+    // Uptime, whether the phone rebooted since the last start, and whatever happened while it was
+    // locked. See `ProtectedDataGate` for how to read it.
+    reporter.event(
+      .started, reason: lastWakeReason.rawValue,
+      detail: BootReport.detail(
+        background: Self.launchedInBackground, unlock: ProtectedDataGate.takeUnlockReport(),
+        armedMismatch: armedMismatch))
   }
 
   // MARK: - Why there is no CLBackgroundActivitySession
@@ -1358,6 +1375,12 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
   /// Small, synchronous, and written on every transition. We will be killed mid-flight and we want
   /// to come back knowing where we were.
   private func persistState() {
+    // Before the first unlock the domain cannot be read, and writing to it would replace values
+    // this process never saw (`sc.bg.armed` among them) with the ones it made up.
+    guard !ProtectedDataGate.isDeferring else {
+      NSLog("[iroh-location] persistState skipped: protected data unavailable")
+      return
+    }
     let defaults = UserDefaults.standard
     defaults.set(state.rawValue, forKey: "sc.bg.state")
     // The sharing INTENT, mirrored where Swift can read it.
@@ -1368,6 +1391,7 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
     // `setBackgroundCadence` are the only things that drive this runtime, so every transition
     // already passes through `persistState`.
     defaults.set(running, forKey: Self.armedKey)
+    ArmedMarker.record(running)
     defaults.set(Int(slotIntervalMs), forKey: "sc.bg.interval_ms")
     defaults.set(movingDistanceFilter, forKey: "sc.bg.distance_m")
     defaults.set(movingAccuracy, forKey: "sc.bg.accuracy_m")
@@ -1475,7 +1499,13 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
 
   /// Was sharing armed when we last persisted? The question a JS-free launch has to answer before
   /// it can decide whether to start the Core Location ladder.
-  static var wasArmed: Bool { UserDefaults.standard.bool(forKey: armedKey) }
+  ///
+  /// Before the phone's first unlock `UserDefaults` reads back empty, so a missing value falls back
+  /// to `ArmedMarker`, the copy kept where a locked launch can read it.
+  static var wasArmed: Bool {
+    if let armed = UserDefaults.standard.object(forKey: armedKey) as? Bool { return armed }
+    return ArmedMarker.read()
+  }
 
   private func restorePersistedState() {
     let defaults = UserDefaults.standard
@@ -1518,9 +1548,14 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
   // MARK: - CLLocationManagerDelegate
 
   func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
+    // The first wake since the phone was unlocked starts the runtime, then handles this delivery.
+    ProtectedDataGate.poll(via: "location")
     guard let location = locations.last else { return }
     let battery = Self.battery()
     lastSeenLocation = location
+    // Not sharing, or still locked after a reboot with the launch waiting (see `ProtectedDataGate`):
+    // nothing here may publish or persist.
+    guard running else { return }
     // Core Location hands back positions it has already given us — after a re-request, and on
     // 2026-10-02 every 30 s for 73 minutes while the phone could get nothing newer. A repeated
     // position carries no new information, and treating it as a capture did harm twice: the first
@@ -1749,6 +1784,10 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
   func locationManager(
     _ manager: CLLocationManager, didExitRegion region: CLRegion
   ) {
+    ProtectedDataGate.poll(via: "location")
+    // A fence registered by an earlier process can fire into one that is not sharing, or one still
+    // locked after a reboot. `enterMoving` would persist state either way.
+    guard running else { return }
     if region.identifier == Self.movingFenceRegionId {
       crossedMovingFence()
       return
@@ -1815,6 +1854,7 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
   ///   alongside the fence and `considerDeparture`, for the same reason the second one exists.
   ///   While `moving` it changes nothing: the precise stream already has the phone.
   func locationManager(_ manager: CLLocationManager, didVisit visit: CLVisit) {
+    ProtectedDataGate.poll(via: "location")
     lastVisitAt = Date()
     guard running else { return }
     note(.visit)

@@ -47,6 +47,7 @@ internal object ServiceRecovery {
   private const val BLOCKED_COUNT_KEY = "blocked_count"
   private const val BLOCKED_FIRST_AT_KEY = "blocked_first_at_ms"
   private const val BLOCKED_REASON_KEY = "blocked_reason"
+  private const val START_TRIGGER_KEY = "start_trigger"
 
   /** How often the watchdog checks on the service. Doze stretches it; that is fine. */
   private const val WATCHDOG_INTERVAL_MS = 15 * 60 * 1000L
@@ -126,16 +127,34 @@ internal object ServiceRecovery {
    * Start the service from a context with no foreground (the watchdog, boot), without crashing.
    * Returns whether the start was accepted.
    */
-  fun tryStart(context: Context, trigger: String): Boolean =
-    try {
+  fun tryStart(context: Context, trigger: String): Boolean {
+    // Recorded before the start, so the service's `started` event can say what brought it back
+    // (`boot`, `package-replaced`, `watchdog`). Committed synchronously: `onCreate` may read it
+    // before an `apply()` lands.
+    prefs(context).edit().putString(START_TRIGGER_KEY, trigger).commit()
+    return try {
       context.startForegroundService(Intent(context, BackgroundLocationService::class.java))
+      Log.i(TAG, "service start accepted (trigger=$trigger)")
       true
     } catch (e: Exception) {
       // ForegroundServiceStartNotAllowedException (API 31+) is an IllegalStateException; a revoked
       // location permission surfaces as a SecurityException. Either way: not now.
+      prefs(context).edit().remove(START_TRIGGER_KEY).apply()
       recordBlocked(context, "$trigger: ${e.javaClass.simpleName}")
       false
     }
+  }
+
+  /**
+   * What started the service, once: the trigger [tryStart] recorded, or `null` for a start it did
+   * not make (the app itself, or Android redelivering the intent after a kill).
+   */
+  fun takeStartTrigger(context: Context): String? {
+    val prefs = prefs(context)
+    val trigger = prefs.getString(START_TRIGGER_KEY, null) ?: return null
+    prefs.edit().remove(START_TRIGGER_KEY).apply()
+    return trigger
+  }
 
   // Battery-optimisation exemption.
 

@@ -15,6 +15,7 @@ import android.os.Build
 import android.os.IBinder
 import android.os.Looper
 import android.os.PowerManager
+import android.os.SystemClock
 import android.util.Log
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -134,17 +135,25 @@ class BackgroundLocationService : Service() {
       // may never have exported anything. `detail` carries the count, the gap and the last cause.
       // Only a start that actually reached the foreground ends the outage being reported.
       val blocked = if (promoted) ServiceRecovery.takeBlocked(applicationContext) else null
+      // What brought the service back, and how long after the phone booted: a `trigger=boot` with
+      // a small `boot_age_s` is the boot receiver working; a first start long after a boot, from
+      // the app, is one that did not.
+      val trigger = ServiceRecovery.takeStartTrigger(applicationContext) ?: "app-or-redeliver"
+      val bootAgeS = SystemClock.elapsedRealtime() / 1000
+      val origin = "trigger=$trigger boot_age_s=$bootAgeS"
+      Log.i(TAG, "service started: $origin promoted=$promoted")
       if (blocked != null) {
         val gapS = (System.currentTimeMillis() - blocked.firstAtMs) / 1000
         reporter.event(
           LocationRuntimeKind.STARTED,
           reason = "recovered",
-          detail = "fgs_start_blocked count=${blocked.count} gap_s=$gapS last=${blocked.reason}",
+          detail = "$origin fgs_start_blocked count=${blocked.count} gap_s=$gapS last=${blocked.reason}",
         )
       } else {
         reporter.event(
           LocationRuntimeKind.STARTED,
           reason = if (promoted) "service" else "service-not-foreground",
+          detail = origin,
         )
       }
       ProcessMemorySampler.sample("started")
