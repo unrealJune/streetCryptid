@@ -2818,6 +2818,7 @@ pub(crate) mod tests {
                 Vec::new(),
                 vec![reader_endpoint.addr()],
                 Duration::from_secs(30),
+                None,
             ),
         )
         .await??
@@ -2882,6 +2883,7 @@ pub(crate) mod tests {
                 Vec::new(),
                 vec![carrier_endpoint.addr()],
                 Duration::from_secs(30),
+                None,
             )
             .await?;
         tokio::time::timeout(Duration::from_secs(15), async {
