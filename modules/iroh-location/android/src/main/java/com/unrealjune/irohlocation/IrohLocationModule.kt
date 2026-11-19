@@ -725,6 +725,27 @@ class IrohLocationModule : Module() {
         ingestOutcomeToMap(outcome)
       }
 
+    /// `ingestFix` and the motion claim it settles, in one drain (`parked`: `true` a stop, `false`
+    /// a departure, `null` none), the push bounded by `budgetMs` when given. See
+    /// `DrainEngine::ingest_claiming`.
+    AsyncFunction("ingestFixClaiming") Coroutine
+      { fix: Map<String, Double>,
+        battery: Map<String, Any>,
+        intervalMs: Double,
+        parked: Boolean?,
+        budgetMs: Double? ->
+        val outcome =
+          requireNode().ingestFixClaiming(
+            locationFixOf(fix),
+            batteryStateOf(battery),
+            intervalMs.coerceAtLeast(1.0).toULong(),
+            System.currentTimeMillis().toULong(),
+            parked,
+            budgetMs?.coerceAtLeast(0.0)?.toULong(),
+          )
+        ingestOutcomeToMap(outcome)
+      }
+
     /// Publish the slots that have come due without a new fix, reusing the last known position.
     /// Driven on a timer by the mounted app — neither platform gives a background process a
     /// reliable one, and the cadence has to stay uniform whether or not the phone is moving.

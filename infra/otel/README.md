@@ -94,7 +94,8 @@ bg.refresh         (the OS-scheduled periodic wake; bg.refresh.expired if iOS cu
 │                  no JS span. `wake.*` on device.health is what counts those; there is no
 │                  `bg.wake` span any more, and no `bg.backfill`.
 └ bg.dispatch      (branch: mounted | headless)
-  └ engine.ingest  (motion, decision, sc.drop_reason?)
+  └ engine.stamp   (call, motion, fix_state_before, fix_state)  ─ native; at the decision, BEFORE the push
+  └ engine.ingest  (motion, fix_state_before, fix_state, decision, sc.drop_reason?)
     └ outbox.enqueue (coalesced / overflow?)
     └ outbox.drain   (published/retained, publish.failed reason)
       └ publish.fix        (sc.seq)
@@ -104,7 +105,7 @@ bg.refresh         (the OS-scheduled periodic wake; bg.refresh.expired if iOS cu
         ├ trail.push.live       (waiting on the node lock)
         ├ trail.push.open       (doc handle + event subscription)
         ├ trail.push.start_sync (peers)
-        ├ trail.push.wait       (budget_ms, ended, events, pending)  ─ the only phase the 30 s deadline bounds
+        ├ trail.push.wait       (budget_ms, ended, events, pending, settled_ms?)  ─ the only phase the 30 s deadline bounds
         ├ trail.push.roles      (recipient/delivery store reads for peer.role)
         ├ trail.push.report     (peers; per-peer path labels)
         ├ trail.push.peer  (sc.peer, peer.outcome)
@@ -113,7 +114,7 @@ bg.refresh         (the OS-scheduled periodic wake; bg.refresh.expired if iOS cu
       └ trail.push.deferred (push.budget_ms)  ─ iOS: sealed, no background time left to push; instead of trail.push
                                                         replica watch: peer.contact (recv, from_author?)
                                                                   └ trail.sync.app (recovered)
-                                                                    └ fix.received.app (sc.seq, transport_path, transport_peer?)
+                                                                    └ fix.received.app (sc.seq, fix_state, published_delta_s, transport_path, transport_peer?)
 ```
 
 There is one location transport: the author's iroh-docs namespace. `docs.write` puts the sealed
@@ -349,12 +350,29 @@ network, or the wake ended too early):
 
 A push longer than its 30 s budget spent the difference outside `trail.push.wait`; the sibling
 phase spans say where. `trail.push.wait{ended}` is `all-reported` (every dialled peer answered),
-`deadline` (someone stayed silent — the usual case while a friend is asleep), `stream-ended` or
-`stream-error`:
+`settled` (the stash finished at `settled_ms` and the rest had `PUSH_GRACE_AFTER_SETTLE` more),
+`deadline` (someone stayed silent and the stash never answered), `stream-ended` or `stream-error`:
 
 ```traceql
 { name = "trail.push" && duration > 35s } >> { name =~ "trail.push.(live|open|start_sync|wait|roles|report)" }
 { name = "trail.push.wait" } | select(span.ended, span.pending)
+```
+
+### What the wire said about a friend (`fix_state`, `engine.stamp`)
+
+"Out of contact" on a friend's map is `presence.ts` reading the newest envelope: `parked` holds for
+24 h, `live`/`no-fix` lapse after 2 h. So the question is always what the LAST envelope before a
+silence was sealed as. `publish.fix` carries `fix_state` (1 live, 2 parked, 3 no-fix) and
+`published_delta_s` on the sender, `fix.received.app` the same two on the reader, joined on
+`sc.seq`. `engine.stamp` says how the stamp was reached — the caller's `motion` claim, and the stamp
+before and after — and is emitted at the decision, before the push, because a process suspended
+inside a push loses the `engine.*` span that would have followed it (2026-11-18: an arrival that
+sealed and pushed left none).
+
+```traceql
+{ name = "publish.fix" && span.sc.author = "cc1d2f7ebd" } | select(span.sc.seq, span.fix_state, span.published_delta_s)
+{ name = "engine.stamp" && span.fix_state_before = 2 && span.fix_state != 2 } | select(span.call, span.motion)
+{ name = "fix.received.app" && span.sc.author = "cc1d2f7ebd" } | select(span.sc.seq, span.fix_state)
 ```
 
 ### A push inside an iOS background wake (`push.budget_ms`, `trail.push.deferred`)

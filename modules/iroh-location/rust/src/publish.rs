@@ -286,6 +286,48 @@ struct News {
     overflow_dropped: u32,
 }
 
+/// What one run decided the wire says about motion, for the `engine.*` spans.
+///
+/// `publish.fix` carries the stamp each envelope was sealed with, but not what the run was told or
+/// what the stamp was before it, and on 2026-11-18 that was the whole question: an iPhone's visit
+/// arrival sealed `parked` at 17:41, the next envelope said `live`, and nothing could say whether a
+/// claim had been overruled, a fix had walked out of a stale anchor, or no claim was made at all.
+#[derive(Debug, Clone, Copy)]
+struct Stamped {
+    motion: Motion,
+    before: Option<u8>,
+    after: Option<u8>,
+}
+
+impl Stamped {
+    fn unchanged(motion: Motion, state: Option<u8>) -> Self {
+        Self {
+            motion,
+            before: state,
+            after: state,
+        }
+    }
+
+    /// Recorded the moment it is decided, BEFORE the drain. The drain ends in a push, and an iOS
+    /// process suspended inside that push (for minutes, on 2026-11-18) takes the run's `engine.*`
+    /// span with it: the 17:41 arrival sealed and pushed and left none. Only a change or a claim is
+    /// worth a span; a fix absorbed into a standing state is most deliveries.
+    fn record(&self, call: &'static str) {
+        if self.motion == Motion::Unknown && self.before == self.after {
+            return;
+        }
+        tracing::info_span!(
+            "engine.stamp",
+            lane = "native",
+            call,
+            motion = self.motion.as_str(),
+            fix_state_before = self.before.unwrap_or(0),
+            fix_state = self.after.unwrap_or(0),
+        )
+        .in_scope(|| {});
+    }
+}
+
 /// Serializes every run of a [`DrainEngine`] over the same stores. One per node.
 ///
 /// The engine is built per call and holds no state, but the stores behind it are shared, and two
@@ -390,6 +432,15 @@ impl Motion {
         }
     }
 
+    /// The `engine.*` span spelling.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Motion::Parked => "parked",
+            Motion::Moving => "moving",
+            Motion::Unknown => "none",
+        }
+    }
+
     fn stamp(self, previous: Option<u8>) -> Option<u8> {
         match self {
             Motion::Parked => Some(FIX_STATE_PARKED),
@@ -469,22 +520,53 @@ impl<S: PublishSink> DrainEngine<'_, S> {
         interval_ms: u64,
         now_ms: u64,
     ) -> Result<IngestOutcome, PublishError> {
+        self.ingest_claiming(fix, Motion::Unknown, battery, interval_ms, now_ms)
+            .await
+    }
+
+    /// [`ingest`](Self::ingest) and a motion claim in ONE run: one stamp decision, one drain, one
+    /// push.
+    ///
+    /// The claim used to follow the fix as a separate heartbeat, and the two raced for one
+    /// background allowance. On 2026-11-18 an iPhone's visit arrival ingested its fix at 17:52:24;
+    /// the fix's drain sealed two `live` envelopes and began a 30 s push to a friend who was asleep,
+    /// iOS suspended the process inside it, and the `parked` claim queued behind it never ran. The
+    /// last envelope said `live`, and two hours later every friend read "out of contact" about a
+    /// phone sitting at home. Judged together, whatever is sealed already says `parked`, and
+    /// whatever runs out of time is the push and only the push.
+    ///
+    /// * [`Motion::Parked`] with an accepted fix anchors the stop ON THAT FIX — the arrival, not
+    ///   whatever was accepted last, which is often the drive in, far enough back that the next fix
+    ///   from the house reads as having left. With a refused fix the standing anchor, or else the
+    ///   last accepted position, is the anchor, as a heartbeat's would be.
+    /// * [`Motion::Moving`] ends a standing `parked`: `live` when this fix was accepted (moving, and
+    ///   here is where), "moving, no fix yet" when it was refused.
+    /// * [`Motion::Unknown`] is a plain ingest.
+    pub async fn ingest_claiming(
+        &self,
+        fix: LocationFix,
+        motion: Motion,
+        battery: BatteryState,
+        interval_ms: u64,
+        now_ms: u64,
+    ) -> Result<IngestOutcome, PublishError> {
         let clock = self.call_clock(now_ms);
         let _run = self.serialize().await;
-        let outcome = self
-            .ingest_untraced(fix, battery, interval_ms, clock)
+        let (outcome, stamped) = self
+            .ingest_untraced(fix, motion, battery, interval_ms, clock)
             .await?;
-        trace_outcome("engine.ingest", &outcome);
+        trace_outcome("engine.ingest", &outcome, stamped);
         Ok(outcome)
     }
 
     async fn ingest_untraced(
         &self,
         fix: LocationFix,
+        motion: Motion,
         battery: BatteryState,
         interval_ms: u64,
         clock: CallClock,
-    ) -> Result<IngestOutcome, PublishError> {
+    ) -> Result<(IngestOutcome, Stamped), PublishError> {
         let now_ms = clock.now_ms;
         let mut state = self.gate.get();
 
@@ -508,40 +590,62 @@ impl<S: PublishSink> DrainEngine<'_, S> {
         // A standing `parked` survives a fix that proves nothing about motion: one accepted at the
         // stop (see `gate::still_parked` for the incident), or one the gate refused. Only a fix
         // that has left the stop, or a caller's `Motion::Moving`, ends it.
+        //
+        // A caller's claim outranks all of that — see `ingest_claiming`.
         let before = state.last_state;
         let parked = before == Some(FIX_STATE_PARKED);
         let anchor = state
             .parked_at
             .take()
             .or_else(|| state.last_known_fix.clone());
-        let (stamp, parked_at) = match (&rejection, anchor) {
-            (None, Some(at)) if parked && gate::still_parked(&fix, &LocationFix::from(&at)) => {
+        let accepted = rejection.is_none();
+        let (stamp, parked_at) = match (motion, accepted, anchor) {
+            // A stop, with the fix that proves where: anchored here, whatever stood before.
+            (Motion::Parked, true, _) => (FIX_STATE_PARKED, Some(StoredFix::from(&fix))),
+            (Motion::Parked, false, at) => (FIX_STATE_PARKED, at),
+            // Motion: the stop is over either way.
+            (Motion::Moving, true, _) => (FIX_STATE_LIVE, None),
+            (Motion::Moving, false, _) if parked => (FIX_STATE_NO_FIX, None),
+            // No claim: the fix alone decides, and only by leaving the stop.
+            (_, true, Some(at)) if parked && gate::still_parked(&fix, &LocationFix::from(&at)) => {
                 (FIX_STATE_PARKED, Some(at))
             }
-            (None, _) => (FIX_STATE_LIVE, None),
-            (Some(_), at) if parked => (FIX_STATE_PARKED, at),
-            (Some(_), _) => (FIX_STATE_NO_FIX, None),
+            (_, true, _) => (FIX_STATE_LIVE, None),
+            (_, false, at) if parked => (FIX_STATE_PARKED, at),
+            (_, false, _) => (FIX_STATE_NO_FIX, None),
         };
         state.last_state = Some(stamp);
         state.parked_at = parked_at;
-        if rejection.is_none() {
+        if accepted {
             state.last_known_fix = Some(StoredFix::from(&fix));
             state.last_accepted_at = Some(now_ms);
         }
+        let stamped = Stamped {
+            motion,
+            before,
+            after: state.last_state,
+        };
+        stamped.record("engine.ingest");
 
         // A hard stop, indistinguishable from the phone dying. Deliberately not a slower cadence:
         // the interval is observable to the stash, so backing it off would put the charge level on
         // the wire. The gate state is still saved — the accepted fix is real either way.
         if gate::critically_low(&battery) {
             self.gate.set(state);
-            return Ok(self.outcome(rejection, 0, Drained::default(), 0, 0, true));
+            return Ok((
+                self.outcome(rejection, 0, Drained::default(), 0, 0, true),
+                stamped,
+            ));
         }
 
         let Some(known) = state.last_known_fix.as_ref().map(LocationFix::from) else {
             // Refused before we ever had a position. Nothing to republish, so no slot to fill; the
             // next acceptable fix anchors the grid.
             self.gate.set(state);
-            return Ok(self.outcome(rejection, 0, Drained::default(), 0, 0, false));
+            return Ok((
+                self.outcome(rejection, 0, Drained::default(), 0, 0, false),
+                stamped,
+            ));
         };
 
         gate::regrid(&mut state, interval_ms);
@@ -561,13 +665,16 @@ impl<S: PublishSink> DrainEngine<'_, S> {
         self.gate.set(state);
 
         let drained = self.drain_held(clock).await?;
-        Ok(self.outcome(
-            rejection,
-            plan.due + news.enqueued,
-            drained,
-            plan.skipped,
-            overflow_dropped,
-            false,
+        Ok((
+            self.outcome(
+                rejection,
+                plan.due + news.enqueued,
+                drained,
+                plan.skipped,
+                overflow_dropped,
+                false,
+            ),
+            stamped,
         ))
     }
 
@@ -616,10 +723,10 @@ impl<S: PublishSink> DrainEngine<'_, S> {
     ) -> Result<IngestOutcome, PublishError> {
         let clock = self.call_clock(now_ms);
         let _run = self.serialize().await;
-        let outcome = self
+        let (outcome, stamped) = self
             .heartbeat_untraced(motion, battery, interval_ms, clock)
             .await?;
-        trace_outcome("engine.heartbeat", &outcome);
+        trace_outcome("engine.heartbeat", &outcome, stamped);
         Ok(outcome)
     }
 
@@ -629,17 +736,24 @@ impl<S: PublishSink> DrainEngine<'_, S> {
         battery: BatteryState,
         interval_ms: u64,
         clock: CallClock,
-    ) -> Result<IngestOutcome, PublishError> {
+    ) -> Result<(IngestOutcome, Stamped), PublishError> {
         let now_ms = clock.now_ms;
         let mut state = self.gate.get();
+        let untouched = Stamped::unchanged(motion, state.last_state);
 
         if gate::critically_low(&battery) {
-            return Ok(self.outcome(None, 0, Drained::default(), 0, 0, true));
+            return Ok((
+                self.outcome(None, 0, Drained::default(), 0, 0, true),
+                untouched,
+            ));
         }
         let Some(known) = state.last_known_fix.as_ref().map(LocationFix::from) else {
             // Nothing has ever passed the gate, so there is no position to repeat. The first
             // acceptable fix anchors the grid.
-            return Ok(self.outcome(None, 0, Drained::default(), 0, 0, false));
+            return Ok((
+                self.outcome(None, 0, Drained::default(), 0, 0, false),
+                untouched,
+            ));
         };
 
         // The declaration this whole field exists for, when the caller can make it. A parked
@@ -657,6 +771,12 @@ impl<S: PublishSink> DrainEngine<'_, S> {
                 .or_else(|| state.last_known_fix.clone()),
             _ => None,
         };
+        let stamped = Stamped {
+            motion,
+            before,
+            after: state.last_state,
+        };
+        stamped.record("engine.heartbeat");
 
         gate::regrid(&mut state, interval_ms);
         let plan = gate::due_slots(now_ms, interval_ms, state.last_published_slot);
@@ -680,13 +800,16 @@ impl<S: PublishSink> DrainEngine<'_, S> {
         self.gate.set(state);
 
         let drained = self.drain_held(clock).await?;
-        Ok(self.outcome(
-            None,
-            plan.due + news.enqueued,
-            drained,
-            plan.skipped,
-            overflow_dropped,
-            false,
+        Ok((
+            self.outcome(
+                None,
+                plan.due + news.enqueued,
+                drained,
+                plan.skipped,
+                overflow_dropped,
+                false,
+            ),
+            stamped,
         ))
     }
 
@@ -937,11 +1060,18 @@ pub fn drop_reason(outcome: &IngestOutcome) -> Option<&'static str> {
 /// `sc.drop_reason` values, now from wherever the pipeline runs — JS-free wakes included.
 ///
 /// Absorbed fixes are not traced: they are most deliveries, and they are not an outcome.
-fn trace_outcome(name: &'static str, outcome: &IngestOutcome) {
+///
+/// `motion`, `fix_state_before` and `fix_state` say what the run was told and what it stamped (see
+/// [`Stamped`]); a run that changed the stamp is traced even when it sealed nothing.
+fn trace_outcome(name: &'static str, outcome: &IngestOutcome, stamped: Stamped) {
     let reason = drop_reason(outcome);
-    if reason.is_none() && outcome.enqueued == 0 && outcome.published == 0 {
+    let changed = stamped.before != stamped.after;
+    if reason.is_none() && outcome.enqueued == 0 && outcome.published == 0 && !changed {
         return;
     }
+    let motion = stamped.motion.as_str();
+    let before = stamped.before.unwrap_or(0);
+    let after = stamped.after.unwrap_or(0);
     let span = if name == "engine.ingest" {
         tracing::info_span!(
             "engine.ingest",
@@ -955,6 +1085,9 @@ fn trace_outcome(name: &'static str, outcome: &IngestOutcome) {
             overflow_dropped = outcome.overflow_dropped,
             suspended = outcome.suspended,
             push_deferred = outcome.push_deferred,
+            motion,
+            fix_state_before = before,
+            fix_state = after,
             sc.drop_reason = reason.unwrap_or(""),
         )
     } else {
@@ -969,6 +1102,9 @@ fn trace_outcome(name: &'static str, outcome: &IngestOutcome) {
             overflow_dropped = outcome.overflow_dropped,
             suspended = outcome.suspended,
             push_deferred = outcome.push_deferred,
+            motion,
+            fix_state_before = before,
+            fix_state = after,
             sc.drop_reason = reason.unwrap_or(""),
         )
     };

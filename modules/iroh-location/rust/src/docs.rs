@@ -85,6 +85,18 @@ const SYNC_FIRST_EVENT_TIMEOUT_SECS: u64 = 25;
 /// but a peer that connects and then stalls would otherwise hold a headless context open.
 pub const PUSH_TIMEOUT_SECS: u64 = 30;
 
+/// How much longer a push waits for friends once the stash has its copy (`settle_on` in
+/// [`TrailDocs::push`]).
+///
+/// Measured 2026-11-19 over 24 h of `trail.push.peer`: the stash finished at p50 0.3 s, a friend
+/// that answered at p50 0.7 s, and 592 of 867 friend dials never answered at all — each one costing
+/// its push the full 30 s. On iOS those 30 s are spent from a ~30 s background allowance, and the
+/// phones were suspended inside them (pushes of 210 and 451 s on 2026-11-18), with whatever the
+/// wake owed next — a `parked` claim — never sent. Once the stash holds the entries every friend can
+/// read them from it, and the namespace stays live, so an awake friend still reconciles after we
+/// stop watching. Three seconds keeps the friends who answer quickly as direct contacts.
+pub const PUSH_GRACE_AFTER_SETTLE: Duration = Duration::from_secs(3);
+
 /// Key separator between the hex author and the zero-padded sequence number.
 pub const KEY_SEP: u8 = b'/';
 
@@ -519,6 +531,12 @@ impl PeerOutcome {
 /// Pure, and separated out for that reason, so it is tested without standing up an iroh node. It
 /// must never drop the record when nobody answered: a push where every peer stayed quiet is the
 /// most informative row there is.
+/// The push deadline once the settling peer has its copy: [`PUSH_GRACE_AFTER_SETTLE`] from now, and
+/// never later than the deadline already standing.
+fn settled_deadline(deadline: Instant, now: Instant) -> Instant {
+    deadline.min(now + PUSH_GRACE_AFTER_SETTLE)
+}
+
 fn finish_outcomes(
     mut reported: Vec<PeerPushOutcome>,
     outstanding: &[[u8; 32]],
@@ -1558,12 +1576,17 @@ impl TrailDocs {
     /// never waited for: a laptop repeater asleep in a bag would otherwise cost every push the
     /// whole deadline. They reconcile whenever they next wake, and a carrier that answers while
     /// the others are awaited is still reported.
+    ///
+    /// `settle_on` is the peer whose copy makes the push durable — the stash. Once it reports
+    /// finished, the rest get [`PUSH_GRACE_AFTER_SETTLE`] more and no longer the whole budget
+    /// (`ended = "settled"`). Its own silence changes nothing: the push then waits as before.
     pub async fn push(
         &self,
         ns: NamespaceId,
         peers: Vec<EndpointAddr>,
         unwaited: Vec<EndpointAddr>,
         budget: Duration,
+        settle_on: Option<[u8; 32]>,
     ) -> Result<Option<PushReport>> {
         use tracing::Instrument;
         // The phases of a push are spans of their own (`trail.push.open`, `.start_sync`, `.wait`)
@@ -1604,13 +1627,15 @@ impl TrailDocs {
         // The budget starts once the exchange is under way, as it always has; `latency_ms` is
         // measured from here too.
         let started_at = Instant::now();
-        let deadline = started_at + budget;
+        let mut deadline = started_at + budget;
+        let mut settled_ms: Option<u64> = None;
         let wait = tracing::info_span!(
             "trail.push.wait",
             budget_ms = budget.as_millis() as u64,
             ended = tracing::field::Empty,
             events = tracing::field::Empty,
             pending = tracing::field::Empty,
+            settled_ms = tracing::field::Empty,
         );
         let mut events_seen: u64 = 0;
         let mut ended = "all-reported";
@@ -1618,7 +1643,11 @@ impl TrailDocs {
             while !pending.is_empty() {
                 let remaining = deadline.saturating_duration_since(Instant::now());
                 if remaining.is_zero() {
-                    ended = "deadline";
+                    ended = if settled_ms.is_some() {
+                        "settled"
+                    } else {
+                        "deadline"
+                    };
                     break;
                 }
                 let next = timeout(remaining, events.next()).await;
@@ -1641,6 +1670,10 @@ impl TrailDocs {
                                     latency_ms: Some(latency_ms),
                                     entries_sent: sent,
                                 });
+                                if settled_ms.is_none() && settle_on == Some(peer) {
+                                    settled_ms = Some(latency_ms);
+                                    deadline = settled_deadline(deadline, Instant::now());
+                                }
                             }
                             Err(err) => {
                                 // One unreachable peer isn't the end of the exchange — keep waiting
@@ -1674,7 +1707,11 @@ impl TrailDocs {
                         break;
                     }
                     Err(_) => {
-                        ended = "deadline";
+                        ended = if settled_ms.is_some() {
+                            "settled"
+                        } else {
+                            "deadline"
+                        };
                         break;
                     }
                 }
@@ -1684,6 +1721,9 @@ impl TrailDocs {
         .instrument(wait.clone())
         .await;
         wait.record("ended", ended);
+        if let Some(ms) = settled_ms {
+            wait.record("settled_ms", ms);
+        }
         wait.record("events", events_seen);
         wait.record("pending", pending.len() as u64);
         waited?;
@@ -2147,6 +2187,20 @@ pub(crate) mod tests {
         assert_eq!(PeerOutcome::Finished.as_str(), "finished");
         assert_eq!(PeerOutcome::Failed.as_str(), "failed");
         assert_eq!(PeerOutcome::Silent.as_str(), "silent");
+    }
+
+    #[test]
+    fn the_stash_settling_cuts_the_wait_for_friends_to_the_grace() {
+        let now = Instant::now();
+        let far = now + Duration::from_secs(30);
+        assert_eq!(settled_deadline(far, now), now + PUSH_GRACE_AFTER_SETTLE);
+    }
+
+    #[test]
+    fn the_stash_settling_never_extends_a_deadline() {
+        let now = Instant::now();
+        let near = now + Duration::from_millis(500);
+        assert_eq!(settled_deadline(near, now), near);
     }
 
     #[test]

@@ -761,8 +761,21 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
         }
         if state == .moving { considerStopping(at: cached) }
       }
-      if wasMoving && state == .stopped {
-        publish(.seed) { await self.heartbeat(battery: battery, parked: true, under: $0) }
+      // A stop restored from an earlier process counts only while the cache is still at it: a
+      // phone that left while nothing ran is the fence's to report, not ours to call parked.
+      let restoredAtStop =
+        !wasMoving && state == .stopped
+        && stopAnchor.map {
+          cached.horizontalAccuracy >= 0
+            && cached.distance(from: $0) <= cached.horizontalAccuracy + Self.stopAnchorRadiusM
+        } == true
+      if (wasMoving && state == .stopped) || restoredAtStop {
+        // Stopped — just now, or restored and still there — so this seal says `parked`, in the
+        // same run as the fix. A restored stop used to take the plain-ingest branch and claim
+        // nothing, leaving whatever the wire last said (often the `live` of the drive in) standing.
+        owesDeclaration = false
+        owesRetraction = false
+        publish(.seed) { await self.ingest(fix: fix, battery: battery, under: $0, claim: true) }
       } else {
         settleClaims(ingesting: fix, battery: battery, lane: .seed)
       }
@@ -1640,7 +1653,12 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
       }
       if state == .moving { considerStopping(at: location) }
       if state == .stopped {
-        publish(.delivery) { await self.heartbeat(battery: battery, parked: true, under: $0) }
+        // The confirming fix and the declaration in one run: the stop is anchored on this fix,
+        // and the envelope it seals already says `parked` (see `settleClaims`).
+        let fix = Self.fix(from: location)
+        publish(.delivery) {
+          await self.ingest(fix: fix, battery: battery, under: $0, claim: true)
+        }
       } else {
         // Only a FRESH delivery may move the fence — a redelivery is a position already left.
         armMovingFence(around: location)
@@ -1751,18 +1769,15 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
     reporter.event(.transition, reason: "departure_confirmed")
   }
 
-  /// Ingest a delivery's fix, then send whatever claim the state machine owes — in one task,
-  /// because two would race for the drain lock in either order.
+  /// Ingest a delivery's fix together with whatever claim the state machine owes: ONE drain run
+  /// (`ingestFixClaiming`), one stamp decision, one push.
   ///
-  /// The fix goes first both ways. A declaration after it lets the drain anchor the stop on this
-  /// fix rather than on whatever it accepted last. A retraction after it costs nothing when the
-  /// fix has already carried the wire to `live` on its own (it is far from the stop, and the drain
-  /// publishes that change at once), and otherwise turns a `parked` the fix could not end — one
-  /// still inside the hold radius — into "moving, no fix yet", which is what is true.
-  ///
-  /// With a claim owed, the fix's push leaves `claimReserveMs` of the wake for the claim's, and the
-  /// friend pull waits until after the claim: the claim is the envelope a friend most needs, and
-  /// until 2026-11 it queued behind both a full push and a full pull inside one ~30 s allowance.
+  /// It was a fix and then a claim heartbeat, in one task. On 2026-11-18 `cc1d2f7ebd`'s arrival
+  /// ingested its fix at 17:52:24, that drain sealed `live` and started a 30 s push to a friend who
+  /// was asleep, iOS suspended the process inside it, and the claim behind it never ran: the last
+  /// envelope said `live`, and friends read "out of contact" two hours later. Together, the
+  /// envelope that is sealed already carries the claim, and the stop is anchored on this fix — the
+  /// arrival — rather than on whatever was accepted last.
   private func settleClaims(
     ingesting fix: LocationFix, battery: BatteryState, lane: PublishAssertion.Lane
   ) {
@@ -1770,14 +1785,7 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
     owesRetraction = false
     owesDeclaration = false
     publish(lane) { assertion in
-      guard let claim else {
-        await self.ingest(fix: fix, battery: battery, under: assertion)
-        return
-      }
-      await self.ingest(
-        fix: fix, battery: battery, under: assertion,
-        reserveMs: PublishAssertion.claimReserveMs, pull: false)
-      await self.heartbeat(battery: battery, parked: claim, under: assertion)
+      await self.ingest(fix: fix, battery: battery, under: assertion, claim: claim)
     }
   }
 
@@ -1971,7 +1979,15 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
     // the arrival is the OS saying the phone has stopped, so the `parked` stamp a heartbeat
     // carries is honest before a fix has placed it, and a fix showing otherwise re-stamps `live`.
     let battery = Self.battery()
-    publish(.visit) { await self.heartbeat(battery: battery, parked: true, under: $0) }
+    if state == .stopped, let anchor = stopAnchor {
+      // Parked on a real fix: send it with the claim, so the drain anchors the stop where the phone
+      // IS, not on the last fix it accepted — often the drive in, far enough back that the next fix
+      // from the house reads as having left and flips the wire to `live`.
+      let fix = Self.fix(from: anchor)
+      publish(.visit) { await self.ingest(fix: fix, battery: battery, under: $0, claim: true) }
+    } else {
+      publish(.visit) { await self.heartbeat(battery: battery, parked: true, under: $0) }
+    }
   }
 
   /// Faster than anyone standing somewhere. A negative speed is Core Location's "unknown", which
@@ -2074,8 +2090,9 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
   /// sites. Dropping to the main queue because that is where the Expo event emitter expects to be
   /// called from, and Core Location has already delivered us there anyway.
   private func handOff(
-    kind: String, fix: LocationFix?, battery: BatteryState, parked: Bool? = nil
-  ) {
+    kind: String, fix: LocationFix?, battery: BatteryState, parked: Bool? = nil,
+    under assertion: PublishAssertion?
+  ) async {
     var payload: [String: Any] = [
       "kind": kind,
       "reason": lastWakeReason.rawValue,
@@ -2084,8 +2101,9 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
         "level": battery.level, "charging": battery.charging, "lowPower": battery.lowPower,
       ],
     ]
-    // The heartbeat's motion claim, forwarded to `heartbeatFix` by `routeNativeCapture`. Omitted
-    // rather than null when there is none, which reads the same as a binary that predates it.
+    // The motion claim, forwarded by `routeNativeCapture` — with the fix in the same drain
+    // (`ingestFixClaiming`) on a `fix`, to `heartbeatFix` on a `heartbeat`. Omitted rather than
+    // null when there is none, which reads the same as a binary that predates it.
     if let parked { payload["parked"] = parked }
     if let fix {
       payload["fix"] = [
@@ -2106,31 +2124,67 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
       return
     }
     reporter.noteHandOff()
-    DispatchQueue.main.async { sink.sendEvent("onNativeFix", payload) }
+    if let assertion {
+      // Held until the app has published it: see `HandOffAcks`. The push budget rides along so
+      // the app's drain is bounded the way ours would have been.
+      let budgetMs = await assertion.pushBudgetMs()
+      let token = UUID().uuidString
+      payload["token"] = token
+      payload["budgetMs"] = budgetMs
+      let event = payload
+      let answered = await HandOffAcks.shared.wait(
+        token: token, timeoutMs: min(budgetMs + Self.handOffSlackMs, Self.handOffMaxWaitMs)
+      ) {
+        DispatchQueue.main.async { sink.sendEvent("onNativeFix", event) }
+      }
+      if !answered {
+        reporter.event(.publishAssertion, reason: "handoff_unanswered", detail: "kind=\(kind)")
+      }
+    } else {
+      let event = payload
+      DispatchQueue.main.async { sink.sendEvent("onNativeFix", event) }
+    }
     // The app publishes this capture; receiving is still ours while it is off screen, since its own
     // pull clock only runs on screen. `pullFriendFixes` declines when the app is active.
-    Task { await self.pullFriendFixes() }
+    await pullFriendFixes()
   }
+
+  /// JS has finished publishing the capture handed to it under `token`. See `HandOffAcks`.
+  func ackHandOff(_ token: String) {
+    HandOffAcks.shared.ack(token)
+  }
+
+  /// Past its push budget, the app's drain still has its seal and reporting to finish.
+  private static let handOffSlackMs: UInt64 = 5_000
+  /// Never hold a hand-off's assertion longer than this, whatever the budget said: an assertion
+  /// still held when the allowance runs out gets the process killed rather than suspended.
+  private static let handOffMaxWaitMs: UInt64 = 28_000
 
   /// Run one captured fix through gate → outbox → seal → send.
   ///
-  /// Under `assertion`, the push is bounded by what is left of it, less `reserveMs` kept for work
-  /// that follows in the same wake; `pull: false` leaves the friend pull to that work.
+  /// `claim` is the motion claim settled in the same run (`true` a stop, `false` a departure, `nil`
+  /// none) — see `settleClaims`. Under `assertion`, the push is bounded by what is left of it.
   private func ingest(
     fix: LocationFix, battery: BatteryState, under assertion: PublishAssertion?,
-    reserveMs: UInt64 = 0, pull: Bool = true
+    claim: Bool? = nil
   ) async {
     reporter.noteWorkStarted()
     defer { reporter.noteWorkFinished() }
     guard let node = await ensureStarted() else {
-      handOff(kind: "fix", fix: fix, battery: battery)
+      await handOff(kind: "fix", fix: fix, battery: battery, parked: claim, under: assertion)
       return
     }
     do {
       let nowMs = UInt64(Date().timeIntervalSince1970 * 1000)
       let outcome: IngestOutcome
-      if let assertion {
-        let budgetMs = await assertion.pushBudgetMs(reserveMs: reserveMs)
+      if let claim {
+        var budgetMs: UInt64?
+        if let assertion { budgetMs = await assertion.pushBudgetMs() }
+        outcome = try await node.ingestFixClaiming(
+          fix: fix, battery: battery, intervalMs: slotIntervalMs, nowMs: nowMs, parked: claim,
+          budgetMs: budgetMs)
+      } else if let assertion {
+        let budgetMs = await assertion.pushBudgetMs()
         outcome = try await node.ingestFixWithin(
           fix: fix, battery: battery, intervalMs: slotIntervalMs, nowMs: nowMs,
           budgetMs: budgetMs)
@@ -2140,7 +2194,7 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
       }
       report("ingest", outcome)
       notePushDeferred(outcome)
-      if pull { await pullFriendFixes() }
+      await pullFriendFixes()
       // The wake's work is done; fold what it cost into the counters. A window left open is not a
       // measurement error, it is the signal that the process did not survive its own wake.
       BackgroundWakeLedger.closeWindow()
@@ -2168,7 +2222,8 @@ final class BackgroundLocationRuntime: NSObject, CLLocationManagerDelegate {
     reporter.noteWorkStarted()
     defer { reporter.noteWorkFinished() }
     guard let node = await ensureStarted() else {
-      handOff(kind: "heartbeat", fix: nil, battery: battery, parked: parked)
+      await handOff(
+        kind: "heartbeat", fix: nil, battery: battery, parked: parked, under: assertion)
       return
     }
     do {

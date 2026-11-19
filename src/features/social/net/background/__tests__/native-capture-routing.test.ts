@@ -10,15 +10,21 @@
  */
 
 import type { LocationFix } from '../../../core/types';
-import { routeNativeCapture, type EngineState } from '../location-engine';
+import { routeNativeCapture, type CaptureClaim, type EngineState } from '../location-engine';
 
 function engineStub(accepted: LocationFix | null) {
-  const calls = { ingest: [] as LocationFix[], heartbeat: 0, parked: [] as (boolean | null)[] };
+  const calls = {
+    ingest: [] as LocationFix[],
+    claims: [] as (CaptureClaim | undefined)[],
+    heartbeat: 0,
+    parked: [] as (boolean | null)[],
+  };
   return {
     calls,
     engine: {
-      ingest: async (fix: LocationFix) => {
+      ingest: async (fix: LocationFix, _parent?: unknown, claim?: CaptureClaim) => {
         calls.ingest.push(fix);
+        calls.claims.push(claim);
         return null as never;
       },
       heartbeat: async (_parent?: unknown, parked?: boolean | null) => {
@@ -72,6 +78,19 @@ describe('routeNativeCapture', () => {
     await routeNativeCapture({ kind: 'heartbeat', parked: false }, engine);
     await routeNativeCapture({ kind: 'heartbeat' }, engine);
     expect(calls.parked).toEqual([true, false, null]);
+  });
+
+  it("carries a fix's claim and budget INTO its ingest, never as a heartbeat after it", async () => {
+    // 2026-11-18: the arrival's fix and its `parked` claim were two drains; the phone was
+    // suspended inside the first one's push and the claim never sealed. One drain or nothing.
+    const { engine, calls } = engineStub(fix);
+    await routeNativeCapture({ kind: 'fix', fix, parked: true, budgetMs: 12_000 }, engine);
+    await routeNativeCapture({ kind: 'fix', fix }, engine);
+    expect(calls.claims).toEqual([
+      { parked: true, budgetMs: 12_000 },
+      { parked: null, budgetMs: null },
+    ]);
+    expect(calls.heartbeat).toBe(0);
   });
 
   it('treats a fix-kind capture with no fix as a heartbeat rather than throwing', async () => {

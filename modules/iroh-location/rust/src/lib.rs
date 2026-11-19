@@ -1984,10 +1984,24 @@ impl LocationNode {
             let trail = started.trail.clone();
             let ns = trail.own_namespace();
 
-            let sent = trail.push(ns, peers, carriers, budget).await.map_err(|e| {
-                tracing::warn!(error = %e, "trail push failed");
-                LocationError::Network(e.to_string())
-            })?;
+            // Read before the push now, not only for the report: the stash's id is what lets the
+            // push stop waiting on friends once the stash has the entries (`settle_on`).
+            let roles = self
+                .peer_roles()
+                .instrument(tracing::info_span!("trail.push.roles"))
+                .await;
+            let settle_on = roles
+                .stash()
+                .copied()
+                .filter(|stash| peers.iter().any(|p| p.id.as_bytes() == stash));
+
+            let sent = trail
+                .push(ns, peers, carriers, budget, settle_on)
+                .await
+                .map_err(|e| {
+                    tracing::warn!(error = %e, "trail push failed");
+                    LocationError::Network(e.to_string())
+                })?;
             let current = tracing::Span::current();
             current.record("finished", sent.is_some());
             let Some(report) = sent else {
@@ -2018,10 +2032,6 @@ impl LocationNode {
             //
             // `peer.role` says whether the peer was the stash or a friend's phone, and a FINISHED
             // push is also a `peer.contact`: the two devices reconciled with each other.
-            let roles = self
-                .peer_roles()
-                .instrument(tracing::info_span!("trail.push.roles"))
-                .await;
             // Per-peer reporting awaits `remote_info` for every finished peer's path label, so it
             // is timed as a phase of its own (`trail.push.report`).
             let report_span =
@@ -6087,6 +6097,39 @@ impl LocationNode {
         ports
             .engine(self, &sink)
             .ingest(fix, battery, interval_ms, now_ms)
+            .await
+            .map_err(|e| LocationError::Network(e.to_string()))
+    }
+
+    /// [`Self::ingest_fix`] and the motion claim it settles, in one run: one stamp decision, one
+    /// drain, one push. See [`publish::DrainEngine::ingest_claiming`] for why they must not be two
+    /// calls, and for how `parked: Some(true)` anchors the stop on this fix.
+    ///
+    /// `budget_ms` bounds the push as [`Self::ingest_fix_within`] does; `None` is the ordinary
+    /// [`docs::PUSH_TIMEOUT_SECS`].
+    pub async fn ingest_fix_claiming(
+        &self,
+        fix: LocationFix,
+        battery: gate::BatteryState,
+        interval_ms: u64,
+        now_ms: u64,
+        parked: Option<bool>,
+        budget_ms: Option<u64>,
+    ) -> Result<publish::IngestOutcome, LocationError> {
+        let sink = match budget_ms {
+            Some(budget_ms) => NodeSink::within(self, budget_ms),
+            None => NodeSink::unbounded(self),
+        };
+        let ports = DrainPorts::of(self).await?;
+        ports
+            .engine(self, &sink)
+            .ingest_claiming(
+                fix,
+                publish::Motion::from_parked(parked),
+                battery,
+                interval_ms,
+                now_ms,
+            )
             .await
             .map_err(|e| LocationError::Network(e.to_string()))
     }

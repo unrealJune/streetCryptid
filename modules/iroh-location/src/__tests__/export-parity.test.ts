@@ -70,6 +70,8 @@ const IOS_ONLY: Record<string, string> = {
     'CBManager.authorization; Android reads its Bluetooth runtime permissions through PermissionsAndroid',
   requestBluetoothAccess:
     'iOS has no request API: the alert appears when a CBManager is created; Android asks from JS',
+  ackNativeCapture:
+    "answers the iOS runtime's hand-off assertion (HandOffAcks); Android's foreground service holds the process itself",
   requestLocalNetworkAccess:
     'iOS has no request API: a Bonjour probe raises the alert; Android asks ACCESS_LOCAL_NETWORK from JS',
 };

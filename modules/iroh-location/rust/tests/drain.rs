@@ -2276,3 +2276,165 @@ async fn a_heartbeat_that_waited_on_the_lock_is_stamped_when_it_ran() {
         "contact is when the envelope was sealed, not when the heartbeat was asked for"
     );
 }
+
+// ── A fix and its claim in one run (`ingest_claiming`) ──────────────────────────────────────────
+
+#[tokio::test]
+async fn an_arrival_and_its_claim_go_out_as_one_parked_envelope() {
+    // 2026-11-18: the arrival's fix and its `parked` claim were two runs. The fix's drain sealed
+    // `live` and was suspended inside its push; the claim never ran. One run seals `parked` first
+    // time, and pushes once.
+    let base = INTERVAL * 10;
+    let h = Harness::new();
+    h.engine()
+        .ingest(fix(base, 20.0), healthy_battery(), INTERVAL, base)
+        .await
+        .unwrap();
+    let flushes_before = *h.sink.flushes.lock().unwrap();
+
+    let arrived = base + MINUTE;
+    let out = h
+        .engine()
+        .ingest_claiming(
+            fix_north(arrived, 12.0, 400.0),
+            Motion::Parked,
+            healthy_battery(),
+            INTERVAL,
+            arrived,
+        )
+        .await
+        .unwrap();
+
+    assert!(out.accepted);
+    assert_eq!(out.enqueued, 1, "the declaration, off the grid");
+    let sent = h.sink.sent.lock().unwrap();
+    let stamps = h.sink.stamps.lock().unwrap();
+    assert_eq!(sent[sent.len() - 1].1, arrived, "carrying the arrival fix");
+    assert_eq!(
+        stamps[stamps.len() - 1].0,
+        Some(iroh_location::FIX_STATE_PARKED)
+    );
+    assert_eq!(stamps.len(), 2, "the drive in, then the stop and nothing between");
+    assert_eq!(*h.sink.flushes.lock().unwrap(), flushes_before + 1, "one push");
+}
+
+#[tokio::test]
+async fn a_claimed_stop_is_anchored_on_the_arrival_not_the_drive_in() {
+    // The drive in was accepted 400 m back. A stop anchored there reads the next fix from the
+    // house as having left it, and flips the wire to `live`.
+    let base = INTERVAL * 10;
+    let h = Harness::new();
+    h.engine()
+        .ingest(fix(base, 20.0), healthy_battery(), INTERVAL, base)
+        .await
+        .unwrap();
+    let arrived = base + MINUTE;
+    h.engine()
+        .ingest_claiming(
+            fix_north(arrived, 12.0, 400.0),
+            Motion::Parked,
+            healthy_battery(),
+            INTERVAL,
+            arrived,
+        )
+        .await
+        .unwrap();
+
+    let later = base + INTERVAL * 2;
+    h.engine()
+        .ingest(
+            fix_north(later, 12.0, 420.0),
+            healthy_battery(),
+            INTERVAL,
+            later,
+        )
+        .await
+        .unwrap();
+
+    let stamps = h.sink.stamps.lock().unwrap();
+    assert_eq!(
+        stamps[stamps.len() - 1].0,
+        Some(iroh_location::FIX_STATE_PARKED)
+    );
+}
+
+#[tokio::test]
+async fn a_claimed_stop_with_a_refused_fix_still_declares() {
+    let base = INTERVAL * 10;
+    let h = Harness::new();
+    h.engine()
+        .ingest(fix(base, 20.0), healthy_battery(), INTERVAL, base)
+        .await
+        .unwrap();
+
+    // Hours old: refused as stale. The claim is still the OS's word that the phone stopped.
+    let at = base + MINUTE;
+    let out = h
+        .engine()
+        .ingest_claiming(
+            fix(base - 4 * 60 * MINUTE, 12.0),
+            Motion::Parked,
+            healthy_battery(),
+            INTERVAL,
+            at,
+        )
+        .await
+        .unwrap();
+
+    assert!(!out.accepted);
+    let stamps = h.sink.stamps.lock().unwrap();
+    assert_eq!(
+        stamps[stamps.len() - 1].0,
+        Some(iroh_location::FIX_STATE_PARKED)
+    );
+}
+
+#[tokio::test]
+async fn a_claimed_departure_with_a_fix_at_the_stop_reads_live() {
+    // Inside the hold radius a plain fix keeps `parked`; a departure the runtime vouches for does
+    // not, and with a fix in hand "moving, and here" is `live`.
+    let base = INTERVAL * 10;
+    let h = parked_harness(base).await;
+
+    let left = base + INTERVAL + MINUTE;
+    let out = h
+        .engine()
+        .ingest_claiming(
+            fix_north(left, 12.0, 20.0),
+            Motion::Moving,
+            healthy_battery(),
+            INTERVAL,
+            left,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(out.enqueued, 1, "the retraction, off the grid");
+    let stamps = h.sink.stamps.lock().unwrap();
+    assert_eq!(
+        stamps[stamps.len() - 1].0,
+        Some(iroh_location::FIX_STATE_LIVE)
+    );
+    assert!(h.gate.0.lock().unwrap().parked_at.is_none());
+}
+
+#[tokio::test]
+async fn an_unclaimed_ingest_is_a_plain_ingest() {
+    let base = INTERVAL * 10;
+    let h = parked_harness(base).await;
+
+    let at = base + INTERVAL + MINUTE;
+    let out = h
+        .engine()
+        .ingest_claiming(
+            fix_north(at, 12.0, 20.0),
+            Motion::Unknown,
+            healthy_battery(),
+            INTERVAL,
+            at,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(out.enqueued, 0, "a fix at the stop is not news");
+}

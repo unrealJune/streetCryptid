@@ -71,6 +71,26 @@ export declare class IrohLocationNativeModule
     intervalMs: number
   ): Promise<NativeIngestOutcome>;
   /**
+   * {@link ingestFix} and the motion claim it settles, in ONE native drain: `parked` `true` a stop,
+   * `false` a departure, `null` none. As two calls (a fix, then a claim heartbeat) the claim queued
+   * behind the fix's push, and an iPhone suspended inside that push never sealed it — friends read
+   * "out of contact" about a phone at home (2026-11-18). `budgetMs` bounds the push, as the native
+   * runtime's own drains are; `null` is the ordinary deadline. OPTIONAL: absent on older binaries.
+   */
+  ingestFixClaiming?(
+    fix: NativeLocationFix,
+    battery: { level: number; charging: boolean; lowPower: boolean },
+    intervalMs: number,
+    parked: boolean | null,
+    budgetMs: number | null
+  ): Promise<NativeIngestOutcome>;
+  /**
+   * Tell the iOS runtime the app has finished publishing the capture it handed over under `token`
+   * (`OnNativeFixEvent.token`), so the background assertion it holds for it can end. iOS only;
+   * OPTIONAL.
+   */
+  ackNativeCapture?(token: string): void;
+  /**
    * Start the native background publish path — a foreground service on Android, Core Location on
    * iOS. Only the sharing toggle should call these: a service the user did not ask for is a
    * persistent notification they cannot explain. OPTIONAL.
