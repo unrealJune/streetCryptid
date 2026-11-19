@@ -2367,12 +2367,12 @@ async fn a_claimed_stop_with_a_refused_fix_still_declares() {
         .await
         .unwrap();
 
-    // Hours old: refused as stale. The claim is still the OS's word that the phone stopped.
+    // Half an hour old: refused as stale. The claim is still the OS's word that the phone stopped.
     let at = base + MINUTE;
     let out = h
         .engine()
         .ingest_claiming(
-            fix(base - 4 * 60 * MINUTE, 12.0),
+            fix(at - 30 * MINUTE, 12.0),
             Motion::Parked,
             healthy_battery(),
             INTERVAL,
