@@ -128,6 +128,7 @@ import { reportStrandedInit } from './background/init-watermark';
 import { stampWatermark } from './background/watermarks';
 import { PairingPollRunner, type FetchResult } from './pairing-poll-runner';
 import type { ApplyMode } from '../core/pairing-poll-driver';
+import { telemetryInstanceId } from '../core/telemetry-id';
 import {
   INITIAL_POST_READY,
   isStepLive,
@@ -1100,7 +1101,7 @@ export class LocationSharingService {
    */
   private configureDevTelemetry(): void {
     if (!this.keys) return;
-    const instanceId = this.keys.endpointId.slice(0, 10);
+    const instanceId = telemetryInstanceId(this.keys.endpointId);
     getTelemetry().setResourceAttributes({ 'service.instance.id': instanceId });
     // Hand over anything the OS recorded about how a PREVIOUS run ended. Here because it needs
     // the native module, after the resource attributes above so a crash report is attributed to

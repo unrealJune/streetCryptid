@@ -83,6 +83,31 @@ Real parent/child trace context flows only where a real channel exists:
 Every span also carries `service.name` (`streetcryptid-app`, `streetcryptid-core`, `trail-stash`)
 and `service.instance.id` (short endpoint id) — so "device A" vs "device B" is always one filter.
 
+## From a friend's dot to their phone (`fleet.py`, `who.py`)
+
+A friend card shows **TELEMETRY ID** when Settings → "Show friend connection details" is on: the
+first ten hex of that friend's endpoint id, which is exactly their `service.instance.id`
+(`core/telemetry-id.ts` is the one place both sides spell it). Tap it to copy. Nothing new is
+collected for this: the id is a prefix of a public key the friend card already holds, and it is
+already on every span and envelope header. It changes only when the friend reinstalls and re-pairs,
+and then the card holds the new one.
+
+```sh
+python3 scripts/telemetry/fleet.py            # every phone: model, build, heard / published / pulled
+python3 scripts/telemetry/who.py 84f86b144a   # one phone: pipeline, device.health + flags, endings, contacts
+```
+
+`who.py` reads, in order: when the phone last said anything and on which build (marked when it is
+behind the fleet's newest); when each pipeline stage (`location.runtime` → `engine.*` →
+`trail.push` / `friend.pull` → `peer.contact`) last ran; the newest `device.health`, with the
+[Reading silence](#reading-silence) mismatches turned into `!!` lines; crashes, stalls and
+`app.previous_run` endings; and which phones it reached and which reached it. Both read **span
+metrics** (`pq.sh`) for anything "last", because a limited Tempo search does not reliably return
+the newest spans. A metric series born inside the window is counted at its first sample, since
+`increase()` reads a span emitted once as zero. Every stage stopping at the same moment with no
+ending span is a phone that stopped existing, not one that misbehaved: dead battery, powered off,
+force-stopped or uninstalled. Nothing on the phone could have recorded that.
+
 ## The story of one ping (span map)
 
 ```
