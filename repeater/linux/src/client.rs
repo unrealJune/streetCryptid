@@ -145,9 +145,49 @@ impl Connection {
 
     async fn send(&mut self, value: &Value) -> Result<()> {
         let line = format!("{value}\n");
+        if line.len() > streetcryptid_repeater_host::MAX_COMMAND_LINE {
+            bail!("Command is too large");
+        }
         self.write.write_all(line.as_bytes()).await?;
         Ok(())
     }
+}
+
+pub async fn network(socket: Option<PathBuf>, file: Option<PathBuf>) -> Result<()> {
+    use std::io::Read;
+    let mut connection = Connection::open(socket).await?;
+    let state = connection.snapshot().await?;
+    if !state["network"].is_object() {
+        bail!("Update the running repeater before configuring its network");
+    }
+    let Some(file) = file else {
+        println!("{}", serde_json::to_string_pretty(&state["network"])?);
+        return Ok(());
+    };
+    let mut bytes = Vec::new();
+    let input: Box<dyn Read> = if file == std::path::Path::new("-") {
+        Box::new(std::io::stdin())
+    } else {
+        Box::new(std::fs::File::open(file).context("Could not open network configuration")?)
+    };
+    input
+        .take(streetcryptid_repeater_host::MAX_COMMAND_LINE as u64 + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > streetcryptid_repeater_host::MAX_COMMAND_LINE {
+        bail!("Network configuration is too large");
+    }
+    let config: streetcryptid_repeater_host::network::NetworkConfig =
+        serde_json::from_slice(&bytes)
+            .map_err(|_| anyhow!("Invalid network configuration JSON"))?;
+    config.validate()?;
+    if !connection
+        .request(serde_json::json!({"kind":"network", "network":config}))
+        .await?
+    {
+        bail!("Network settings were not saved");
+    }
+    println!("Saved. Restart the repeater to apply connection changes; its identity is preserved.");
+    Ok(())
 }
 
 /// The daemon is trusted only if it runs as this account, as root, or as the service account: the

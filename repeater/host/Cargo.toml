@@ -11,11 +11,12 @@ fs2 = "0.4"
 iroh = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+url = "2"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "registry"] }
 # `otel` compiles the stash's OTLP exporter in; it stays dormant unless this build was given an
-# endpoint (SC_REPEATER_OTEL_ENDPOINT) AND the person running it left diagnostics on.
+# endpoint (saved locally or SC_REPEATER_OTEL_ENDPOINT) AND diagnostics consent.
 trail-stash = { path = "../server", features = ["live", "otel"] }
 streetcryptid-repeater = { path = "../protocol" }
 

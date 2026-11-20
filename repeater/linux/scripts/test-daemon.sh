@@ -89,6 +89,15 @@ cli status --json > "$work/status.json"
 grep -q '"keepAwake": true' "$work/status.json" || fail "the snapshot does not carry the new setting"
 grep -q '"keepAwake":true' "$state/host-settings.json" || fail "the setting was not persisted"
 
+echo "== network configuration is private, redacted and restart-pending"
+printf '%s\n' '{"relays":[{"url":"https://relay.example","authToken":"smoke-test-key"}],"telemetryEndpoint":"https://collector.example/otlp"}' > "$work/network.json"
+chmod 600 "$work/network.json"
+cli network --file "$work/network.json" | grep -q 'Saved' || fail "network settings were not saved"
+cli network > "$work/network-status.json"
+grep -q '"restartRequired": true' "$work/network-status.json" || fail "restart requirement missing"
+grep -q 'smoke-test-key' "$work/network-status.json" && fail "key leaked in network status"
+[[ "$(stat -c %a "$state/network-settings.json")" == 600 ]] || fail "network keys are not owner-only"
+
 echo "== name and release"
 cli name | grep -q '(no name)' || fail "a new repeater has a name"
 cli name 'Test   box' | grep -q 'Named "Test box"' || fail "the name was not saved tidied"
@@ -135,6 +144,10 @@ echo "== a restart is the same repeater, with the same settings"
 start_daemon
 [[ "$(field endpointId)" == "$endpoint" ]] || fail "the identity changed across a restart"
 grep -q '"keepAwake": true' "$work/status.json" || fail "the setting did not survive a restart"
+grep -q '"restartRequired": false' "$work/status.json" || fail "network settings were not applied"
+grep -q '"telemetryAvailable": true' "$work/status.json" || fail "runtime collector was not applied"
+grep -q 'smoke-test-key' "$work/status.json" && fail "key leaked in snapshot"
+grep -q 'smoke-test-key' "$work/daemon.log" && fail "key leaked in logs"
 stop_daemon
 
 echo "== a per-user daemon refuses a directory whose identity moved to the service"

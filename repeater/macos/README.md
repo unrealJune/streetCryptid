@@ -52,9 +52,14 @@ Quitting, including a Sparkle restart, finishes pending settings before closing 
 lock. After five seconds the app sends SIGTERM and two seconds later SIGKILL if necessary.
 The host also observes pipe EOF if the app crashes.
 
-Diagnostics are off by default. A build without `SC_REPEATER_OTEL_ENDPOINT` cannot enable them;
-release builds obtain it from the `REPEATER_OTEL_ENDPOINT` repository variable. The shared host's
-existing diagnostics report `host.platform=macos`; there is no new telemetry collection path.
+Settings → **Network & collector** configures iroh relay URLs with per-relay access keys and an
+OTLP HTTP base URL. Save explicitly, then Quit Repeater and reopen it to apply. Identity and
+grants are preserved; the screen reports a pending restart. Keys are write-only in the editor.
+See [connection settings](../host/README.md) for defaults, key handling and storage.
+
+Diagnostics are off by default. A local collector URL overrides `SC_REPEATER_OTEL_ENDPOINT`
+(release builds' `REPEATER_OTEL_ENDPOINT` variable); setting one does not enable diagnostics.
+The shared host reports `host.platform=macos`; there is no new telemetry collection path.
 
 ## Build
 

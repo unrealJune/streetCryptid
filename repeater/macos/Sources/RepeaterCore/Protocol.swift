@@ -10,6 +10,7 @@ public struct HostSettings: Codable, Equatable {
 }
 
 public struct Snapshot: Decodable {
+  public let network: NetworkStatus?
   public let `protocol`: Int
   public let version: String
   public let mode: String
@@ -81,13 +82,17 @@ public struct HostCommand: Encodable {
   public let telemetry: Bool?
   public let keepAwake: Bool?
   public let name: String?
+  public let network: NetworkConfig?
 
-  public init(kind: String, settings: HostSettings? = nil, name: String? = nil) {
+  public init(
+    kind: String, settings: HostSettings? = nil, name: String? = nil, network: NetworkConfig? = nil
+  ) {
     self.kind = kind
     self.requestId = UUID().uuidString
     self.telemetry = settings?.telemetry
     self.keepAwake = settings?.keepAwake
     self.name = name
+    self.network = network
   }
 
   public func line() throws -> Data {
@@ -95,6 +100,35 @@ public struct HostCommand: Encodable {
     data.append(10)
     guard data.count <= 4096 else { throw HostError.lineTooLong }
     return data
+  }
+}
+
+public struct NetworkStatus: Decodable {
+  public let relays: [RelayStatus]
+  public let telemetryEndpoint: String
+  public let restartRequired: Bool
+}
+
+public struct RelayStatus: Decodable {
+  public let url: String
+  public let hasAuthToken: Bool
+}
+
+public struct NetworkConfig: Encodable {
+  public let relays: [RelayConfig]
+  public let telemetryEndpoint: String
+  public init(relays: [RelayConfig], telemetryEndpoint: String) {
+    self.relays = relays
+    self.telemetryEndpoint = telemetryEndpoint
+  }
+}
+
+public struct RelayConfig: Encodable {
+  public let url: String
+  public let authToken: String?
+  public init(url: String, authToken: String?) {
+    self.url = url
+    self.authToken = authToken
   }
 }
 

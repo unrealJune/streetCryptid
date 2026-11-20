@@ -152,8 +152,43 @@ struct RepeaterView: View {
             settingLabel(
               "Send diagnostics", available: model.host.snapshot?.telemetryAvailable == true)
           }
-          .disabled(model.host.snapshot?.telemetryAvailable != true)
           .help("Optional health and traffic counters. Never locations.")
+        }
+        if model.configured, model.host.snapshot?.network != nil {
+          Section("Network & collector") {
+            Text(
+              "No custom relays uses the public defaults. Keys stay on this machine; a blank key keeps the saved one for that URL."
+            )
+            .font(.caption).foregroundStyle(.secondary)
+            ForEach($model.relays) { $relay in
+              VStack(alignment: .leading) {
+                TextField("Relay URL (https://...)", text: $relay.url)
+                SecureField(
+                  relay.hasKey ? "Key saved; leave blank to keep" : "Optional relay key",
+                  text: $relay.key)
+                HStack {
+                  Toggle("Clear saved key", isOn: $relay.clearKey)
+                  Spacer()
+                  Button("Remove") { model.relays.removeAll { $0.id == relay.id } }
+                }
+              }
+            }
+            Button("Add relay") { model.relays.append(AppModel.RelayDraft()) }
+              .disabled(model.relays.count >= 8)
+            TextField("OTLP HTTP base URL (blank: build default)", text: $model.telemetryEndpoint)
+            Text(
+              "Only use a collector you trust with diagnostic metadata. Send diagnostics remains a separate opt-in."
+            )
+            .font(.caption).foregroundStyle(.secondary)
+            Button("Save network settings") { Task { await model.saveNetwork() } }
+              .disabled(model.networkSaving)
+            Text(
+              model.host.snapshot?.network?.restartRequired == true
+                ? "Restart required: Quit Repeater, then reopen it. Identity and grants are kept."
+                : "Connection changes apply after quitting and reopening Repeater."
+            )
+            .font(.caption).foregroundStyle(.secondary)
+          }
         }
         if model.configured {
           Section {

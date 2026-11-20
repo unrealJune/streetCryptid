@@ -21,9 +21,9 @@ use std::time::{Duration, Instant};
 use anyhow::{bail, Context, Result};
 use serde_json::Value;
 use streetcryptid_repeater_host::{
-    claim_directory, identity, init_telemetry, message, read_name, run_pulse, snapshot, start,
-    write_name, Action, Command, HostInfo, PulseInfo, Settings, Snapshot, MAX_COMMAND_LINE,
-    SERVICE_MARKER,
+    claim_directory, identity, init_telemetry, message, read_name, run_pulse, snapshot,
+    start_configured, write_name, Action, Command, HostInfo, PulseInfo, Settings, Snapshot,
+    MAX_COMMAND_LINE, SERVICE_MARKER,
 };
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
@@ -62,9 +62,14 @@ pub fn run(args: RunArgs) -> Result<()> {
     let _lock = claim_directory(&state_dir).context("This repeater is already running")?;
     let secret = identity(&state_dir).context("The repeater identity could not be read")?;
     let settings = Arc::new(Settings::open(&state_dir));
+    let network = streetcryptid_repeater_host::network::NetworkSettings::open(&state_dir)?;
     // Before the runtime exists: the exporter reads its endpoint from the environment, and no
     // other thread may be running while it is written.
-    init_telemetry(TELEMETRY_ENDPOINT, &secret, settings.telemetry_flag());
+    init_telemetry(
+        network.active().telemetry_endpoint(TELEMETRY_ENDPOINT),
+        &secret,
+        settings.telemetry_flag(),
+    );
     let socket = args
         .socket
         .unwrap_or_else(|| paths::default_socket(args.mode, &state_dir));
@@ -77,6 +82,7 @@ pub fn run(args: RunArgs) -> Result<()> {
         socket.clone(),
         secret,
         settings,
+        network,
     ));
     runtime.shutdown_timeout(Duration::from_secs(5));
     let _ = std::fs::remove_file(&socket);
@@ -89,6 +95,7 @@ async fn serve(
     socket: PathBuf,
     secret: iroh::SecretKey,
     settings: Arc<Settings>,
+    network: streetcryptid_repeater_host::network::NetworkSettings,
 ) -> Result<()> {
     let started_at = Instant::now();
     let hub = Arc::new(Hub::new(message::service(VERSION, "starting", 0)));
@@ -104,7 +111,7 @@ async fn serve(
 
     let mut stop = std::pin::pin!(shutdown_signal());
     let node = tokio::select! {
-        result = start(&dir, secret) => result.context("The repeater node could not start")?,
+        result = start_configured(&dir, secret, network.active()) => result.context("The repeater node could not start")?,
         _ = &mut stop => {
             accept.abort();
             return Ok(());
@@ -139,10 +146,14 @@ async fn serve(
     ));
     let run_id = streetcryptid_repeater_host::run_id();
     let info = || HostInfo {
+        network: Some(network.status()),
         version: VERSION,
         mode: mode.name(),
         settings: settings.get(),
-        telemetry_available: TELEMETRY_ENDPOINT.is_some_and(|e| !e.trim().is_empty()),
+        telemetry_available: network
+            .active()
+            .telemetry_endpoint(TELEMETRY_ENDPOINT)
+            .is_some(),
         keep_awake_held: streetcryptid_repeater_host::PowerState::holding(&*power),
     };
     let mut console = Console::new(interactive);
@@ -163,6 +174,7 @@ async fn serve(
             Some(Request { command, reply }) = requested.recv() => {
                 let ok = match command.action() {
                     Ok(Action::Settings(next)) => settings.set(next).is_ok(),
+                    Ok(Action::Network(next)) => network.set(next).is_ok(),
                     Ok(Action::Name(name)) => match (write_name(&dir, Some(&name)), node.repeater()) {
                         (Ok(kept), Some(repeater)) => {
                             repeater.set_name(kept.as_deref());

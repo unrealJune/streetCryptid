@@ -30,9 +30,8 @@ pub const VERSION: &str = match option_env!("REPEATER_VERSION") {
     None => env!("CARGO_PKG_VERSION"),
 };
 
-/// Where diagnostics go, fixed when the binary is built. Without it the exporter is never built
-/// and no setting can turn it on; with it, nothing is sent until the person running the repeater
-/// says yes (`settings --telemetry on`).
+/// Default collector, overridden by local network settings; `settings --telemetry on` is still
+/// required before anything is sent.
 pub const TELEMETRY_ENDPOINT: Option<&str> = option_env!("SC_REPEATER_OTEL_ENDPOINT");
 
 #[cfg(target_os = "linux")]

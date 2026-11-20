@@ -279,18 +279,35 @@ impl StashNode {
         delivery: Arc<dyn DeliveryService>,
         waker: Arc<dyn Waker>,
     ) -> Result<Arc<Self>> {
-        // The repeater signs its certs with the key it answers dials with.
-        let seed = secret.to_bytes();
-        let mut endpoint_builder =
-            Endpoint::builder(iroh::endpoint::presets::N0).secret_key(secret);
-        if !relay_urls.is_empty() {
+        let relays = if !relay_urls.is_empty() {
             let relay_map = RelayMap::try_from_iter(relay_urls.iter().map(String::as_str))
                 .map_err(|e| anyhow!("invalid custom relay URL: {e}"))?;
             let relay_map = match relay_token {
                 Some(token) => relay_map.with_auth_token(token),
                 None => relay_map,
             };
-            endpoint_builder = endpoint_builder.relay_mode(RelayMode::Custom(relay_map));
+            Some(relay_map)
+        } else {
+            None
+        };
+        Self::spawn_with_relays(storage, secret, retention, relays, delivery, waker).await
+    }
+
+    /// [`Self::spawn_with`] with independently authenticated relay entries. `None` preserves
+    /// the N0 preset; desktop settings supply a map without changing the server's env contract.
+    pub async fn spawn_with_relays(
+        storage: Storage,
+        secret: SecretKey,
+        retention: RetentionPolicy,
+        relays: Option<RelayMap>,
+        delivery: Arc<dyn DeliveryService>,
+        waker: Arc<dyn Waker>,
+    ) -> Result<Arc<Self>> {
+        let seed = secret.to_bytes();
+        let mut endpoint_builder =
+            Endpoint::builder(iroh::endpoint::presets::N0).secret_key(secret);
+        if let Some(relays) = relays {
+            endpoint_builder = endpoint_builder.relay_mode(RelayMode::Custom(relays));
         }
         let endpoint = endpoint_builder
             .bind()

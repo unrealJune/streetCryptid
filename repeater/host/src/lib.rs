@@ -13,6 +13,8 @@ use streetcryptid_repeater::roster::Policy;
 use trail_stash::config::StashConfig;
 use trail_stash::node::{default_delivery, default_waker, StashNode, Storage};
 
+pub mod network;
+
 pub fn claim_directory(dir: &Path) -> Result<File> {
     std::fs::create_dir_all(dir)?;
     let lock = OpenOptions::new()
@@ -59,18 +61,25 @@ pub fn identity(dir: &Path) -> Result<SecretKey> {
 }
 
 pub async fn start(dir: &Path, secret: SecretKey) -> Result<Arc<StashNode>> {
+    start_configured(dir, secret, &network::NetworkConfig::default()).await
+}
+
+pub async fn start_configured(
+    dir: &Path,
+    secret: SecretKey,
+    network: &network::NetworkConfig,
+) -> Result<Arc<StashNode>> {
     let config = StashConfig::from_env(|_| None);
     // Memory only, like every repeater (REPEATERS.md §5.1): the identity, roster and grants stay
     // in `dir`, and no location ciphertext ever touches the disk. A restart comes back as the
     // same repeater, carrying the same people, holding nothing until their phones sync again.
     tokio::time::timeout(
         Duration::from_secs(30),
-        StashNode::spawn_with(
+        StashNode::spawn_with_relays(
             Storage::MemoryRepeater(dir.into()),
             secret,
             config.retention,
-            &[],
-            None,
+            network.relay_map()?,
             default_delivery(),
             default_waker(),
         ),
@@ -203,6 +212,7 @@ pub struct Snapshot {
     pub endpoint_id: String,
     /// What this machine is called here, signed into the next cert it issues.
     pub name: Option<String>,
+    pub network: Option<network::NetworkStatus>,
     /// The name in the cert its roster holds: what phones show now. Differs from `name` until
     /// the owner's phone picks up a rename.
     pub listed_name: Option<String>,
@@ -228,6 +238,7 @@ pub struct Snapshot {
 
 /// What the snapshot says about the host itself, as opposed to the node.
 pub struct HostInfo {
+    pub network: Option<network::NetworkStatus>,
     pub version: &'static str,
     pub mode: &'static str,
     pub settings: HostSettings,
@@ -246,6 +257,7 @@ pub fn snapshot(node: &StashNode, host: HostInfo) -> Snapshot {
         .claim_secret()
         .map(|secret| streetcryptid_repeater::wire::claim_url(&node.node_ticket(), &secret));
     Snapshot {
+        network: host.network,
         protocol: PROTOCOL,
         version: host.version,
         mode: host.mode,
@@ -297,6 +309,7 @@ pub struct Command {
     pub keep_awake: Option<bool>,
     /// For `name`: the new name, or `""` to clear it.
     pub name: Option<String>,
+    pub network: Option<network::NetworkConfig>,
 }
 
 /// What the app may ask of the host: its settings, its name, or releasing the repeater from its
@@ -304,6 +317,7 @@ pub struct Command {
 #[derive(Debug, PartialEq)]
 pub enum Action {
     Settings(HostSettings),
+    Network(network::NetworkConfig),
     Name(String),
     Release,
 }
@@ -312,6 +326,16 @@ impl Command {
     pub fn action(&self) -> Result<Action> {
         if self.protocol != PROTOCOL || self.request_id.is_empty() || self.request_id.len() > 64 {
             bail!("Invalid command");
+        }
+        if let Some(network) = &self.network {
+            if self.kind != "network"
+                || self.telemetry.is_some()
+                || self.keep_awake.is_some()
+                || self.name.is_some()
+            {
+                bail!("Invalid command");
+            }
+            return Ok(Action::Network(network.clone()));
         }
         match (
             self.kind.as_str(),
@@ -376,7 +400,7 @@ pub const TELEMETRY_FILTER: &str = "info,iroh=warn,iroh_relay=warn,iroh_docs=war
 iroh_blobs=warn,iroh_gossip=warn,noq=warn,noq_proto=warn,noq_udp=warn";
 pub const TELEMETRY_SERVICE: &str = "streetcryptid-repeater";
 
-/// Install the OTLP exporter when this build was given an endpoint, behind the person's consent.
+/// Install the OTLP exporter at the configured or built-in endpoint, behind the person's consent.
 /// Without an endpoint nothing is installed and no setting can turn it on. Call it before any
 /// other thread exists: it writes the exporter's environment.
 pub fn init_telemetry(endpoint: Option<&str>, secret: &SecretKey, consent: Arc<AtomicBool>) {
@@ -666,6 +690,7 @@ mod tests {
         let state = snapshot(
             &node,
             HostInfo {
+                network: None,
                 version: "test",
                 mode: "user",
                 settings: HostSettings::default(),

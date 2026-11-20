@@ -5,8 +5,9 @@ use std::time::{Duration, Instant};
 
 use anyhow::{bail, Result};
 use streetcryptid_repeater_host::{
-    claim_directory, identity, init_telemetry, message, read_name, run_pulse, snapshot, start,
-    write_name, Action, Command, HostInfo, PulseInfo, Settings, MAX_COMMAND_LINE, SERVICE_MARKER,
+    claim_directory, identity, init_telemetry, message, read_name, run_pulse, snapshot,
+    start_configured, write_name, Action, Command, HostInfo, PulseInfo, Settings, MAX_COMMAND_LINE,
+    SERVICE_MARKER,
 };
 use trail_stash::config::{DEFAULT_PEER_SYNC_INTERVAL_MIN, DEFAULT_PRUNE_INTERVAL_MIN};
 
@@ -18,9 +19,7 @@ const VERSION: &str = match option_env!("REPEATER_VERSION") {
     None => env!("CARGO_PKG_VERSION"),
 };
 
-/// Where diagnostics go, fixed when the binary is built. Without it the exporter is never built
-/// and no setting can turn it on; with it, nothing is sent until the person running the repeater
-/// says yes.
+/// Default collector, overridden by local network settings. Consent is always required.
 const TELEMETRY_ENDPOINT: Option<&str> = option_env!("SC_REPEATER_OTEL_ENDPOINT");
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -114,18 +113,28 @@ fn run() -> Result<()> {
     let _lock = claim_directory(&args.state_dir)?;
     let secret = identity(&args.state_dir)?;
     let settings = Arc::new(Settings::open(&args.state_dir));
+    let network = streetcryptid_repeater_host::network::NetworkSettings::open(&args.state_dir)?;
     // Before the runtime exists: the exporter reads its endpoint from the environment, and no
     // other thread may be running while it is written.
-    init_telemetry(TELEMETRY_ENDPOINT, &secret, settings.telemetry_flag());
+    init_telemetry(
+        network.active().telemetry_endpoint(TELEMETRY_ENDPOINT),
+        &secret,
+        settings.telemetry_flag(),
+    );
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
-    let result = runtime.block_on(serve(args, secret, settings));
+    let result = runtime.block_on(serve(args, secret, settings, network));
     runtime.shutdown_timeout(Duration::from_secs(5));
     result
 }
 
-async fn serve(args: Args, secret: iroh::SecretKey, settings: Arc<Settings>) -> Result<()> {
+async fn serve(
+    args: Args,
+    secret: iroh::SecretKey,
+    settings: Arc<Settings>,
+    network: streetcryptid_repeater_host::network::NetworkSettings,
+) -> Result<()> {
     let dir = args.state_dir.clone();
     let mode = args.mode;
     // EOF on the inherited pipe stops the node even if the UI (or the service) crashes.
@@ -156,7 +165,7 @@ async fn serve(args: Args, secret: iroh::SecretKey, settings: Arc<Settings>) -> 
 
     let started_at = Instant::now();
     let node = tokio::select! {
-        result = start(&dir, secret) => result?,
+        result = start_configured(&dir, secret, network.active()) => result?,
         _ = stopped.recv() => return Ok(()),
     };
     if let Some(repeater) = node.repeater() {
@@ -192,10 +201,14 @@ async fn serve(args: Args, secret: iroh::SecretKey, settings: Arc<Settings>) -> 
     let mut interval = tokio::time::interval(Duration::from_secs(2));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let info = || HostInfo {
+        network: Some(network.status()),
         version: VERSION,
         mode: mode.name(),
         settings: settings.get(),
-        telemetry_available: TELEMETRY_ENDPOINT.is_some_and(|e| !e.trim().is_empty()),
+        telemetry_available: network
+            .active()
+            .telemetry_endpoint(TELEMETRY_ENDPOINT)
+            .is_some(),
         keep_awake_held: streetcryptid_repeater_host::PowerState::holding(&*power),
     };
     loop {
@@ -204,6 +217,7 @@ async fn serve(args: Args, secret: iroh::SecretKey, settings: Arc<Settings>) -> 
             Some(command) = requested.recv() => {
                 let ok = match command.action() {
                     Ok(Action::Settings(next)) => settings.set(next).is_ok(),
+                    Ok(Action::Network(next)) => network.set(next).is_ok(),
                     Ok(Action::Name(name)) => match (write_name(&dir, Some(&name)), node.repeater()) {
                         (Ok(kept), Some(repeater)) => {
                             repeater.set_name(kept.as_deref());

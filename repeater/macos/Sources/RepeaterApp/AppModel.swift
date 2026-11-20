@@ -16,6 +16,16 @@ final class AppModel: NSObject, ObservableObject, SPUUpdaterDelegate {
   @Published var name = ""
   @Published var telemetry = false
   @Published var keepAwake = false
+  struct RelayDraft: Identifiable {
+    let id = UUID()
+    var url = ""
+    var key = ""
+    var hasKey = false
+    var clearKey = false
+  }
+  @Published var relays: [RelayDraft] = []
+  @Published var telemetryEndpoint = ""
+  @Published var networkSaving = false
   @Published var login = true
   @Published var automaticUpdates = true
   @Published var canUpdate = false
@@ -83,6 +93,7 @@ final class AppModel: NSObject, ObservableObject, SPUUpdaterDelegate {
       name = snapshot.name ?? ""
       telemetry = snapshot.settings.telemetry
       keepAwake = snapshot.settings.keepAwake
+      loadNetwork()
     }
     login =
       SMAppService.mainApp.status == .enabled
@@ -98,6 +109,36 @@ final class AppModel: NSObject, ObservableObject, SPUUpdaterDelegate {
     if name.count > 40 { name = String(name.prefix(40)) }
     problem = nil
     settingsWriter.submit(preferences)
+  }
+
+  private func loadNetwork() {
+    guard let network = host.snapshot?.network else { return }
+    relays = network.relays.map { RelayDraft(url: $0.url, hasKey: $0.hasAuthToken) }
+    telemetryEndpoint = network.telemetryEndpoint
+  }
+
+  func saveNetwork() async {
+    networkSaving = true
+    defer { networkSaving = false }
+    do {
+      let config = NetworkConfig(
+        relays: relays.map {
+          RelayConfig(
+            url: $0.url.trimmingCharacters(in: .whitespacesAndNewlines),
+            authToken: $0.clearKey ? "" : ($0.key.isEmpty ? nil : $0.key))
+        },
+        telemetryEndpoint: telemetryEndpoint.trimmingCharacters(in: .whitespacesAndNewlines))
+      try await host.send(HostCommand(kind: "network", network: config))
+      for i in relays.indices {
+        relays[i].hasKey = !relays[i].clearKey && (!relays[i].key.isEmpty || relays[i].hasKey)
+        relays[i].key = ""
+        relays[i].clearKey = false
+      }
+      problem = nil
+    } catch {
+      problem =
+        "Network settings were not saved. Use unique HTTPS relay origins and a valid collector URL (HTTP only on loopback)."
+    }
   }
 
   func leaveSettings() async {
