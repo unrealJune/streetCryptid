@@ -1,3 +1,4 @@
+import * as Clipboard from 'expo-clipboard';
 import { SymbolView } from 'expo-symbols';
 import { useRef, useState } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
@@ -18,6 +19,7 @@ import {
   fixTransportDescription,
 } from '../core/fix-transport';
 import { describePresence, formatAge, formatDistance, type FriendPresence } from '../core/presence';
+import { telemetryInstanceId } from '../core/telemetry-id';
 import type { Friend, RatchetActivity } from '../core/types';
 import { isNavigationDestination, openNavigation } from '../net/open-navigation';
 
@@ -329,6 +331,11 @@ export function FriendDetailIsland({
           />
           {displayPreferencesReady && showFriendConnectionDetails ? (
             <>
+              {/* The id this friend's phone ships telemetry under (`service.instance.id`), so a
+                  stale dot here is one paste away from that phone's own account of itself
+                  (`scripts/telemetry/who.sh`). It is a prefix of a public key, already on every
+                  span and envelope header; it reveals nothing the friend card does not hold. */}
+              <TelemetryIdRow id={telemetryInstanceId(endpointId)} theme={theme} />
               <DetailRow
                 label="LAST FIX ACK"
                 value={formatAckAge(ratchetActivity?.fix)}
@@ -545,6 +552,38 @@ function DetailRow({ label, value, theme }: { label: string; value: string; them
       <Text style={[styles.rowLabel, { color: chrome.steel }]}>{label}</Text>
       <Text style={[styles.rowValue, { color: chrome.ink }]}>{value}</Text>
     </View>
+  );
+}
+
+function TelemetryIdRow({ id, theme }: { id: string; theme: CryptidTheme }) {
+  const { chrome } = theme;
+  const [copied, setCopied] = useState(false);
+
+  async function copy(): Promise<void> {
+    try {
+      await Clipboard.setStringAsync(id);
+      setCopied(true);
+    } catch {
+      // Nothing to recover: the id stays on screen and selectable.
+    }
+  }
+
+  return (
+    <Pressable
+      accessibilityLabel={`Telemetry ID: ${id}`}
+      accessibilityHint="Copies the ID"
+      accessibilityRole="button"
+      onPress={() => void copy()}
+      style={({ pressed }) => [
+        styles.row,
+        { borderTopColor: chrome.islandBorder, opacity: pressed ? 0.62 : 1 },
+      ]}
+    >
+      <Text style={[styles.rowLabel, { color: chrome.steel }]}>TELEMETRY ID</Text>
+      <Text selectable style={[styles.rowValue, { color: copied ? chrome.green : chrome.ink }]}>
+        {copied ? `${id} · COPIED` : id}
+      </Text>
+    </Pressable>
   );
 }
 

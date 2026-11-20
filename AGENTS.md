@@ -65,7 +65,9 @@ map, the `sc.*` join-key correlation model (entry-hash based; there is deliberat
 end-to-end trace because payloads are E2E-encrypted), and the TraceQL cookbook for debugging
 dropped location pings across devices and the trail-stash server.
 
-**Query it with `scripts/telemetry/{tq,tr,lq}.sh`** (TraceQL search, full trace, LogQL). Grafana
+**Query it with `scripts/telemetry/{tq,tr,lq,pq}.sh`** (TraceQL search, full trace, LogQL, PromQL
+over span metrics). **`fleet.py` lists every phone and `who.py <id>` explains one**; the id is the
+TELEMETRY ID a friend card shows with connection details on (`infra/otel/README.md`). Grafana
 resolves publicly but routes only over the tailnet. In a Claude Code web session,
 `scripts/claude-web/session-start.sh` (a SessionStart hook) joins the tailnet as an ephemeral
 userspace node and the helpers route through its SOCKS5 listener; it needs `TS_AUTHKEY`,
