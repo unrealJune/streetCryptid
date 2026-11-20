@@ -1,3 +1,4 @@
+import * as Clipboard from 'expo-clipboard';
 import { SymbolView } from 'expo-symbols';
 import { Text } from 'react-native';
 import { act, create, type ReactTestRenderer } from 'react-test-renderer';
@@ -20,6 +21,9 @@ jest.mock('expo-symbols', () => ({
   SymbolView: () => null,
 }));
 jest.mock('@/global.css', () => ({}));
+jest.mock('expo-clipboard', () => ({
+  setStringAsync: jest.fn(() => Promise.resolve(true)),
+}));
 const mockPreferences: {
   distanceUnit: 'km' | 'mi';
   showFriendConnectionDetails: boolean;
@@ -329,6 +333,20 @@ describe('FriendDetailIsland', () => {
     render('mid');
     expect(findText(renderer, 'LAST FIX ACK')).toHaveLength(1);
     expect(findText(renderer, 'LAST NULL ACK')).toHaveLength(1);
+  });
+
+  // The friend card is where "her dot is stale" starts, and this is the id her phone's telemetry
+  // ships under: the two have to be the same spelling or the paste finds nothing.
+  it('shows and copies the telemetry id with connection details', async () => {
+    render('mid');
+    expect(findText(renderer, 'TELEMETRY ID')).toHaveLength(0);
+    act(() => renderer.unmount());
+    mockPreferences.showFriendConnectionDetails = true;
+    render('mid');
+    const [row] = renderer.root.findAllByProps({ accessibilityLabel: 'Telemetry ID: aabb' });
+    await act(async () => row.props.onPress());
+    expect(Clipboard.setStringAsync).toHaveBeenCalledWith('aabb');
+    expect(findText(renderer, 'aabb · COPIED')).toHaveLength(1);
   });
 
   it('uses miles in the friend summary when selected', () => {
