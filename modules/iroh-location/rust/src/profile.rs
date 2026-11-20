@@ -410,6 +410,9 @@ pub struct ProfileDocs {
     /// The peer that last handed us an entry in each friend namespace (`InsertRemote.from`), so
     /// a [settle](Self::settle_stranded) can ask it again for bytes it did not deliver.
     served_by: Mutex<HashMap<[u8; 32], [u8; 32]>>,
+    /// Which stranded entries [`Self::settle_stranded`] is leaving alone for now; the trail's
+    /// [`crate::docs::StrandedBackoff`], for the same reason.
+    stranded_backoff: crate::docs::StrandedBackoff,
 }
 
 /// A friend profile entry whose newest record is in the replica while the bytes it names are not.
@@ -441,6 +444,8 @@ pub struct ProfileSettleReport {
     pub fetched: usize,
     /// Profiles that became readable and were newer than what we had, each handed to the sink.
     pub updated: usize,
+    /// Of `stranded`, the ones this pass did not ask for because they are backing off.
+    pub deferred: usize,
 }
 
 impl ProfileDocs {
@@ -495,6 +500,7 @@ impl ProfileDocs {
             seal: None,
             write: Mutex::new(()),
             served_by: Mutex::new(HashMap::new()),
+            stranded_backoff: crate::docs::StrandedBackoff::default(),
         })
     }
 
@@ -1123,8 +1129,9 @@ impl ProfileDocs {
     /// among them), `namespace_sources` for the entry's namespace (whoever else holds that
     /// friend's profile: the repeaters carrying them), the friend's own phone (from the read
     /// ticket we imported), and whoever last served that namespace to us. Bounded by `deadline`
-    /// and by the trail's per-fetch cap; anything still stranded is tried on the next pull, and
-    /// failures are reported, not raised.
+    /// and by the trail's per-fetch cap; anything still stranded is tried on the next pull and
+    /// then backs off ([`crate::docs::stranded_retry_delay`]), and failures are reported, not
+    /// raised.
     pub async fn settle_stranded(
         &self,
         endpoint: &iroh::Endpoint,
@@ -1133,11 +1140,19 @@ impl ProfileDocs {
         deadline: Option<Instant>,
         sink: Option<&dyn ProfileSink>,
     ) -> Result<ProfileSettleReport> {
-        let stranded = self.stranded_entries().await?;
+        let all = self.stranded_entries().await?;
         let mut report = ProfileSettleReport {
-            stranded: stranded.len(),
+            stranded: all.len(),
             ..ProfileSettleReport::default()
         };
+        self.stranded_backoff
+            .retain(|hash| all.iter().any(|entry| entry.hash == *hash));
+        let now = Instant::now();
+        let stranded: Vec<StrandedEntry> = all
+            .into_iter()
+            .filter(|entry| self.stranded_backoff.due(&entry.hash, now))
+            .collect();
+        report.deferred = report.stranded - stranded.len();
         if stranded.is_empty() {
             return Ok(report);
         }
@@ -1198,13 +1213,15 @@ impl ProfileDocs {
                     );
                 }
                 Err(error) => {
+                    let retry_in = self.stranded_backoff.failed(entry.hash, Instant::now());
                     tracing::debug!(
                         sc.namespace = %crate::telemetry::short_hex(&entry.namespace),
                         sc.entry_hash = %crate::telemetry::short_hex(entry.hash.as_bytes()),
                         profile.key = %key,
                         age_ms,
+                        retry_in_s = retry_in.as_secs(),
                         %error,
-                        "stranded friend profile entry still without bytes; will retry next pull"
+                        "stranded friend profile entry still without bytes; will retry"
                     );
                 }
             }
@@ -1798,6 +1815,7 @@ mod tests {
                 stranded: 1,
                 fetched: 1,
                 updated: 1,
+                deferred: 0,
             }
         );
         let delivered = sink.0.lock().unwrap().clone();

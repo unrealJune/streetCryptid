@@ -4696,10 +4696,14 @@ impl LocationNode {
             // frozen on this phone however healthy the sync looks.
             sync.stranded = tracing::field::Empty,
             sync.stranded_fetched = tracing::field::Empty,
+            // Of `sync.stranded`, the ones left alone this pass because earlier fetches failed and
+            // they are backing off (`docs::stranded_retry_delay`).
+            sync.stranded_deferred = tracing::field::Empty,
             // The same for friends' profile namespaces (`profile::ProfileDocs::settle_stranded`):
             // a stranded profile is a friend whose name and sigil stopped updating.
             sync.profile_stranded = tracing::field::Empty,
             sync.profile_stranded_fetched = tracing::field::Empty,
+            sync.profile_stranded_deferred = tracing::field::Empty,
         );
         if let Some(budget) = budget {
             span.record("sync.budget_ms", budget.as_millis() as u64);
@@ -4851,6 +4855,7 @@ impl LocationNode {
                 Ok(settled) => {
                     current.record("sync.stranded", settled.stranded);
                     current.record("sync.stranded_fetched", settled.fetched);
+                    current.record("sync.stranded_deferred", settled.deferred);
                 }
                 Err(error) => {
                     tracing::warn!(%error, "trail sync: could not settle stranded friend slots");
@@ -4860,6 +4865,7 @@ impl LocationNode {
                 Ok(settled) => {
                     current.record("sync.profile_stranded", settled.stranded);
                     current.record("sync.profile_stranded_fetched", settled.fetched);
+                    current.record("sync.profile_stranded_deferred", settled.deferred);
                     // A fetched entry may be a repeater card, which only this read puts in the
                     // roster book; the profile re-read inside the settle covers the persona.
                     if settled.fetched > 0 {

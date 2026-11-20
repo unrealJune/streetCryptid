@@ -33,6 +33,40 @@ describe('OS crash/hang diagnostics', () => {
     await expect(reportOsDiagnostics(source)).resolves.toBe(0);
   });
 
+  // MetricKit's daily cost report rides the same spool but is not a diagnostic: it gets its own
+  // span, and only well-formed numeric `m.*` fields come through.
+  it('reports a daily metrics row as ios.metrics, not as a diagnostic', async () => {
+    const source = {
+      takeCrashDiagnostics: jest.fn(async () => [
+        JSON.stringify({
+          kind: 'metrics',
+          app_build: '91',
+          window_begin_ms: 1_000.4,
+          'm.cpu_ms': 812_345.6,
+          'm.location_10m_ms': 3_600_000,
+          'm.cell_up_bytes': 1_234,
+          'm.Bad Name': 5,
+          'm.not_a_number': 'lots',
+        }),
+      ]),
+    };
+
+    await expect(reportOsDiagnostics(source)).resolves.toBe(1);
+    expect(reported()).toHaveLength(0);
+    const metrics = getEventLog()
+      .filter((entry) => entry.action === 'ios.metrics')
+      .map((entry) => (entry.details as { attributes: Record<string, unknown> }).attributes);
+    expect(metrics).toEqual([
+      {
+        'metric.cpu_ms': 812_346,
+        'metric.location_10m_ms': 3_600_000,
+        'metric.cell_up_bytes': 1_234,
+        'diag.app_build': '91',
+        window_begin_ms: 1_000,
+      },
+    ]);
+  });
+
   // A hang's duration is the number this whole path exists to recover: it needs no symbolication
   // and it is the one thing nothing in-process can measure about its own death.
   it('reports a hang with its duration', async () => {
