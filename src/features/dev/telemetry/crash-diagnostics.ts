@@ -103,6 +103,41 @@ export function diagnosticAttributes(diagnostic: OsDiagnostic): Record<string, s
   return attributes;
 }
 
+/**
+ * The span attributes for one daily MetricKit metrics row (`kind = "metrics"`): every numeric
+ * `m.<name>` becomes `metric.<name>`, plus the build and window it describes.
+ *
+ * Generic over the names on purpose: the native side decides what to forward, and a new metric
+ * should not need a JS release to arrive. Bounded here all the same, since this is the boundary a
+ * malformed row would otherwise cross unchecked.
+ */
+export function metricsAttributes(row: Record<string, unknown>): Record<string, string | number> {
+  const attributes: Record<string, string | number> = {};
+  let copied = 0;
+  for (const [key, value] of Object.entries(row)) {
+    if (!key.startsWith('m.') || copied >= 64) continue;
+    if (typeof value !== 'number' || !Number.isFinite(value)) continue;
+    const name = key.slice(2);
+    if (!/^[a-z0-9_]{1,48}$/.test(name)) continue;
+    attributes[`metric.${name}`] = Math.round(value);
+    copied += 1;
+  }
+  for (const [key, as] of [
+    ['app_version', 'diag.app_version'],
+    ['app_build', 'diag.app_build'],
+    ['os_version', 'diag.os_version'],
+    ['device_type', 'diag.device_type'],
+  ] as const) {
+    const value = row[key];
+    if (typeof value === 'string' && value) attributes[as] = value.slice(0, 256);
+  }
+  for (const key of ['window_begin_ms', 'window_end_ms'] as const) {
+    const value = row[key];
+    if (typeof value === 'number' && Number.isFinite(value)) attributes[key] = Math.round(value);
+  }
+  return attributes;
+}
+
 interface DiagnosticSource {
   takeCrashDiagnostics?(): Promise<string[]>;
 }
@@ -129,7 +164,14 @@ export async function reportOsDiagnostics(source: DiagnosticSource | null): Prom
   for (const line of lines) {
     const diagnostic = parse(line);
     if (!diagnostic) continue;
-    telemetry.startSpan('ios.diagnostic', { attributes: diagnosticAttributes(diagnostic) }).end();
+    if (diagnostic.kind === 'metrics') {
+      // MetricKit's daily cost report, not a diagnostic: its own span name so a query for
+      // `ios.diagnostic` still means "the OS says something went wrong".
+      const attributes = metricsAttributes(diagnostic as unknown as Record<string, unknown>);
+      telemetry.startSpan('ios.metrics', { attributes }).end();
+    } else {
+      telemetry.startSpan('ios.diagnostic', { attributes: diagnosticAttributes(diagnostic) }).end();
+    }
     reported += 1;
   }
   // These describe a process that is already gone and were spooled on disk to survive exactly

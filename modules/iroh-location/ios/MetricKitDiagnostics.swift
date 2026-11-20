@@ -58,10 +58,109 @@ final class MetricKitDiagnostics: NSObject, MXMetricManagerSubscriber {
 
   // MARK: - MXMetricManagerSubscriber
 
-  /// Required by the protocol. Daily aggregate metrics are not what this is for — the diagnostics
-  /// callback below is — and collecting them would be a privacy surface for no debugging gain.
+  /// The OS's daily account of what the app cost: CPU, GPU, time the location hardware ran at each
+  /// accuracy, bytes over Wi-Fi and cellular, time on screen and off it, and how background runs
+  /// ended. Forwarded as one `kind = "metrics"` row per payload, which JS emits as `ios.metrics`.
+  ///
+  /// This was once left empty as "a privacy surface for no debugging gain". The gain arrived: on
+  /// 2026-11-19 the app was reported heavy on battery, and everything we had was the app's own
+  /// counters (`wake.*`), which cover background windows only, cannot see the GPS at all, and turned
+  /// out to be partly wrong. Every value here is an aggregate duration, byte count or exit count
+  /// over about a day — no location, no identifiers, nothing a person wrote.
   @objc(didReceiveMetricPayloads:)
-  func didReceive(_ payloads: [MXMetricPayload]) {}
+  func didReceive(_ payloads: [MXMetricPayload]) {
+    let received = Date().timeIntervalSince1970 * 1000
+    let rows = payloads.map { Self.metricsRow($0, received: received) }
+    guard !rows.isEmpty else { return }
+    append(rows)
+  }
+
+  /// One payload, flattened to `m.<name>` numbers. Durations in ms, sizes in bytes.
+  static func metricsRow(_ payload: MXMetricPayload, received: Double) -> [String: Any] {
+    var row: [String: Any] = [
+      "kind": "metrics",
+      "window_begin_ms": payload.timeStampBegin.timeIntervalSince1970 * 1000,
+      "window_end_ms": payload.timeStampEnd.timeIntervalSince1970 * 1000,
+      "received_ms": received,
+      "app_version": payload.latestApplicationVersion,
+    ]
+    if let meta = payload.metaData {
+      row["app_build"] = meta.applicationBuildVersion
+      row["os_version"] = meta.osVersion
+      row["device_type"] = meta.deviceType
+    }
+    var m: [String: Double] = [:]
+    func ms(_ key: String, _ value: Measurement<UnitDuration>?) {
+      if let value { m[key] = value.converted(to: .milliseconds).value }
+    }
+    func bytes(_ key: String, _ value: Measurement<UnitInformationStorage>?) {
+      if let value { m[key] = value.converted(to: .bytes).value }
+    }
+    func count(_ key: String, _ value: Int?) {
+      if let value { m[key] = Double(value) }
+    }
+    m["multiple_versions"] = payload.includesMultipleApplicationVersions ? 1 : 0
+
+    ms("cpu_ms", payload.cpuMetrics?.cumulativeCPUTime)
+    if let instructions = payload.cpuMetrics?.cumulativeCPUInstructions {
+      m["cpu_instructions"] = instructions.value
+    }
+    ms("gpu_ms", payload.gpuMetrics?.cumulativeGPUTime)
+
+    // How long the location hardware ran at each accuracy we asked for. Best-for-navigation and
+    // best are GPS; ten metres usually is; a hundred metres and coarser are Wi-Fi and cell.
+    if let loc = payload.locationActivityMetrics {
+      ms("location_nav_ms", loc.cumulativeBestAccuracyForNavigationTime)
+      ms("location_best_ms", loc.cumulativeBestAccuracyTime)
+      ms("location_10m_ms", loc.cumulativeNearestTenMetersAccuracyTime)
+      ms("location_100m_ms", loc.cumulativeHundredMetersAccuracyTime)
+      ms("location_1km_ms", loc.cumulativeKilometerAccuracyTime)
+      ms("location_3km_ms", loc.cumulativeThreeKilometersAccuracyTime)
+    }
+
+    if let net = payload.networkTransferMetrics {
+      bytes("wifi_up_bytes", net.cumulativeWifiUpload)
+      bytes("wifi_down_bytes", net.cumulativeWifiDownload)
+      bytes("cell_up_bytes", net.cumulativeCellularUpload)
+      bytes("cell_down_bytes", net.cumulativeCellularDownload)
+    }
+
+    if let time = payload.applicationTimeMetrics {
+      ms("foreground_ms", time.cumulativeForegroundTime)
+      ms("background_ms", time.cumulativeBackgroundTime)
+      ms("background_location_ms", time.cumulativeBackgroundLocationTime)
+    }
+
+    bytes("disk_writes_bytes", payload.diskIOMetrics?.cumulativeLogicalWrites)
+    bytes("peak_memory_bytes", payload.memoryMetrics?.peakMemoryUsage)
+
+    // How background runs ended. `normal` is iOS suspending or reclaiming us as usual; the rest
+    // are the ways a run is cut short, and each costs a relaunch.
+    if let exits = payload.applicationExitMetrics?.backgroundExitData {
+      count("bg_exit_normal", exits.cumulativeNormalAppExitCount)
+      count("bg_exit_memory_limit", exits.cumulativeMemoryResourceLimitExitCount)
+      count("bg_exit_memory_pressure", exits.cumulativeMemoryPressureExitCount)
+      count("bg_exit_cpu_limit", exits.cumulativeCPUResourceLimitExitCount)
+      count("bg_exit_watchdog", exits.cumulativeAppWatchdogExitCount)
+      count("bg_exit_task_timeout", exits.cumulativeBackgroundTaskAssertionTimeoutExitCount)
+      count("bg_exit_locked_file", exits.cumulativeSuspendedWithLockedFileExitCount)
+      count("bg_exit_abnormal", exits.cumulativeAbnormalExitCount)
+      count("bg_exit_bad_access", exits.cumulativeBadAccessExitCount)
+      count("bg_exit_illegal_instruction", exits.cumulativeIllegalInstructionExitCount)
+    }
+    if let exits = payload.applicationExitMetrics?.foregroundExitData {
+      count("fg_exit_normal", exits.cumulativeNormalAppExitCount)
+      count("fg_exit_memory_limit", exits.cumulativeMemoryResourceLimitExitCount)
+      count("fg_exit_watchdog", exits.cumulativeAppWatchdogExitCount)
+      count("fg_exit_abnormal", exits.cumulativeAbnormalExitCount)
+      count("fg_exit_bad_access", exits.cumulativeBadAccessExitCount)
+      count("fg_exit_illegal_instruction", exits.cumulativeIllegalInstructionExitCount)
+    }
+    for (key, value) in m where value.isFinite {
+      row["m." + key] = value
+    }
+    return row
+  }
 
   // Both protocol methods import into Swift as `didReceive(_:)`, so the Objective-C selectors
   // are pinned rather than inferred: two overloads competing for one inferred selector is a hard

@@ -768,7 +768,10 @@ no local bytes when the reconciliation finished, and how many of those the pass 
 (`TrailDocs::settle_stranded`). `sync.profile_stranded` / `sync.profile_stranded_fetched` count the
 same for entries in friends' profile namespaces (`ProfileDocs::settle_stranded`); a stuck one logs
 `fetched a stranded friend profile entry's bytes` (or `… still without bytes`) with `sc.namespace`
-and `profile.key`.
+and `profile.key`. After two failures in a row a stranded entry backs off (15 min doubling to 6 h,
+`retry_in_s` on the log line); `sync.stranded_deferred` / `sync.profile_stranded_deferred` count
+the ones a pass skipped. A pull whose `trail.sync` runs to `sync.budget_ms` with `ns_content_ready`
+equal to `namespaces` was waiting on stranded fetches, not on the sync.
 
 **`sync.stranded` that stays above zero is a friend whose dot is frozen on this phone**, however
 healthy the rest of the pass looks. A record and its bytes travel separately. The docs engine
@@ -1067,6 +1070,7 @@ foreground resume. Its value is in the _mismatches_:
 | `wake.bg_launches` climbing while `wake.js_boots` tracks it                                         | background launches are still booting the whole React Native bundle — the deferral is not working                                                                                                                                                                                        |
 | `wake.cpu_ms_max` approaching 48000                                                                 | not "high": that is `MXCPUExceptionDiagnostic`'s threshold, the constant all 41 exceptions in the 2026-09 window reported                                                                                                                                                                |
 | `wake.window_open=true` on a record that is not mid-wake                                            | a previous wake never closed its window — the process was frozen or killed inside it                                                                                                                                                                                                     |
+| `wake.windows_orphaned` > 0                                                                         | that many windows were left open by a process that died inside them and discarded by the next one; their CPU is not in any total. Before v4.8 they were folded in, which is why older `cpu_ms_*` groups can sum past `cpu_ms_total` and `wall_ms_total` can exceed the interval          |
 | `wake.wakes` large with `wake.syncs` at 0                                                           | the phone is being woken and publishing, but never pulling — friends' fixes only arrive on foreground                                                                                                                                                                                    |
 | `wake.pull_expired` or `wake.pull_stranded` > 0                                                     | iOS cut a pull off or froze the process inside one — read `friend.pull`; the counters survive what the spans may not                                                                                                                                                                     |
 | `wake.pull_overruns` > 0                                                                            | a pull came back well past its budget: the process was suspended mid-pull                                                                                                                                                                                                                |
@@ -1103,6 +1107,18 @@ launch AFTER the one that offended. The ledger is durable UserDefaults counters 
 for the same reason `init-watermark.ts` is: a wake that ends before it can ship cannot describe
 itself, and on a JS-free wake there is no journal to write to. `recordDeviceHealth` is the only
 caller allowed to reset them, so two records in the same minute cannot each take half the counts.
+
+**Battery is `ios.metrics`, not `wake.*`.** The ledger sees background windows only and nothing of
+the hardware. MetricKit's daily payload does: `metric.cpu_ms` / `metric.gpu_ms`, the location
+hardware's time at each accuracy (`metric.location_nav_ms`, `_best_ms`, `_10m_ms`, `_100m_ms`,
+`_1km_ms`, `_3km_ms` — the first three are GPS), bytes by radio (`metric.cell_up_bytes`, …),
+`metric.foreground_ms` / `background_ms` / `background_location_ms`, and how runs ended
+(`metric.bg_exit_*`, `metric.fg_exit_*`). One span per day per phone, emitted on the next
+foreground launch, with `window_begin_ms` / `window_end_ms` and the `diag.app_build` it measured:
+
+```
+{ name = "ios.metrics" } | select(resource.service.instance.id, span.diag.app_build, span.metric.cpu_ms, span.metric.location_10m_ms, span.metric.location_3km_ms, span.metric.cell_up_bytes, span.metric.background_ms)
+```
 
 Absent on Android, and on any iOS binary older than the export — **absent, never zero**. A zero
 would read as "nothing happened" when the truth is "nobody was counting".

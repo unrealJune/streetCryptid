@@ -139,6 +139,11 @@ Conventions when changing that code:
   forwarded (binary+offset, attributed thread first, 48 frames) — a full call-stack tree is
   hundreds of kilobytes and would make telemetry the reason a phone stops shipping telemetry.
   `diag.*` attributes describe the build that DIED, which is routinely not the build reporting it.
+  The daily metric payloads ride the same spool as `kind = "metrics"` rows and come out as
+  `ios.metrics` (`metric.cpu_ms`, `metric.location_10m_ms` … `_3km_ms`, `metric.cell_up_bytes`,
+  `metric.background_ms`, `metric.bg_exit_*`): the OS's own battery accounting, GPS time included,
+  which no counter in the app can see. They were dropped until 2026-11-19, when the app was
+  reported heavy on battery and nothing could say whether the GPS, the radio or the CPU was why.
 - **A backgrounded iOS app is not a suspended one, and that is where the CPU went.**
   `UIBackgroundModes: ["location"]` plus `allowsBackgroundLocationUpdates` means iOS does not
   suspend this process while sharing is on, so a swiped-away app keeps every JS timer it had
@@ -158,8 +163,12 @@ Conventions when changing that code:
 - **The background budget is measured now, not inferred.** Every earlier claim about it —
   `SHIP_MAX_BATCHES = 3`, `HEADLESS_TEARDOWN_TIMEOUT_MS`, "throttled into silence" — came from
   reading silence after the fact. `BackgroundWakeLedger.swift` samples `CLOCK_PROCESS_CPUTIME_ID`
-  and `CLOCK_MONOTONIC` around each wake into durable UserDefaults counters, surfaced as `wake.*`
-  on the next `device.health`. Counters and not spans, for the reason `init-watermark.ts` exists: a
+  and `CLOCK_UPTIME_RAW` around each wake into durable UserDefaults counters, surfaced as `wake.*`
+  on the next `device.health`. Records before v4.8 are unreliable: the wall clock was
+  `CLOCK_MONOTONIC`, which on Darwin counts sleep (one week read as 62 days), and a window opened by
+  a process that was then killed was closed by the next one against its own per-process clocks,
+  so the groups summed to many times the total. A window now belongs to its process, and one left
+  open by another is discarded and counted (`wake.windows_orphaned`). Counters and not spans, for the reason `init-watermark.ts` exists: a
   wake that ends before it can ship cannot describe itself, and on a JS-free wake there is no
   journal to write to. `recordDeviceHealth` is the ONLY caller allowed to reset them — a
   take-and-reset inside the read lets two records in one minute take half the counts each.
@@ -378,7 +387,12 @@ failed` for the life of the process. On 2026-11-15 a single panicking accept tas
   sealed `s/profile`, `s/repeaters` and `keyring` too; sources are the owner's `profile_relays`,
   then the owner named by the read ticket), which hands a profile that became readable to the app
   because no `ContentReady` will, and re-reads repeater cards when anything landed; it reports
-  `sync.profile_stranded` / `_fetched`. Do not move
+  `sync.profile_stranded` / `_fetched`. **A stranded fetch that fails twice backs off**
+  (`docs::stranded_retry_delay`: next pull, then 15 min doubling to 6 h; `sync.stranded_deferred` /
+  `sync.profile_stranded_deferred` count what a pass skipped). A fetch nobody can serve ends only
+  on its timeout, and on 2026-11-19 a Pixel 10 holding two unservable slots (one 39 days old) and
+  two profile entries ran 213 of 214 pulls to the 20 s deadline: 6 s of CPU and 20 s of radio
+  every 5-15 minutes, for nothing. Do not shorten the backoff back to "every pull". Do not move
   either into the replica read (a read never dials), and do not drop the `rsy` lane: a control
   record without bytes is a restart request the leader cannot see. The web build does not run it
   yet.
