@@ -166,18 +166,19 @@ runs:
           echo "ANDROID_NDK_ROOT=$ndk_home"
         } >> "$GITHUB_ENV"
 
-    - name: Restore the Cargo cache
-      id: cargo-cache
-      uses: ./.github/actions/eas-rust-cache
-      with:
-        platform: ${{ inputs.platform }}
-        save: ${{ inputs.save-caches }}
-
     # Restored for every job, including the warm job: warming is exactly the case where staging the
     # finished artifacts is the point.
     - name: Restore the prebuilt native artifacts
       id: artifact-cache
       uses: ./.github/actions/eas-native-cache
+      with:
+        platform: ${{ inputs.platform }}
+        save: ${{ inputs.save-caches }}
+
+    - name: Restore the Cargo cache
+      id: cargo-cache
+      if: steps.artifact-cache.outputs.cache-hit != 'true'
+      uses: ./.github/actions/eas-rust-cache
       with:
         platform: ${{ inputs.platform }}
         save: ${{ inputs.save-caches }}

@@ -1,10 +1,22 @@
 name: CI / app
 
-# The Expo app and its native core: the four jobs `ci.yml` ran before the repeater was imported,
-# moved here verbatim. Called only from `ci.yml`, which decides whether this lane is needed.
+# The Expo app and its native core. Called only from `ci.yml`, which selects the affected checks.
 
 on:
   workflow_call:
+    inputs:
+      app:
+        type: boolean
+        required: true
+      native:
+        type: boolean
+        required: true
+      ble:
+        type: boolean
+        required: true
+      workflows:
+        type: boolean
+        required: true
 
 permissions:
   contents: read
@@ -15,6 +27,7 @@ env:
 
 jobs:
   quality:
+    if: inputs.app
     name: Quality / ${{ matrix.name }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -76,6 +89,7 @@ jobs:
   # anything under .github/ changes (scripts/ci-changes.sh). shellcheck comes with the runner and
   # checks each `run:` block; custom runner labels live in .github/actionlint.yaml.
   workflows:
+    if: inputs.workflows
     name: Quality / Workflows
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -98,6 +112,7 @@ jobs:
         run: /tmp/actionlint -color
 
   typecheck:
+    if: inputs.app
     name: Typecheck
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -117,8 +132,11 @@ jobs:
       - name: Install Linux build dependencies
         if: steps.wasm-bindings.outputs.cache-hit != 'true'
         run: |
-          sudo apt-get update
-          sudo apt-get install --yes build-essential clang cmake libssl-dev perl pkg-config
+          if ! dpkg-query -W -f='${db:Status-Status}\n' build-essential clang cmake libssl-dev perl pkg-config |
+            awk '$0 == "installed" { count++ } END { exit(count != 6) }'; then
+            sudo apt-get update
+            sudo apt-get install --yes build-essential clang cmake libssl-dev perl pkg-config
+          fi
 
       - name: Install Rust and WASM build tools
         if: steps.wasm-bindings.outputs.cache-hit != 'true'
@@ -170,6 +188,7 @@ jobs:
         run: bun run typecheck
 
   native:
+    if: inputs.native
     name: Native
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -212,8 +231,11 @@ jobs:
 
       - name: Install Linux build dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install --yes build-essential clang cmake libssl-dev perl pkg-config
+          if ! dpkg-query -W -f='${db:Status-Status}\n' build-essential clang cmake libssl-dev perl pkg-config |
+            awk '$0 == "installed" { count++ } END { exit(count != 6) }'; then
+            sudo apt-get update
+            sudo apt-get install --yes build-essential clang cmake libssl-dev perl pkg-config
+          fi
 
       - name: Install Rust build tools
         uses: taiki-e/install-action@a6b2e2dcd845ddd7f509ce4f3ed3d922b80cc5d9 # v2.84.0
@@ -302,6 +324,7 @@ jobs:
   # radio. Its own job because it compiles iroh a second time (the app crate leaves BLE out on
   # Linux) and would not fit in `native`'s budget beside the app's tests.
   ble-transport:
+    if: inputs.ble
     name: BLE transport
     runs-on: ubuntu-latest
     timeout-minutes: 30

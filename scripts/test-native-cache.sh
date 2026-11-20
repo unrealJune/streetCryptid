@@ -89,12 +89,17 @@ EOF
 cat > "$test_root/bin/xcodebuild" << 'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
+if [[ "${1:-}" == -version ]]; then
+  echo "Xcode ${FAKE_XCODE_VERSION:-27.1}"
+  exit 0
+fi
 echo "xcodebuild $*" >> "$FAKE_BUILD_LOG"
 args=("$@")
 for ((i = 0; i < ${#args[@]}; i++)); do
   if [[ "${args[i]}" == "-output" ]]; then
-    mkdir -p "${args[i + 1]}"
+    mkdir -p "${args[i + 1]}/ios-arm64"
     printf 'fake xcframework\n' > "${args[i + 1]}/Info.plist"
+    printf 'fake static library\n' > "${args[i + 1]}/ios-arm64/libiroh_location.a"
   fi
 done
 EOF
@@ -123,6 +128,7 @@ make_tree() {
   # phone links by path. A server source sits beside them to prove it is NOT a digest input.
   printf '[workspace]\n' > "$root/Cargo.toml"
   printf '# lockfile\n' > "$root/Cargo.lock"
+  printf '[toolchain]\nchannel = "1.97.0"\n' > "$root/rust-toolchain.toml"
   printf 'pub fn noq() {}\n' > "$root/third_party/noq/lib.rs"
   printf 'pub fn roster() {}\n' > "$root/repeater/protocol/src/lib.rs"
   printf 'fn main() {}\n' > "$root/repeater/server/src/main.rs"
@@ -156,6 +162,7 @@ EOF
 # touches the developer's real caches.
 run_hook() {
   local root="$1" platform="$2" abis="${3:-}"
+  shift "$(( $# < 3 ? $# : 3 ))"
   : > "$build_log"
   env -i \
     PATH="$test_root/bin:/usr/bin:/bin" \
@@ -163,11 +170,12 @@ run_hook() {
     TMPDIR="${TMPDIR:-/tmp}" \
     FAKE_BUILD_LOG="$build_log" \
     FAKE_RUSTC_VERSION="${FAKE_RUSTC_VERSION:-1.90.0}" \
+    FAKE_XCODE_VERSION="${FAKE_XCODE_VERSION:-27.1}" \
     EAS_BUILD_PLATFORM="$platform" \
     SC_NATIVE_CACHE_DIR="$test_root/cache" \
     SC_BUILD_PROFILE_DIR="$test_root/profile" \
     ${abis:+SC_ANDROID_ABIS="$abis"} \
-    bash "$root/scripts/eas-build-pre-install.sh"
+    bash "$root/scripts/eas-build-pre-install.sh" "$@"
 }
 
 built() { [[ -s "$build_log" ]]; }
@@ -176,6 +184,10 @@ make_tree "$test_root/a"
 
 # --- 1. A cold run builds every requested ABI and stages it ------------------
 
+if run_hook "$test_root/a" android 'arm64-v8a' --cache-ready; then
+  fail "a probe found artifacts on a cold runner"
+fi
+built && fail "probing a cold cache built artifacts"
 run_hook "$test_root/a" android 'arm64-v8a armeabi-v7a x86_64'
 built || fail "the first Android run reused something from an empty cache"
 
@@ -210,7 +222,12 @@ grep -q 'generated kotlin' \
 
 # --- 3. Asking for an ABI that was never staged must miss --------------------
 
+run_hook "$test_root/b" android 'arm64-v8a x86_64' --cache-ready ||
+  fail "the setup probe did not accept a complete cache"
 rm -rf "$test_root/cache/android/"*/x86_64
+if run_hook "$test_root/b" android 'arm64-v8a x86_64' --cache-ready; then
+  fail "the setup probe accepted a partial cache"
+fi
 run_hook "$test_root/b" android 'arm64-v8a x86_64'
 built || fail "a missing ABI was served from cache"
 
@@ -254,8 +271,7 @@ if built; then
   fail "a server-only change invalidated the native cache"
 fi
 
-# The Rust toolchain is the input GitHub's hashFiles cannot see, which is exactly why the hook
-# computes a digest of its own instead of trusting the cache key.
+# The actual compiler identity matters even while the checkout and pin are unchanged.
 FAKE_RUSTC_VERSION=1.91.0
 export FAKE_RUSTC_VERSION
 run_hook "$test_root/b" android 'arm64-v8a'
@@ -292,5 +308,10 @@ fi
   fail "the iOS cache hit did not restore the headers"
 [[ -f "$test_root/b/modules/iroh-location/ios/generated/iroh_location.swift" ]] ||
   fail "the iOS cache hit did not restore the Swift bindings"
+
+if FAKE_XCODE_VERSION=27.2 run_hook "$test_root/b" ios '' --cache-ready; then
+  fail "a new Xcode toolchain did not invalidate the native cache"
+fi
+built && fail "probing a different Xcode did not stay read-only"
 
 echo "The native artifact cache reused artifacts across checkouts and ABI subsets, and rebuilt for every change to the sources, the workspace (manifest, lockfile, noq patch, repeater protocol), the build script, and the toolchain, and kept serving through a server-only change."

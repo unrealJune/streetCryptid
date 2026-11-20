@@ -566,6 +566,38 @@ jobs:
             rm -f -- "$BUILD_ARTIFACT"
           fi
 
+  prune-preview-caches:
+    name: Prune superseded compiler caches
+    needs: [build_ios, build_android]
+    if: >-
+      !cancelled() &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      (needs.build_ios.result == 'success' || needs.build_android.result == 'success')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    steps:
+      # No checkout, and no credentials other than the cache API token. Never touch main's caches.
+      - name: Keep two cache generations per platform and family
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          [[ "$PR_NUMBER" =~ ^[0-9]+$ ]]
+          ref="refs/pull/$PR_NUMBER/merge"
+          for prefix in eas-local-ccache-ios- eas-local-ccache-android- eas-local-gradle-build-cache-; do
+            ids="$(gh api --paginate --slurp --method GET "repos/$GITHUB_REPOSITORY/actions/caches" \
+              -f ref="$ref" -f key="$prefix" -f sort=created_at -f direction=desc -F per_page=100 \
+              | jq -r '[.[].actions_caches[]][2:][].id')"
+            for id in $ids; do
+              [[ "$id" =~ ^[0-9]+$ ]]
+              gh api --method DELETE "repos/$GITHUB_REPOSITORY/actions/caches/$id" >/dev/null ||
+                echo "::warning::Could not prune preview cache $id"
+            done
+          done
+
   notify:
     name: Notify build thread
     # Same gate as the build jobs — anything they built gets reported. An author
