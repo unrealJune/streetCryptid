@@ -20,7 +20,9 @@ import {
   useLiveReadout,
   type LiveReadout,
   type LiveReadoutStore,
+  FriendsHeader,
   FriendsIsland,
+  FriendsList,
   IslandColumn,
   hexToRgb,
   LocateMeControl,
@@ -562,6 +564,19 @@ export default function MapScreenBody() {
     </View>
   );
 
+  const rosterProps = (rosterMinimized: boolean) => ({
+    friends: rosterFriends,
+    minimized: rosterMinimized,
+    onOpenPairing: () => {
+      closeLayers();
+      router.push('/pairing' as Href);
+    },
+    onOpenProfile: (friendId: string) => focusRosterFriend(friendId, 'mid'),
+    onSelect: focusRosterFriend,
+    theme,
+  });
+  // In the drawer the roster's title row floats over its list (see `MapDrawer`'s `header`).
+  const drawerRoster = !detailPresence && rosterOpen;
   // The bodies, shared by the drawer (one at a time, behind the tabs) and the wide column (both).
   const meBody = () => <MeIsland readouts={readouts} signal={selfSignal} theme={theme} />;
   const friendsBody = (bodyDetent: DrawerDetent, bodyMinimized: boolean) =>
@@ -590,17 +605,7 @@ export default function MapScreenBody() {
         theme={theme}
       />
     ) : (
-      <FriendsIsland
-        friends={rosterFriends}
-        minimized={bodyMinimized}
-        onOpenPairing={() => {
-          closeLayers();
-          router.push('/pairing' as Href);
-        }}
-        onOpenProfile={(friendId) => focusRosterFriend(friendId, 'mid')}
-        onSelect={focusRosterFriend}
-        theme={theme}
-      />
+      <FriendsIsland {...rosterProps(bodyMinimized)} />
     );
 
   return (
@@ -690,6 +695,7 @@ export default function MapScreenBody() {
           <MapDrawer
             activeTab={islandTab}
             detent={detent}
+            header={drawerRoster ? <FriendsHeader {...rosterProps(minimized)} /> : undefined}
             insetBottom={insets.bottom}
             insetTop={insets.top}
             maxDetent={drawerMax}
@@ -706,7 +712,13 @@ export default function MapScreenBody() {
             signal={selfSignal}
             theme={theme}
           >
-            {detailPresence || rosterOpen ? friendsBody(detent, minimized) : meBody()}
+            {drawerRoster ? (
+              <FriendsList {...rosterProps(minimized)} />
+            ) : detailPresence || rosterOpen ? (
+              friendsBody(detent, minimized)
+            ) : (
+              meBody()
+            )}
           </MapDrawer>
         </View>
       )}

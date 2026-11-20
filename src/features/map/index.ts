@@ -1,7 +1,7 @@
 /** Public surface of the map feature. */
 
 export { CoverageIsland } from './components/coverage-island';
-export { FriendsIsland } from './components/friends-island';
+export { FriendsHeader, FriendsIsland, FriendsList } from './components/friends-island';
 export { IslandColumn } from './components/island-column';
 export type { MapRosterFriend } from './components/friends-island';
 export { IslandTabs } from './components/island-tabs';
