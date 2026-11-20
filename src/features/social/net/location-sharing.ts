@@ -668,6 +668,12 @@ export class LocationSharingService {
    */
   private recipientsMirror: Promise<void> = Promise.resolve();
   private deliveryMirror: Promise<void> = Promise.resolve();
+  /**
+   * New friends our introduction went out WITHOUT a wrap for, keyed to when it went out. See
+   * {@link noteOwedIntroduction}. In memory only: a process that dies holding one falls back to
+   * the next scheduled publish, which is all there was before.
+   */
+  private readonly owedIntroductions = new Map<string, number>();
   private readonly removingFriends = new Set<string>();
   /**
    * The keychain RESERVATION for `seq`, not a mirror of the native counter (`state-store.ts`).
@@ -1567,6 +1573,7 @@ export class LocationSharingService {
       this.profileBackfill.delete(endpointId);
     }
     this.droppedRecipients.delete(endpointId);
+    this.owedIntroductions.delete(endpointId);
     this.sessionVerdicts.delete(endpointId);
     delete this.ratchetActivity[endpointId];
     void saveRatchetActivity(this.kv, this.ratchetActivity);
@@ -1995,6 +2002,64 @@ export class LocationSharingService {
   }
 
   /**
+   * Whether the introduction we just sealed left `endpointId` out for want of a sending chain, and
+   * if so, remember that we owe them one.
+   *
+   * The ratchet's roles are fixed by endpoint order (`initiator_by_endpoint`), and the RESPONDER —
+   * the higher id — cannot derive a sending key until it has opened the initiator's first
+   * envelope. Both phones introduce at ACKNOWLEDGE, so the responder's introduction is a race
+   * against the initiator's arriving first, and in the field it mostly lost: in 7 of 10 pairings
+   * between 2026-11-08 and 11-12 the responder's `docs.write` carried the new friend in
+   * `dropped_peers` as `no_sending_chain`, and the initiator's first dot waited for the
+   * responder's next scheduled publish (18 s to 16 min there; on a parked iPhone, hours). Every
+   * seal before that open drops them the same way, so the report read here is not racing another
+   * drain. {@link refreshTrailFromReplica} pays the debt on the first envelope it opens from them.
+   */
+  private async noteOwedIntroduction(endpointId: string): Promise<boolean> {
+    const mod = this.mod;
+    if (typeof mod?.lastSealReport !== 'function') return false;
+    const report = await mod.lastSealReport().catch(() => null);
+    const owed = report?.droppedPeers?.includes(`${endpointId}:no_sending_chain`) ?? false;
+    if (owed && !this.owedIntroductions.has(endpointId)) {
+      this.owedIntroductions.set(endpointId, Date.now());
+    }
+    return owed;
+  }
+
+  /**
+   * Introduce ourselves again to friends we owed one, now that a read has opened an envelope from
+   * each — which is what gave the ratchet its sending chain for them. Not awaited by the read.
+   */
+  private async payOwedIntroductions(peers: { endpointId: string; owedSince: number }[]) {
+    const live = peers.filter(
+      ({ endpointId }) =>
+        this.state.friends[endpointId] !== undefined && !this.removingFriends.has(endpointId)
+    );
+    if (live.length === 0) return;
+    const span = getTelemetry().startSpan('pair.reintroduce', {
+      attributes: {
+        'sc.peer': live[0]!.endpointId.slice(0, 10),
+        peers: live.length,
+        owed_ms: Date.now() - Math.min(...live.map((p) => p.owedSince)),
+      },
+    });
+    try {
+      await this.publishIntroduction();
+      // Should never be true: the open that brought us here made the chain. Recorded because a
+      // `true` means the debt is owed again, and the next open will try once more.
+      const stillDropped = await Promise.all(
+        live.map(({ endpointId }) => this.noteOwedIntroduction(endpointId))
+      );
+      span.setAttribute('still_dropped', stillDropped.some(Boolean));
+      span.setStatus('ok');
+    } catch (error) {
+      span.recordError(error);
+    } finally {
+      span.end();
+    }
+  }
+
+  /**
    * Wire up a freshly acknowledged friend: open their namespaces, then the introduction, then a
    * trail sync.
    *
@@ -2058,6 +2123,14 @@ export class LocationSharingService {
         try {
           await step();
           span.setAttribute(`${name}_ms`, Date.now() - stepStarted);
+          // Before `trail_sync`, which is often the read that opens their introduction and so
+          // pays this debt at once.
+          if (name === 'introduction') {
+            span.setAttribute(
+              'introduction_owed',
+              await this.noteOwedIntroduction(friend.endpointId)
+            );
+          }
         } catch (error) {
           span.setAttributes({
             [`${name}_ms`]: Date.now() - stepStarted,
@@ -2884,9 +2957,16 @@ export class LocationSharingService {
     const events = await this.mod.readLatest().catch(() => [] as NativeRatchetEvent[]);
 
     let recoveredFriendFixes = 0;
+    const owedPaid: { endpointId: string; owedSince: number }[] = [];
     for (const nf of events) {
       if (known.has(nf.author)) {
         this.recordRatchetActivity(nf.author, nf.kind === 'null' ? 'null' : 'fix', nf.seq);
+        // Every event here OPENED, so the ratchet now has a sending chain for its author.
+        const owedSince = this.owedIntroductions.get(nf.author);
+        if (owedSince !== undefined) {
+          this.owedIntroductions.delete(nf.author);
+          owedPaid.push({ endpointId: nf.author, owedSince });
+        }
       }
       if (!nf.fix) continue;
       const fix = {
@@ -2965,6 +3045,7 @@ export class LocationSharingService {
       }
       this.replicaWatermarks.set(nf.author, { ts: nf.fix.ts, seq: nf.seq });
     }
+    if (owedPaid.length > 0) void this.payOwedIntroductions(owedPaid);
     return recoveredFriendFixes;
   }
 

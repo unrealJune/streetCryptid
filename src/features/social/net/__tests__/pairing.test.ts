@@ -1765,6 +1765,84 @@ describe('LocationSharingService — pairing / profile wiring', () => {
       expect(mockHolder.mod.calls.publishIntroduction).toBe(1);
     });
 
+    // The pair's responder (the higher endpoint id) has no sending chain until it opens the
+    // initiator's first envelope, so its introduction usually goes out WITHOUT the new friend: 7 of
+    // 10 field pairings from 2026-11-08 to 11-12, each leaving the initiator to wait for the
+    // responder's next scheduled publish.
+    describe('when our introduction could not wrap for the new friend', () => {
+      const theirFix = {
+        author: 'cc330099',
+        seq: 1,
+        kind: 'fix' as const,
+        fix: { lat: 47.6, lon: -122.3, accuracyM: 5, headingDeg: 0, ts: 1_000 },
+      };
+      const settle = async (svc: LocationSharingService) => {
+        await svc.awaitFriendWiring();
+        // The debt is paid off the read's path; let it land.
+        for (let i = 0; i < 10; i += 1) await Promise.resolve();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      };
+
+      it('introduces itself again on the first envelope it opens from them', async () => {
+        const { svc } = await pairAndWatch();
+        mockHolder.mod.droppedPeers = ['cc330099:no_sending_chain'];
+        await svc.acknowledgeDiscoveredFriend();
+        await settle(svc);
+        expect(mockHolder.mod.calls.publishIntroduction).toBe(1);
+
+        // Their introduction lands and opens: the ratchet can now send to them.
+        mockHolder.mod.latest = [theirFix];
+        mockHolder.mod.droppedPeers = [];
+        await svc.syncTrail(0);
+        await settle(svc);
+        expect(mockHolder.mod.calls.publishIntroduction).toBe(2);
+        expect(poolSpans('pair.reintroduce')[0]?.details).toMatchObject({
+          attributes: expect.objectContaining({ 'sc.peer': 'cc330099', still_dropped: false }),
+        });
+
+        // Paid once, not on every read.
+        await svc.syncTrail(0);
+        await settle(svc);
+        expect(mockHolder.mod.calls.publishIntroduction).toBe(2);
+      });
+
+      it('pays at once when the wiring sync already opens their introduction', async () => {
+        const { svc } = await pairAndWatch();
+        mockHolder.mod.droppedPeers = ['cc330099:no_sending_chain'];
+        mockHolder.mod.latest = [theirFix];
+        await svc.acknowledgeDiscoveredFriend();
+        await settle(svc);
+
+        expect(mockHolder.mod.calls.publishIntroduction).toBe(2);
+      });
+
+      it('does not introduce twice when the first one reached them', async () => {
+        const { svc } = await pairAndWatch();
+        mockHolder.mod.droppedPeers = [];
+        mockHolder.mod.latest = [theirFix];
+        await svc.acknowledgeDiscoveredFriend();
+        await settle(svc);
+        await svc.syncTrail(0);
+        await settle(svc);
+
+        expect(mockHolder.mod.calls.publishIntroduction).toBe(1);
+        expect(poolSpans('pair.reintroduce')).toHaveLength(0);
+      });
+
+      it('owes nothing to a friend removed before they were heard from', async () => {
+        const { svc } = await pairAndWatch();
+        mockHolder.mod.droppedPeers = ['cc330099:no_sending_chain'];
+        await svc.acknowledgeDiscoveredFriend();
+        await settle(svc);
+        await svc.removeFriend('cc330099');
+
+        mockHolder.mod.latest = [theirFix];
+        await svc.syncTrail(0);
+        await settle(svc);
+        expect(mockHolder.mod.calls.publishIntroduction).toBe(1);
+      });
+    });
+
     // THE regression from 2026-09-17 00:50 UTC. The friend's network wiring was awaited by
     // ACKNOWLEDGE, and it held the node-wide native lock across a dial to an internet-unreachable
     // peer — so the
