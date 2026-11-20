@@ -33,11 +33,18 @@ import UIKit
 /// approaching 48 000 is not "high", it is the threshold — the same constant every one of those 41
 /// diagnostics reported.
 ///
-/// Wall time is `CLOCK_MONOTONIC`, which on Darwin does NOT advance while the device is asleep.
-/// That is the correct clock here: it measures the window we were given, not the hours we spent
-/// suspended inside it. Note this is exactly the distinction the observability write-up flagged as
-/// unverified for Hermes' `performance.now()` — in Swift it is unambiguous, which is part of why
-/// the measurement belongs on this side.
+/// Wall time is `CLOCK_UPTIME_RAW`, which does not advance while the device is asleep: it
+/// measures the window we were given, not the hours spent suspended inside it. It used to be
+/// `CLOCK_MONOTONIC` on the belief that Darwin's stops in sleep too. It does not (`clock_gettime(3)`:
+/// it "will continue to increment while the system is asleep"), and the records said so: an
+/// iPhone 16 Pro Max reported `wall_ms_total` of 5.4 billion — 62 days — for one week.
+///
+/// A window belongs to the process that opened it. `CLOCK_PROCESS_CPUTIME_ID` and the per-thread
+/// times start at zero in every process, but the open marks live in UserDefaults, so a window
+/// opened by a process iOS then killed used to be closed by the NEXT process against its own
+/// clocks: the total clamped to zero while the per-group deltas did not, which is how records
+/// came to show groups summing to 70 times `cpu_ms_total`. A window found open from another
+/// process is now discarded and counted (`windows_orphaned`), never folded in.
 enum BackgroundWakeLedger {
   // MARK: - Keys
 
@@ -102,6 +109,11 @@ enum BackgroundWakeLedger {
   /// foregrounded app.
   private static let openCpu = "sc.bg.open_cpu_ms"
   private static let openWall = "sc.bg.open_wall_ms"
+  /// Which process opened the window (`processToken`). State, not a count: not reset.
+  private static let openProcess = "sc.bg.open_process"
+  /// Windows a later process found open and discarded: the process that opened one was killed or
+  /// frozen inside it, and its CPU is unknowable from here.
+  private static let windowsOrphaned = "sc.bg.windows_orphaned"
 
   /// Per-thread-group CPU, so a figure says WHERE the time went. Keyed `<prefix><group>`.
   private static let groupTotalPrefix = "sc.bg.cpu_ms."
@@ -118,11 +130,12 @@ enum BackgroundWakeLedger {
     return Double(ts.tv_sec) * 1000 + Double(ts.tv_nsec) / 1_000_000
   }
 
-  /// Monotonic milliseconds. Does not advance while the device is asleep, which is what makes it
-  /// the right measure of a wake WINDOW rather than of elapsed wall time.
+  /// Awake milliseconds. Does not advance while the device is asleep, which is what makes it the
+  /// right measure of a wake WINDOW rather than of elapsed wall time. See the type's docs for why
+  /// this is not `CLOCK_MONOTONIC`.
   static func wallMs() -> Double {
     var ts = timespec()
-    guard clock_gettime(CLOCK_MONOTONIC, &ts) == 0 else { return 0 }
+    guard clock_gettime(CLOCK_UPTIME_RAW, &ts) == 0 else { return 0 }
     return Double(ts.tv_sec) * 1000 + Double(ts.tv_nsec) / 1_000_000
   }
 
@@ -251,7 +264,34 @@ enum BackgroundWakeLedger {
     // Only while off screen. A delivery to a mounted app is not a background wake, and measuring
     // one as though it were is how foreground CPU ends up in `cpu_ms_max` — see `backgrounded`.
     guard backgrounded else { return }
-    if defaults.object(forKey: openCpu) == nil { openWindow() }
+    if !windowOpenInThisProcess { openWindow() }
+  }
+
+  /// Whether a window is open AND this process opened it. One left by an earlier process is not
+  /// ours to close; `openWindow` replaces it and `closeWindow` discards it.
+  private static var windowOpenInThisProcess: Bool {
+    defaults.object(forKey: openCpu) != nil
+      && defaults.string(forKey: openProcess) == processToken
+  }
+
+  /// Drop a window an earlier process left open, counting it. Returns whether there was one.
+  @discardableResult
+  private static func discardOrphanedWindow() -> Bool {
+    guard defaults.object(forKey: openCpu) != nil,
+      defaults.string(forKey: openProcess) != processToken
+    else { return false }
+    bump(windowsOrphaned)
+    clearOpenWindow()
+    return true
+  }
+
+  private static func clearOpenWindow() {
+    defaults.removeObject(forKey: openCpu)
+    defaults.removeObject(forKey: openWall)
+    defaults.removeObject(forKey: openProcess)
+    for group in ThreadGroup.allCases {
+      defaults.removeObject(forKey: groupOpenPrefix + group.rawValue)
+    }
   }
 
   /// Record a capture that reached neither a node nor a JS sink, and was therefore thrown away.
@@ -391,6 +431,8 @@ enum BackgroundWakeLedger {
 
   /// Begin timing a window.
   static func openWindow() {
+    discardOrphanedWindow()
+    defaults.set(processToken, forKey: openProcess)
     defaults.set(cpuMs(), forKey: openCpu)
     defaults.set(wallMs(), forKey: openWall)
     let groups = groupCpuMs()
@@ -402,11 +444,13 @@ enum BackgroundWakeLedger {
   /// Close the open window and fold its cost into the totals. Idempotent: a window that was never
   /// opened contributes nothing rather than a garbage reading.
   static func closeWindow() {
+    if discardOrphanedWindow() { return }
     guard defaults.object(forKey: openCpu) != nil else { return }
     let cpu = max(0, cpuMs() - defaults.double(forKey: openCpu))
     let wall = max(0, wallMs() - defaults.double(forKey: openWall))
     defaults.removeObject(forKey: openCpu)
     defaults.removeObject(forKey: openWall)
+    defaults.removeObject(forKey: openProcess)
     defaults.set(defaults.double(forKey: cpuTotal) + cpu, forKey: cpuTotal)
     defaults.set(defaults.double(forKey: wallTotal) + wall, forKey: wallTotal)
     if cpu > defaults.double(forKey: cpuMax) {
@@ -442,6 +486,7 @@ enum BackgroundWakeLedger {
       // A window still open right now: a wake in progress, or — the interesting case — one that
       // was never closed because the process was frozen or killed inside it.
       "window_open": defaults.object(forKey: openCpu) != nil,
+      "windows_orphaned": defaults.integer(forKey: windowsOrphaned),
     ]
     if let last = defaults.object(forKey: lastWake) as? Double {
       out["last_wake_age_ms"] = Int(Date().timeIntervalSince1970 * 1000 - last)
@@ -508,7 +553,10 @@ enum BackgroundWakeLedger {
       publishBegun, publishCompleted, publishExpired, publishStranded, publishPushDeferred,
       publishHeldMsTotal, publishHeldMsMax,
     ]
-    for key in [wakes, bgLaunches, jsBoots, cpuTotal, cpuMax, wallTotal, wallAtCpuMax, syncs, dropped]
+    for key in [
+      wakes, bgLaunches, jsBoots, cpuTotal, cpuMax, wallTotal, wallAtCpuMax, syncs, dropped,
+      windowsOrphaned,
+    ]
       + groups + pulls + publishes
     {
       defaults.removeObject(forKey: key)
