@@ -354,7 +354,10 @@ failed` for the life of the process. On 2026-11-15 a single panicking accept tas
   `PUSH_GRACE_AFTER_SETTLE` = 3 s, `trail.push.wait{ended=settled, settled_ms}`). Over 24 h to
   2026-11-19, 592 of 867 friend dials never answered and each cost its push the full 30 s, while
   the stash answered at p50 0.3 s. The stash serves every friend, and the namespace stays live, so
-  an awake friend still reconciles after the wait ends. Without a stash the push waits as before.
+  an awake friend still reconciles after the wait ends. A repeater carrying our trail settles a push
+  the same way (it serves the namespace to every friend that pulls it), while staying unwaited: it
+  can end a wait, never extend it. With neither, the push waits as before. Which carrier a fix left
+  through is `trail.push{push.durable_via}`, a spanmetrics dimension beside `fix.provenance`.
 - **A position Core Location hands back is not a capture.** `didUpdateLocations` drops a location
   whose timestamp is not newer than the last one delivered: on 2026-10-02 one fix came back every
   30 s for 73 minutes, the first two went out `live` 5-9 minutes stale, and the rest read as a

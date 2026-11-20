@@ -85,8 +85,8 @@ const SYNC_FIRST_EVENT_TIMEOUT_SECS: u64 = 25;
 /// but a peer that connects and then stalls would otherwise hold a headless context open.
 pub const PUSH_TIMEOUT_SECS: u64 = 30;
 
-/// How much longer a push waits for friends once the stash has its copy (`settle_on` in
-/// [`TrailDocs::push`]).
+/// How much longer a push waits for friends once a durable carrier — the stash, or one of our
+/// repeaters — has its copy (`settle_on` in [`TrailDocs::push`]).
 ///
 /// Measured 2026-11-19 over 24 h of `trail.push.peer`: the stash finished at p50 0.3 s, a friend
 /// that answered at p50 0.7 s, and 592 of 867 friend dials never answered at all — each one costing
@@ -94,7 +94,13 @@ pub const PUSH_TIMEOUT_SECS: u64 = 30;
 /// phones were suspended inside them (pushes of 210 and 451 s on 2026-11-18), with whatever the
 /// wake owed next — a `parked` claim — never sent. Once the stash holds the entries every friend can
 /// read them from it, and the namespace stays live, so an awake friend still reconciles after we
-/// stop watching. Three seconds keeps the friends who answer quickly as direct contacts.
+/// stop watching. Three seconds keeps the friends who answer quickly as direct contacts: replayed
+/// over 48 h of `trail.push.peer` it kept 711 of the 867 friend finishes inside the window and cut
+/// the fleet's push wait from 10.5 to 1.9 phone-hours.
+///
+/// A repeater settles a push exactly as the stash does: it carries the namespace for every friend
+/// who can read it (`repeater::pull_plan`), so a phone that carries its trail on a repeater and has
+/// not opted into the stash no longer spends every push's whole budget on friends' phones.
 pub const PUSH_GRACE_AFTER_SETTLE: Duration = Duration::from_secs(3);
 
 /// Key separator between the hex author and the zero-padded sequence number.
@@ -495,6 +501,8 @@ pub struct PushReport {
     pub peers_failed: usize,
     /// What each dialled peer did, individually. See [`PeerPushOutcome`].
     pub per_peer: Vec<PeerPushOutcome>,
+    /// The durable carrier (one of `settle_on`) whose finish cut the wait short, when one did.
+    pub settled_by: Option<[u8; 32]>,
 }
 
 /// Which of the three things a dialled peer did.
@@ -512,6 +520,11 @@ pub enum PeerOutcome {
     Failed,
     /// Never reported at all before the deadline. An asleep phone looks like this.
     Silent,
+    /// A carrier handed to the live engine but never waited for (a repeater; see
+    /// [`TrailDocs::push`]) that had not reported when the push stopped watching. Not
+    /// [`Silent`](Self::Silent): nothing waited on it, and it may well finish a second later. Kept
+    /// as a row anyway, because without it a repeater's answer rate had no denominator.
+    Unwaited,
 }
 
 impl PeerOutcome {
@@ -521,12 +534,14 @@ impl PeerOutcome {
             Self::Finished => "finished",
             Self::Failed => "failed",
             Self::Silent => "silent",
+            Self::Unwaited => "unwaited",
         }
     }
 }
 
 /// Complete a push's per-peer record: every dialled peer that never reported is folded in as
-/// [`PeerOutcome::Silent`] alongside the peers that did.
+/// [`PeerOutcome::Silent`] alongside the peers that did, and every unwaited carrier that never
+/// reported as [`PeerOutcome::Unwaited`].
 ///
 /// Pure, and separated out for that reason, so it is tested without standing up an iroh node. It
 /// must never drop the record when nobody answered: a push where every peer stayed quiet is the
@@ -540,11 +555,23 @@ fn settled_deadline(deadline: Instant, now: Instant) -> Instant {
 fn finish_outcomes(
     mut reported: Vec<PeerPushOutcome>,
     outstanding: &[[u8; 32]],
+    carriers: &[[u8; 32]],
 ) -> Vec<PeerPushOutcome> {
     for peer in outstanding {
         reported.push(PeerPushOutcome {
             peer: *peer,
             outcome: PeerOutcome::Silent,
+            latency_ms: None,
+            entries_sent: 0,
+        });
+    }
+    for peer in carriers {
+        if reported.iter().any(|row| &row.peer == peer) {
+            continue;
+        }
+        reported.push(PeerPushOutcome {
+            peer: *peer,
+            outcome: PeerOutcome::Unwaited,
             latency_ms: None,
             entries_sent: 0,
         });
@@ -1577,16 +1604,18 @@ impl TrailDocs {
     /// whole deadline. They reconcile whenever they next wake, and a carrier that answers while
     /// the others are awaited is still reported.
     ///
-    /// `settle_on` is the peer whose copy makes the push durable — the stash. Once it reports
-    /// finished, the rest get [`PUSH_GRACE_AFTER_SETTLE`] more and no longer the whole budget
-    /// (`ended = "settled"`). Its own silence changes nothing: the push then waits as before.
+    /// `settle_on` are the peers whose copy makes the push durable — the stash and our repeaters.
+    /// Once the first of them reports finished, the rest get [`PUSH_GRACE_AFTER_SETTLE`] more and
+    /// no longer the whole budget (`ended = "settled"`, [`PushReport::settled_by`]). A carrier
+    /// among them stays unwaited: it can end the wait, never extend it. Their silence changes
+    /// nothing: the push then waits as before.
     pub async fn push(
         &self,
         ns: NamespaceId,
         peers: Vec<EndpointAddr>,
         unwaited: Vec<EndpointAddr>,
         budget: Duration,
-        settle_on: Option<[u8; 32]>,
+        settle_on: &[[u8; 32]],
     ) -> Result<Option<PushReport>> {
         use tracing::Instrument;
         // The phases of a push are spans of their own (`trail.push.open`, `.start_sync`, `.wait`)
@@ -1608,8 +1637,10 @@ impl TrailDocs {
         let dialled = peers.len();
         let scheduled = unwaited.len();
         let mut targets = peers;
+        let mut carriers: Vec<[u8; 32]> = Vec::new();
         for peer in unwaited {
             if !pending.contains(peer.id.as_bytes()) && !targets.iter().any(|t| t.id == peer.id) {
+                carriers.push(*peer.id.as_bytes());
                 targets.push(peer);
             }
         }
@@ -1621,6 +1652,7 @@ impl TrailDocs {
             ))
             .await?;
         if dialled == 0 {
+            report.per_peer = finish_outcomes(report.per_peer, &[], &carriers);
             return Ok(Some(report));
         }
 
@@ -1670,8 +1702,9 @@ impl TrailDocs {
                                     latency_ms: Some(latency_ms),
                                     entries_sent: sent,
                                 });
-                                if settled_ms.is_none() && settle_on == Some(peer) {
+                                if settled_ms.is_none() && settle_on.contains(&peer) {
                                     settled_ms = Some(latency_ms);
+                                    report.settled_by = Some(peer);
                                     deadline = settled_deadline(deadline, Instant::now());
                                 }
                             }
@@ -1729,7 +1762,7 @@ impl TrailDocs {
         waited?;
 
         let outstanding: Vec<[u8; 32]> = pending.into_iter().collect();
-        report.per_peer = finish_outcomes(report.per_peer, &outstanding);
+        report.per_peer = finish_outcomes(report.per_peer, &outstanding, &carriers);
         Ok(Some(report))
     }
 
@@ -2137,7 +2170,7 @@ pub(crate) mod tests {
         // `None` here and threw the whole push away.
         let a = [0xaau8; 32];
         let b = [0xbbu8; 32];
-        let out = finish_outcomes(Vec::new(), &[a, b]);
+        let out = finish_outcomes(Vec::new(), &[a, b], &[]);
         assert_eq!(out.len(), 2);
         assert!(out.iter().all(|p| p.outcome == PeerOutcome::Silent));
         assert!(out.iter().all(|p| p.latency_ms.is_none()));
@@ -2146,7 +2179,7 @@ pub(crate) mod tests {
     #[test]
     fn answered_peers_keep_their_latency_and_entries() {
         let peer = [0x07u8; 32];
-        let out = finish_outcomes(vec![finished(peer, 913, 3)], &[]);
+        let out = finish_outcomes(vec![finished(peer, 913, 3)], &[], &[]);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].latency_ms, Some(913));
         assert_eq!(out[0].entries_sent, 3);
@@ -2162,6 +2195,7 @@ pub(crate) mod tests {
         let out = finish_outcomes(
             vec![finished(stash, 800, 1), finished(awake, 1_100, 1)],
             &[asleep],
+            &[],
         );
         assert_eq!(out.len(), 3);
         let mut peers: Vec<[u8; 32]> = out.iter().map(|p| p.peer).collect();
@@ -2187,6 +2221,27 @@ pub(crate) mod tests {
         assert_eq!(PeerOutcome::Finished.as_str(), "finished");
         assert_eq!(PeerOutcome::Failed.as_str(), "failed");
         assert_eq!(PeerOutcome::Silent.as_str(), "silent");
+        assert_eq!(PeerOutcome::Unwaited.as_str(), "unwaited");
+    }
+
+    #[test]
+    fn an_unwaited_carrier_is_a_row_whether_or_not_it_answered() {
+        // A repeater that answered inside the wait keeps its answer; one that did not is
+        // `unwaited`, never `silent` — nothing waited on it — and never dropped, or a repeater's
+        // answer rate has no denominator.
+        let stash = [0x10u8; 32];
+        let quick = [0x40u8; 32];
+        let asleep = [0x50u8; 32];
+        let out = finish_outcomes(
+            vec![finished(stash, 300, 1), finished(quick, 900, 1)],
+            &[],
+            &[quick, asleep],
+        );
+        assert_eq!(out.len(), 3, "the answering carrier is not counted twice");
+        let row = |peer| out.iter().find(|p| p.peer == peer).unwrap().outcome;
+        assert_eq!(row(quick), PeerOutcome::Finished);
+        assert_eq!(row(asleep), PeerOutcome::Unwaited);
+        assert!(out.iter().all(|p| p.outcome != PeerOutcome::Silent));
     }
 
     #[test]
@@ -2793,6 +2848,74 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn a_repeater_that_answers_settles_a_push_held_by_an_asleep_friend() -> Result<()> {
+        // The repeater-only phone (no stash): before carriers could settle a push, every push
+        // waited its whole budget on friends' phones in pockets.
+        let dir = scratch_dir("carrier-settles");
+        let (writer_endpoint, writer_docs, writer_blobs, writer_router) =
+            replication_peer().await?;
+        let (carrier_endpoint, carrier_docs, _carrier_blobs, carrier_router) =
+            replication_peer().await?;
+        // An endpoint that is up and never accepts anything: the friend asleep in a pocket.
+        let asleep = Endpoint::builder(iroh::endpoint::presets::N0)
+            .relay_mode(RelayMode::Disabled)
+            .bind()
+            .await?;
+        let writer = TrailDocs::init(writer_docs, writer_blobs, dir.clone(), None, None).await?;
+        let ns = writer.own_namespace();
+        writer
+            .doc_for(ns)
+            .await?
+            .set_bytes(
+                writer.author,
+                encode_key(writer_endpoint.id().as_bytes()),
+                b"sealed fix".to_vec(),
+            )
+            .await?;
+        let ticket: iroh_docs::DocTicket = writer.read_ticket(ns).await?.parse()?;
+        carrier_docs
+            .import_namespace(ticket.capability)
+            .await?
+            .start_sync(Vec::new())
+            .await?;
+
+        let carrier = *carrier_endpoint.id().as_bytes();
+        let started = Instant::now();
+        let report = tokio::time::timeout(
+            Duration::from_secs(20),
+            writer.push(
+                ns,
+                vec![asleep.addr()],
+                vec![carrier_endpoint.addr()],
+                Duration::from_secs(30),
+                &[carrier],
+            ),
+        )
+        .await??
+        .expect("the push reports");
+        assert!(
+            started.elapsed() < Duration::from_secs(20),
+            "a carrier's finish must cut the wait to the grace"
+        );
+        assert_eq!(report.settled_by, Some(carrier));
+        let row = |peer: [u8; 32]| {
+            report
+                .per_peer
+                .iter()
+                .find(|p| p.peer == peer)
+                .map(|p| p.outcome)
+        };
+        assert_eq!(row(carrier), Some(PeerOutcome::Finished));
+        assert_eq!(row(*asleep.id().as_bytes()), Some(PeerOutcome::Silent));
+
+        asleep.close().await;
+        writer_router.shutdown().await?;
+        carrier_router.shutdown().await?;
+        let _ = std::fs::remove_dir_all(dir);
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn an_unwaited_carrier_is_scheduled_without_holding_the_push() -> Result<()> {
         let dir = scratch_dir("unwaited-carrier");
         let (writer_endpoint, writer_docs, writer_blobs, writer_router) =
@@ -2810,7 +2933,7 @@ pub(crate) mod tests {
         let reader_doc = reader_docs.import_namespace(ticket.capability).await?;
         reader_doc.start_sync(Vec::new()).await?;
 
-        // Nothing is waited for, so the push returns at once with nothing reported...
+        // Nothing is waited for, so the push returns at once, with the carrier as an unwaited row...
         let report = tokio::time::timeout(
             Duration::from_secs(3),
             writer.push(
@@ -2818,12 +2941,14 @@ pub(crate) mod tests {
                 Vec::new(),
                 vec![reader_endpoint.addr()],
                 Duration::from_secs(30),
-                None,
+                &[],
             ),
         )
         .await??
         .expect("a push with only unwaited carriers still reports");
-        assert!(report.per_peer.is_empty());
+        assert_eq!(report.per_peer.len(), 1);
+        assert_eq!(report.per_peer[0].outcome, PeerOutcome::Unwaited);
+        assert_eq!(report.settled_by, None);
 
         // ...and the carrier still receives the entry and its bytes.
         tokio::time::timeout(Duration::from_secs(15), async {
@@ -2883,7 +3008,7 @@ pub(crate) mod tests {
                 Vec::new(),
                 vec![carrier_endpoint.addr()],
                 Duration::from_secs(30),
-                None,
+                &[],
             )
             .await?;
         tokio::time::timeout(Duration::from_secs(15), async {

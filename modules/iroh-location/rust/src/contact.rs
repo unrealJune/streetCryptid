@@ -139,6 +139,26 @@ impl PeerRoles {
     }
 }
 
+/// `push.durable_via` on `trail.push`: which kind of carrier this push's fix left through.
+///
+/// The send-side twin of `fix.provenance`'s `fix.source`. `settled` is the role of the carrier
+/// whose finish ended the wait (`PushReport::settled_by`), and wins: when the stash and a
+/// repeater both finished, the one that answered first is the one the fix actually left by.
+/// Otherwise the most durable role that finished at all, so a push only friends' phones answered
+/// reads `friend`, and one nobody answered reads `none` — a fix still on this phone.
+///
+/// `stash` | `repeater` | `friend` | `other` | `none`, a closed vocabulary because it is a
+/// spanmetrics dimension (`collector-config.yaml`).
+pub fn durable_via(settled: Option<&'static str>, finished: &[&'static str]) -> &'static str {
+    if let Some(role) = settled {
+        return role;
+    }
+    ["stash", "repeater", "friend", "other"]
+        .into_iter()
+        .find(|role| finished.contains(role))
+        .unwrap_or("none")
+}
+
 /// Emit `fix.provenance`: one friend's fix reached this phone, from whom and over which path.
 /// Dimensions (`collector-config.yaml`) are `fix.source` and `fix.path`, so "where do my fixes
 /// come from" is a spanmetrics query over weeks. `fix.repeater_owner` names whose repeater it was,
@@ -294,6 +314,22 @@ mod tests {
         };
         // Sorted by peer id: 0x55.. before 0xaa...
         assert_eq!(out, vec![(STASH, stash), (A, friend)]);
+    }
+
+    #[test]
+    fn a_push_leaves_through_whichever_carrier_settled_it() {
+        // A repeater that answered before the stash is how the fix left, even though the stash
+        // finished too.
+        assert_eq!(
+            durable_via(Some("repeater"), &["stash", "repeater", "friend"]),
+            "repeater"
+        );
+        // Nothing settled: the most durable carrier that finished at all.
+        assert_eq!(durable_via(None, &["friend", "stash"]), "stash");
+        assert_eq!(durable_via(None, &["friend", "repeater"]), "repeater");
+        assert_eq!(durable_via(None, &["friend"]), "friend");
+        // Nobody answered: the fix is still only on this phone.
+        assert_eq!(durable_via(None, &[]), "none");
     }
 
     #[test]

@@ -1967,6 +1967,14 @@ impl LocationNode {
             peers_failed = tracing::field::Empty,
             peers_silent = tracing::field::Empty,
             finished = tracing::field::Empty,
+            // Which kind of carrier made this push durable — a spanmetrics dimension, so "how
+            // often do our fixes leave through a repeater rather than the stash" is a PromQL
+            // query over weeks. See [`contact::durable_via`].
+            push.durable_via = tracing::field::Empty,
+            push.settled_by = tracing::field::Empty,
+            push.stash_finished = tracing::field::Empty,
+            push.repeaters_finished = tracing::field::Empty,
+            push.friends_finished = tracing::field::Empty,
         );
         async move {
             if peers.len() < requested {
@@ -1985,18 +1993,25 @@ impl LocationNode {
             let ns = trail.own_namespace();
 
             // Read before the push now, not only for the report: the stash's id is what lets the
-            // push stop waiting on friends once the stash has the entries (`settle_on`).
+            // push stop waiting on friends once the stash has the entries (`settle_on`). Our
+            // repeaters settle it the same way — they serve the namespace to every friend who
+            // pulls it — so a phone carried by a repeater and not opted into the stash no longer
+            // waits out every push on friends' phones, and whichever durable carrier answers
+            // first is the one the push leaves through.
             let roles = self
                 .peer_roles()
                 .instrument(tracing::info_span!("trail.push.roles"))
                 .await;
-            let settle_on = roles
+            let settle_on: Vec<[u8; 32]> = roles
                 .stash()
                 .copied()
-                .filter(|stash| peers.iter().any(|p| p.id.as_bytes() == stash));
+                .filter(|stash| peers.iter().any(|p| p.id.as_bytes() == stash))
+                .into_iter()
+                .chain(carriers.iter().map(|addr| *addr.id.as_bytes()))
+                .collect();
 
             let sent = trail
-                .push(ns, peers, carriers, budget, settle_on)
+                .push(ns, peers, carriers, budget, &settle_on)
                 .await
                 .map_err(|e| {
                     tracing::warn!(error = %e, "trail push failed");
@@ -2019,6 +2034,27 @@ impl LocationNode {
                     .filter(|p| p.outcome == docs::PeerOutcome::Silent)
                     .count(),
             );
+            let finished_roles: Vec<&'static str> = report
+                .per_peer
+                .iter()
+                .filter(|p| p.outcome == docs::PeerOutcome::Finished)
+                .map(|p| roles.role(&p.peer))
+                .collect();
+            let count = |role: &str| finished_roles.iter().filter(|r| **r == role).count();
+            let settled_role = report.settled_by.map(|peer| roles.role(&peer));
+            current.record(
+                "push.durable_via",
+                contact::durable_via(settled_role, &finished_roles),
+            );
+            if let Some(peer) = report.settled_by {
+                current.record(
+                    "push.settled_by",
+                    tracing::field::display(telemetry::short_hex(&peer)),
+                );
+            }
+            current.record("push.stash_finished", count("stash") > 0);
+            current.record("push.repeaters_finished", count("repeater"));
+            current.record("push.friends_finished", count("friend"));
 
             // One child span per dialled peer, because no aggregate can answer the question that
             // matters: `peers_finished = 2` tells you two peers answered, not WHICH two or how long
