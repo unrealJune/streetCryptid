@@ -3,10 +3,16 @@ param(
     [ValidateSet('Debug', 'Release')][string]$Configuration = 'Release',
     [switch]$Test,
     [switch]$Package,
+    [switch]$SkipFormat,
     [string]$Version = '0.1.0-preview.1'
 )
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $true
+function Invoke-BuildPhase([string]$Name, [scriptblock]$Command) {
+    $timer = [System.Diagnostics.Stopwatch]::StartNew()
+    try { & $Command }
+    finally { Write-Host ('Build phase {0}: {1:N1}s' -f $Name, $timer.Elapsed.TotalSeconds) }
+}
 # repeater/windows; the Rust host is a member of the repository's Cargo workspace, so cargo runs
 # with -p against the root lockfile and builds into the root target directory.
 $root = Split-Path $PSScriptRoot
@@ -42,42 +48,61 @@ try {
     # from Rust until the host executable is copied in at the end, so it runs in a second process
     # while cargo works. Both are CPU-heavy, but restore, publish and AOT's long single-threaded
     # stretches overlap cargo's instead of waiting for them.
-    $dotnet = Start-Job -WorkingDirectory $root -ArgumentList $Test.IsPresent, $Configuration, $rid, $platform, $Version, $root -ScriptBlock {
-        param($Test, $Configuration, $rid, $platform, $Version, $root)
+    $jobArgs = @($Test.IsPresent, $SkipFormat.IsPresent, $Configuration, $rid, $platform,
+        $Version, $root, ${function:Invoke-BuildPhase}.ToString())
+    $dotnet = Start-Job -WorkingDirectory $root -ArgumentList $jobArgs -ScriptBlock {
+        param($Test, $SkipFormat, $Configuration, $rid, $platform, $Version, $root, $phaseFunction)
         $ErrorActionPreference = 'Stop'
         $PSNativeCommandUseErrorActionPreference = $true
+        Set-Item Function:Invoke-BuildPhase -Value ([scriptblock]::Create($phaseFunction))
         if ($Test) {
-            dotnet test .\tests\Repeater.Tests.csproj --nologo -v:q -p:RestoreLockedMode=true
-            foreach ($project in '.\core\Repeater.Core.csproj', '.\tests\Repeater.Tests.csproj', '.\service\Repeater.Service.csproj') {
-                dotnet format $project --verify-no-changes --no-restore
+            Invoke-BuildPhase 'managed tests' {
+                dotnet test .\tests\Repeater.Tests.csproj --nologo -v:q -p:RestoreLockedMode=true
+            }
+            if (!$SkipFormat) {
+                Invoke-BuildPhase 'managed formatting' {
+                    foreach ($project in '.\core\Repeater.Core.csproj', '.\tests\Repeater.Tests.csproj', '.\service\Repeater.Service.csproj') {
+                        dotnet format $project --verify-no-changes --no-restore
+                    }
+                }
             }
         }
         $output = Join-Path $root "artifacts\$rid\app"
         $appPri = Join-Path $output 'StreetCryptid.Repeater.pri'
         if (Test-Path -LiteralPath $appPri) { Remove-Item -LiteralPath $appPri -Force }
-        dotnet publish .\app\Repeater.csproj --configuration $Configuration --runtime $rid `
-            -p:Platform=$platform -p:Version=$Version --output $output --nologo -v:q -p:RestoreLockedMode=true
+        Invoke-BuildPhase 'WinUI publish' {
+            dotnet publish .\app\Repeater.csproj --configuration $Configuration --runtime $rid `
+                -p:Platform=$platform -p:Version=$Version --output $output --nologo -v:q -p:RestoreLockedMode=true
+        }
         if (!(Test-Path -LiteralPath $appPri -PathType Leaf) -or (Get-Item -LiteralPath $appPri).Length -eq 0) {
             throw 'Published app is missing its WinUI resource index.'
         }
         # The service is native AOT: one executable, which is all that gets copied under Program Files.
         $serviceOutput = Join-Path $root "artifacts\$rid\service"
-        dotnet publish .\service\Repeater.Service.csproj --configuration $Configuration --runtime $rid `
-            -p:Version=$Version --output $serviceOutput --nologo -v:q -p:RestoreLockedMode=true
+        Invoke-BuildPhase 'service AOT publish' {
+            dotnet publish .\service\Repeater.Service.csproj --configuration $Configuration --runtime $rid `
+                -p:Version=$Version --output $serviceOutput --nologo -v:q -p:RestoreLockedMode=true
+        }
         Copy-Item (Join-Path $serviceOutput 'StreetCryptid.Repeater.Service.exe') $output
     }
 
     try {
         if ($Test) {
-            cargo fmt -p streetcryptid-repeater-host --check
+            if (!$SkipFormat) { cargo fmt -p streetcryptid-repeater-host --check }
             # `repeater-test` (/Cargo.toml) is the test profile without the phone's optimized
             # dependencies, and both runs ask for trail-stash with the same features the host
             # links (live + otel), so the second reuses everything the first compiled.
-            cargo test -p streetcryptid-repeater-host --profile repeater-test --locked --quiet
+            Invoke-BuildPhase 'Rust host tests' {
+                cargo test -p streetcryptid-repeater-host --profile repeater-test --locked --quiet
+            }
             # The desktop tests in the server crate: MemoryRepeater, arrivals, forwarding.
-            cargo test -p trail-stash --profile repeater-test --features 'live,otel' --locked desktop_ --quiet
+            Invoke-BuildPhase 'Rust desktop stash tests' {
+                cargo test -p trail-stash --profile repeater-test --features 'live,otel' --locked desktop_ --quiet
+            }
         }
-        cargo build -p streetcryptid-repeater-host --locked --profile $profile @targetArgs --quiet
+        Invoke-BuildPhase 'Rust host build' {
+            cargo build -p streetcryptid-repeater-host --locked --profile $profile @targetArgs --quiet
+        }
     } finally {
         # Never leave the .NET process running behind a Rust failure.
         $dotnetDone = Wait-Job $dotnet

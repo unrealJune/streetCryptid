@@ -513,10 +513,14 @@ jobs:
           free -m
           echo "systemd-oomd: $(systemctl is-active systemd-oomd 2>/dev/null || true)"
 
+      - name: Install the Gradle build profiler
+        run: install -D -m 0644 scripts/gradle-build-profile.init.gradle "$HOME/.gradle/init.d/gradle-build-profile.init.gradle"
+
       - name: Build the store bundle locally
         id: build
         env:
           EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+          SC_GRADLE_PROFILE: '1'
         run: |
           set -euo pipefail
           mkdir -p "$EAS_LOCAL_BUILD_ARTIFACTS_DIR" "$EAS_LOCAL_BUILD_WORKINGDIR"
@@ -536,9 +540,19 @@ jobs:
           SC_CACHE_CARGO_HIT: ${{ steps.setup.outputs.cargo-cache-hit }}
           SC_CACHE_NATIVE_HIT: ${{ steps.setup.outputs.artifact-cache-hit }}
           SC_CACHE_GRADLE_HIT: ${{ steps.setup.outputs.native-cache-hit }}
+          SC_PROFILE_BUNDLE_DIR: ${{ runner.temp }}/build-profile-bundle
         run: |
           bash scripts/build-report.sh android >> "$GITHUB_STEP_SUMMARY" ||
             printf '_The build profile could not be rendered._\n' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the validated Android build profile
+        if: '!cancelled()'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: build-profile-android
+          path: ${{ runner.temp }}/build-profile-bundle
+          if-no-files-found: ignore
+          retention-days: 14
 
       # Straight from this runner to the Play Developer API -- the .aab never goes to Expo.
       - name: Upload to the Google Play internal track

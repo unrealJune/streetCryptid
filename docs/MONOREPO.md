@@ -186,23 +186,25 @@ ci.yml                      name: CI
   changes                   git diff against the merge base → area flags (a script, no action)
   app      → ci-app.yml              quality, typecheck, native (+ bindings push), ble-transport
   server   → ci-repeater-server.yml  fmt, pure-core test, live test, helm lint, image build (no push)
-  windows  → ci-repeater-windows.yml today's repeater-ci.yml, now workflow_call only
+  windows  → ci-repeater-windows.yml build, test and package on x64 and ARM64
   Required                  needs all; `skipped` passes, `failure`/`cancelled` fail
 ```
 
-| Changed paths                                                                                           | Lanes                  |
-| ------------------------------------------------------------------------------------------------------- | ---------------------- |
-| `src/` `modules/` `app.json` `app.config.ts` `package.json` `bun.lock` `patches/` `plugins/` `scripts/` | app                    |
-| `repeater/server/`                                                                                      | server                 |
-| `repeater/windows/`                                                                                     | windows                |
-| `repeater/protocol/` root `Cargo.toml` `Cargo.lock` `rust-toolchain.toml` `third_party/`                | app + server + windows |
-| `.github/`                                                                                              | all                    |
+| Changed paths                                                                            | Lanes                                       |
+| ---------------------------------------------------------------------------------------- | ------------------------------------------- |
+| `src/` `assets/` `docs/`                                                                 | app quality, typecheck                      |
+| Mobile Rust and generated bindings                                                       | app + native                                |
+| Vendored mobile BLE                                                                      | app + native + BLE                          |
+| `repeater/server/`                                                                       | server (plus macOS for its embedded server) |
+| `repeater/windows/`                                                                      | windows                                     |
+| `repeater/protocol/` root `Cargo.toml` `Cargo.lock` `rust-toolchain.toml` `third_party/` | app + native + BLE + repeaters              |
+| Known `.github/` workflow and action files                                               | affected lanes + workflow lint              |
+| Other `.github/` files, lane selection itself, or unavailable diff                       | all                                         |
 
-- The `app` lane is today's four jobs moved verbatim, `native`'s write permission and head-SHA
-  checkout included (it pushes refreshed bindings).
-- The Windows lane is ~90 minutes on two runners; it runs only when its area changes.
-- `pr-development-builds.yml` gets the same `changes` gate, so a server-only PR builds no IPA.
-- Today every PR runs the whole mobile suite whatever it touches; this is also a speed-up.
+- App native checks still use a head-SHA checkout to push refreshed bindings. Previews and
+  releases build their pinned revision and use the matching native libraries and bindings.
+- Signed previews still use the app gate and cancel superseded revisions; product-only repeater
+  changes don't build a mobile preview.
 
 ## Releases: one tag namespace per product
 

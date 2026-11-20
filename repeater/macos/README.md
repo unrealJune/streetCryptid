@@ -78,8 +78,9 @@ signed distribution builds. `smoke` uses temporary state and never registers a l
 
 ## Releases and automatic updates
 
-`ci-repeater-macos.yml` compiles a universal app and runs the host on native Apple Silicon and
-Intel runners. `release-repeater-macos.yml` uses Conventional Commits and the separate `macos-v*`
+`ci-repeater-macos.yml` runs Swift and Rust tests natively on both architectures. Apple Silicon
+builds the universal app once; the Intel smoke job and release signer use that same bundle.
+`release-repeater-macos.yml` uses Conventional Commits and the separate `macos-v*`
 tag namespace. Shared Rust, icon and font inputs count toward macOS releases too.
 
 The release workflow signs all nested Sparkle executables, the host and app with Developer ID,

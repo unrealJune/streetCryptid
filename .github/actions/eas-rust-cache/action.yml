@@ -20,8 +20,7 @@ description: >-
 #      does not -- the keys silently diverge and every restore misses forever. That is why this
 #      action, not the caller, exports them.
 #
-# The rustc version is hashed too, and scripts/eas-build-pre-install.sh tracks `stable`, so the
-# first pull request opened after a new Rust stable release misses until main is warmed again.
+# The producer and consumer select the same repository-pinned rustc.
 inputs:
   platform:
     description: Mobile platform the Cargo target directory is being warmed for (ios or android).
@@ -55,16 +54,14 @@ runs:
         esac
         # scripts/eas-build-pre-install.sh runs from the copy EAS makes under runner.temp, so the
         # target directory has to be an absolute path back into the cached workspace checkout.
+        toolchain="$(sed -n 's/^channel = "\([^"]*\)"$/\1/p' rust-toolchain.toml)"
+        [[ -n "$toolchain" ]]
         {
           # The root Cargo workspace's target directory.
           echo "CARGO_TARGET_DIR=$GITHUB_WORKSPACE/target"
-          echo "RUSTUP_TOOLCHAIN=stable"
+          echo "RUSTUP_TOOLCHAIN=$toolchain"
           echo "SC_EAS_RUST_CACHE_SAVE=${{ inputs.save }}"
         } >> "$GITHUB_ENV"
-
-    - name: Install the Rust toolchain
-      shell: bash
-      run: rustup toolchain install stable --profile minimal --no-self-update
 
     - name: Restore the Cargo cache
       id: cargo-cache

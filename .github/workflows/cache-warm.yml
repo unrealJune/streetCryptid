@@ -34,6 +34,7 @@ on:
       # and the protocol crate the phone links by path.
       - Cargo.toml
       - Cargo.lock
+      - rust-toolchain.toml
       - third_party/**
       - repeater/protocol/**
       - scripts/eas-build-pre-install.sh

@@ -30,6 +30,9 @@ jobs:
       linux: ${{ steps.lanes.outputs.linux }}
       website: ${{ steps.lanes.outputs.website }}
       macos: ${{ steps.lanes.outputs.macos }}
+      native: ${{ steps.lanes.outputs.native }}
+      ble: ${{ steps.lanes.outputs.ble }}
+      workflows: ${{ steps.lanes.outputs.workflows }}
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -51,11 +54,16 @@ jobs:
   app:
     name: App
     needs: changes
-    if: needs.changes.outputs.app == 'true'
+    if: needs.changes.outputs.app == 'true' || needs.changes.outputs.workflows == 'true'
     # `native` pushes refreshed UniFFI bindings back to the pull request branch.
     permissions:
       contents: write
     uses: ./.github/workflows/ci-app.yml
+    with:
+      app: ${{ needs.changes.outputs.app == 'true' }}
+      native: ${{ needs.changes.outputs.native == 'true' }}
+      ble: ${{ needs.changes.outputs.ble == 'true' }}
+      workflows: ${{ needs.changes.outputs.workflows == 'true' }}
 
   server:
     name: Repeater server

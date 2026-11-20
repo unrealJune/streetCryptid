@@ -137,9 +137,11 @@ jobs:
             repeater/windows/**/packages.lock.json
             repeater/windows/.config/dotnet-tools.json
 
-      # rust-toolchain.toml selects the version; this installs it with rustfmt.
+      # Only x64 checks source formatting; both architectures still build and run native tests.
       - name: Install pinned Rust toolchain
-        run: rustup toolchain install 1.97.0 --profile minimal --component rustfmt
+        run: |
+          $components = @(if ('${{ matrix.arch }}' -eq 'x64') { '--component'; 'rustfmt' })
+          rustup toolchain install 1.97.0 --profile minimal @components
 
       # lld-link does not search for the Windows SDK and MSVC libraries the way link.exe does; the
       # developer environment puts them on LIB for every later step.
@@ -155,16 +157,23 @@ jobs:
           "CARGO_TARGET_${{ matrix.triple }}_LINKER=rust-lld" >> $env:GITHUB_ENV
 
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        id: rust-cache
         with:
           workspaces: ${{ env.REPO_DIR }} -> target
           key: repeater-windows-${{ matrix.arch }}
           save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
+      - name: Record Rust cache result
+        env:
+          EXACT_HIT: ${{ steps.rust-cache.outputs.cache-hit }}
+        run: |
+          "Windows ${{ matrix.arch }} Rust cache exact hit: $env:EXACT_HIT" >> $env:GITHUB_STEP_SUMMARY
+
       - name: Test, publish and package matching native binaries
         working-directory: ${{ env.REPO_DIR }}
         run: |
           .\repeater\windows\scripts\build.ps1 -Architecture '${{ matrix.arch }}' `
-            -Test -Package -Version $env:REPEATER_VERSION
+            -Test -Package -Version $env:REPEATER_VERSION -SkipFormat:('${{ matrix.arch }}' -eq 'arm64')
       # The runner is disposable and elevated: install the real service, talk to it, remove it.
       - name: Install, exercise and remove the Windows service
         working-directory: ${{ env.REPO_DIR }}
@@ -184,3 +193,5 @@ jobs:
           path: ${{ env.REPO_DIR }}/repeater/windows/artifacts/win-${{ matrix.arch }}/releases/
           if-no-files-found: error
           retention-days: 14
+          # Installers, nupkg files and both source/service archives are already compressed.
+          compression-level: 0

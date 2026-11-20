@@ -28,10 +28,14 @@ run_cargo() {
   fi
 }
 
+bindgen="$target_dir/debug/uniffi-bindgen"
 case "$(uname -s)" in
   Darwin) host_library="$target_dir/debug/libiroh_location.dylib" ;;
   Linux) host_library="$target_dir/debug/libiroh_location.so" ;;
-  MINGW* | MSYS* | CYGWIN*) host_library="$target_dir/debug/iroh_location.dll" ;;
+  MINGW* | MSYS* | CYGWIN*)
+    host_library="$target_dir/debug/iroh_location.dll"
+    bindgen="$bindgen.exe"
+    ;;
   *)
     echo "Unsupported host for UniFFI binding generation: $(uname -s)" >&2
     exit 1
@@ -40,18 +44,13 @@ esac
 
 (
   cd "$crate_dir"
-  run_cargo build --locked --features cli
+  run_cargo build --locked --features cli --lib --bin uniffi-bindgen
 
   generate() {
     local language="$1"
     local out_dir="$2"
     mkdir -p "$out_dir"
-    run_cargo run \
-      --locked \
-      --bin uniffi-bindgen \
-      --features cli \
-      -- \
-      generate \
+    "$bindgen" generate \
       --library "$host_library" \
       --crate iroh_location \
       --language "$language" \

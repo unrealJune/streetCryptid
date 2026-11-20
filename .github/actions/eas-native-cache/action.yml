@@ -10,11 +10,8 @@ description: >-
 #
 # Two things make that sound:
 #
-#   1. scripts/eas-build-pre-install.sh recomputes its own digest over the crate sources, the exact
-#      rustc version, and the two scripts that decide how they are compiled. The cache key below is
-#      only a hint about WHICH tarball to download; the hook's digest is what decides whether the
-#      contents may be used. So a key collision -- or a Rust toolchain bump, which hashFiles cannot
-#      see -- produces a rebuild, never a wrong binary.
+#   1. The hook computes the key here and recomputes it in the EAS build copy. Both also check
+#      that the archive has the requested native outputs and bindings.
 #   2. The bindings are cached WITH the artifacts. UniFFI aborts at load time when generated
 #      bindings do not match the library's API checksums, so restoring one without the other would
 #      trade build time for a crash on device. Restoring both makes a hit exactly equivalent to
@@ -37,39 +34,52 @@ inputs:
 
 outputs:
   cache-hit:
-    description: Whether the native artifact cache was an exact hit.
-    value: ${{ steps.restore.outputs.cache-hit }}${{ steps.restore-and-save.outputs.cache-hit }}
+    description: Whether the restored artifacts pass the hook's cache check.
+    value: ${{ steps.verify.outputs.ready }}
   cache-primary-key:
     description: Primary key of the restored entry, for the caller's save step.
-    value: ${{ steps.restore.outputs.cache-primary-key }}
+    value: ${{ steps.identity.outputs.key }}
 
 runs:
   using: composite
   steps:
-    - name: Validate the platform
+    - name: Resolve native artifact identity
+      id: identity
       shell: bash
       env:
-        PLATFORM: ${{ inputs.platform }}
+        EAS_BUILD_PLATFORM: ${{ inputs.platform }}
       run: |
         set -euo pipefail
-        case "$PLATFORM" in
+        case "$EAS_BUILD_PLATFORM" in
           ios | android) ;;
           *)
-            echo "Unsupported platform: $PLATFORM" >&2
+            echo "Unsupported platform: $EAS_BUILD_PLATFORM" >&2
             exit 1
             ;;
         esac
+        toolchain="$(sed -n 's/^channel = "\([^"]*\)"$/\1/p' rust-toolchain.toml)"
+        [[ -n "$toolchain" ]]
+        rustup toolchain install "$toolchain" --profile minimal --no-self-update
+        digest="$(bash scripts/eas-build-pre-install.sh --cache-key)"
+        [[ "$digest" =~ ^[0-9a-f]{40}$ ]]
+        full="eas-local-native-v3-$EAS_BUILD_PLATFORM-$RUNNER_OS-$RUNNER_ARCH-full-$digest"
+        key="$full"
+        if [[ "$EAS_BUILD_PLATFORM" == android && -n "${SC_ANDROID_ABIS:-}" ]]; then
+          abi_set="$(printf '%s' "$SC_ANDROID_ABIS" | sha256sum | cut -c1-16)"
+          key="eas-local-native-v3-android-$RUNNER_OS-$RUNNER_ARCH-$abi_set-$digest"
+          printf 'fallback=%s\n' "$full" >> "$GITHUB_OUTPUT"
+        fi
+        printf 'key=%s\n' "$key" >> "$GITHUB_OUTPUT"
 
-    # Deliberately no restore-keys. A prefix match would download a tarball built from different
-    # sources, whose digest the hook is then guaranteed to reject -- pure transfer cost for a hit
-    # that cannot happen. An exact key or nothing.
+    # A preview can use the full store ABI set, but a store build must never restore a preview.
     - name: Restore the native artifacts
       id: restore
       if: inputs.save != 'true'
       uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: ~/.cache/streetcryptid/native/${{ inputs.platform }}
-        key: eas-local-native-${{ inputs.platform }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('modules/iroh-location/rust/src/**', 'modules/iroh-location/rust/third_party/**', 'modules/iroh-location/rust/Cargo.toml', 'Cargo.toml', 'Cargo.lock', 'third_party/**', 'repeater/protocol/**', 'scripts/eas-build-pre-install.sh', 'scripts/generate-uniffi-bindings.sh') }}
+        key: ${{ steps.identity.outputs.key }}
+        restore-keys: ${{ steps.identity.outputs.fallback }}
 
     - name: Restore and save the native artifacts
       id: restore-and-save
@@ -77,4 +87,16 @@ runs:
       uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: ~/.cache/streetcryptid/native/${{ inputs.platform }}
-        key: eas-local-native-${{ inputs.platform }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('modules/iroh-location/rust/src/**', 'modules/iroh-location/rust/third_party/**', 'modules/iroh-location/rust/Cargo.toml', 'Cargo.toml', 'Cargo.lock', 'third_party/**', 'repeater/protocol/**', 'scripts/eas-build-pre-install.sh', 'scripts/generate-uniffi-bindings.sh') }}
+        key: ${{ steps.identity.outputs.key }}
+
+    - name: Verify the restored native artifacts
+      id: verify
+      shell: bash
+      env:
+        EAS_BUILD_PLATFORM: ${{ inputs.platform }}
+      run: |
+        ready=false
+        if bash scripts/eas-build-pre-install.sh --cache-ready; then
+          ready=true
+        fi
+        printf 'ready=%s\n' "$ready" >> "$GITHUB_OUTPUT"
