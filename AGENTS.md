@@ -356,7 +356,10 @@ failed` for the life of the process. On 2026-11-15 a single panicking accept tas
   the stash answered at p50 0.3 s. The stash serves every friend, and the namespace stays live, so
   an awake friend still reconciles after the wait ends. A repeater carrying our trail settles a push
   the same way (it serves the namespace to every friend that pulls it), while staying unwaited: it
-  can end a wait, never extend it. With neither, the push waits as before. Which carrier a fix left
+  can end a wait, never extend it. With neither, the push waits as before. When the grace runs out,
+  a friend that looks awake — an open iroh path (`TransportAddrUsage::Active`) or a `NeighborUp`
+  on the namespace — is HELD until the original deadline rather than let go, so a direct send that
+  is still connecting is not abandoned to an iOS suspension (`trail.push.peer{peer.held_at_cut}`). Which carrier a fix left
   through is `trail.push{push.durable_via}`, a spanmetrics dimension beside `fix.provenance`.
 - **A position Core Location hands back is not a capture.** `didUpdateLocations` drops a location
   whose timestamp is not newer than the last one delivered: on 2026-10-02 one fix came back every

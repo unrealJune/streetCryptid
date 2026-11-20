@@ -2011,7 +2011,14 @@ impl LocationNode {
                 .collect();
 
             let sent = trail
-                .push(ns, peers, carriers, budget, &settle_on)
+                .push(
+                    ns,
+                    peers,
+                    carriers,
+                    budget,
+                    &settle_on,
+                    Some(&started.endpoint),
+                )
                 .await
                 .map_err(|e| {
                     tracing::warn!(error = %e, "trail push failed");
@@ -2076,7 +2083,7 @@ impl LocationNode {
                 for peer in &report.per_peer {
                     let latency = peer.latency_ms;
                     let role = roles.role(&peer.peer);
-                    tracing::info_span!(
+                    let row = tracing::info_span!(
                         "trail.push.peer",
                         sc.peer = %telemetry::short_hex(&peer.peer),
                         peer.outcome = peer.outcome.as_str(),
@@ -2084,8 +2091,14 @@ impl LocationNode {
                         peer.latency_ms = latency.unwrap_or_default(),
                         peer.answered = latency.is_some(),
                         entries_sent = peer.entries_sent,
-                    )
-                    .in_scope(|| {});
+                        // Outstanding when the settle grace ran out: held (it looked awake) or
+                        // let go. Absent when no cut happened or it had already answered.
+                        peer.held_at_cut = tracing::field::Empty,
+                    );
+                    if let Some(held) = peer.held_at_cut {
+                        row.record("peer.held_at_cut", held);
+                    }
+                    row.in_scope(|| {});
                     if peer.outcome == docs::PeerOutcome::Finished {
                         let path = match EndpointId::from_bytes(&peer.peer) {
                             Ok(id) => delivery_label(&started.endpoint, id).await,

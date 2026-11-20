@@ -130,10 +130,10 @@ bg.refresh         (the OS-scheduled periodic wake; bg.refresh.expired if iOS cu
         ├ trail.push.live       (waiting on the node lock)
         ├ trail.push.open       (doc handle + event subscription)
         ├ trail.push.start_sync (peers)
-        ├ trail.push.wait       (budget_ms, ended, events, pending, settled_ms?)  ─ the only phase the 30 s deadline bounds
+        ├ trail.push.wait       (budget_ms, ended, events, pending, settled_ms?, held?, held_finished?)  ─ the only phase the 30 s deadline bounds
         ├ trail.push.roles      (recipient/delivery store reads for peer.role)
         ├ trail.push.report     (peers; per-peer path labels)
-        ├ trail.push.peer  (sc.peer, peer.role, peer.outcome)
+        ├ trail.push.peer  (sc.peer, peer.role, peer.outcome, peer.held_at_cut?)
         ├ peer.contact     (send, per peer that finished)
         └ trail.content.upload (stash blob PUT; stash opted in only)
       └ trail.push.deferred (push.budget_ms)  ─ iOS: sealed, no background time left to push; instead of trail.push
@@ -377,6 +377,9 @@ A push longer than its 30 s budget spent the difference outside `trail.push.wait
 phase spans say where. `trail.push.wait{ended}` is `all-reported` (every dialled peer answered),
 `settled` (a durable carrier — the stash or one of our repeaters, `trail.push{push.settled_by}` —
 finished at `settled_ms` and the rest had `PUSH_GRACE_AFTER_SETTLE` more),
+`held` (when the grace ran out, the friends that looked awake — an open iroh path, or a `NeighborUp`
+on the namespace — were waited for until the original deadline and all answered; `held` /
+`held_finished` count them),
 `deadline` (someone stayed silent and the stash never answered), `stream-ended` or `stream-error`:
 
 ```traceql
@@ -941,7 +944,10 @@ push carried those; pushing is native-only now and none of them exist.)
 - **`trail.push.peer`** — one per dialled peer and per scheduled repeater: `peer.outcome`
   (`finished` | `failed` | `silent` | `unwaited` — a repeater nothing waited on that had not
   answered when the push stopped watching), `peer.role` (`stash` | `friend` | `repeater` |
-  `other`), `peer.latency_ms`, `peer.answered`, `entries_sent`, `sc.peer`. Its own duration is
+  `other`), `peer.latency_ms`, `peer.answered`, `entries_sent`, `sc.peer`, and
+  `peer.held_at_cut` for a peer still outstanding when the settle grace ran out (`true`: it looked
+  awake and was waited for; `false`: let go). A `finished` row with `peer.held_at_cut = true` is a
+  direct send the 3 s grace alone would have stopped watching. Its own duration is
   meaningless (opened after the fact); `peer.latency_ms` is the measurement.
 
 `push.durable_via`, `peer.role` and `peer.outcome` are spanmetrics dimensions, so stash against
@@ -952,6 +958,8 @@ side). Tempo's metrics API refuses ranges over 3 h, so do not answer it with Tra
 # How our fixes left, per hour: through the stash, a repeater, only friends' phones, or not at all.
 sum by (push_durable_via) (
   rate(traces_span_metrics_calls_total{span_name="trail.push"}[1h])) * 3600
+# Direct sends the hold kept: friends held at the cut, and whether they then finished.
+#   { name = "trail.push.peer" && span.peer.held_at_cut = true } | select(span.peer.outcome, span.peer.latency_ms)
 # How often each kind of carrier answers a push.
 sum by (peer_role, peer_outcome) (
   increase(traces_span_metrics_calls_total{span_name="trail.push.peer"}[7d]))
