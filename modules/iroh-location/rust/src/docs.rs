@@ -335,6 +335,77 @@ pub struct SettleReport {
     pub fetched: usize,
     /// Authors that became readable, each once — what the replica observer was told.
     pub readable: Vec<[u8; 32]>,
+    /// Of `stranded`, the ones this pass did not ask for because they are backing off
+    /// ([`StrandedBackoff`]).
+    pub deferred: usize,
+}
+
+/// The first retry delay after a stranded fetch has failed twice in a row
+/// ([`stranded_retry_delay`]). A pull runs every 5-15 min, so this is "skip the next pull or so".
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+const STRANDED_RETRY_BASE_SECS: u64 = 15 * 60;
+/// The longest a stranded slot waits between attempts. Long enough that bytes nobody holds cost a
+/// handful of dials a day, short enough that a friend back from a week away is read the same day.
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+const STRANDED_RETRY_CAP_SECS: u64 = 6 * 60 * 60;
+
+/// How long to leave a stranded entry alone after its `failures`-th failed fetch in a row.
+///
+/// The first failure is retried by the very next pull: the common case
+/// ([`TrailDocs::settle_stranded`]'s 2026-11-10 incident) is bytes that land on the stash moments
+/// after the record did. After that, the bytes are not coming soon, and every attempt costs a pull
+/// its whole remaining deadline — a fetch that nobody can serve ends only on its timeout. On
+/// 2026-11-19 a Pixel 10 held two friend slots and two profile entries that no peer had (one slot
+/// 39 days old), and every one of its pulls over two days ran to the 20 s deadline on them: 213
+/// of 214 pulls, 6 s of CPU and 20 s of radio each, every 5-15 minutes, to bring nothing.
+/// Doubling from [`STRANDED_RETRY_BASE_SECS`] to [`STRANDED_RETRY_CAP_SECS`].
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+pub(crate) fn stranded_retry_delay(failures: u32) -> Duration {
+    if failures <= 1 {
+        return Duration::ZERO;
+    }
+    let doublings = (failures - 2).min(16);
+    Duration::from_secs(
+        STRANDED_RETRY_BASE_SECS
+            .saturating_mul(1u64 << doublings)
+            .min(STRANDED_RETRY_CAP_SECS),
+    )
+}
+
+/// Per content hash, how many stranded fetches in a row have failed and when to try again.
+///
+/// In memory on purpose: it only has to outlive one process's pull cadence, and a new process
+/// trying everything once more is exactly the retry a cold start should make. Bounded by what is
+/// stranded right now — [`Self::retain`] drops every hash that is no longer stranded, fetched or
+/// superseded alike. A std lock, never held across an await.
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+#[derive(Debug, Default)]
+pub(crate) struct StrandedBackoff {
+    inner: std::sync::Mutex<HashMap<Hash, (u32, Instant)>>,
+}
+
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+impl StrandedBackoff {
+    /// Whether `hash` may be asked for at `now`. Unknown hashes always may.
+    pub(crate) fn due(&self, hash: &Hash, now: Instant) -> bool {
+        let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        inner.get(hash).is_none_or(|(_, next)| *next <= now)
+    }
+
+    /// A fetch of `hash` failed at `now`; returns the delay before the next attempt.
+    pub(crate) fn failed(&self, hash: Hash, now: Instant) -> Duration {
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let failures = inner.get(&hash).map_or(0, |(n, _)| *n).saturating_add(1);
+        let delay = stranded_retry_delay(failures);
+        inner.insert(hash, (failures, now + delay));
+        delay
+    }
+
+    /// Forget every hash `keep` does not name: fetched, superseded, or no longer replicated.
+    pub(crate) fn retain(&self, keep: impl Fn(&Hash) -> bool) {
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        inner.retain(|hash, _| keep(hash));
+    }
 }
 
 /// Who to ask for one stranded slot's bytes, most likely first, each once, never ourselves.
@@ -753,6 +824,8 @@ pub struct TrailDocs {
     /// One watch task per namespace, aborted when its entry is dropped. A std lock: it is only
     /// ever held to insert or remove, never across an await.
     watchers: std::sync::Mutex<HashMap<[u8; 32], AbortOnDropHandle<()>>>,
+    /// Which stranded slots [`Self::settle_stranded`] is leaving alone for now, and until when.
+    stranded_backoff: StrandedBackoff,
 }
 
 impl TrailDocs {
@@ -819,6 +892,7 @@ impl TrailDocs {
             serving_peers: Arc::new(Mutex::new(HashMap::new())),
             observer,
             watchers: std::sync::Mutex::new(HashMap::new()),
+            stranded_backoff: StrandedBackoff::default(),
         };
         let live: Vec<Doc> = docs.handles.lock().await.values().cloned().collect();
         for doc in live {
@@ -1237,9 +1311,11 @@ impl TrailDocs {
     /// pass dialled — the stash among them), `namespace_sources` for the slot's namespace (the
     /// repeaters carrying that friend), the slot's author (its `EndpointId` is the key), and
     /// whoever last served that author to us. Each fetch is bounded by `deadline` when there is
-    /// one and by [`STRANDED_FETCH_TIMEOUT_SECS`] regardless; a slot still stranded is simply
-    /// tried again on the next pull. Failures are expected (a sleeping author, a stash that has
-    /// not received the bytes either) and are reported, not raised.
+    /// one and by [`STRANDED_FETCH_TIMEOUT_SECS`] regardless. A slot still stranded is tried again
+    /// by the next pull, and after that backs off ([`stranded_retry_delay`]): a fetch nobody can
+    /// serve ends only on its timeout, so retrying it every pull held every pull to its deadline.
+    /// Failures are expected (a sleeping author, a stash that has not received the bytes either)
+    /// and are reported, not raised; `deferred` counts the slots left alone this pass.
     #[cfg(not(target_arch = "wasm32"))]
     pub async fn settle_stranded(
         &self,
@@ -1248,11 +1324,19 @@ impl TrailDocs {
         namespace_sources: &HashMap<[u8; 32], Vec<iroh::EndpointId>>,
         deadline: Option<Instant>,
     ) -> Result<SettleReport> {
-        let stranded = self.stranded_slots().await?;
+        let all = self.stranded_slots().await?;
         let mut report = SettleReport {
-            stranded: stranded.len(),
+            stranded: all.len(),
             ..SettleReport::default()
         };
+        self.stranded_backoff
+            .retain(|hash| all.iter().any(|slot| slot.hash == *hash));
+        let now = Instant::now();
+        let stranded: Vec<StrandedSlot> = all
+            .into_iter()
+            .filter(|slot| self.stranded_backoff.due(&slot.hash, now))
+            .collect();
+        report.deferred = report.stranded - stranded.len();
         if stranded.is_empty() {
             return Ok(report);
         }
@@ -1315,12 +1399,14 @@ impl TrailDocs {
                     );
                 }
                 Err(error) => {
+                    let retry_in = self.stranded_backoff.failed(slot.hash, Instant::now());
                     tracing::debug!(
                         sc.author = %crate::telemetry::short_hex(&slot.author),
                         sc.entry_hash = %crate::telemetry::short_hex(slot.hash.as_bytes()),
                         age_ms = now_us.saturating_sub(slot.written_us) / 1000,
+                        retry_in_s = retry_in.as_secs(),
                         %error,
-                        "stranded friend slot still without bytes; will retry next pull"
+                        "stranded friend slot still without bytes; will retry"
                     );
                 }
             }
@@ -3551,6 +3637,44 @@ pub(crate) mod tests {
         for dir in [a_dir, r_dir] {
             let _ = std::fs::remove_dir_all(&dir);
         }
+    }
+
+    #[test]
+    fn a_stranded_fetch_is_retried_by_the_next_pull_then_backs_off_to_a_cap() {
+        let mins = |m: u64| Duration::from_secs(m * 60);
+        assert_eq!(stranded_retry_delay(0), Duration::ZERO);
+        assert_eq!(
+            stranded_retry_delay(1),
+            Duration::ZERO,
+            "bytes may land any moment"
+        );
+        assert_eq!(stranded_retry_delay(2), mins(15));
+        assert_eq!(stranded_retry_delay(3), mins(30));
+        assert_eq!(stranded_retry_delay(4), mins(60));
+        assert_eq!(stranded_retry_delay(6), mins(240));
+        assert_eq!(stranded_retry_delay(7), mins(360), "capped at six hours");
+        assert_eq!(stranded_retry_delay(u32::MAX), mins(360));
+    }
+
+    #[test]
+    fn stranded_backoff_defers_a_failing_hash_and_forgets_one_no_longer_stranded() {
+        let backoff = StrandedBackoff::default();
+        let (a, b) = (Hash::new(b"a"), Hash::new(b"b"));
+        let t0 = Instant::now();
+        assert!(backoff.due(&a, t0), "an unknown hash is always due");
+
+        assert_eq!(backoff.failed(a, t0), Duration::ZERO);
+        assert!(backoff.due(&a, t0), "one failure: the next pull asks again");
+        let delay = backoff.failed(a, t0);
+        assert_eq!(delay, Duration::from_secs(15 * 60));
+        assert!(!backoff.due(&a, t0 + Duration::from_secs(60)));
+        assert!(backoff.due(&a, t0 + delay));
+        assert!(backoff.due(&b, t0), "other hashes are unaffected");
+
+        // Fetched or superseded: dropped, so the same bytes stranded again start from scratch.
+        backoff.retain(|h| *h == b);
+        assert!(backoff.due(&a, t0));
+        assert_eq!(backoff.failed(a, t0), Duration::ZERO);
     }
 
     #[test]
