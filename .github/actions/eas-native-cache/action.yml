@@ -67,11 +67,11 @@ runs:
         if [[ "$EAS_BUILD_PLATFORM" == android && -n "${SC_ANDROID_ABIS:-}" ]]; then
           abi_set="$(printf '%s' "$SC_ANDROID_ABIS" | sha256sum | cut -c1-16)"
           key="eas-local-native-v3-android-$RUNNER_OS-$RUNNER_ARCH-$abi_set-$digest"
-          printf 'fallback=%s\n' "$full" >> "$GITHUB_OUTPUT"
         fi
         printf 'key=%s\n' "$key" >> "$GITHUB_OUTPUT"
 
-    # A preview can use the full store ABI set, but a store build must never restore a preview.
+    # Keep Android preview and store restores separate. The full-ABI fallback was
+    # present on repeated preview failures that did not reproduce on a cache miss.
     - name: Restore the native artifacts
       id: restore
       if: inputs.save != 'true'
@@ -79,7 +79,6 @@ runs:
       with:
         path: ~/.cache/streetcryptid/native/${{ inputs.platform }}
         key: ${{ steps.identity.outputs.key }}
-        restore-keys: ${{ steps.identity.outputs.fallback }}
 
     - name: Restore and save the native artifacts
       id: restore-and-save

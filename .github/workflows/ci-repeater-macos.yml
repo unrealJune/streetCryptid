@@ -21,12 +21,13 @@ jobs:
       matrix:
         include:
           - arch: arm64
+            target: aarch64-apple-darwin
             runner: macos-15
           - arch: x86_64
+            target: x86_64-apple-darwin
             runner: macos-15-intel
     env:
       MACOSX_DEPLOYMENT_TARGET: '13.0'
-      MACOS_SPARKLE_PUBLIC_KEY: ${{ vars.MACOS_SPARKLE_PUBLIC_KEY }}
       SC_REPEATER_OTEL_ENDPOINT: ${{ vars.REPEATER_OTEL_ENDPOINT }}
       VERSION: ${{ inputs.version || '0.0.0' }}
     steps:
@@ -35,9 +36,9 @@ jobs:
           persist-credentials: false
       - name: Install the pinned Rust toolchain
         run: rustup show
-      - name: Install universal build targets and rustfmt
+      - name: Install rustfmt
         if: matrix.arch == 'arm64'
-        run: rustup component add rustfmt && rustup target add aarch64-apple-darwin x86_64-apple-darwin
+        run: rustup component add rustfmt
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           workspaces: . -> target
@@ -52,17 +53,45 @@ jobs:
         run: swift test --package-path repeater/macos --force-resolved-versions --parallel
       - name: Run native Rust tests
         run: cargo test --locked --profile repeater-test -p streetcryptid-repeater-host -- --test-threads=4
-      - name: Build universal app
-        if: matrix.arch == 'arm64'
-        run: bash repeater/macos/scripts/build.sh "$VERSION" universal
+      - name: Build the native release host
+        env:
+          REPEATER_VERSION: ${{ env.VERSION }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          cargo build --locked --profile desktop-release -p streetcryptid-repeater-host --target "$TARGET"
+          mkdir -p "hosts/$TARGET"
+          cp "target/$TARGET/desktop-release/streetcryptid-repeater-host" "hosts/$TARGET/"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: macos-host-${{ matrix.arch }}
+          path: hosts/
+          if-no-files-found: error
+          retention-days: 1
+
+  assemble:
+    name: macOS / assemble universal app
+    needs: build
+    runs-on: macos-15
+    timeout-minutes: 15
+    env:
+      MACOS_SPARKLE_PUBLIC_KEY: ${{ vars.MACOS_SPARKLE_PUBLIC_KEY }}
+      VERSION: ${{ inputs.version || '0.0.0' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          pattern: macos-host-*
+          path: hosts
+          merge-multiple: true
+      - name: Build and verify the universal app
+        run: bash repeater/macos/scripts/build.sh "$VERSION" universal "$PWD/hosts"
       - name: Exercise native bundled host
-        if: matrix.arch == 'arm64'
         run: python3 repeater/macos/scripts/smoke.py "repeater/macos/artifacts/universal/streetCryptid Repeater.app/Contents/Resources/streetcryptid-repeater-host"
       - name: Archive unsigned app without losing permissions or symlinks
-        if: matrix.arch == 'arm64'
         run: tar -C repeater/macos/artifacts/universal -czf repeater-macos-unsigned.tar.gz "streetCryptid Repeater.app"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        if: matrix.arch == 'arm64'
         with:
           name: repeater-macos-unsigned
           path: repeater-macos-unsigned.tar.gz
@@ -72,7 +101,7 @@ jobs:
 
   intel-smoke:
     name: macOS / smoke universal app on Intel
-    needs: build
+    needs: assemble
     runs-on: macos-15-intel
     timeout-minutes: 10
     steps:
