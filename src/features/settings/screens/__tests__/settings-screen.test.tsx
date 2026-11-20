@@ -82,7 +82,7 @@ describe('SettingsScreen', () => {
     const byHref = new Map(rows().map((row) => [row.href, row.value]));
 
     expect(byHref.has('/settings/transports')).toBe(false);
-    expect(byHref.get('/settings/delivery')).toBe('Mutual Friends + Stash');
+    expect(byHref.get('/settings/delivery')).toBe('Official hosted repeater');
     expect(byHref.get('/settings/appearance')).toBe('Seattle · Light');
     // Transports moved behind Advanced, so Advanced is where their state has to surface:
     // a row that reports nothing is what made this menu look unfinished.
@@ -146,12 +146,12 @@ describe('SettingsScreen', () => {
     // A build with no stash deployed uses mutual friends whatever the stored preference says,
     // and the menu is a summary of what is happening.
     snapshot.delivery = { mode: 'stash', effectiveMode: 'mutual' };
-    expect(rows().find((row) => row.href === '/settings/delivery')?.value).toBe('Mutual Friends');
+    expect(rows().find((row) => row.href === '/settings/delivery')?.value).toBe('Friends only');
 
     act(() => renderer.unmount());
     snapshot.delivery = { mode: 'stash', effectiveMode: 'stash' };
     expect(rows().find((row) => row.href === '/settings/delivery')?.value).toBe(
-      'Mutual Friends + Stash'
+      'Official hosted repeater'
     );
 
     snapshot.delivery = { mode: 'stash', effectiveMode: 'stash' };

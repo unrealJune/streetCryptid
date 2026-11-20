@@ -6,7 +6,7 @@ import { SettingsPage, SettingsSection } from '@/features/settings/components/se
 
 import { useRepeaterChrome } from '../components/repeater-chrome';
 import { RosterPeople } from '../components/roster-people';
-import { inviteCandidates, rosterLine, type RosterView } from '../core/repeaters';
+import { inviteCandidates, type RosterView } from '../core/repeaters';
 import { useRepeaters } from '../hooks/use-repeaters';
 
 /**
@@ -44,7 +44,7 @@ export default function RosterPeopleScreen() {
     <SettingsPage
       title="People"
       backLabel="Repeaters"
-      subtitle={roster ? `${roster.ownerLabel} · ${rosterLine(roster)}` : undefined}
+      subtitle={roster ? roster.ownerLabel : undefined}
     >
       {error ? (
         <ThemedText accessibilityRole="alert" type="small" style={{ color: chrome.amber }}>

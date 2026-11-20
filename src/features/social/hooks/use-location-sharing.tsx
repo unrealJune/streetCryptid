@@ -546,7 +546,7 @@ export function LocationSharingProvider({ children }: PropsWithChildren) {
       if (!bluetoothPermissionGranted.current) {
         const granted = await ensurePairingPermissions();
         if (!granted) {
-          throw new Error('Bluetooth access is needed to Bump with a nearby friend.');
+          throw new Error('Bluetooth access is needed to pair with a nearby friend.');
         }
         bluetoothPermissionGranted.current = true;
       }

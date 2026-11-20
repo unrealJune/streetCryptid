@@ -344,7 +344,7 @@ export function buildTransportReport(input: TransportInputs): TransportReport {
           ? [
               { label: 'Transport attached', value: yesNo(input.ble.available) },
               { label: 'Active scan toggle', value: yesNo(input.ble.activeScanToggle) },
-              { label: 'RSSI during Bump', value: yesNo(input.ble.rssi) },
+              { label: 'RSSI during pairing', value: yesNo(input.ble.rssi) },
               { label: 'Discovery refresh', value: yesNo(input.ble.discoveryRefresh) },
               { label: 'Invite-less pairing armed', value: yesNo(input.ble.pairingReady) },
             ]
@@ -413,10 +413,10 @@ export function buildTransportReport(input: TransportInputs): TransportReport {
 
   rows.push({
     id: 'stash',
-    label: 'Offline delivery (stash)',
+    label: 'Offline delivery (hosted repeater)',
     status: !input.stash.available ? 'unavailable' : input.stash.optedIn ? 'active' : 'inactive',
     detail: !input.stash.available
-      ? 'No trail stash is configured.'
+      ? 'No hosted repeater is configured.'
       : input.stash.optedIn
         ? 'Ciphertext-blind offline replication is enabled.'
         : 'Configured but not opted in.',

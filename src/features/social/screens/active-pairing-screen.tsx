@@ -351,7 +351,7 @@ export default function ActivePairingScreen() {
           ? describePairingFailure(failure)
           : { status: 'PAIRING STOPPED', detail: 'Nothing was shared.' };
         return {
-          mode: failure?.nearby ? 'BUMP FAILED' : 'PAIRING FAILED',
+          mode: failure?.nearby ? 'SHAKE FAILED' : 'PAIRING FAILED',
           status: copy.status,
           detail: copy.detail,
           caption: failure?.withdrawn ? 'PAIRING STOPPED' : 'NOTHING SHARED',
@@ -456,7 +456,7 @@ export default function ActivePairingScreen() {
         };
       case 'loading':
         return {
-          mode: 'BUMP',
+          mode: 'PAIRING',
           status: 'PREPARING PAIRING',
           detail: 'Waking the encrypted nearby service.',
           caption: 'PREPARING',
@@ -476,7 +476,7 @@ export default function ActivePairingScreen() {
         };
       case 'radio-off':
         return {
-          mode: 'BUMP PAUSED',
+          mode: 'PAIRING PAUSED',
           status: 'BLUETOOTH IS OFF',
           detail:
             Platform.OS === 'android'
@@ -491,7 +491,7 @@ export default function ActivePairingScreen() {
         return {
           mode: 'LINK PAIRING',
           status: 'NO BLUETOOTH RADIO',
-          detail: 'This device cannot use Bump. Make or open a one-time pairing link instead.',
+          detail: 'This phone can’t pair by shaking. Make or open a one-time pairing link instead.',
           caption: 'LINKS STILL WORK',
           readout: '',
           fieldMode: 'scatter',
@@ -504,8 +504,8 @@ export default function ActivePairingScreen() {
         // Bluetooth failing to find anyone, retry after retry, until a force-quit.
         if (bump.error) {
           return {
-            mode: 'BUMP PAUSED',
-            status: 'BUMP COULD NOT START',
+            mode: 'PAIRING PAUSED',
+            status: 'PAIRING COULD NOT START',
             detail: bump.error,
             caption: 'NOT STARTED',
             readout: '',
@@ -514,9 +514,9 @@ export default function ActivePairingScreen() {
           };
         }
         return {
-          mode: 'BUMP MISSED',
+          mode: 'SHAKE MISSED',
           status: 'NOTHING FOUND',
-          detail: 'No phone replied, make sure both phones are searching at the same time',
+          detail: 'No phone replied. Make sure you both shake at the same time.',
           caption: 'NO CONTACT',
           readout: '',
           fieldMode: 'scatter',
@@ -526,7 +526,7 @@ export default function ActivePairingScreen() {
         // This phone's search came back empty, but its window is still open: the other phone may
         // have found this one, and its request lands here. Saying "nothing found" was the lie.
         return {
-          mode: 'BUMP ARMED',
+          mode: 'READY TO SHAKE',
           status: 'LISTENING',
           detail:
             'This phone did not find the other one. If the other phone found this one, pairing starts here. Keep both open.',
@@ -537,7 +537,7 @@ export default function ActivePairingScreen() {
         };
       case 'bump-searching':
         return {
-          mode: 'BUMP ARMED',
+          mode: 'READY TO SHAKE',
           status: 'SEARCHING',
           detail: '',
           caption: 'SEARCHING',
@@ -547,7 +547,7 @@ export default function ActivePairingScreen() {
         };
       case 'bump-starting':
         return {
-          mode: 'BUMP ARMED',
+          mode: 'READY TO SHAKE',
           status: 'STARTING NEARBY PAIRING',
           detail: 'Opening the Bluetooth listening window.',
           caption: 'PREPARING',
@@ -557,7 +557,7 @@ export default function ActivePairingScreen() {
         };
       case 'bump-armed':
         return {
-          mode: 'BUMP ARMED',
+          mode: 'READY TO SHAKE',
           status: 'SHAKE TO ADD A NEARBY FRIEND',
           detail: '',
           caption: 'SHAKE TO START',
@@ -1152,7 +1152,12 @@ export default function ActivePairingScreen() {
               </>
             ) : stage === 'link-spent' ? (
               <>
-                <Action color={chrome.steel} label="BACK TO BUMP" onPress={returnToBump} outline />
+                <Action
+                  color={chrome.steel}
+                  label="BACK TO PAIRING"
+                  onPress={returnToBump}
+                  outline
+                />
                 <Action color={signal} label="NEW LINK" onPress={() => void createAndShareLink()} />
               </>
             ) : stage === 'service-failed' ? (
@@ -1175,11 +1180,16 @@ export default function ActivePairingScreen() {
                   onPress={() => void createAndShareLink()}
                   outline
                 />
-                <Action color={signal} label="BUMP NOW" onPress={() => void bump.commit()} />
+                <Action color={signal} label="PAIR NOW" onPress={() => void bump.commit()} />
               </>
             ) : stage === 'link-expired' || stage === 'link-failed' || stage === 'redeem-failed' ? (
               <>
-                <Action color={chrome.steel} label="BACK TO BUMP" onPress={returnToBump} outline />
+                <Action
+                  color={chrome.steel}
+                  label="BACK TO PAIRING"
+                  onPress={returnToBump}
+                  outline
+                />
                 <Action color={signal} label="NEW LINK" onPress={() => void createAndShareLink()} />
               </>
             ) : stage === 'bump-armed' ||

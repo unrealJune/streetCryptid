@@ -418,9 +418,9 @@ interface Removable {
 
 /** How often the pairing/discovery queues are drained once the node has started (ms). */
 /** Shared by the service and the provider so the two arm paths cannot drift apart. */
-export const BLUETOOTH_OFF_MESSAGE = 'Bluetooth is off. Turn it on to bump.';
+export const BLUETOOTH_OFF_MESSAGE = 'Bluetooth is off. Turn it on to pair.';
 export const BLUETOOTH_UNSUPPORTED_MESSAGE =
-  'This device has no Bluetooth LE radio, so Bump cannot run.';
+  'This phone has no Bluetooth LE radio, so it can’t pair by shaking.';
 
 const PAIRING_POLL_INTERVAL_MS = 4000;
 
@@ -1673,7 +1673,7 @@ export class LocationSharingService {
       throw new Error('Another pairing action is already in progress.');
     }
     if (this.hasActivePairingSession()) {
-      throw new Error('Finish or cancel the current pairing before starting Bump.');
+      throw new Error('Finish or cancel the current pairing before starting a new one.');
     }
     this.rebindInFlight = true;
     try {
@@ -1707,7 +1707,7 @@ export class LocationSharingService {
       throw new Error('Another pairing action is already in progress.');
     }
     if (this.hasActivePairingSession()) {
-      throw new Error('Finish or cancel the current pairing before starting Bump.');
+      throw new Error('Finish or cancel the current pairing before starting a new one.');
     }
     // Fail loudly before arming: with the radio off the window would open, the sensor would fire,
     // and the resolve would come back empty with no hint that Bluetooth was the reason.

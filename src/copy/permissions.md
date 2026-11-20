@@ -41,8 +41,8 @@ One permission
 
 ### subtitle
 
-Here’s what streetCryptid needs from your phone, and why. It works best with everything on, but
-you can say no to any of it and change your mind later in Settings.
+Here’s what streetCryptid needs, and why. It works best with everything on, but you can say no to
+any of it and change your mind later in Settings.
 
 ### continue
 
@@ -90,7 +90,7 @@ Location
 
 ### title
 
-Before we turn on location
+Location
 
 ### lede
 
@@ -98,18 +98,15 @@ streetCryptid uses your location while the app is closed or in the background.
 
 ### summary
 
-Fill in your map and share with friends.
-
-### card: TERRITORY EXPLORATION (amber)
-
-As you walk through your city, streetCryptid reveals the streets and hex-shaped sectors you’ve covered.
-This only works if the app can sample your location occasionally in the background, since most of your moving around happens while the app is closed.
+Share with friends and fill in your map.
 
 ### card: FRIEND LOCATION SHARING (green)
 
-If you pair with friends and enable location sharing, your live location is sent
-so they can see you on the map, including while the app is in the background. Only
-friends you’ve explicitly paired with can see this.
+Only friends you’ve paired with can see your location, even while the app is in the background.
+
+### card: TERRITORY EXPLORATION (amber)
+
+To show where you’ve explored, the app needs your location in the background.
 
 ### note-ios
 
@@ -135,18 +132,11 @@ Allow all the time
 
 ### lede
 
-Most of your walking happens with the app closed. Background access lets streetCryptid keep up
-then.
+Most of your walking happens while the app is closed. Background access lets it keep up.
 
 ### summary
 
 Keep working while the app is closed.
-
-### card: WHILE THE APP IS CLOSED (green)
-
-With “all the time,” your explored map keeps filling in and friends keep seeing where you are while
-your phone is in your pocket. With “only while using the app,” both stop the moment you leave it,
-and friends see a dot that stopped where you were.
 
 ### note-ios
 
@@ -154,7 +144,7 @@ Next, your phone will ask whether to change to “Always Allow.”
 
 ### note-android
 
-We’ll open streetCryptid’s settings. Choose “Allow all the time,” then come back.
+We’ll open your phone settings. Choose “Allow all the time,” then come back.
 
 ### action
 
@@ -168,20 +158,15 @@ Bluetooth
 
 ### title
 
-Bluetooth, for Bump
+Bluetooth for pairing
 
 ### lede
 
-Bump pairs your phone with a friend’s when you hold them together.
+Pair your phones by shaking them next to each other. It all happens over Bluetooth.
 
 ### summary
 
 Pair with a friend in person.
-
-### card: PAIRING IN PERSON (green)
-
-When you both tap Bump, each phone finds the other over Bluetooth and starts an encrypted pairing
-on the spot.
 
 ### note-android
 
@@ -236,8 +221,7 @@ A notification while sharing
 
 ### lede
 
-While streetCryptid shares your location in the background, Android requires a notification that
-says so.
+Android requires a notification while streetCryptid uses your location in the background.
 
 ### summary
 
@@ -263,16 +247,11 @@ Keep sharing when the app is closed
 
 ### lede
 
-To save memory, Android sometimes closes apps in the background. When it closes streetCryptid,
-sharing stays off until you open the app again.
+To keep sharing when the app is closed, set battery use to Unrestricted.
 
 ### summary
 
-Stop Android from switching sharing off.
-
-### card: SET BATTERY USE TO UNRESTRICTED (green)
-
-This lets streetCryptid restart sharing by itself.
+Keep sharing on in the background.
 
 ### note
 

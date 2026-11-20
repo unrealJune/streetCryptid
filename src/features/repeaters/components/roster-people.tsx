@@ -102,8 +102,8 @@ export function RosterPeople({ roster, accent, warning, busy, owner, invite }: R
           </ThemedText>
           <ThemedText type="small" themeColor="textSecondary">
             {roster.open
-              ? 'Anyone may join already. Invite someone only to let back a person who was removed.'
-              : 'An invite lets a friend choose to have their location carried here. It carries nobody by itself.'}
+              ? 'Your friends can already join. Invites here are only for letting back someone you removed.'
+              : 'An invite lets a friend choose to use these repeaters. Nothing changes for them until they do.'}
           </ThemedText>
           {roster.invited.map((person) => (
             <ThemedText key={person.id} type="small" themeColor="textSecondary">

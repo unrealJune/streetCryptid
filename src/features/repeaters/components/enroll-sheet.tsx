@@ -3,7 +3,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { Spacing } from '@/constants/theme';
 
-import { enrollFacts, ownerName, rosterLine, vouchLine, type RosterView } from '../core/repeaters';
+import { enrollFacts, ownerName, vouchLine, type RosterView } from '../core/repeaters';
 
 import {
   FactList,
@@ -53,9 +53,9 @@ export function EnrollSheet({
         {roster ? (
           <IslandPanel
             chrome={chrome}
-            status={`REPLICATE YOUR LOCATION ON ${ownerName(roster).toUpperCase()}’S REPEATERS?`}
+            status={`CARRY YOUR LOCATION ON ${ownerName(roster).toUpperCase()}’S REPEATERS?`}
             statusColor={chrome.ink}
-            detail={error ?? [rosterLine(roster), vouchLine(roster)].filter(Boolean).join(' · ')}
+            detail={error ?? vouchLine(roster)}
             marginBottom={Math.max(insets.bottom, Spacing.two)}
           >
             <PanelRow>
@@ -65,8 +65,8 @@ export function EnrollSheet({
               <PanelButton chrome={chrome} kind="outline" label="NOT NOW" onPress={onDismiss} />
               <PanelButton
                 chrome={chrome}
-                label="ENROLL"
-                accessibilityLabel={`Enroll: carry my location on ${roster.ownerLabel}`}
+                label="JOIN"
+                accessibilityLabel={`Join: carry my location on ${roster.ownerLabel}`}
                 disabled={busy}
                 onPress={onEnroll}
               />

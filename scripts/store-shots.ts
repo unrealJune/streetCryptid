@@ -311,7 +311,7 @@ const SCENES: readonly Scene[] = [
   {
     id: 'pairing',
     headline: 'Pair in person.\nNo phone numbers.',
-    kicker: 'Bump over Bluetooth · or a one-time link',
+    kicker: 'Shake to pair over Bluetooth · or a one-time link',
     settleMs: 3000,
     async prepare(page) {
       await mustClick(page, 'FRIENDS');
@@ -350,7 +350,7 @@ const SCENES: readonly Scene[] = [
   {
     id: 'delivery',
     headline: 'You decide how\nit travels.',
-    kicker: 'Direct · via mutuals · via your stash',
+    kicker: 'Direct · via friends · via a repeater',
     settleMs: 1800,
     async prepare(page) {
       await mustClick(page, 'Settings');

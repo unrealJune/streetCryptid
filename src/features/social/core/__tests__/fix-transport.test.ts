@@ -28,7 +28,7 @@ describe('describeDelivery', () => {
     const result = describe_();
     expect(result.kind).toBe('friend');
     expect(result.headline).toBe('Served by @owlbear');
-    expect(result.detail).toContain("copy of @maya's trail");
+    expect(result.detail).toContain("copy of @maya's location");
     // No id for someone we can name — the handle is the identity that matters.
     expect(result.peerId).toBeUndefined();
   });
@@ -42,7 +42,7 @@ describe('describeDelivery', () => {
   it('recognises the stash rather than calling it a stranger', () => {
     const result = describe_({ viaPeer: STASH });
     expect(result.kind).toBe('stash');
-    expect(result.headline).toBe('Served by the trail stash');
+    expect(result.headline).toBe('Served by the official hosted repeater');
   });
 
   /**
@@ -63,7 +63,7 @@ describe('describeDelivery', () => {
     const result = describe_({ viaPeer: undefined });
     expect(result.kind).toBe('unknown');
     expect(result.headline).toBe('Server not recorded');
-    expect(result.detail).toContain("this phone's replica");
+    expect(result.detail).toContain("this phone's own copy");
     expect(result.peerId).toBeUndefined();
   });
 

@@ -72,20 +72,20 @@ export default function RepeatersScreen() {
   const stashRow = snapshot?.delivery.stashConfigured ? (
     <GroupRow
       first
-      title="streetCryptid stash"
-      detail={`hosted · ${retentionWords(STASH_RETENTION_MS)} · memory only`}
+      title="Official hosted repeater"
+      detail={`Keeps your latest location for up to ${retentionWords(STASH_RETENTION_MS)}`}
       right={
         <RowSwitch
           value={snapshot.delivery.mode === 'stash'}
           accent={chrome.green}
           disabled={stashBusy}
-          accessibilityLabel="Carry my location on the streetCryptid stash"
+          accessibilityLabel="Carry my location on the official hosted repeater"
           onChange={(carry) => {
             setStashBusy(true);
             void run(
               setDeliveryMode(carry ? 'stash' : 'mutual').then(
                 () => null,
-                () => 'Could not change the stash setting. Try again.'
+                () => 'Couldn’t change that. Try again.'
               )
             ).finally(() => setStashBusy(false));
           }}
@@ -245,7 +245,7 @@ export default function RepeatersScreen() {
             <GroupRow
               first
               title="Add a repeater"
-              text="Run trail-stash on a computer that stays on, then scan the code it shows."
+              text="Run a repeater on any computer, then scan the QR code it shows."
               onPress={addRepeater}
             />
           </GroupCard>

@@ -187,8 +187,8 @@ export function AccountOnboardingScreen({
           // there is no node to dial a repeater with. Settings → Repeaters is where that lives.
           footnote={
             <ThemedText type="small" themeColor="textSecondary">
-              Have a computer that stays on? Once you are set up, you can run your own repeater, or
-              use a friend&apos;s, from Settings → Repeaters.
+              You can run your own repeater on any computer too. Find it in Settings → Repeaters
+              after setup.
             </ThemedText>
           }
         />
