@@ -195,15 +195,55 @@
 
           <!-- ── macOS ───────────────────────────────────────────────────────── -->
           <div class="panel" role="tabpanel" id="os-macos" aria-labelledby="tab-macos">
-            <div class="soon">
-              <h2>Not on macOS yet</h2>
-              <p>
-                Use any Windows or Linux computer that stays on. You can claim it from an iPhone.
-              </p>
-              <button class="outline" type="button" data-show-tab="tab-windows">
-                Set up on Windows
-              </button>
-            </div>
+            <ol class="steps">
+              <li>
+                <h2>Download the Mac app</h2>
+                <p>macOS 13 or newer, on Apple Silicon or Intel. One universal download.</p>
+                <p>
+                  <a
+                    class="outline"
+                    href="https://github.com/unrealJune/streetCryptid/releases?q=macos-v&amp;expanded=true"
+                    >macOS releases</a
+                  >
+                </p>
+                <p>
+                  Choose <code>streetcryptid-repeater-*-universal-macos.zip</code> from a
+                  <code>macos-v</code> release, expand it, and move
+                  <strong>streetCryptid Repeater.app</strong> into Applications. If no macOS release
+                  is listed, the first signed build is not available yet. Do not disable Gatekeeper
+                  or install unsigned CI artifacts.
+                </p>
+              </li>
+              <li>
+                <h2>Choose how it runs</h2>
+                <p>
+                  Open the app and complete setup. Choose <strong>Start at login</strong>, automatic
+                  updates, optional diagnostics, and whether to keep the Mac awake on mains power.
+                  Allow its login item in System Settings if macOS asks.
+                </p>
+                <p>
+                  Closing the window keeps it running in the menu bar. Quit stops it. It runs while
+                  you are signed in, not after logout or before login. A sleeping Mac carries
+                  nothing; keep-awake does not override closing a laptop lid.
+                </p>
+              </li>
+              <li>
+                <h2>Claim it from your phone</h2>
+                <p>
+                  Scan the app's QR code with your owner phone, or copy the claim link into
+                  streetCryptid's <strong>Settings → Repeaters</strong>. Do not share the one-time
+                  code or screenshots of it.
+                </p>
+              </li>
+              <li>
+                <h2>Let it carry</h2>
+                <p>
+                  Status shows encrypted items, traffic and people carried. Manage people from the
+                  owner phone. Signed automatic updates keep the same repeater identity and
+                  settings.
+                </p>
+              </li>
+            </ol>
           </div>
 
           <!-- ── Linux ───────────────────────────────────────────────────────── -->

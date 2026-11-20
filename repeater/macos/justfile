@@ -1,0 +1,23 @@
+set working-directory := "../.."
+
+build version="0.0.0" arch="universal":
+    bash repeater/macos/scripts/build.sh {{version}} {{arch}}
+
+test:
+    swift test --package-path repeater/macos --parallel
+    cargo test --locked --profile repeater-test -p streetcryptid-repeater-host -- --test-threads=4
+    python3 repeater/macos/scripts/test-package.py
+
+format:
+    xcrun swift-format format --in-place --recursive repeater/macos/Sources repeater/macos/Tests repeater/macos/Package.swift
+    cargo fmt -p streetcryptid-repeater-host
+
+check:
+    xcrun swift-format lint --strict --recursive repeater/macos/Sources repeater/macos/Tests repeater/macos/Package.swift
+    cargo fmt -p streetcryptid-repeater-host --check
+
+smoke arch="universal":
+    python3 repeater/macos/scripts/smoke.py "repeater/macos/artifacts/{{arch}}/streetCryptid Repeater.app/Contents/Resources/streetcryptid-repeater-host"
+
+package version:
+    bash repeater/macos/scripts/package.sh {{version}}

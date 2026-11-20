@@ -181,6 +181,23 @@ commit_in "$work" repeater/host/src/lib.rs "feat(host): a desktop host feature"
 assert_linux "the desktop host is linked" true minor 0.2.0
 expect "windows takes the desktop host too" minor "$(field bump "$(next_windows)")"
 
+next_macos() {
+  (cd "$work" && bash scripts/next-repeater-version.sh macos "$@")
+}
+expect "macOS first release" 0.1.0 "$(field version "$(next_macos)")"
+git -C "$work" tag macos-v0.1.0
+commit_in "$work" repeater/linux/src/cli.rs "feat(linux): another CLI feature"
+expect "macOS ignores Linux CLI" false "$(field release "$(next_macos)")"
+commit_in "$work" repeater/macos/Sources/RepeaterApp/App.swift "fix(macos): a native fix"
+expect "macOS native fix" 0.1.1 "$(field version "$(next_macos)")"
+git -C "$work" tag macos-v0.1.1
+commit_in "$work" repeater/host/src/lib.rs "feat(host): shared desktop behavior"
+expect "macOS links host" 0.2.0 "$(field version "$(next_macos)")"
+git -C "$work" tag macos-v0.2.0
+commit_in "$work" repeater/windows/app/Assets/Plex.ttf "fix: shared desktop font"
+expect "macOS shares font inputs" 0.2.1 "$(field version "$(next_macos)")"
+expect "macOS tag namespace" macos-v0.2.1 "$(field tag "$(next_macos)")"
+
 if (cd "$work" && bash scripts/next-repeater-version.sh desktop >/dev/null 2>&1); then
   echo "An unknown product was accepted." >&2
   exit 1

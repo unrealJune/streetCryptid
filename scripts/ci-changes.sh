@@ -37,25 +37,30 @@
 set -euo pipefail
 
 all() {
-  printf 'app=true\nserver=true\nwindows=true\nlinux=true\nwebsite=true\n'
+  printf 'app=true\nserver=true\nwindows=true\nlinux=true\nwebsite=true\nmacos=true\n'
 }
 
 classify() {
-  local app=false server=false windows=false linux=false website=false path
+  local app=false server=false windows=false linux=false website=false macos=false path
   while IFS= read -r path; do
     [[ -z "$path" ]] && continue
     case "$path" in
+      repeater/server/src/* | repeater/server/Cargo.toml) server=true; macos=true ;;
       repeater/server/* | .dockerignore) server=true ;;
+      repeater/windows/app/Assets/*) windows=true; macos=true ;;
       repeater/windows/*) windows=true ;;
       repeater/linux/*) linux=true ;;
+      repeater/macos/*) macos=true ;;
       repeater/host/*)
         windows=true
         linux=true
+        macos=true
         ;;
       website/*) website=true ;;
       assets/images/mothman-logo*.svg)
         app=true
         windows=true
+        macos=true
         ;;
       .github/* | scripts/ci-changes.sh)
         app=true
@@ -63,18 +68,20 @@ classify() {
         windows=true
         linux=true
         website=true
+        macos=true
         ;;
       repeater/protocol/* | Cargo.toml | Cargo.lock | rust-toolchain.toml | third_party/* | repeater/*)
         app=true
         server=true
         windows=true
         linux=true
+        macos=true
         ;;
       *) app=true ;;
     esac
   done
-  printf 'app=%s\nserver=%s\nwindows=%s\nlinux=%s\nwebsite=%s\n' \
-    "$app" "$server" "$windows" "$linux" "$website"
+  printf 'app=%s\nserver=%s\nwindows=%s\nlinux=%s\nwebsite=%s\nmacos=%s\n' \
+    "$app" "$server" "$windows" "$linux" "$website" "$macos"
 }
 
 if [[ "${1:-}" == '--paths' ]]; then

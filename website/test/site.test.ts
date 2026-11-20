@@ -123,4 +123,14 @@ describe('repeater installer', () => {
   test('the script is ASCII, so Windows PowerShell 5.1 reads it the same as pwsh', () => {
     expect(/^[\x09\x0a\x0d\x20-\x7e]*$/.test(script)).toBe(true);
   });
+
+  test('the Mac guide uses its own release channel and explains the login-session lifetime', () => {
+    const start = guide.indexOf('id="os-macos"');
+    const mac = guide.slice(start, guide.indexOf('id="os-linux"', start));
+    expect(mac).toContain('releases?q=macos-v&amp;expanded=true');
+    expect(mac).toContain('streetcryptid-repeater-*-universal-macos.zip');
+    expect(mac).toContain('not after logout or before login');
+    expect(mac).toContain('Do not disable Gatekeeper');
+    expect(mac).not.toContain('releases/latest');
+  });
 });

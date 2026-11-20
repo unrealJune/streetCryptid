@@ -103,8 +103,22 @@ case "$product" in
       "${workspace_paths[@]}"
     )
     ;;
+  macos)
+    prefix='macos-v'
+    suffix=''
+    initial='0.1.0'
+    paths=(
+      repeater/macos
+      repeater/host
+      repeater/server/src
+      repeater/server/Cargo.toml
+      repeater/windows/app/Assets
+      "${workspace_paths[@]}"
+      'assets/images/mothman-logo*.svg'
+    )
+    ;;
   *)
-    echo "Usage: $0 <server|windows|linux> [--force auto|patch|minor|major]" >&2
+    echo "Usage: $0 <server|windows|linux|macos> [--force auto|patch|minor|major]" >&2
     exit 2
     ;;
 esac

@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleIdentifier</key><string>com.unrealjune.streetcryptid.repeater</string>
+    <key>CFBundleName</key><string>streetCryptid Repeater</string>
+    <key>CFBundleDisplayName</key><string>streetCryptid Repeater</string>
+    <key>CFBundleExecutable</key><string>StreetCryptidRepeater</string>
+    <key>CFBundlePackageType</key><string>APPL</string>
+    <key>CFBundleIconFile</key><string>Repeater</string>
+    <key>CFBundleVersion</key><string>0.0.0</string>
+    <key>CFBundleShortVersionString</key><string>0.0.0</string>
+    <key>LSMinimumSystemVersion</key><string>13.0</string>
+    <key>LSUIElement</key><true/>
+    <key>NSHighResolutionCapable</key><true/>
+    <key>NSPrincipalClass</key><string>NSApplication</string>
+    <key>NSHumanReadableCopyright</key><string>streetCryptid contributors. AGPL-3.0-or-later.</string>
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>Carry encrypted updates between nearby streetCryptid phones.</string>
+    <key>SUFeedURL</key>
+    <string>https://github.com/unrealJune/streetCryptid/releases/download/macos-updates/appcast.xml</string>
+    <key>SUPublicEDKey</key><string></string>
+    <key>SUEnableAutomaticChecks</key><false/>
+    <key>SUAutomaticallyUpdate</key><false/>
+    <key>SUAllowsAutomaticUpdates</key><true/>
+    <key>SUScheduledCheckInterval</key><integer>21600</integer>
+    <key>SUVerifyUpdateBeforeExtraction</key><true/>
+</dict>
+</plist>

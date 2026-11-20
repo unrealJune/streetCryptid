@@ -1,0 +1,146 @@
+name: Release / repeater macOS
+
+on:
+  push:
+    branches: [main]
+    tags: [macos-v*]
+    paths:
+      - repeater/macos/**
+      - repeater/host/**
+      - repeater/server/src/**
+      - repeater/server/Cargo.toml
+      - repeater/protocol/**
+      - repeater/windows/app/Assets/**
+      - assets/images/mothman-logo*.svg
+      - Cargo.toml
+      - Cargo.lock
+      - rust-toolchain.toml
+      - third_party/**
+      - .github/workflows/ci-repeater-macos.yml
+      - .github/workflows/release-repeater-macos.yml
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: Conventional Commit bump
+        type: choice
+        options: [auto, patch, minor, major]
+        default: auto
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-repeater-macos
+  cancel-in-progress: false
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      release: ${{ steps.version.outputs.release }}
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - id: version
+        env:
+          BUMP: ${{ inputs.bump || 'auto' }}
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REF_TYPE" == tag ]]; then
+            version="${GITHUB_REF_NAME#macos-v}"
+            [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+            printf 'release=true\nversion=%s\ntag=%s\n' "$version" "$GITHUB_REF_NAME" >> "$GITHUB_OUTPUT"
+          elif [[ "$GITHUB_REF" == refs/heads/main ]]; then
+            bash scripts/next-repeater-version.sh macos --force "$BUMP" >> "$GITHUB_OUTPUT"
+          fi
+  build:
+    needs: version
+    if: needs.version.outputs.release == 'true'
+    uses: ./.github/workflows/ci-repeater-macos.yml
+    with:
+      version: ${{ needs.version.outputs.version }}
+  sign:
+    needs: [version, build]
+    runs-on: macos-15
+    timeout-minutes: 45
+    environment: production-release
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      MACOS_SPARKLE_PUBLIC_KEY: ${{ vars.MACOS_SPARKLE_PUBLIC_KEY }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: repeater-macos-unsigned
+      - name: Restore app and pinned signing tools
+        run: |
+          mkdir -p repeater/macos/artifacts/universal
+          tar -xzf repeater-macos-unsigned.tar.gz -C repeater/macos/artifacts/universal
+          swift package --package-path repeater/macos --force-resolved-versions resolve
+      - name: Sign, notarize and sign the update archive
+        env:
+          MACOS_CERTIFICATE_P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          MACOS_SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
+          MACOS_NOTARY_KEY: ${{ secrets.MACOS_NOTARY_KEY }}
+          MACOS_NOTARY_KEY_ID: ${{ secrets.MACOS_NOTARY_KEY_ID }}
+          MACOS_NOTARY_ISSUER: ${{ secrets.MACOS_NOTARY_ISSUER }}
+          MACOS_SPARKLE_PRIVATE_KEY: ${{ secrets.MACOS_SPARKLE_PRIVATE_KEY }}
+        run: bash repeater/macos/scripts/sign-ci.sh "$VERSION"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: repeater-macos-signed
+          path: repeater/macos/artifacts/release-${{ env.VERSION }}/
+          if-no-files-found: error
+          retention-days: 14
+  publish:
+    needs: [version, sign]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: repeater-macos-signed
+          path: dist
+      - name: Publish archive before advancing the separate macOS feed
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ needs.version.outputs.tag }}
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          gh release create "$TAG" dist/*.zip dist/*.tar.gz dist/SHA256SUMS \
+            --target "$GITHUB_SHA" --latest=false \
+            --title "streetCryptid macOS repeater $VERSION" \
+            --notes "Native macOS 13+ repeater for Apple Silicon and Intel. Signed and notarized. Move the app to Applications, open it and complete setup. Source and SHA256SUMS are included."
+          if ! gh release view macos-updates >/dev/null 2>&1; then
+            gh release create macos-updates --target "$GITHUB_SHA" --prerelease --latest=false \
+              --title "macOS repeater update feed" --notes "Sparkle feed only; downloads are on macos-v releases."
+          else
+            mkdir previous
+            gh release download macos-updates --pattern appcast.xml --dir previous
+            # A manually tagged older release must never move the update feed backwards.
+            advance="$(python3 - <<'PY'
+          import os, xml.etree.ElementTree as ET
+          ns = "{http://www.andymatuschak.org/xml-namespaces/sparkle}"
+          root = ET.parse("previous/appcast.xml").getroot()
+          versions = [tuple(map(int, item.text.split("."))) for item in root.iter(ns + "version")]
+          current = tuple(map(int, os.environ["VERSION"].split(".")))
+          print("yes" if not versions or current > max(versions) else "no")
+          PY
+            )"
+            if [[ "$advance" != yes ]]; then
+              echo "Published older release without changing the update feed."
+              exit 0
+            fi
+          fi
+          gh release upload macos-updates dist/appcast.xml --clobber

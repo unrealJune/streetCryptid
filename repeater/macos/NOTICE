@@ -1,0 +1,14 @@
+streetCryptid macOS Repeater
+Copyright streetCryptid contributors
+SPDX-License-Identifier: AGPL-3.0-or-later
+
+Native SwiftUI/AppKit UI around the shared Rust desktop host (repeater/host), the
+trail-stash server crate in memory-only repeater mode, and repeater/protocol.
+The corresponding source archive accompanies every release.
+
+Sparkle is copyright its contributors, under its BSD-style license.
+The bundled Sparkle-LICENSE includes its third-party notices.
+IBM Plex Mono and Rajdhani are distributed under the SIL Open Font License;
+their notices accompany the fonts in the application resources.
+The application also includes the repository's patched noq and iroh-docs;
+see third_party/ in the corresponding source archive for their notices.

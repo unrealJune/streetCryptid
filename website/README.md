@@ -9,7 +9,7 @@ website/
 ├─ site/                  everything served, at the path it is served at
 │  ├─ .well-known/        apple-app-site-association, assetlinks.json
 │  ├─ pair/               invite fallback
-│  └─ repeater/           claim fallback + setup guide (Windows, Linux), install.ps1
+│  └─ repeater/           claim fallback + setup guide (Windows, Linux, macOS), install.ps1
 ├─ Caddyfile              headers, rewrites, error page
 ├─ Dockerfile             caddy + Caddyfile + site/, validated at build
 ├─ charts/streetcrypt-id/ Deployment, Service, PodDisruptionBudget
@@ -20,6 +20,10 @@ website/
 website lane short of the image build.
 
 ## Deploying
+
+The macOS tab links only to `macos-v*` releases: a universal, signed and notarized ZIP for macOS
+13+. It explains Applications installation, login-item approval and the login-session lifetime.
+It does not link to unsigned CI artifacts or claim a first release is already available.
 
 There is no release to cut. Every push to `main` that touches `website/` runs
 `.github/workflows/release-website.yml`, which:

@@ -52,3 +52,7 @@ repeater/windows/**/obj/
 repeater/windows/artifacts/
 repeater/windows/.tools/
 repeater/windows/**/packages.lock.json
+
+# Swift package and app build output
+repeater/macos/.build/
+repeater/macos/artifacts/

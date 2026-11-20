@@ -1,0 +1,62 @@
+name: CI / repeater macOS
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        type: string
+        default: '0.0.0'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: macOS / ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            runner: macos-15
+          - arch: x86_64
+            runner: macos-15-intel
+    env:
+      MACOSX_DEPLOYMENT_TARGET: '13.0'
+      MACOS_SPARKLE_PUBLIC_KEY: ${{ vars.MACOS_SPARKLE_PUBLIC_KEY }}
+      SC_REPEATER_OTEL_ENDPOINT: ${{ vars.REPEATER_OTEL_ENDPOINT }}
+      VERSION: ${{ inputs.version || '0.0.0' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust targets
+        run: rustup show && rustup component add rustfmt && rustup target add aarch64-apple-darwin x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          workspaces: . -> target
+          key: repeater-macos-${{ matrix.arch }}
+      - name: Format and test
+        run: |
+          xcrun swift-format lint --strict --recursive repeater/macos/Sources repeater/macos/Tests repeater/macos/Package.swift
+          cargo fmt -p streetcryptid-repeater-host --check
+          swift test --package-path repeater/macos --force-resolved-versions --parallel
+          cargo test --locked --profile repeater-test -p streetcryptid-repeater-host -- --test-threads=4
+          python3 repeater/macos/scripts/test-package.py
+      - name: Build universal app
+        run: bash repeater/macos/scripts/build.sh "$VERSION" universal
+      - name: Exercise native bundled host
+        run: python3 repeater/macos/scripts/smoke.py "repeater/macos/artifacts/universal/streetCryptid Repeater.app/Contents/Resources/streetcryptid-repeater-host"
+      - name: Archive unsigned app without losing permissions or symlinks
+        if: matrix.arch == 'arm64'
+        run: tar -C repeater/macos/artifacts/universal -czf repeater-macos-unsigned.tar.gz "streetCryptid Repeater.app"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: matrix.arch == 'arm64'
+        with:
+          name: repeater-macos-unsigned
+          path: repeater-macos-unsigned.tar.gz
+          if-no-files-found: error
+          retention-days: 7

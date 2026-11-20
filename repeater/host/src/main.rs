@@ -179,7 +179,7 @@ async fn serve(args: Args, secret: iroh::SecretKey, settings: Arc<Settings>) -> 
     let pulse = tokio::spawn(run_pulse(
         node.clone(),
         PulseInfo {
-            platform: "windows",
+            platform: std::env::consts::OS,
             mode: mode.name(),
             version: VERSION,
         },
@@ -285,8 +285,10 @@ mod power {
                 let on_ac = sys::on_ac();
                 let hold = wanted.load(Ordering::Relaxed) && on_ac;
                 shared.on_ac.store(on_ac, Ordering::Relaxed);
-                if hold != shared.holding.swap(hold, Ordering::Relaxed) {
-                    sys::hold_awake(hold);
+                if hold != shared.holding.load(Ordering::Relaxed) {
+                    shared
+                        .holding
+                        .store(sys::hold_awake(hold), Ordering::Relaxed);
                 }
                 std::thread::sleep(Duration::from_secs(30));
             });
@@ -324,23 +326,30 @@ mod power {
             !ok || status.ac_line_status != 0
         }
 
-        pub fn hold_awake(hold: bool) {
+        pub fn hold_awake(hold: bool) -> bool {
             let flags = if hold {
                 ES_CONTINUOUS | ES_SYSTEM_REQUIRED
             } else {
                 ES_CONTINUOUS
             };
             // SAFETY: plain flags; the request belongs to the calling thread.
-            unsafe { SetThreadExecutionState(flags) };
+            let success = unsafe { SetThreadExecutionState(flags) } != 0;
+            hold && success
         }
     }
 
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
+    #[path = "macos.rs"]
+    mod sys;
+
+    #[cfg(not(any(windows, target_os = "macos")))]
     mod sys {
         pub fn on_ac() -> bool {
             true
         }
-        pub fn hold_awake(_: bool) {}
+        pub fn hold_awake(_: bool) -> bool {
+            false
+        }
     }
 }
 

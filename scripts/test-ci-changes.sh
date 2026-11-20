@@ -17,7 +17,7 @@ expect() {
 }
 
 lanes() {
-  printf 'app=%s\nserver=%s\nwindows=%s\nlinux=%s\nwebsite=%s' "$1" "$2" "$3" "${4:-$3}" "${5:-false}"
+  printf 'app=%s\nserver=%s\nwindows=%s\nlinux=%s\nwebsite=%s\nmacos=%s' "$1" "$2" "$3" "${4:-$3}" "${5:-false}" "${6:-$3}"
 }
 
 paths() {
@@ -28,11 +28,13 @@ expect "nothing changed" "$(lanes false false false)" "$(printf '' | bash "$scri
 expect "app source" "$(lanes true false false)" "$(paths src/app/index.tsx)"
 expect "mobile crate" "$(lanes true false false)" "$(paths modules/iroh-location/rust/src/lib.rs)"
 expect "docs still format-checked" "$(lanes true false false)" "$(paths docs/MONOREPO.md)"
-expect "server only" "$(lanes false true false)" "$(paths repeater/server/src/lib.rs repeater/server/charts/trail-stash/values.yaml)"
+expect "linked server source" "$(lanes false true false false false true)" "$(paths repeater/server/src/lib.rs repeater/server/charts/trail-stash/values.yaml)"
 expect "the image's ignore file" "$(lanes false true false)" "$(paths .dockerignore)"
 expect "the Windows icon's source" "$(lanes true false true false)" "$(paths assets/images/mothman-logo.svg)"
-expect "windows only" "$(lanes false false true false)" "$(paths repeater/windows/app/App.xaml.cs)"
-expect "server and windows" "$(lanes false true true false)" "$(paths repeater/server/Dockerfile repeater/windows/justfile)"
+expect "windows only" "$(lanes false false true false false false)" "$(paths repeater/windows/app/App.xaml.cs)"
+expect "server and windows" "$(lanes false true true false false false)" "$(paths repeater/server/Dockerfile repeater/windows/justfile)"
+expect "macos only" "$(lanes false false false false false true)" "$(paths repeater/macos/Sources/RepeaterApp/RepeaterApp.swift)"
+expect "shared desktop assets" "$(lanes false false true false false true)" "$(paths repeater/windows/app/Assets/Plex.ttf)"
 expect "protocol" "$(lanes true true true)" "$(paths repeater/protocol/src/roster.rs)"
 expect "root lockfile" "$(lanes true true true)" "$(paths Cargo.lock)"
 expect "toolchain" "$(lanes true true true)" "$(paths rust-toolchain.toml)"
@@ -44,7 +46,7 @@ expect "linux only" "$(lanes false false false true)" "$(paths repeater/linux/sr
 expect "the desktop host" "$(lanes false false true true)" "$(paths repeater/host/src/lib.rs)"
 expect "website only" "$(lanes false false false false true)" "$(paths website/site/repeater/index.html website/Caddyfile)"
 expect "website and app" "$(lanes true false false false true)" "$(paths website/README.md src/app/index.tsx)"
-expect "mixed" "$(lanes true true false)" "$(paths repeater/server/src/lib.rs package.json)"
+expect "mixed" "$(lanes true true false false false true)" "$(paths repeater/server/src/lib.rs package.json)"
 
 # Against a real history: the merge base decides, and an unknown base runs everything.
 work="$(mktemp -d "${TMPDIR:-/tmp}/streetcryptid-ci-changes.XXXXXX")"

@@ -1,5 +1,14 @@
 # Bringing the repeater into this repo
 
+## macOS addition (2026-11-19)
+
+`repeater/macos` is the native SwiftUI/AppKit shell around `repeater/host`, with its own pinned
+Swift package, `just macos::*` recipes, `ci-repeater-macos.yml` lane and `macos-v*` releases.
+It uses the Windows stdio protocol in a login-session menu-bar app; no new Rust workspace member
+or protocol is needed. Shared host changes reach Windows, Linux and macOS. Sparkle updates use
+the separate `macos-updates` feed; release archives must be signed and notarized.
+See `repeater/macos/README.md` for build, signing and acceptance requirements.
+
 ## Status (2026-11-11): done
 
 | Step | PR                                                                                        |
