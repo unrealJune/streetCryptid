@@ -37,10 +37,13 @@ done
 swift build --package-path repeater/macos --configuration release "${swift_args[@]}" --force-resolved-versions --product StreetCryptidRepeater
 bin="$(swift build --package-path repeater/macos --configuration release "${swift_args[@]}" --show-bin-path)"
 install -m 0755 "$bin/StreetCryptidRepeater" "$app/Contents/MacOS/StreetCryptidRepeater"
+bundled_host="$app/Contents/Resources/streetcryptid-repeater-host"
 if [[ "$arch" == universal ]]; then
-  lipo -create "${hosts[@]}" -output "$app/Contents/Resources/streetcryptid-repeater-host"
+  lipo -create "${hosts[@]}" -output "$bundled_host"
+  # GitHub artifact downloads strip executable permissions from the input slices.
+  chmod 0755 "$bundled_host"
 else
-  install -m 0755 "${hosts[0]}" "$app/Contents/Resources/streetcryptid-repeater-host"
+  install -m 0755 "${hosts[0]}" "$bundled_host"
 fi
 
 framework="$root/repeater/macos/.build/artifacts/sparkle/Sparkle/Sparkle.xcframework/macos-arm64_x86_64/Sparkle.framework"
@@ -76,6 +79,6 @@ codesign --force --deep --sign - "$app"
 codesign --verify --deep --strict "$app"
 for cpu in "${arches[@]}"; do
   lipo "$app/Contents/MacOS/StreetCryptidRepeater" -verify_arch "$cpu"
-  lipo "$app/Contents/Resources/streetcryptid-repeater-host" -verify_arch "$cpu"
+  lipo "$bundled_host" -verify_arch "$cpu"
 done
 printf 'Built %s\n' "$app"
