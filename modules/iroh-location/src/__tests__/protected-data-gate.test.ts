@@ -22,6 +22,7 @@ const read = (file: string) =>
 const RUNTIME = read('BackgroundLocationRuntime.swift');
 const BOOTSTRAP = read('IrohBackgroundBootstrap.swift');
 const REFRESH = read('NativeRefreshTask.swift');
+const GATE = read('ProtectedDataGate.swift');
 
 /** The body of the first function whose signature contains `signature`, braces balanced. */
 function body(source: string, signature: string): string {
@@ -68,6 +69,25 @@ describe('protected data gate (iOS)', () => {
     expect(firstStatement(body(RUNTIME, signature))).toBe(
       'ProtectedDataGate.poll(via: "location")'
     );
+  });
+
+  // `startNativeBackground` is a sync Expo Function, so a foreground launch runs `start()` on
+  // React's JS thread. A main-queue precondition reached from it trapped every such launch on
+  // 2026-11-20 (`_dispatch_assert_queue_fail` on com.facebook.react.runtime.JavaScript).
+  it('asks nothing main-only of the gate on the way through start()', () => {
+    const reached = ['func start()', 'private func persistState()'].flatMap((signature) =>
+      [...body(RUNTIME, signature).matchAll(/ProtectedDataGate\.(\w+)/g)].map((m) => m[1])
+    );
+    expect(reached).toContain('takeUnlockReport');
+    for (const member of new Set(reached)) {
+      const signature = GATE.includes(`static func ${member}(`)
+        ? `static func ${member}(`
+        : `static var ${member}:`;
+      expect({ member, body: body(GATE, signature) }).toEqual({
+        member,
+        body: expect.not.stringContaining('dispatchPrecondition'),
+      });
+    }
   });
 
   it('lets a refresh wake finish a deferred launch before servicing it', () => {
