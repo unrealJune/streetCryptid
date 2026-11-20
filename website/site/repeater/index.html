@@ -336,6 +336,32 @@
               </li>
             </ol>
           </div>
+          <details>
+            <summary>Custom relays and diagnostics collector</summary>
+            <p>
+              In Windows or macOS Settings, open <strong>Network and collector</strong> (<strong
+                >Network &amp; collector</strong
+              >
+              on Mac). Add iroh relay URLs and an optional access key for each. No custom relays
+              uses the public defaults. Keys stay on the repeater; a blank key keeps the saved one
+              for that URL.
+            </p>
+            <p>
+              On Linux, <code>streetcryptid-repeater network</code> shows the settings without keys;
+              <code>network --file PATH</code> saves a private JSON file. See the
+              <a
+                href="https://github.com/unrealJune/streetCryptid/blob/main/repeater/host/README.md"
+                >configuration guide</a
+              >
+              for its format. Never put access keys in shell history or screenshots.
+            </p>
+            <p>
+              The collector URL is an OTLP HTTP base URL. Send diagnostics remains a separate
+              opt-in; use only a collector you trust with diagnostic metadata. Save, then restart
+              the repeater (or its Windows/Linux service) to apply connection changes. Your
+              identity, claim and grants are preserved.
+            </p>
+          </details>
         </section>
       </main>
 

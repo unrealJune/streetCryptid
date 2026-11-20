@@ -491,10 +491,11 @@ public sealed partial class MainWindow : Window
         RunningPanel.Visibility = page == "running" ? Visibility.Visible : Visibility.Collapsed;
         UpdatePanel.Visibility = page == "update" ? Visibility.Visible : Visibility.Collapsed;
         RenderName(snapshot, settingsOpen);
+        RenderNetwork(snapshot, settingsOpen);
         Qr.SetLink(page == "claim" ? snapshot?.ClaimUrl : null);
         SaveButton.Content = preferences.SetupComplete ? "SAVE" : "CONTINUE";
         SaveButton.IsEnabled = !settingsDamaged && !switching;
-        DiagnosticsChoice.Visibility = snapshot?.TelemetryAvailable ?? true ? Visibility.Visible : Visibility.Collapsed;
+        DiagnosticsChoice.Visibility = Visibility.Visible;
         TrayChoice.IsEnabled = StartupChoice.IsOn;
         ReleaseButton.Visibility = settingsOpen && claimed ? Visibility.Visible : Visibility.Collapsed;
         ReleaseButton.IsEnabled = !switching;

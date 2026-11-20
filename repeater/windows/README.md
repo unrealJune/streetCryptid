@@ -88,8 +88,8 @@ are never merged or overwritten: the installer stops and says so.
 
 The app talks to the service over the `streetcryptid-repeater` pipe, which only the installing
 account (plus SYSTEM and the service) may open, and which refuses remote clients. Before trusting
-it the app checks that the process serving the pipe is the running service. The service forwards
-exactly one command to the host — settings — and drops a client that sends anything else.
+it the app checks that the process serving the pipe is the running service. The service forwards only the host's settings, network, name and release commands, and drops a
+client that sends anything else.
 
 An app update does not replace the service's copy on its own, but the person sees one update:
 **Update** restarts the app into the new version with `--finish-update`, and that process runs the
@@ -147,9 +147,14 @@ and then offers manual Retry.
 
 ## Diagnostics
 
-Builds made with `SC_REPEATER_OTEL_ENDPOINT` set (CI sets it from the `REPEATER_OTEL_ENDPOINT`
-repository variable) compile the trail-stash OTLP exporter in; others have none. Even then nothing
-is sent until the person leaves **Send diagnostics** on at setup: the host starts with it off, and
+Settings → **Network and collector** configures iroh relay URLs with per-relay access keys and an
+OTLP HTTP collector base URL. Save, then restart the repeater (or its Windows service) to apply;
+the screen reports when a restart is required. See [connection settings](../host/README.md) for
+key handling, defaults and storage.
+
+`SC_REPEATER_OTEL_ENDPOINT` (CI's `REPEATER_OTEL_ENDPOINT` variable) is the default collector,
+overridden by the local URL. Nothing is sent until the person leaves **Send diagnostics** on at
+setup: the host starts with it off, and
 the choice is enforced per span, so turning it off stops export at once. What is sent: the stash's
 own `repeater.*` spans and `repeater.host.start` / `.pulse` / `.stop` (every five minutes: roster
 size, tracked/missing content, arrivals, connections, bytes in/out, power state, uptime), keyed by the short endpoint id as `service.instance.id`. A silent gap between pulses is

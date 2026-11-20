@@ -36,17 +36,18 @@ sudo ./streetcryptid-repeater install --system   # for the machine, from boot
 
 ## Commands
 
-| Command                                               | What it does                                                                |
-| ----------------------------------------------------- | --------------------------------------------------------------------------- |
-| `run`                                                 | The repeater, in the foreground. Prints the claim QR at a terminal.         |
-| `status [--json]`                                     | What it is doing: claim, people carried, items ready, traffic, settings.    |
-| `claim [--once] [--link]`                             | The claim QR, renewed until a phone claims it (`--link`: the link alone).   |
-| `settings [--telemetry on/off] [--keep-awake on/off]` | Show or change this machine's choices.                                      |
-| `name [NAME] [--clear]`                               | Show or set the name phones show for this machine (at most 40 chars).       |
-| `release --yes`                                       | Hand it back: stop carrying everyone, show a new claim code; same identity. |
-| `watch`                                               | Every protocol line, as JSON, for scripts.                                  |
-| `install [--system]`                                  | Opt in to the systemd daemon (per user, or the machine's).                  |
-| `uninstall [--system]`                                | Stop and remove the daemon; the identity is kept.                           |
+| Command                                               | What it does                                                                              |
+| ----------------------------------------------------- | ----------------------------------------------------------------------------------------- |
+| `run`                                                 | The repeater, in the foreground. Prints the claim QR at a terminal.                       |
+| `status [--json]`                                     | What it is doing: claim, people carried, items ready, traffic, settings.                  |
+| `claim [--once] [--link]`                             | The claim QR, renewed until a phone claims it (`--link`: the link alone).                 |
+| `settings [--telemetry on/off] [--keep-awake on/off]` | Show or change this machine's choices.                                                    |
+| `network [--file PATH]`                               | Show redacted relay/collector settings, or save JSON (`-` reads stdin). Restart to apply. |
+| `name [NAME] [--clear]`                               | Show or set the name phones show for this machine (at most 40 chars).                     |
+| `release --yes`                                       | Hand it back: stop carrying everyone, show a new claim code; same identity.               |
+| `watch`                                               | Every protocol line, as JSON, for scripts.                                                |
+| `install [--system]`                                  | Opt in to the systemd daemon (per user, or the machine's).                                |
+| `uninstall [--system]`                                | Stop and remove the daemon; the identity is kept.                                         |
 
 The management commands find the running repeater by themselves: your own first
 (`$XDG_RUNTIME_DIR/streetcryptid-repeater/control.sock`), then the machine's
@@ -61,7 +62,8 @@ object per line.
 - On connecting, a client gets a `service` line (`starting`, `running`, `stopped`) and the latest
   `snapshot`, so it never waits for a first screen.
 - Then a snapshot every two seconds and an `arrival` for each newly servable fix.
-- It takes the host's three commands: `settings` (`telemetry`, `keepAwake`), `name` (`name`, `""`
+- It takes the host's commands: `settings` (`telemetry`, `keepAwake`), `network` (relay keys and
+  collector URL), `name` (`name`, `""`
   to clear) and `release`, each answered with a `result` to that client and a fresh snapshot to
   everyone. Anything else and the client is dropped, as the Windows service does.
 
@@ -131,9 +133,13 @@ whole state directory when moving an installation by hand. Only one daemon can h
 
 ## Diagnostics
 
-Builds made with `SC_REPEATER_OTEL_ENDPOINT` set (release builds take it from the
-`REPEATER_OTEL_ENDPOINT` repository variable) compile the OTLP exporter in; others have none. Even
-then nothing is sent until someone runs `settings --telemetry on` (or `install --telemetry on`):
+`network --file PATH` configures iroh relays with individual access keys and the OTLP HTTP base
+URL. Read [connection settings](../host/README.md) for the JSON format, secure key input and
+restart instructions. `network` without arguments reports URLs/key presence, never keys.
+
+`SC_REPEATER_OTEL_ENDPOINT` (release builds' `REPEATER_OTEL_ENDPOINT` variable) supplies the
+default collector; a local URL overrides it after restart. Nothing is sent until someone runs
+`settings --telemetry on` (or `install --telemetry on`):
 the choice is enforced per span, so turning it off stops export at once. What is sent is what the
 Windows repeater sends — the stash's `repeater.*` spans and `repeater.host.start` / `.pulse` /
 `.stop` with `host.platform = linux` — keyed by the short endpoint id. Never a location.

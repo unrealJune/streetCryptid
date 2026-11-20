@@ -6,6 +6,31 @@ namespace StreetCryptid.Repeater.Tests;
 public class HostProtocolTests
 {
     [Fact]
+    public void NetworkCommandsPreserveReplaceAndClearKeysThroughTheService()
+    {
+        var network = new NetworkConfig([
+            new RelayConfig("https://one.example", null),
+            new RelayConfig("https://two.example", "test-secret"),
+            new RelayConfig("https://three.example", "")
+        ], "https://collector.example/otlp");
+        string line = HostProtocol.NetworkCommand("network", network);
+        Assert.True(HostProtocol.IsHostCommand(line));
+        using var doc = System.Text.Json.JsonDocument.Parse(line);
+        var relays = doc.RootElement.GetProperty("network").GetProperty("relays");
+        Assert.Equal(System.Text.Json.JsonValueKind.Null, relays[0].GetProperty("authToken").ValueKind);
+        Assert.Equal("test-secret", relays[1].GetProperty("authToken").GetString());
+        Assert.Equal("", relays[2].GetProperty("authToken").GetString());
+        Assert.DoesNotContain("test-secret", network.ToString());
+        Assert.DoesNotContain("test-secret", network.Relays[1].ToString());
+        Assert.False(HostProtocol.IsHostCommand(line.Replace("\"authToken\":null", "\"authToken\":7")));
+        Assert.False(HostProtocol.IsHostCommand(line.Replace("\"authToken\":null", "\"authToken\":null,\"authToken\":\"x\"")));
+        Assert.False(HostProtocol.IsHostCommand(line.Replace("\"telemetryEndpoint\":", "\"unknown\":")));
+        Assert.False(HostProtocol.IsHostCommand(line.Replace("\"kind\":\"network\"", "\"kind\":\"release\"")));
+        Assert.Throws<ArgumentException>(() => HostProtocol.NetworkCommand("large",
+            new NetworkConfig(Enumerable.Repeat(new RelayConfig("https://relay.example", new string('x', 512)), 8).ToArray(), "")));
+    }
+
+    [Fact]
     public void SnapshotRacingAnArrivalStillPingsExactlyOnce()
     {
         var tracker = new ArrivalTracker();

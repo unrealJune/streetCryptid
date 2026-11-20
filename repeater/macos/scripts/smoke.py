@@ -39,6 +39,9 @@ def run(binary, state):
         for command in [
             {"kind": "settings", "telemetry": False, "keepAwake": False},
             {"kind": "name", "name": "Smoke test"},
+            {"kind": "network", "network": {
+                "relays": [{"url": "https://relay.example", "authToken": "smoke-test-key"}],
+                "telemetryEndpoint": "https://collector.example/otlp"}},
         ]:
             child.stdin.write(json.dumps(dict(protocol=2, requestId="smoke", **command)) + "\n")
             child.stdin.flush()
@@ -47,6 +50,18 @@ def run(binary, state):
         assert after["name"] == "Smoke test"
         assert not after["settings"]["telemetry"]
         assert not after["keepAwakeHeld"]
+        assert after["network"]["relays"][0]["hasAuthToken"]
+        assert "smoke-test-key" not in json.dumps(after)
+        assert after["network"]["restartRequired"] == (not before["network"]["relays"])
+        if before["network"]["relays"]:
+            assert before["telemetryAvailable"]
+            assert not before["network"]["restartRequired"]
+        child.stdin.write(json.dumps(dict(protocol=2, requestId="invalid", kind="network",
+            network={"relays": [{"url": "https://user:secret@example.com"}],
+                     "telemetryEndpoint": ""})) + "\n")
+        child.stdin.flush()
+        assert not take("result")["ok"]
+        assert take("snapshot")["snapshot"]["network"] == after["network"]
         child.stdin.close()
         assert child.wait(timeout=12) == 0
         return before["endpointId"]
@@ -65,4 +80,5 @@ with tempfile.TemporaryDirectory(prefix="sc-macos-smoke-") as directory:
     assert first == run(sys.argv[1], state)
     assert (state / "secret.key").read_bytes() == key
     assert (state / "secret.key").stat().st_mode & 0o777 == 0o600
+    assert (state / "network-settings.json").stat().st_mode & 0o777 == 0o600
 print("Bundled host: commands, EOF shutdown, private identity and restart passed.")

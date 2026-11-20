@@ -79,6 +79,14 @@ enum Commands {
         #[arg(long)]
         socket: Option<PathBuf>,
     },
+    /// Show redacted connection settings, or save a JSON file (restart to apply).
+    Network {
+        /// Read settings from this file, or "-" for stdin. Keys never go in command arguments.
+        #[arg(long)]
+        file: Option<PathBuf>,
+        #[arg(long)]
+        socket: Option<PathBuf>,
+    },
     /// Show this machine's name, or name it ("Living room PC"); phones show it once the owner's
     /// phone picks it up.
     Name {
@@ -209,6 +217,7 @@ fn client_command(command: Commands) -> anyhow::Result<()> {
     runtime.block_on(async {
         match command {
             Commands::Status { json, socket } => client::status(socket, json).await,
+            Commands::Network { file, socket } => client::network(socket, file).await,
             Commands::Claim { once, link, socket } => client::claim(socket, once, link).await,
             Commands::Settings {
                 telemetry,

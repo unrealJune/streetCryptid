@@ -60,4 +60,22 @@ final class ProtocolTests: XCTestCase {
     budget.receivedSnapshot(now: 310)
     XCTAssertEqual(budget.nextDelay(), 2)
   }
+
+  func testNetworkKeysCanBePreservedReplacedOrCleared() throws {
+    let command = HostCommand(
+      kind: "network",
+      network: NetworkConfig(
+        relays: [
+          RelayConfig(url: "https://one.example", authToken: nil),
+          RelayConfig(url: "https://two.example", authToken: "test-key"),
+          RelayConfig(url: "https://three.example", authToken: ""),
+        ], telemetryEndpoint: "https://collector.example/otlp"))
+    let value = try JSONSerialization.jsonObject(with: command.line()) as! [String: Any]
+    XCTAssertEqual(Set(value.keys), ["protocol", "kind", "requestId", "network"])
+    let network = value["network"] as! [String: Any]
+    let relays = network["relays"] as! [[String: Any]]
+    XCTAssertNil(relays[0]["authToken"])
+    XCTAssertEqual(relays[1]["authToken"] as? String, "test-key")
+    XCTAssertEqual(relays[2]["authToken"] as? String, "")
+  }
 }

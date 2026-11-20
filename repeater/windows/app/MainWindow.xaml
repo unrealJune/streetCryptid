@@ -142,6 +142,21 @@
                             <Button x:Name="SettingsUpdateButton" Content="CHECK FOR UPDATES" Click="UpdateClicked"
                                     Style="{StaticResource CryptidButton}" Visibility="Collapsed" />
                         </StackPanel>
+                        <Expander x:Name="NetworkPanel" Header="Network and collector" HorizontalAlignment="Stretch">
+                            <ScrollViewer MaxHeight="320">
+                            <StackPanel Spacing="8">
+                                <TextBlock Text="No custom relays uses public defaults. Blank keys keep the saved key for that URL."
+                                           TextWrapping="Wrap" />
+                                <StackPanel x:Name="NetworkRelays" Spacing="12" />
+                                <Button Content="ADD RELAY" Click="AddRelayClicked" />
+                                <TextBox x:Name="NetworkEndpoint" Header="OTLP HTTP base URL (blank: build default)" />
+                                <TextBlock Text="Only use a collector you trust with diagnostic metadata. Send diagnostics remains a separate opt-in."
+                                           TextWrapping="Wrap" />
+                                <Button x:Name="NetworkSave" Content="SAVE NETWORK SETTINGS" Click="SaveNetworkClicked" />
+                                <TextBlock x:Name="NetworkRestart" TextWrapping="Wrap" />
+                            </StackPanel>
+                            </ScrollViewer>
+                        </Expander>
                         <TextBlock x:Name="VersionText" FontSize="12" Opacity=".7" TextWrapping="Wrap"
                                    FontFamily="ms-appx:///Assets/Plex.ttf#IBM Plex Mono" />
                         <Button x:Name="ReleaseButton" Content="RELEASE THIS REPEATER" Click="ReleaseClicked"

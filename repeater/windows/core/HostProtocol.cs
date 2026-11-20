@@ -5,6 +5,15 @@ namespace StreetCryptid.Repeater.Core;
 
 /// <summary>Choices the host keeps for this machine (see the Rust host's <c>HostSettings</c>).</summary>
 public sealed record HostSettings(bool Telemetry, bool KeepAwake);
+public sealed record RelayStatus(string Url, bool HasAuthToken);
+public sealed record NetworkStatus(RelayStatus[] Relays, string TelemetryEndpoint, bool RestartRequired);
+public sealed class RelayConfig(string url, string? authToken)
+{
+    public string Url { get; } = url;
+    public string? AuthToken { get; } = authToken;
+    public override string ToString() => "RelayConfig { [redacted] }";
+}
+public sealed record NetworkConfig(RelayConfig[] Relays, string TelemetryEndpoint);
 
 public sealed record HostSnapshot(
     string EndpointId, bool Claimed, string? ClaimUrl, string? Owner,
@@ -13,7 +22,7 @@ public sealed record HostSnapshot(
     ulong BytesReceived = 0, ulong BytesSent = 0,
     string? Version = null, string? Mode = null,
     HostSettings? Settings = null, bool TelemetryAvailable = false,
-    string? Name = null, string? ListedName = null);
+    string? Name = null, string? ListedName = null, NetworkStatus? Network = null);
 
 /// <summary>
 /// What the Windows service says about itself to a client, separately from the host it supervises:
@@ -90,6 +99,14 @@ public static class HostProtocol
         }, Options);
     }
 
+    public static string NetworkCommand(string requestId, NetworkConfig network)
+    {
+        if (requestId.Length is 0 or > 64) throw new ArgumentException("Invalid request id.", nameof(requestId));
+        string line = JsonSerializer.Serialize(new { protocol = Version, kind = "network", requestId, network }, Options);
+        if (!IsCommand(line, "network")) throw new ArgumentException("Invalid network settings.");
+        return line;
+    }
+
     /// <summary>
     /// Release this repeater from its roster (REPEATERS.md §4.1): it stops carrying everyone and
     /// shows a new claim code. The only roster decision the person at the machine can make.
@@ -121,13 +138,14 @@ public static class HostProtocol
     /// that can reach its pipe still cannot speak the host's protocol in general.
     /// </summary>
     public static bool IsHostCommand(string line) =>
-        IsCommand(line, "settings") || IsCommand(line, "name") || IsCommand(line, "release");
+        IsCommand(line, "settings") || IsCommand(line, "name") || IsCommand(line, "release") || IsCommand(line, "network");
 
     /// <summary>A settings command, exactly as <see cref="SettingsCommand"/> writes it.</summary>
     public static bool IsSettingsCommand(string line) => IsCommand(line, "settings");
 
     private static bool IsCommand(string line, string kind)
     {
+        if (Encoding.UTF8.GetByteCount(line) + 1 > 4096) return false;
         bool settings = kind == "settings";
         bool naming = kind == "name";
         try
@@ -150,13 +168,54 @@ public static class HostProtocol
                         property.Value.ValueKind is JsonValueKind.True or JsonValueKind.False,
                     "name" => naming && property.Value.ValueKind == JsonValueKind.String &&
                               property.Value.GetString() is { Length: <= 200 },
+                    "network" => kind == "network" && IsNetwork(property.Value),
                     _ => false,
                 };
                 if (!ok) return false;
             }
-            return seen.Count == (settings ? 5 : naming ? 4 : 3);
+            return seen.Count == (settings ? 5 : naming || kind == "network" ? 4 : 3);
         }
         catch (JsonException) { return false; }
+    }
+
+    private static bool IsNetwork(JsonElement network)
+    {
+        if (network.ValueKind != JsonValueKind.Object) return false;
+        var fields = new HashSet<string>();
+        foreach (var field in network.EnumerateObject())
+        {
+            if (!fields.Add(field.Name)) return false;
+            if (field.Name == "telemetryEndpoint")
+            {
+                if (field.Value.ValueKind != JsonValueKind.String || field.Value.GetString()!.Length > 2048) return false;
+            }
+            else if (field.Name == "relays")
+            {
+                if (field.Value.ValueKind != JsonValueKind.Array || field.Value.GetArrayLength() > 8) return false;
+                foreach (var relay in field.Value.EnumerateArray())
+                {
+                    if (relay.ValueKind != JsonValueKind.Object) return false;
+                    var keys = new HashSet<string>();
+                    foreach (var key in relay.EnumerateObject())
+                    {
+                        if (!keys.Add(key.Name)) return false;
+                        if (key.Name == "url")
+                        {
+                            if (key.Value.ValueKind != JsonValueKind.String || key.Value.GetString() is not { Length: > 0 and <= 2048 }) return false;
+                        }
+                        else if (key.Name == "authToken")
+                        {
+                            if (key.Value.ValueKind != JsonValueKind.Null &&
+                                (key.Value.ValueKind != JsonValueKind.String || key.Value.GetString()!.Length > 512)) return false;
+                        }
+                        else return false;
+                    }
+                    if (!keys.Contains("url")) return false;
+                }
+            }
+            else return false;
+        }
+        return fields.SetEquals(["relays", "telemetryEndpoint"]);
     }
 
     public static async IAsyncEnumerable<string> ReadLines(
