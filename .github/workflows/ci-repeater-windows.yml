@@ -51,6 +51,10 @@ on:
         description: Link Rust with rust-lld instead of link.exe
         type: boolean
         default: true
+      benchmark-no-lto:
+        description: Benchmark a preview with link-time optimization disabled (not a release)
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -155,6 +159,11 @@ jobs:
         if: inputs.rust-lld
         run: |
           "CARGO_TARGET_${{ matrix.triple }}_LINKER=rust-lld" >> $env:GITHUB_ENV
+
+      - name: Disable Rust LTO for the benchmark
+        if: github.event_name == 'workflow_dispatch' && inputs.benchmark-no-lto
+        run: |
+          'CARGO_PROFILE_DESKTOP_RELEASE_LTO=off' >> $env:GITHUB_ENV
 
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         id: rust-cache

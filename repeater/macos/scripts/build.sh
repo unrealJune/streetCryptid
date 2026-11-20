@@ -5,6 +5,7 @@ root="$(cd "$(dirname "$0")/../../.." && pwd)"
 cd "$root"
 version="${1:-0.0.0}"
 arch="${2:-universal}"
+prebuilt_hosts="${3:-}"
 [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "Expected MAJOR.MINOR.PATCH" >&2; exit 2; }
 case "$arch" in
   universal) arches=(arm64 x86_64) ;;
@@ -23,8 +24,14 @@ for cpu in "${arches[@]}"; do
   swift_args+=(--arch "$cpu")
   target=x86_64-apple-darwin
   [[ "$cpu" != arm64 ]] || target=aarch64-apple-darwin
-  cargo build --locked --profile desktop-release -p streetcryptid-repeater-host --target "$target"
-  hosts+=("${CARGO_TARGET_DIR:-$root/target}/$target/desktop-release/streetcryptid-repeater-host")
+  if [[ -n "$prebuilt_hosts" ]]; then
+    host="$prebuilt_hosts/$target/streetcryptid-repeater-host"
+    [[ -s "$host" ]] && lipo "$host" -verify_arch "$cpu" || { echo "Missing or invalid $cpu host" >&2; exit 1; }
+    hosts+=("$host")
+  else
+    cargo build --locked --profile desktop-release -p streetcryptid-repeater-host --target "$target"
+    hosts+=("${CARGO_TARGET_DIR:-$root/target}/$target/desktop-release/streetcryptid-repeater-host")
+  fi
 done
 
 swift build --package-path repeater/macos --configuration release "${swift_args[@]}" --force-resolved-versions --product StreetCryptidRepeater
