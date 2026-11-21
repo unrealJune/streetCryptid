@@ -468,6 +468,11 @@ uint64_t uniffi_iroh_location_fn_method_locationnode_import_profile_ticket(uint6
 uint64_t uniffi_iroh_location_fn_method_locationnode_ingest_fix(uint64_t ptr, RustBuffer fix, RustBuffer battery, uint64_t interval_ms, uint64_t now_ms
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_METHOD_LOCATIONNODE_INGEST_FIX_CLAIMING
+#define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_METHOD_LOCATIONNODE_INGEST_FIX_CLAIMING
+uint64_t uniffi_iroh_location_fn_method_locationnode_ingest_fix_claiming(uint64_t ptr, RustBuffer fix, RustBuffer battery, uint64_t interval_ms, uint64_t now_ms, RustBuffer parked, RustBuffer budget_ms
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_METHOD_LOCATIONNODE_INGEST_FIX_WITHIN
 #define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_FN_METHOD_LOCATIONNODE_INGEST_FIX_WITHIN
 uint64_t uniffi_iroh_location_fn_method_locationnode_ingest_fix_within(uint64_t ptr, RustBuffer fix, RustBuffer battery, uint64_t interval_ms, uint64_t now_ms, uint64_t budget_ms
@@ -1600,6 +1605,12 @@ uint16_t uniffi_iroh_location_checksum_method_locationnode_import_profile_ticket
 #ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_METHOD_LOCATIONNODE_INGEST_FIX
 #define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_METHOD_LOCATIONNODE_INGEST_FIX
 uint16_t uniffi_iroh_location_checksum_method_locationnode_ingest_fix(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_METHOD_LOCATIONNODE_INGEST_FIX_CLAIMING
+#define UNIFFI_FFIDEF_UNIFFI_IROH_LOCATION_CHECKSUM_METHOD_LOCATIONNODE_INGEST_FIX_CLAIMING
+uint16_t uniffi_iroh_location_checksum_method_locationnode_ingest_fix_claiming(void
     
 );
 #endif

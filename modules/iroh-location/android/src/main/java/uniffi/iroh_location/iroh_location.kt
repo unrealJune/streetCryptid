@@ -801,6 +801,8 @@ external fun uniffi_iroh_location_checksum_method_locationnode_import_profile_ti
 ): Int
 external fun uniffi_iroh_location_checksum_method_locationnode_ingest_fix(
 ): Int
+external fun uniffi_iroh_location_checksum_method_locationnode_ingest_fix_claiming(
+): Int
 external fun uniffi_iroh_location_checksum_method_locationnode_ingest_fix_within(
 ): Int
 external fun uniffi_iroh_location_checksum_method_locationnode_initiate_pair(
@@ -1054,6 +1056,8 @@ external fun uniffi_iroh_location_fn_method_locationnode_import_doc_ticket(`ptr`
 external fun uniffi_iroh_location_fn_method_locationnode_import_profile_ticket(`ptr`: Long,`ticket`: RustBuffer.ByValue,
 ): Long
 external fun uniffi_iroh_location_fn_method_locationnode_ingest_fix(`ptr`: Long,`fix`: RustBuffer.ByValue,`battery`: RustBuffer.ByValue,`intervalMs`: Long,`nowMs`: Long,
+): Long
+external fun uniffi_iroh_location_fn_method_locationnode_ingest_fix_claiming(`ptr`: Long,`fix`: RustBuffer.ByValue,`battery`: RustBuffer.ByValue,`intervalMs`: Long,`nowMs`: Long,`parked`: RustBuffer.ByValue,`budgetMs`: RustBuffer.ByValue,
 ): Long
 external fun uniffi_iroh_location_fn_method_locationnode_ingest_fix_within(`ptr`: Long,`fix`: RustBuffer.ByValue,`battery`: RustBuffer.ByValue,`intervalMs`: Long,`nowMs`: Long,`budgetMs`: Long,
 ): Long
@@ -1552,6 +1556,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_iroh_location_checksum_method_locationnode_ingest_fix() != 21806) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_iroh_location_checksum_method_locationnode_ingest_fix_claiming() != 24745) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_iroh_location_checksum_method_locationnode_ingest_fix_within() != 40339) {
@@ -2945,6 +2952,16 @@ public interface LocationNodeInterface {
     suspend fun `ingestFix`(`fix`: LocationFix, `battery`: BatteryState, `intervalMs`: kotlin.ULong, `nowMs`: kotlin.ULong): IngestOutcome
     
     /**
+     * [`Self::ingest_fix`] and the motion claim it settles, in one run: one stamp decision, one
+     * drain, one push. See [`publish::DrainEngine::ingest_claiming`] for why they must not be two
+     * calls, and for how `parked: Some(true)` anchors the stop on this fix.
+     *
+     * `budget_ms` bounds the push as [`Self::ingest_fix_within`] does; `None` is the ordinary
+     * [`docs::PUSH_TIMEOUT_SECS`].
+     */
+    suspend fun `ingestFixClaiming`(`fix`: LocationFix, `battery`: BatteryState, `intervalMs`: kotlin.ULong, `nowMs`: kotlin.ULong, `parked`: kotlin.Boolean?, `budgetMs`: kotlin.ULong?): IngestOutcome
+    
+    /**
      * [`Self::ingest_fix`] for a caller with a deadline: an iOS background wake, which owns only
      * the seconds its background-task assertion buys.
      *
@@ -4232,6 +4249,35 @@ open class LocationNode: Disposable, AutoCloseable, LocationNodeInterface
             UniffiLib.uniffi_iroh_location_fn_method_locationnode_ingest_fix(
                 uniffiHandle,
                 FfiConverterTypeLocationFix.lower(`fix`),FfiConverterTypeBatteryState.lower(`battery`),FfiConverterULong.lower(`intervalMs`),FfiConverterULong.lower(`nowMs`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_iroh_location_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_iroh_location_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterTypeIngestOutcome.lift(it) },
+        // Error FFI converter
+        LocationException.ErrorHandler,
+    )
+    }
+
+    
+    /**
+     * [`Self::ingest_fix`] and the motion claim it settles, in one run: one stamp decision, one
+     * drain, one push. See [`publish::DrainEngine::ingest_claiming`] for why they must not be two
+     * calls, and for how `parked: Some(true)` anchors the stop on this fix.
+     *
+     * `budget_ms` bounds the push as [`Self::ingest_fix_within`] does; `None` is the ordinary
+     * [`docs::PUSH_TIMEOUT_SECS`].
+     */
+    @Throws(LocationException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `ingestFixClaiming`(`fix`: LocationFix, `battery`: BatteryState, `intervalMs`: kotlin.ULong, `nowMs`: kotlin.ULong, `parked`: kotlin.Boolean?, `budgetMs`: kotlin.ULong?) : IngestOutcome {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_iroh_location_fn_method_locationnode_ingest_fix_claiming(
+                uniffiHandle,
+                FfiConverterTypeLocationFix.lower(`fix`),FfiConverterTypeBatteryState.lower(`battery`),FfiConverterULong.lower(`intervalMs`),FfiConverterULong.lower(`nowMs`),FfiConverterOptionalBoolean.lower(`parked`),FfiConverterOptionalULong.lower(`budgetMs`),
             )
         },
         { future, callback, continuation -> UniffiLib.ffi_iroh_location_rust_future_poll_rust_buffer(future, callback, continuation) },

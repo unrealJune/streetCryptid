@@ -2653,11 +2653,27 @@ export class LocationSharingService {
       // itself, so a node that is up can publish. (These used to need a live gossip subscription,
       // and a moment without one latched the engine into `error` for the life of the process —
       // an iPhone on 2026-09-01, twelve `engine.failed` spans through an entire drive.)
-      ingest: async (fix, battery, intervalMs) => {
+      ingest: async (fix, battery, intervalMs, claim) => {
         const mod = this.mod;
         if (!mod) throw new Error('ingestFix: native module not bound');
         await this.retryPendingSeqSeed();
-        return outcomeOf(await mod.ingestFix(toNativeFix(fix), battery, intervalMs));
+        if (!claim) return outcomeOf(await mod.ingestFix(toNativeFix(fix), battery, intervalMs));
+        if (typeof mod.ingestFixClaiming === 'function') {
+          // One drain for the fix and its claim, bounded by what the runtime said was left.
+          return outcomeOf(
+            await mod.ingestFixClaiming(
+              toNativeFix(fix),
+              battery,
+              intervalMs,
+              claim.parked,
+              claim.budgetMs
+            )
+          );
+        }
+        // An older binary: the two calls this replaced, claim second so it anchors on this fix.
+        const ingested = outcomeOf(await mod.ingestFix(toNativeFix(fix), battery, intervalMs));
+        if (claim.parked !== null) await mod.heartbeatFix(battery, intervalMs, claim.parked);
+        return ingested;
       },
       heartbeat: async (battery, intervalMs, parked) => {
         const mod = this.mod;
@@ -2944,6 +2960,13 @@ export class LocationSharingService {
               payload_ts: nf.fix.ts,
               payload_accuracy_m: nf.fix.accuracyM,
               payload_heading_deg: nf.fix.headingDeg,
+              // What the friend's map will draw from this envelope, and the only proof of when
+              // the sender was alive: the same two fields `publish.fix` stamps on the way out, so
+              // "why does this friend read out of contact" is one join on `sc.seq`.
+              ...(nf.fix.state != null ? { fix_state: nf.fix.state } : {}),
+              ...(nf.fix.publishedDeltaS != null
+                ? { published_delta_s: nf.fix.publishedDeltaS }
+                : {}),
               transport_path: via,
               ...(nf.viaPeer ? { transport_peer: nf.viaPeer.slice(0, 10) } : {}),
             },
@@ -4152,6 +4175,22 @@ export class LocationSharingService {
    * would throw the user's own marker across town for a frame.
    */
   private async handleNativeCapture(event: OnNativeFixEvent): Promise<void> {
+    try {
+      await this.publishNativeCapture(event);
+    } finally {
+      // The iOS runtime holds a background assertion until we say we are done (`HandOffAcks`):
+      // answered on every path, early returns included, or it waits out its timeout.
+      if (event.token) {
+        try {
+          this.mod?.ackNativeCapture?.(event.token);
+        } catch {
+          // An ack that cannot be delivered only costs the runtime its timeout.
+        }
+      }
+    }
+  }
+
+  private async publishNativeCapture(event: OnNativeFixEvent): Promise<void> {
     const engine = this.engine;
     // No engine means sharing is not running here; the capture is not ours to publish.
     if (!engine) return;
@@ -4189,6 +4228,7 @@ export class LocationSharingService {
               }
             : undefined,
           parked: event.parked,
+          budgetMs: event.budgetMs,
         },
         engine
       );

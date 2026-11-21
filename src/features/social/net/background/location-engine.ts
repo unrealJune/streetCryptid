@@ -59,7 +59,7 @@ function reportEngineFailure(stage: string, message: string): void {
  * establish one (a heartbeat, or a fix the gate refused with nothing accepted before it).
  */
 export async function routeNativeCapture(
-  event: { kind: 'fix' | 'heartbeat'; fix?: LocationFix; parked?: boolean },
+  event: { kind: 'fix' | 'heartbeat'; fix?: LocationFix; parked?: boolean; budgetMs?: number },
   engine: Pick<LocationEngine, 'ingest' | 'heartbeat' | 'getState'>
 ): Promise<LocationFix | null> {
   if (event.kind === 'heartbeat' || !event.fix) {
@@ -68,8 +68,23 @@ export async function routeNativeCapture(
     await engine.heartbeat(undefined, event.parked ?? null);
     return null;
   }
-  await engine.ingest(event.fix);
+  // The fix and the claim it settles go to the drain TOGETHER. Sent as a fix and then a claim
+  // heartbeat, the claim queued behind the fix's push, and on 2026-11-18 an iPhone was suspended
+  // inside that push with the `parked` claim never sealed.
+  await engine.ingest(event.fix, undefined, {
+    parked: event.parked ?? null,
+    budgetMs: event.budgetMs ?? null,
+  });
   return engine.getState().lastAcceptedFix;
+}
+
+/**
+ * What the native runtime knew about a capture it handed over: its motion claim (`null` none) and
+ * what is left of its background allowance for the push (`null` no bound).
+ */
+export interface CaptureClaim {
+  parked: boolean | null;
+  budgetMs: number | null;
 }
 
 /** What the engine needs from the native pipeline. One call per entry point, nothing else. */
@@ -78,7 +93,12 @@ export interface NativeDrain {
    * Run one captured fix through gate → outbox → seal → send. Resolves with what happened, which
    * is the only way this side learns whether the fix was accepted or why it was not.
    */
-  ingest(fix: LocationFix, battery: BatteryState, intervalMs: number): Promise<DrainOutcome>;
+  ingest(
+    fix: LocationFix,
+    battery: BatteryState,
+    intervalMs: number,
+    claim?: CaptureClaim
+  ): Promise<DrainOutcome>;
   /**
    * Publish the slots that have come due with no new fix, reusing the last accepted position.
    * Also drains anything already queued, so it doubles as the flush.
@@ -139,8 +159,11 @@ export interface LocationEngineOptions {
 export interface LocationEngine {
   start(): Promise<void>;
   stop(): Promise<void>;
-  /** Hand one captured fix to the native pipeline. */
-  ingest(fix: LocationFix, parent?: SpanContext): Promise<SamplingDecision>;
+  /**
+   * Hand one captured fix to the native pipeline, with the native runtime's claim about it when it
+   * handed one over (see {@link routeNativeCapture}).
+   */
+  ingest(fix: LocationFix, parent?: SpanContext, claim?: CaptureClaim): Promise<SamplingDecision>;
   /**
    * Publish the slots that have come due without a new fix. Returns how many went out.
    *
@@ -234,7 +257,11 @@ export function createLocationEngine(opts: LocationEngineOptions): LocationEngin
       setState({ status: 'idle' });
     },
 
-    async ingest(fix: LocationFix, parent?: SpanContext): Promise<SamplingDecision> {
+    async ingest(
+      fix: LocationFix,
+      parent?: SpanContext,
+      claim?: CaptureClaim
+    ): Promise<SamplingDecision> {
       const batt = await battery();
       const decision = policy.decide({ battery: batt });
       setState({ decision, lastFixAt: now() });
@@ -267,7 +294,7 @@ export function createLocationEngine(opts: LocationEngineOptions): LocationEngin
 
       const outcome = await exclusive(async () => {
         try {
-          return await drain.ingest(fix, batt, policy.config.intervalMs);
+          return await drain.ingest(fix, batt, policy.config.intervalMs, claim);
         } catch (err) {
           fail('ingest', err);
           return null;

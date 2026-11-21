@@ -119,26 +119,27 @@ bg.refresh         (the OS-scheduled periodic wake; bg.refresh.expired if iOS cu
 │                  no JS span. `wake.*` on device.health is what counts those; there is no
 │                  `bg.wake` span any more, and no `bg.backfill`.
 └ bg.dispatch      (branch: mounted | headless)
-  └ engine.ingest  (motion, decision, sc.drop_reason?)
+  └ engine.stamp   (call, motion, fix_state_before, fix_state)  ─ native; at the decision, BEFORE the push
+  └ engine.ingest  (motion, fix_state_before, fix_state, decision, sc.drop_reason?)
     └ outbox.enqueue (coalesced / overflow?)
     └ outbox.drain   (published/retained, publish.failed reason)
       └ publish.fix        (sc.seq)
         └ docs.write       (sc.entry_hash, sc.envelope, dropped, sc.drop_reason?, dropped_peers?)  ─ LOCAL replica; live engine broadcasts it
       └ session.recover    (desynced, primed, restarted, requested, withdrawn, await_prekey, no_key, control_written)  ─ §4.6, once per drain
-      └ trail.push         (entries_sent, finished, push.budget_ms)  ─ reconciliation ─►  stash.entry.received (sc.entry_hash)
+      └ trail.push         (entries_sent, finished, push.budget_ms, push.durable_via)  ─ reconciliation ─►  stash.entry.received (sc.entry_hash)
         ├ trail.push.live       (waiting on the node lock)
         ├ trail.push.open       (doc handle + event subscription)
         ├ trail.push.start_sync (peers)
-        ├ trail.push.wait       (budget_ms, ended, events, pending)  ─ the only phase the 30 s deadline bounds
+        ├ trail.push.wait       (budget_ms, ended, events, pending, settled_ms?, held?, held_finished?)  ─ the only phase the 30 s deadline bounds
         ├ trail.push.roles      (recipient/delivery store reads for peer.role)
         ├ trail.push.report     (peers; per-peer path labels)
-        ├ trail.push.peer  (sc.peer, peer.outcome)
+        ├ trail.push.peer  (sc.peer, peer.role, peer.outcome, peer.held_at_cut?)
         ├ peer.contact     (send, per peer that finished)
         └ trail.content.upload (stash blob PUT; stash opted in only)
       └ trail.push.deferred (push.budget_ms)  ─ iOS: sealed, no background time left to push; instead of trail.push
                                                         replica watch: peer.contact (recv, from_author?)
                                                                   └ trail.sync.app (recovered)
-                                                                    └ fix.received.app (sc.seq, transport_path, transport_peer?)
+                                                                    └ fix.received.app (sc.seq, fix_state, published_delta_s, transport_path, transport_peer?)
 ```
 
 There is one location transport: the author's iroh-docs namespace. `docs.write` puts the sealed
@@ -374,12 +375,33 @@ network, or the wake ended too early):
 
 A push longer than its 30 s budget spent the difference outside `trail.push.wait`; the sibling
 phase spans say where. `trail.push.wait{ended}` is `all-reported` (every dialled peer answered),
-`deadline` (someone stayed silent — the usual case while a friend is asleep), `stream-ended` or
-`stream-error`:
+`settled` (a durable carrier — the stash or one of our repeaters, `trail.push{push.settled_by}` —
+finished at `settled_ms` and the rest had `PUSH_GRACE_AFTER_SETTLE` more),
+`held` (when the grace ran out, the friends that looked awake — an open iroh path, or a `NeighborUp`
+on the namespace — were waited for until the original deadline and all answered; `held` /
+`held_finished` count them),
+`deadline` (someone stayed silent and the stash never answered), `stream-ended` or `stream-error`:
 
 ```traceql
 { name = "trail.push" && duration > 35s } >> { name =~ "trail.push.(live|open|start_sync|wait|roles|report)" }
 { name = "trail.push.wait" } | select(span.ended, span.pending)
+```
+
+### What the wire said about a friend (`fix_state`, `engine.stamp`)
+
+"Out of contact" on a friend's map is `presence.ts` reading the newest envelope: `parked` holds for
+24 h, `live`/`no-fix` lapse after 2 h. So the question is always what the LAST envelope before a
+silence was sealed as. `publish.fix` carries `fix_state` (1 live, 2 parked, 3 no-fix) and
+`published_delta_s` on the sender, `fix.received.app` the same two on the reader, joined on
+`sc.seq`. `engine.stamp` says how the stamp was reached — the caller's `motion` claim, and the stamp
+before and after — and is emitted at the decision, before the push, because a process suspended
+inside a push loses the `engine.*` span that would have followed it (2026-11-18: an arrival that
+sealed and pushed left none).
+
+```traceql
+{ name = "publish.fix" && span.sc.author = "cc1d2f7ebd" } | select(span.sc.seq, span.fix_state, span.published_delta_s)
+{ name = "engine.stamp" && span.fix_state_before = 2 && span.fix_state != 2 } | select(span.call, span.motion)
+{ name = "fix.received.app" && span.sc.author = "cc1d2f7ebd" } | select(span.sc.seq, span.fix_state)
 ```
 
 ### A push inside an iOS background wake (`push.budget_ms`, `trail.push.deferred`)
@@ -908,18 +930,43 @@ previous record.
 ## Who answers a push (`trail.push.peer`)
 
 Every push dials the stash and every friend with a durable ticket under ONE deadline,
-`docs::PUSH_TIMEOUT_SECS` (30 s), and ends early once every dialled peer has reported. A silent
-peer costs the full deadline and is still handed the data later: the namespace stays live, so it
+`docs::PUSH_TIMEOUT_SECS` (30 s), and ends early once every dialled peer has reported, or
+`PUSH_GRACE_AFTER_SETTLE` (3 s) after the first durable carrier — the stash, or a repeater carrying
+our trail — finished. Repeaters are scheduled but never waited for: they can end a wait, never
+extend it. A silent peer is still handed the data later: the namespace stays live, so it
 reconciles whenever that peer next wakes. (Until 2026-11 the app predicted a per-peer budget from
 presence — `peer-reachability.ts`, `trail.push.peer.app`, `peer.budget_ms`, `skipped` — and the
 push carried those; pushing is native-only now and none of them exist.)
 
-- **`trail.push`** — `sync.peers_requested` / `sync.peers_dialed`, `entries_sent`,
-  `peers_finished`, `peers_failed`, `peers_silent`, `finished`.
-- **`trail.push.peer`** — one per dialled peer: `peer.outcome` (`finished` | `failed` | `silent`),
-  `peer.role` (`stash` | `friend` | `other`), `peer.latency_ms`, `peer.answered`, `entries_sent`,
-  `sc.peer`. Its own duration is meaningless (opened after the fact); `peer.latency_ms` is the
-  measurement.
+- **`trail.push`** — `sync.peers_requested` / `sync.peers_dialed`, `sync.repeaters_scheduled`,
+  `entries_sent`, `peers_finished`, `peers_failed`, `peers_silent`, `finished`, and the carrier
+  summary: `push.durable_via` (`stash` | `repeater` | `friend` | `other` | `none` — the role of the
+  carrier that settled the push, else the most durable one that finished; `none` is a fix still
+  only on this phone), `push.settled_by` (short id), `push.stash_finished`,
+  `push.repeaters_finished`, `push.friends_finished`.
+- **`trail.push.peer`** — one per dialled peer and per scheduled repeater: `peer.outcome`
+  (`finished` | `failed` | `silent` | `unwaited` — a repeater nothing waited on that had not
+  answered when the push stopped watching), `peer.role` (`stash` | `friend` | `repeater` |
+  `other`), `peer.latency_ms`, `peer.answered`, `entries_sent`, `sc.peer`, and
+  `peer.held_at_cut` for a peer still outstanding when the settle grace ran out (`true`: it looked
+  awake and was waited for; `false`: let go). A `finished` row with `peer.held_at_cut = true` is a
+  direct send the 3 s grace alone would have stopped watching. Its own duration is
+  meaningless (opened after the fact); `peer.latency_ms` is the measurement.
+
+`push.durable_via`, `peer.role` and `peer.outcome` are spanmetrics dimensions, so stash against
+repeaters is a weeks-long PromQL question in both directions (`fix.provenance` is the receive
+side). Tempo's metrics API refuses ranges over 3 h, so do not answer it with TraceQL metrics.
+
+```promql
+# How our fixes left, per hour: through the stash, a repeater, only friends' phones, or not at all.
+sum by (push_durable_via) (
+  rate(traces_span_metrics_calls_total{span_name="trail.push"}[1h])) * 3600
+# Direct sends the hold kept: friends held at the cut, and whether they then finished.
+#   { name = "trail.push.peer" && span.peer.held_at_cut = true } | select(span.peer.outcome, span.peer.latency_ms)
+# How often each kind of carrier answers a push.
+sum by (peer_role, peer_outcome) (
+  increase(traces_span_metrics_calls_total{span_name="trail.push.peer"}[7d]))
+```
 
 ```traceql
 # Who actually answers. `silent` is the peer's doing; `failed` is the dial or the protocol.

@@ -74,6 +74,14 @@ connectors:
       # vocabularies (`contact.rs`).
       - name: fix.source
       - name: fix.path
+      # The send side of the same question. `push.durable_via` on `trail.push` — which kind of
+      # carrier a fix left through (`stash` / `repeater` / `friend` / `none`); `peer.role` x
+      # `peer.outcome` on `trail.push.peer` — how often each kind answers a push at all. Closed
+      # vocabularies (`contact.rs`, `docs::PeerOutcome`). Tempo's metrics API caps a query at
+      # 3 h, which is why these are dimensions rather than TraceQL.
+      - name: push.durable_via
+      - name: peer.role
+      - name: peer.outcome
     # Deliberately NOT `sc.author`, `sc.seq` or `sc.entry_hash`: those are per-envelope and would
     # make a new time series for every ping. Follow one envelope in Tempo; count them here.
     histogram:

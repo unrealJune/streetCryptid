@@ -627,6 +627,30 @@ public final class IrohLocationModule: Module {
           nowMs: UInt64(Date().timeIntervalSince1970 * 1000)))
     }
 
+    /// `ingestFix` and the motion claim it settles, in one drain (`parked`: `true` a stop, `false`
+    /// a departure, `nil` none), with the push bounded by `budgetMs` when the runtime handed one
+    /// over. What a mounted app does with a capture the runtime hands it — see `HandOffAcks` and
+    /// `DrainEngine::ingest_claiming`.
+    AsyncFunction("ingestFixClaiming") {
+      (fix: [String: Double], battery: [String: Any], intervalMs: Double, parked: Bool?,
+        budgetMs: Double?) async throws -> [String: Any?] in
+      guard let node = self.node else { throw Exception(name: "NoNode", description: "call createNode first") }
+      return ingestOutcomeToDict(
+        try await node.ingestFixClaiming(
+          fix: locationFix(from: fix),
+          battery: batteryState(from: battery),
+          intervalMs: UInt64(max(1, intervalMs)),
+          nowMs: UInt64(Date().timeIntervalSince1970 * 1000),
+          parked: parked,
+          budgetMs: budgetMs.map { UInt64(max(0, $0)) }))
+    }
+
+    /// The app has finished publishing a capture the runtime handed it, so the background
+    /// assertion held for it can end. See `HandOffAcks`.
+    Function("ackNativeCapture") { (token: String) in
+      BackgroundLocationRuntime.shared.ackHandOff(token)
+    }
+
     /// Publish the slots that have come due without a new fix, reusing the last known position.
     /// Driven on a timer by the mounted app — neither platform gives a background process a
     /// reliable one, and the cadence has to stay uniform whether or not the phone is moving.

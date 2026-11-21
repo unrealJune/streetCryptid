@@ -1967,6 +1967,14 @@ impl LocationNode {
             peers_failed = tracing::field::Empty,
             peers_silent = tracing::field::Empty,
             finished = tracing::field::Empty,
+            // Which kind of carrier made this push durable — a spanmetrics dimension, so "how
+            // often do our fixes leave through a repeater rather than the stash" is a PromQL
+            // query over weeks. See [`contact::durable_via`].
+            push.durable_via = tracing::field::Empty,
+            push.settled_by = tracing::field::Empty,
+            push.stash_finished = tracing::field::Empty,
+            push.repeaters_finished = tracing::field::Empty,
+            push.friends_finished = tracing::field::Empty,
         );
         async move {
             if peers.len() < requested {
@@ -1984,10 +1992,38 @@ impl LocationNode {
             let trail = started.trail.clone();
             let ns = trail.own_namespace();
 
-            let sent = trail.push(ns, peers, carriers, budget).await.map_err(|e| {
-                tracing::warn!(error = %e, "trail push failed");
-                LocationError::Network(e.to_string())
-            })?;
+            // Read before the push now, not only for the report: the stash's id is what lets the
+            // push stop waiting on friends once the stash has the entries (`settle_on`). Our
+            // repeaters settle it the same way — they serve the namespace to every friend who
+            // pulls it — so a phone carried by a repeater and not opted into the stash no longer
+            // waits out every push on friends' phones, and whichever durable carrier answers
+            // first is the one the push leaves through.
+            let roles = self
+                .peer_roles()
+                .instrument(tracing::info_span!("trail.push.roles"))
+                .await;
+            let settle_on: Vec<[u8; 32]> = roles
+                .stash()
+                .copied()
+                .filter(|stash| peers.iter().any(|p| p.id.as_bytes() == stash))
+                .into_iter()
+                .chain(carriers.iter().map(|addr| *addr.id.as_bytes()))
+                .collect();
+
+            let sent = trail
+                .push(
+                    ns,
+                    peers,
+                    carriers,
+                    budget,
+                    &settle_on,
+                    Some(&started.endpoint),
+                )
+                .await
+                .map_err(|e| {
+                    tracing::warn!(error = %e, "trail push failed");
+                    LocationError::Network(e.to_string())
+                })?;
             let current = tracing::Span::current();
             current.record("finished", sent.is_some());
             let Some(report) = sent else {
@@ -2005,6 +2041,27 @@ impl LocationNode {
                     .filter(|p| p.outcome == docs::PeerOutcome::Silent)
                     .count(),
             );
+            let finished_roles: Vec<&'static str> = report
+                .per_peer
+                .iter()
+                .filter(|p| p.outcome == docs::PeerOutcome::Finished)
+                .map(|p| roles.role(&p.peer))
+                .collect();
+            let count = |role: &str| finished_roles.iter().filter(|r| **r == role).count();
+            let settled_role = report.settled_by.map(|peer| roles.role(&peer));
+            current.record(
+                "push.durable_via",
+                contact::durable_via(settled_role, &finished_roles),
+            );
+            if let Some(peer) = report.settled_by {
+                current.record(
+                    "push.settled_by",
+                    tracing::field::display(telemetry::short_hex(&peer)),
+                );
+            }
+            current.record("push.stash_finished", count("stash") > 0);
+            current.record("push.repeaters_finished", count("repeater"));
+            current.record("push.friends_finished", count("friend"));
 
             // One child span per dialled peer, because no aggregate can answer the question that
             // matters: `peers_finished = 2` tells you two peers answered, not WHICH two or how long
@@ -2018,10 +2075,6 @@ impl LocationNode {
             //
             // `peer.role` says whether the peer was the stash or a friend's phone, and a FINISHED
             // push is also a `peer.contact`: the two devices reconciled with each other.
-            let roles = self
-                .peer_roles()
-                .instrument(tracing::info_span!("trail.push.roles"))
-                .await;
             // Per-peer reporting awaits `remote_info` for every finished peer's path label, so it
             // is timed as a phase of its own (`trail.push.report`).
             let report_span =
@@ -2030,7 +2083,7 @@ impl LocationNode {
                 for peer in &report.per_peer {
                     let latency = peer.latency_ms;
                     let role = roles.role(&peer.peer);
-                    tracing::info_span!(
+                    let row = tracing::info_span!(
                         "trail.push.peer",
                         sc.peer = %telemetry::short_hex(&peer.peer),
                         peer.outcome = peer.outcome.as_str(),
@@ -2038,8 +2091,14 @@ impl LocationNode {
                         peer.latency_ms = latency.unwrap_or_default(),
                         peer.answered = latency.is_some(),
                         entries_sent = peer.entries_sent,
-                    )
-                    .in_scope(|| {});
+                        // Outstanding when the settle grace ran out: held (it looked awake) or
+                        // let go. Absent when no cut happened or it had already answered.
+                        peer.held_at_cut = tracing::field::Empty,
+                    );
+                    if let Some(held) = peer.held_at_cut {
+                        row.record("peer.held_at_cut", held);
+                    }
+                    row.in_scope(|| {});
                     if peer.outcome == docs::PeerOutcome::Finished {
                         let path = match EndpointId::from_bytes(&peer.peer) {
                             Ok(id) => delivery_label(&started.endpoint, id).await,
@@ -6093,6 +6152,39 @@ impl LocationNode {
         ports
             .engine(self, &sink)
             .ingest(fix, battery, interval_ms, now_ms)
+            .await
+            .map_err(|e| LocationError::Network(e.to_string()))
+    }
+
+    /// [`Self::ingest_fix`] and the motion claim it settles, in one run: one stamp decision, one
+    /// drain, one push. See [`publish::DrainEngine::ingest_claiming`] for why they must not be two
+    /// calls, and for how `parked: Some(true)` anchors the stop on this fix.
+    ///
+    /// `budget_ms` bounds the push as [`Self::ingest_fix_within`] does; `None` is the ordinary
+    /// [`docs::PUSH_TIMEOUT_SECS`].
+    pub async fn ingest_fix_claiming(
+        &self,
+        fix: LocationFix,
+        battery: gate::BatteryState,
+        interval_ms: u64,
+        now_ms: u64,
+        parked: Option<bool>,
+        budget_ms: Option<u64>,
+    ) -> Result<publish::IngestOutcome, LocationError> {
+        let sink = match budget_ms {
+            Some(budget_ms) => NodeSink::within(self, budget_ms),
+            None => NodeSink::unbounded(self),
+        };
+        let ports = DrainPorts::of(self).await?;
+        ports
+            .engine(self, &sink)
+            .ingest_claiming(
+                fix,
+                publish::Motion::from_parked(parked),
+                battery,
+                interval_ms,
+                now_ms,
+            )
             .await
             .map_err(|e| LocationError::Network(e.to_string()))
     }

@@ -57,16 +57,17 @@ import UIKit
 /// - `armed_mismatch=1`: `UserDefaults` said sharing was off while the marker said on, so a
 ///   defaults write clobbered the intent. That is the failure described above, still happening.
 ///
-/// Main thread only, except `isDeferring` and `ArmedMarker`.
+/// Main thread only, except `isDeferring`, `takeUnlockReport` and `ArmedMarker`.
 enum ProtectedDataGate {
   private static var deferred: [() -> Void] = []
   private static var observer: NSObjectProtocol?
   private static var lockedSince: Date?
-  private static var unlockReport: String?
   private static var assertion: UIBackgroundTaskIdentifier = .invalid
 
   private static let flagLock = NSLock()
   private static var deferringFlag = false
+  /// Guarded by `flagLock`.
+  private static var unlockReport: String?
 
   /// Whether launch work is waiting for the first unlock. Safe from any thread.
   static var isDeferring: Bool {
@@ -136,10 +137,16 @@ enum ProtectedDataGate {
 
   /// Describes the wait once, for the `started` event that follows it. `nil` if this process never
   /// waited.
+  ///
+  /// Safe from any thread, because `start()` is: a foreground launch starts sharing from JS, and
+  /// `startNativeBackground` is a sync Function, so it runs on React's JS thread. A main-queue
+  /// precondition here trapped every such launch on 2026-11-20.
   static func takeUnlockReport() -> String? {
-    dispatchPrecondition(condition: .onQueue(.main))
-    defer { unlockReport = nil }
-    return unlockReport
+    flagLock.lock()
+    defer { flagLock.unlock() }
+    let report = unlockReport
+    unlockReport = nil
+    return report
   }
 
   private static func observe() {
@@ -155,7 +162,9 @@ enum ProtectedDataGate {
   private static func drain(via: String) {
     if let lockedSince {
       let waitedMs = Int(Date().timeIntervalSince(lockedSince) * 1000)
+      flagLock.lock()
       unlockReport = "wait_ms=\(waitedMs) via=\(via)"
+      flagLock.unlock()
       NSLog("[iroh-location] protected data available after \(waitedMs) ms (via=\(via))")
     }
     lockedSince = nil
@@ -280,7 +289,8 @@ enum BootReport {
     return Int(tv.tv_sec)
   }
 
-  /// Main thread, data available (it reads and writes `UserDefaults`).
+  /// Any thread (`start()` may run on the JS thread), data available (it reads and writes
+  /// `UserDefaults`).
   static func detail(background: Bool, unlock: String?, armedMismatch: Bool) -> String {
     var parts: [String] = ["bg=\(background ? 1 : 0)"]
     if let boot = bootTime {

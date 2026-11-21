@@ -71,10 +71,15 @@ final class PublishAssertion: @unchecked Sendable {
   /// Kept back from iOS's allowance for everything after a push — reporting, the pull's own
   /// decision to decline, `endBackgroundTask` — matching the pull's `pullSafetyMs`.
   static let safetyMs: UInt64 = 5_000
-  /// Reserved for the claim heartbeat when a capture is ingested ahead of one (`settleClaims`):
-  /// a push to friends who are asleep spends its whole deadline, and the claim is the envelope
-  /// friends most need to read.
-  static let claimReserveMs: UInt64 = 8_000
+  /// What a backgrounded process is assumed to have left when iOS reports no limit.
+  ///
+  /// `backgroundTimeRemaining` reads "no limit" while the location stream keeps the process
+  /// running, and stays so until the stream winds down — which is exactly what an arrival does. So
+  /// every drain on 2026-11-18 took the unbounded 30 s push (`push.budget_ms = 30000`), and the
+  /// phones were suspended inside it the moment they parked: pushes of 210 and 451 s, and a
+  /// `parked` claim that never ran. Off screen, "no limit" is a promise iOS can withdraw mid-push;
+  /// the ~30 s a background task is granted is the one it keeps.
+  static let residentAllowanceMs: UInt64 = 25_000
   /// Passed when iOS reports no limit (the app is active). Larger than `PUSH_TIMEOUT_SECS`, so
   /// Rust's own deadline applies.
   static let unboundedMs: UInt64 = 60_000
@@ -126,10 +131,23 @@ final class PublishAssertion: @unchecked Sendable {
   /// The push budget for a drain about to start. Reads iOS's allowance on main, where
   /// `UIApplication` must be read; the first reading is kept for the expiry span.
   func pushBudgetMs(reserveMs: UInt64 = 0) async -> UInt64 {
-    let remaining = await MainActor.run { UIApplication.shared.backgroundTimeRemaining }
+    let (remaining, active) = await MainActor.run {
+      (
+        UIApplication.shared.backgroundTimeRemaining,
+        UIApplication.shared.applicationState == .active
+      )
+    }
     let remainingMs = Self.finiteMs(remaining)
     keepFirstReading(remainingMs)
-    return Self.pushBudgetMs(remainingMs: remainingMs, reserveMs: reserveMs)
+    return Self.pushBudgetMs(
+      remainingMs: Self.effectiveRemainingMs(reported: remainingMs, active: active),
+      reserveMs: reserveMs)
+  }
+
+  /// iOS's reading, or `residentAllowanceMs` for a "no limit" reported off screen.
+  static func effectiveRemainingMs(reported: UInt64?, active: Bool) -> UInt64? {
+    if let reported { return reported }
+    return active ? nil : residentAllowanceMs
   }
 
   /// Synchronous so the lock is never held across an await.

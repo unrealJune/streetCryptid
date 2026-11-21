@@ -203,9 +203,13 @@ Conventions when changing that code:
   parked declaration was even sealed: friends read "out of contact" about a phone sitting still.
   The seal is never bounded; the push is (`ingest_fix_within` / `heartbeat_fix_within`, the
   remaining allowance minus 5 s, not started under 2 s → `push_deferred`, which asks for a
-  `NativeRefreshTask` wake if none is pending). An ingest that owes a claim leaves 8 s for the
-  claim's push and pulls only after it. Outcomes are durable `wake.publish_*` counters plus
-  `location.runtime{event=publish_assertion}` (`expired` / `stranded`).
+  `NativeRefreshTask` wake if none is pending). Off screen, a "no limit" `backgroundTimeRemaining`
+  counts as 25 s (`residentAllowanceMs`): the location stream keeps a process resident only until
+  it winds down, which is what an arrival does, and on 2026-11-18 every drain took the unbounded
+  30 s push and was suspended inside it (210 s, 451 s). A capture handed to a mounted app keeps
+  its assertion until JS answers `ackNativeCapture` (`HandOffAcks`, at most 28 s) and carries its
+  `budgetMs`. Outcomes are durable `wake.publish_*` counters plus
+  `location.runtime{event=publish_assertion}` (`expired` / `stranded` / `handoff_unanswered`).
   `native-publish-assertion.test.ts` scans the Swift for a bare `Task`. The `serviceRefresh` path is
   the one exception: its `BGProcessingTask` is its assertion. Android was checked and left alone:
   its foreground service keeps the process running, and the newest `trail.push.wait` spans there
@@ -347,9 +351,25 @@ failed` for the life of the process. On 2026-11-15 a single panicking accept tas
   otherwise after `speculativeHoldSeconds` (60 s) inside its radius; a re-centre — a fix that left
   the last candidate — retracts and never re-declares. Until 2026-10-20 every re-centre declared,
   and the field-soak iPhone (simulated GPS, speed always -1) flipped `live`/`parked` every 30-60 s
-  for whole walks, each flip an off-grid envelope (`moving.declared_parked`). A claim is settled in the
-  same task as the fix that caused it (`settleClaims`), fix first, so the drain anchors a
-  declaration on that fix and judges it against the right stop.
+  for whole walks, each flip an off-grid envelope (`moving.declared_parked`). **A claim is settled
+  in the same DRAIN as the fix that caused it** (`settleClaims` → `ingest_fix_claiming`, and from a
+  mounted app `ingestFixClaiming`): a `parked` claim with an accepted fix anchors the stop ON that
+  fix, and the envelope sealed already carries it. It was a fix and then a claim heartbeat, and on
+  2026-11-18 `cc1d2f7ebd`'s arrival sealed two `live` envelopes, was suspended inside their push,
+  and never sealed the claim; friends read "out of contact" two hours later. A visit arrival that
+  parks on a fix, a confirming dwell and a seed into `stopped` (restored ones included) send their
+  fix with the claim too; only a stop with no fix yet sends a bare `heartbeat(parked: true)`.
+- **A push stops waiting for friends once the stash has the entries** (`docs::push` `settle_on`,
+  `PUSH_GRACE_AFTER_SETTLE` = 3 s, `trail.push.wait{ended=settled, settled_ms}`). Over 24 h to
+  2026-11-19, 592 of 867 friend dials never answered and each cost its push the full 30 s, while
+  the stash answered at p50 0.3 s. The stash serves every friend, and the namespace stays live, so
+  an awake friend still reconciles after the wait ends. A repeater carrying our trail settles a push
+  the same way (it serves the namespace to every friend that pulls it), while staying unwaited: it
+  can end a wait, never extend it. With neither, the push waits as before. When the grace runs out,
+  a friend that looks awake — an open iroh path (`TransportAddrUsage::Active`) or a `NeighborUp`
+  on the namespace — is HELD until the original deadline rather than let go, so a direct send that
+  is still connecting is not abandoned to an iOS suspension (`trail.push.peer{peer.held_at_cut}`). Which carrier a fix left
+  through is `trail.push{push.durable_via}`, a spanmetrics dimension beside `fix.provenance`.
 - **A position Core Location hands back is not a capture.** `didUpdateLocations` drops a location
   whose timestamp is not newer than the last one delivered: on 2026-10-02 one fix came back every
   30 s for 73 minutes, the first two went out `live` 5-9 minutes stale, and the rest read as a

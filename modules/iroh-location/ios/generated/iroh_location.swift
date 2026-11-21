@@ -1097,6 +1097,16 @@ public protocol LocationNodeProtocol: AnyObject, Sendable {
     func ingestFix(fix: LocationFix, battery: BatteryState, intervalMs: UInt64, nowMs: UInt64) async throws  -> IngestOutcome
     
     /**
+     * [`Self::ingest_fix`] and the motion claim it settles, in one run: one stamp decision, one
+     * drain, one push. See [`publish::DrainEngine::ingest_claiming`] for why they must not be two
+     * calls, and for how `parked: Some(true)` anchors the stop on this fix.
+     *
+     * `budget_ms` bounds the push as [`Self::ingest_fix_within`] does; `None` is the ordinary
+     * [`docs::PUSH_TIMEOUT_SECS`].
+     */
+    func ingestFixClaiming(fix: LocationFix, battery: BatteryState, intervalMs: UInt64, nowMs: UInt64, parked: Bool?, budgetMs: UInt64?) async throws  -> IngestOutcome
+    
+    /**
      * [`Self::ingest_fix`] for a caller with a deadline: an iOS background wake, which owns only
      * the seconds its background-task assertion buys.
      *
@@ -2283,6 +2293,31 @@ open func ingestFix(fix: LocationFix, battery: BatteryState, intervalMs: UInt64,
                 uniffi_iroh_location_fn_method_locationnode_ingest_fix(
                     self.uniffiCloneHandle(),
                     FfiConverterTypeLocationFix_lower(fix),FfiConverterTypeBatteryState_lower(battery),FfiConverterUInt64.lower(intervalMs),FfiConverterUInt64.lower(nowMs)
+                )
+            },
+            pollFunc: ffi_iroh_location_rust_future_poll_rust_buffer,
+            completeFunc: ffi_iroh_location_rust_future_complete_rust_buffer,
+            freeFunc: ffi_iroh_location_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeIngestOutcome_lift,
+            errorHandler: FfiConverterTypeLocationError_lift
+        )
+}
+    
+    /**
+     * [`Self::ingest_fix`] and the motion claim it settles, in one run: one stamp decision, one
+     * drain, one push. See [`publish::DrainEngine::ingest_claiming`] for why they must not be two
+     * calls, and for how `parked: Some(true)` anchors the stop on this fix.
+     *
+     * `budget_ms` bounds the push as [`Self::ingest_fix_within`] does; `None` is the ordinary
+     * [`docs::PUSH_TIMEOUT_SECS`].
+     */
+open func ingestFixClaiming(fix: LocationFix, battery: BatteryState, intervalMs: UInt64, nowMs: UInt64, parked: Bool?, budgetMs: UInt64?)async throws  -> IngestOutcome  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_iroh_location_fn_method_locationnode_ingest_fix_claiming(
+                    self.uniffiCloneHandle(),
+                    FfiConverterTypeLocationFix_lower(fix),FfiConverterTypeBatteryState_lower(battery),FfiConverterUInt64.lower(intervalMs),FfiConverterUInt64.lower(nowMs),FfiConverterOptionBool.lower(parked),FfiConverterOptionUInt64.lower(budgetMs)
                 )
             },
             pollFunc: ffi_iroh_location_rust_future_poll_rust_buffer,
@@ -10958,6 +10993,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_method_locationnode_ingest_fix() != 21806) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_iroh_location_checksum_method_locationnode_ingest_fix_claiming() != 24745) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_iroh_location_checksum_method_locationnode_ingest_fix_within() != 40339) {

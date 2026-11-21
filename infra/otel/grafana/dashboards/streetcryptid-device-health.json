@@ -878,6 +878,178 @@
           "refId": "A"
         }
       ]
+    },
+    {
+      "type": "row",
+      "title": "Carriers — the stash against repeaters, both directions",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 68
+      },
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "title": "How our fixes left /h — trail.push by push.durable_via",
+      "description": "SEND side. One count per push, by the kind of carrier that made the fix durable: the one whose finish ended the wait (`push.settled_by`), else the most durable one that finished. `stash` and `repeater` are the two durable carriers; `friend` means only friends' phones took it; `none` is a fix still only on this phone. The receive-side twin is the fix.provenance panel above.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 69
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "fillOpacity": 8,
+            "spanNulls": false,
+            "drawStyle": "bars",
+            "stacking": {
+              "mode": "normal"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${prometheus}"
+          },
+          "expr": "sum by (push_durable_via) (rate(traces_span_metrics_calls_total{span_name=\"trail.push\"}[1h])) * 3600",
+          "legendFormat": "{{push_durable_via}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Where friends' fixes came from /h — stash vs repeater",
+      "description": "RECEIVE side, durable carriers only: `fix.provenance` with `fix.source` stash or repeater. Next to the send panel so the two read as one question.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 69
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "fillOpacity": 8,
+            "spanNulls": false,
+            "drawStyle": "bars",
+            "stacking": {
+              "mode": "normal"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${prometheus}"
+          },
+          "expr": "sum by (fix_source) (rate(traces_span_metrics_calls_total{span_name=\"fix.provenance\", fix_source=~\"stash|repeater\"}[1h])) * 3600",
+          "legendFormat": "{{fix_source}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "table",
+      "title": "Push answers by carrier — over the dashboard range",
+      "description": "Every `trail.push.peer` row by `peer.role` x `peer.outcome`. `unwaited` is a repeater nothing waited on that had not answered when the push stopped watching (it may still have reconciled after). A repeater's answer rate is finished / (finished + failed + unwaited).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 77
+      },
+      "options": {
+        "showHeader": true
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "custom": {
+            "align": "left"
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${prometheus}"
+          },
+          "expr": "sum by (peer_role, peer_outcome) (increase(traces_span_metrics_calls_total{span_name=\"trail.push.peer\"}[$__range]))",
+          "instant": true,
+          "format": "table",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "table",
+      "title": "Fixes per carrier per device — over the dashboard range",
+      "description": "Rows are (this device, direction, carrier). `send` counts pushes by `push.durable_via`; `recv` counts friends' fixes by `fix.source`. A device with repeaters in its rosters and no `repeater` rows is one whose repeaters never answer first.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prometheus}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 77
+      },
+      "options": {
+        "showHeader": true
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "custom": {
+            "align": "left"
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${prometheus}"
+          },
+          "expr": "label_replace(sum by (service_instance_id, push_durable_via) (increase(traces_span_metrics_calls_total{span_name=\"trail.push\"}[$__range])), \"carrier\", \"$1\", \"push_durable_via\", \"(.*)\") or label_replace(sum by (service_instance_id, fix_source) (increase(traces_span_metrics_calls_total{span_name=\"fix.provenance\"}[$__range])), \"carrier\", \"recv:$1\", \"fix_source\", \"(.*)\")",
+          "instant": true,
+          "format": "table",
+          "refId": "A"
+        }
+      ]
     }
   ]
 }
