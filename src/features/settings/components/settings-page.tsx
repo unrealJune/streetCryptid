@@ -1,5 +1,13 @@
 import { type ReactNode, type RefObject, useEffect, useRef } from 'react';
-import { Pressable, ScrollView, StyleSheet, View, type ScrollViewInstance } from 'react-native';
+import {
+  KeyboardAvoidingView,
+  Platform,
+  Pressable,
+  ScrollView,
+  StyleSheet,
+  View,
+  type ScrollViewInstance,
+} from 'react-native';
 import { useRouter } from 'expo-router';
 import { SymbolView, type SymbolViewProps } from 'expo-symbols';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -81,6 +89,11 @@ export function SettingsPage({
         onScrollOffset ? (event) => onScrollOffset(event.nativeEvent.contentOffset.y) : undefined
       }
       scrollEventThrottle={onScrollOffset ? 32 : undefined}
+      // A field low on the page scrolls clear of the keyboard (iOS here; Android through the
+      // KeyboardAvoidingView below), and dragging the page or tapping off a field puts it away.
+      automaticallyAdjustKeyboardInsets
+      keyboardDismissMode={Platform.OS === 'ios' ? 'interactive' : 'on-drag'}
+      keyboardShouldPersistTaps="handled"
       // Beside the rail's tabs the scroll bar moves to the leading edge, clear of them.
       style={[
         {
@@ -153,12 +166,16 @@ export function SettingsPage({
     </ScrollView>
   );
 
-  if (!footer) return page;
+  // Edge-to-edge Android no longer resizes the window for the keyboard, so the page shrinks itself.
   return (
-    <View style={[styles.screen, { backgroundColor: theme.background }]}>
+    <KeyboardAvoidingView
+      behavior="padding"
+      enabled={Platform.OS === 'android'}
+      style={[styles.screen, { backgroundColor: theme.background }]}
+    >
       {page}
-      <PageFooter rail={footerRail}>{footer}</PageFooter>
-    </View>
+      {footer ? <PageFooter rail={footerRail}>{footer}</PageFooter> : null}
+    </KeyboardAvoidingView>
   );
 }
 

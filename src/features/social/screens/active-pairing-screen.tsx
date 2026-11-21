@@ -5,7 +5,10 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   AppState,
   BackHandler,
+  Keyboard,
+  KeyboardAvoidingView,
   Platform,
+  Pressable,
   Share,
   StyleSheet,
   Text,
@@ -22,6 +25,7 @@ import Animated, {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { useColorScheme } from '@/hooks/use-color-scheme';
+import { useKeyboardShown } from '@/hooks/use-keyboard-shown';
 import { ThemedText } from '@/components/themed-text';
 import { resolveSignalColor } from '@/constants/signal-colors';
 import { CryptidThemes, Spacing } from '@/constants/theme';
@@ -614,6 +618,7 @@ export default function ActivePairingScreen() {
 
   const createAndShareLink = async (): Promise<void> => {
     if (workingRef.current) return;
+    Keyboard.dismiss();
     workingRef.current = 'link';
     setIntent('link');
     setWorking('link');
@@ -648,6 +653,7 @@ export default function ActivePairingScreen() {
   };
 
   const submitInput = async (): Promise<void> => {
+    Keyboard.dismiss();
     const value = input.trim();
     if (!value || workingRef.current) {
       if (!value) setInputError('Paste a streetCryptid pairing link, token, or code.');
@@ -821,6 +827,8 @@ export default function ActivePairingScreen() {
     return () => subscription.remove();
   }, [close, decideFriend, friend, scanning, verification, verify]);
 
+  const keyboardShown = useKeyboardShown();
+
   const showPasteRow =
     !shownFriend &&
     !verification &&
@@ -866,8 +874,20 @@ export default function ActivePairingScreen() {
         </PressableAction>
       </View>
 
-      <View style={sideBySide ? styles.bodyRow : styles.bodyColumn}>
-        <View style={styles.stage}>
+      {/* 'padding' on both platforms: it pads only by the keyboard's overlap with this view, so
+          it is a no-op where the OS already resized the window, and it is what lifts the panel
+          under Android's edge-to-edge, where adjustResize no longer does. */}
+      <KeyboardAvoidingView
+        behavior="padding"
+        style={sideBySide ? styles.bodyRow : styles.bodyColumn}
+      >
+        {/* Tapping the stage dismisses the keyboard, as anywhere outside a field does on iOS and
+            Android; the field is clipped meanwhile rather than drawn over the header. */}
+        <Pressable
+          accessible={false}
+          onPress={Keyboard.dismiss}
+          style={[styles.stage, keyboardShown ? styles.stageClipped : null]}
+        >
           <Animated.View
             key={stageKey}
             entering={reducedMotion ? undefined : FadeIn.duration(SWAP_IN_MS)}
@@ -917,7 +937,7 @@ export default function ActivePairingScreen() {
               </View>
             )}
           </Animated.View>
-        </View>
+        </Pressable>
 
         <Animated.View
           layout={reducedMotion ? undefined : LinearTransition.duration(SWAP_IN_MS)}
@@ -927,7 +947,8 @@ export default function ActivePairingScreen() {
             {
               backgroundColor: chrome.island,
               borderColor: chrome.islandBorder,
-              marginBottom: Math.max(insets.bottom, Spacing.two),
+              // The keyboard covers the home indicator, so its inset is not owed while it is up.
+              marginBottom: keyboardShown ? Spacing.two : Math.max(insets.bottom, Spacing.two),
             },
           ]}
         >
@@ -1035,6 +1056,7 @@ export default function ActivePairingScreen() {
                 onSubmitEditing={() => void submitInput()}
                 placeholder="Pairing link or code"
                 placeholderTextColor={chrome.steel}
+                returnKeyType="go"
                 selectionColor={signal}
                 style={[
                   styles.input,
@@ -1201,7 +1223,7 @@ export default function ActivePairingScreen() {
             </ThemedText>
           ) : null}
         </Animated.View>
-      </View>
+      </KeyboardAvoidingView>
 
       {scanLink ? (
         <Animated.View
@@ -1346,6 +1368,9 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     minHeight: 0,
     paddingHorizontal: 18,
+  },
+  stageClipped: {
+    overflow: 'hidden',
   },
   stageContent: {
     alignItems: 'center',
