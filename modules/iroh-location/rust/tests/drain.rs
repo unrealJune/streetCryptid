@@ -2314,8 +2314,16 @@ async fn an_arrival_and_its_claim_go_out_as_one_parked_envelope() {
         stamps[stamps.len() - 1].0,
         Some(iroh_location::FIX_STATE_PARKED)
     );
-    assert_eq!(stamps.len(), 2, "the drive in, then the stop and nothing between");
-    assert_eq!(*h.sink.flushes.lock().unwrap(), flushes_before + 1, "one push");
+    assert_eq!(
+        stamps.len(),
+        2,
+        "the drive in, then the stop and nothing between"
+    );
+    assert_eq!(
+        *h.sink.flushes.lock().unwrap(),
+        flushes_before + 1,
+        "one push"
+    );
 }
 
 #[tokio::test]
