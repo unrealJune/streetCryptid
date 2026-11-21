@@ -65,77 +65,98 @@ interface FriendsIslandProps {
  *
  * The drawer owns minimizing through its grip; there is no collapse control in here.
  */
-export function FriendsIsland({
-  friends,
-  theme,
-  minimized,
-  onSelect,
-  onOpenProfile,
-  onOpenPairing,
-}: FriendsIslandProps) {
+export function FriendsIsland(props: FriendsIslandProps) {
+  return (
+    <View style={props.minimized ? islandBody.minimized : islandBody.expanded}>
+      <FriendsHeaderRow {...props} />
+      {props.minimized ? null : <FriendsRows {...props} />}
+    </View>
+  );
+}
+
+/**
+ * The roster's title row on its own, for the drawer to float over the list (`MapDrawer`'s
+ * `header`). Carries the body's top padding — and, collapsed, the whole minimized shape — so the
+ * header plus `FriendsList` measure exactly what `FriendsIsland` does.
+ */
+export function FriendsHeader(props: FriendsIslandProps) {
+  return (
+    <View style={props.minimized ? islandBody.minimized : styles.headerPad}>
+      <FriendsHeaderRow {...props} />
+    </View>
+  );
+}
+
+/** The roster's rows, under a `FriendsHeader` the drawer floats. Nothing at all when minimized. */
+export function FriendsList(props: FriendsIslandProps) {
+  if (props.minimized) return null;
+  return (
+    <View style={styles.listPad}>
+      <FriendsRows {...props} />
+    </View>
+  );
+}
+
+function FriendsHeaderRow({ friends, theme, onOpenPairing }: FriendsIslandProps) {
+  const { chrome } = theme;
+  const nearby = friends.filter((friend) => friend.nearby).length;
+  return (
+    <View style={islandBody.header}>
+      <View
+        accessible
+        accessibilityRole="summary"
+        accessibilityLabel={
+          friends.length === 0
+            ? 'No cryptids yet!'
+            : `${friends.length} friend${friends.length === 1 ? '' : 's'}, ${nearby} nearby.`
+        }
+        style={islandBody.summary}
+      >
+        <Text style={[styles.title, { color: chrome.ink }]}>{nearby} NEARBY</Text>
+      </View>
+      {/* The pairing screen's only entrance. Kept on the header line at every
+          detent: it is the answer to an empty roster, and the roster is at its
+          emptiest exactly when the panel is smallest. */}
+      <Pressable
+        accessibilityHint="Opens the active pairing screen and starts nearby listening"
+        accessibilityLabel="Open pairing"
+        accessibilityRole="button"
+        hitSlop={8}
+        onPress={onOpenPairing}
+        style={({ pressed }) => [
+          styles.add,
+          { backgroundColor: chrome.seg, opacity: pressed ? 0.55 : 1 },
+        ]}
+      >
+        <SymbolView
+          name={{ ios: 'person.badge.plus', android: 'person_add', web: 'person_add' }}
+          size={18}
+          tintColor={chrome.green}
+        />
+      </Pressable>
+    </View>
+  );
+}
+
+function FriendsRows({ friends, theme, onSelect, onOpenProfile }: FriendsIslandProps) {
   const { chrome } = theme;
   const { distanceUnit, ready: displayPreferencesReady } = useDisplayPreferences();
-  const nearby = friends.filter((friend) => friend.nearby).length;
   const sortedFriends = [...friends].sort((a, b) => Number(b.online) - Number(a.online));
-
-  return (
-    <View style={minimized ? islandBody.minimized : islandBody.expanded}>
-      <View style={islandBody.header}>
-        <View
-          accessible
-          accessibilityRole="summary"
-          accessibilityLabel={
-            friends.length === 0
-              ? 'No cryptids yet!'
-              : `${friends.length} friend${friends.length === 1 ? '' : 's'}, ${nearby} nearby.`
-          }
-          style={islandBody.summary}
-        >
-          <Text style={[styles.title, { color: chrome.ink }]}>{nearby} NEARBY</Text>
-        </View>
-        {/* The pairing screen's only entrance. Kept on the header line at every
-            detent: it is the answer to an empty roster, and the roster is at its
-            emptiest exactly when the panel is smallest. */}
-        <Pressable
-          accessibilityHint="Opens the active pairing screen and starts nearby listening"
-          accessibilityLabel="Open pairing"
-          accessibilityRole="button"
-          hitSlop={8}
-          onPress={onOpenPairing}
-          style={({ pressed }) => [
-            styles.add,
-            { backgroundColor: chrome.seg, opacity: pressed ? 0.55 : 1 },
-          ]}
-        >
-          <SymbolView
-            name={{ ios: 'person.badge.plus', android: 'person_add', web: 'person_add' }}
-            size={18}
-            tintColor={chrome.green}
-          />
-        </Pressable>
-      </View>
-
-      {minimized ? null : (
-        <>
-          {friends.length === 0 ? (
-            <Text style={[styles.empty, { color: chrome.steel }]}>No cryptids yet!</Text>
-          ) : (
-            <View style={styles.list}>
-              {sortedFriends.map((friend, index) => (
-                <FriendRow
-                  distanceUnit={displayPreferencesReady ? distanceUnit : null}
-                  divider={index > 0}
-                  friend={friend}
-                  key={friend.id}
-                  onOpenProfile={onOpenProfile}
-                  onSelect={onSelect}
-                  theme={theme}
-                />
-              ))}
-            </View>
-          )}
-        </>
-      )}
+  return friends.length === 0 ? (
+    <Text style={[styles.empty, { color: chrome.steel }]}>No cryptids yet!</Text>
+  ) : (
+    <View style={styles.list}>
+      {sortedFriends.map((friend, index) => (
+        <FriendRow
+          distanceUnit={displayPreferencesReady ? distanceUnit : null}
+          divider={index > 0}
+          friend={friend}
+          key={friend.id}
+          onOpenProfile={onOpenProfile}
+          onSelect={onSelect}
+          theme={theme}
+        />
+      ))}
     </View>
   );
 }
@@ -248,6 +269,15 @@ export function compactDistance(
 }
 
 const styles = StyleSheet.create({
+  // `islandBody.expanded`'s padding, divided between the floated header and the list under it.
+  headerPad: {
+    paddingHorizontal: Spacing.three,
+    paddingTop: Spacing.one,
+  },
+  listPad: {
+    paddingBottom: Spacing.one,
+    paddingHorizontal: Spacing.three,
+  },
   title: {
     fontFamily: 'Rajdhani_700Bold',
     fontSize: 22,
