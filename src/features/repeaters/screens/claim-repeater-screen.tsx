@@ -2,7 +2,16 @@ import * as Clipboard from 'expo-clipboard';
 import { type Href, useLocalSearchParams, useRouter } from 'expo-router';
 import * as WebBrowser from 'expo-web-browser';
 import { type ReactNode, useState } from 'react';
-import { StyleSheet, Text, TextInput, useWindowDimensions, View } from 'react-native';
+import {
+  Keyboard,
+  KeyboardAvoidingView,
+  Pressable,
+  StyleSheet,
+  Text,
+  TextInput,
+  useWindowDimensions,
+  View,
+} from 'react-native';
 import Animated, { FadeIn, FadeOut, useReducedMotion } from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
@@ -10,6 +19,7 @@ import { Spacing } from '@/constants/theme';
 import { successHaptic, warningHaptic } from '@/features/haptics/haptics';
 import { PairingSignalField } from '@/features/social/components/pairing-signal-field';
 import { PressableAction } from '@/features/social/components/pressable-action';
+import { useKeyboardShown } from '@/hooks/use-keyboard-shown';
 
 import {
   IslandPanel,
@@ -79,6 +89,9 @@ export default function ClaimRepeaterScreen() {
   const [carry, setCarry] = useState(true);
   // Unknown until the rosters are read; a later machine takes the roster's policy as it is.
   const firstRepeater = repeaters.status === 'ready' && repeaters.sections.mine === null;
+  const keyboardShown = useKeyboardShown();
+  // The keyboard covers the home indicator, so its inset is not owed while it is up.
+  const panelMargin = keyboardShown ? Spacing.two : Math.max(insets.bottom, Spacing.two);
 
   const machine = 'link' in state ? claimLinkMachineId(state.link) : null;
   const machineShort = machine ? shortId(machine) : null;
@@ -94,6 +107,7 @@ export default function ClaimRepeaterScreen() {
   }
 
   function takeLink(text: string) {
+    Keyboard.dismiss();
     const check = checkClaimLink(text);
     if (!check.ok) {
       setState({ step: 'add', error: check.reason });
@@ -145,7 +159,7 @@ export default function ClaimRepeaterScreen() {
               : (state.error ??
                 'Point your phone’s camera at the code on the repeater’s screen, or paste the link it printed.')
           }
-          marginBottom={Math.max(insets.bottom, Spacing.two)}
+          marginBottom={panelMargin}
         >
           {unsupported ? null : (
             <>
@@ -158,6 +172,7 @@ export default function ClaimRepeaterScreen() {
                   onSubmitEditing={() => takeLink(input)}
                   placeholder="Claim link"
                   placeholderTextColor={chrome.steel}
+                  returnKeyType="go"
                   selectionColor={chrome.green}
                   style={[
                     styles.input,
@@ -218,7 +233,7 @@ export default function ClaimRepeaterScreen() {
               : 'Check that this is the link on the repeater in front of you.'
           }
           onClose={() => setState({ step: 'add', error: null })}
-          marginBottom={Math.max(insets.bottom, Spacing.two)}
+          marginBottom={panelMargin}
         >
           <PanelRow>
             {firstRepeater ? (
@@ -285,7 +300,7 @@ export default function ClaimRepeaterScreen() {
           detail={
             refused ? state.reason : 'It has to be running and online. This takes up to 20 seconds.'
           }
-          marginBottom={Math.max(insets.bottom, Spacing.two)}
+          marginBottom={panelMargin}
         >
           {refused ? (
             <PanelActions>
@@ -331,7 +346,7 @@ export default function ClaimRepeaterScreen() {
           ]
             .filter(Boolean)
             .join(' · ')}
-          marginBottom={Math.max(insets.bottom, Spacing.two)}
+          marginBottom={panelMargin}
         >
           <PanelActions>
             <PanelButton
@@ -364,23 +379,32 @@ export default function ClaimRepeaterScreen() {
         onBack={back}
         paddingTop={Math.max(insets.top, Spacing.three)}
       />
-      <View style={styles.stage}>
-        <Animated.View
-          key={state.step}
-          entering={reducedMotion ? undefined : FadeIn.duration(260)}
-          exiting={reducedMotion ? undefined : FadeOut.duration(160)}
-          style={styles.centred}
+      {/* As on the pairing screen: the panel rides up with the keyboard on both platforms, and a
+          tap on the stage puts the keyboard away. */}
+      <KeyboardAvoidingView behavior="padding" style={styles.body}>
+        <Pressable
+          accessible={false}
+          onPress={Keyboard.dismiss}
+          style={[styles.stage, keyboardShown ? styles.stageClipped : null]}
         >
-          {stage}
-        </Animated.View>
-      </View>
-      {panel}
+          <Animated.View
+            key={state.step}
+            entering={reducedMotion ? undefined : FadeIn.duration(260)}
+            exiting={reducedMotion ? undefined : FadeOut.duration(160)}
+            style={styles.centred}
+          >
+            {stage}
+          </Animated.View>
+        </Pressable>
+        {panel}
+      </KeyboardAvoidingView>
     </View>
   );
 }
 
 const styles = StyleSheet.create({
   screen: { flex: 1 },
+  body: { flex: 1 },
   stage: {
     alignItems: 'center',
     flex: 1,
@@ -388,6 +412,7 @@ const styles = StyleSheet.create({
     minHeight: 0,
     paddingHorizontal: 18,
   },
+  stageClipped: { overflow: 'hidden' },
   centred: { alignItems: 'center', gap: 10, justifyContent: 'center' },
   claimed: { alignItems: 'center', gap: 14 },
   machineId: {
