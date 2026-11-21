@@ -55,6 +55,14 @@
 > `rsy` slot now holds the control record (prekeys + restart requests). The schedule is
 > unchanged. See "Why revision 3's resync was replaced" in §4.6.
 >
+> **Revision 5 (2026-11-10), after a design review against the tree.** The schedule is
+> unchanged. This revision corrects claims the code does not yet meet and adds §10, the repair
+> list. It puts clone-and-return in the threat model, and with it post-compromise security
+> (§1); states the real secrecy window (§1); corrects the rotating-kid claim (§1.1, §4.7);
+> records that lapse fires on healthy iPhones (§4.5); marks §5.1 and §5.2 as still open;
+> proposes an answer to the mesh question (§8); and narrows two rejections that earlier
+> revisions had outgrown (§7.1, §9).
+>
 > Claims below are marked **[verified]** where checked against the tree at the time of
 > writing, and **[MUST VERIFY]** where they are assumptions that gate the plan.
 
@@ -79,12 +87,26 @@ and flash storage keep deleted data recoverable by default. §5.4 bounds the gap
 honest form of claim 1 is "no fix older than the last erasure pass," which §5.4 keeps
 small, not zero.
 
-Explicitly **out of scope — post-compromise security (PCS).** PCS heals when a legitimate
-device keeps running and ratchets forward. A seized device never returns to its owner, so
-it never ratchets again, so the session never heals. Against this threat PCS is close to
-worthless, and no part of this design should be justified by it. The mechanism that stops
-post-seizure access is **revocation**, which already exists (`pool.ts:48` drops the
-recipient's wrap; `crypto.rs` re-keys `K` per fix, so no wrap means no access).
+**What "bounded, small window" is today (revision 5).** A receiver's chain moves only when it
+opens an envelope, and on iOS that happens only while the app is mounted (§4.7). The window in
+claim 1 is therefore _the time since the receiving device last opened something from that
+author_, up to the 2^17-position acceptance window, for as long as superseded ciphertext
+survives anywhere (§5.1 and §5.2, both still open in this tree). Claims 1 and 3 hold as
+designed only once repair items R2 and R3 (§10) land.
+
+**Post-compromise security (PCS) is in scope for one case and useless for the other**
+(revision 5; earlier revisions put it out of scope entirely).
+
+- _Seize and keep._ A seized device never returns to its owner, so it never ratchets again and
+  the session never heals. PCS buys nothing here. The mechanism that stops post-seizure access
+  is **revocation**, which already exists (`pool.ts:48` drops the recipient's wrap; `crypto.rs`
+  re-keys `K` per fix, so no wrap means no access).
+- _Clone and return._ A phone imaged at a border crossing, during an arrest, or through a backup
+  extraction, and then handed back, keeps running. The adversary holds a copy of the ratchet
+  state and can read along until the next DH step, after which a passive copy is useless. This
+  is the property the DH ratchet, the null lane (§4.1) and the lapse rule (§4.5) pay for; a
+  symmetric chain would deliver claim 1 without any of them (§3, §9). An adversary who also
+  _uses_ the copied identity key is not healed by anything here; see §1.1.
 
 ### 1.1 Accepted residual risks — stated so nobody mistakes this design for covering them
 
@@ -102,6 +124,20 @@ recipient's wrap; `crypto.rs` re-keys `K` per fix, so no wrap means no access).
   so the archive clusters recipient sets _across authors_ — a shared-friend-graph leak.
   §4.7's rotating kids close that. Padded null fixes (§4.1) make watchers and sharers
   indistinguishable. Full traffic-analysis resistance remains a non-goal.
+- **Wraps are linkable despite rotating kids (revision 5).** Each wrap carries its ratchet
+  header — the sender's ratchet public key, epoch and counter — in plaintext beside the kid
+  (`crypto.rs`, `WrapV3`). The key is constant for a whole DH epoch and the counter is
+  monotonic, so the stash, and any friend holding the namespace, can follow one recipient's
+  wrap from envelope to envelope and count an author's recipients. §4.7's unlinkability claim
+  does not hold until repair item R4.
+- **A signed fix is non-repudiable.** Every envelope is ed25519-signed by the author's
+  long-term identity, and iroh-docs signs the entry again. Anyone who obtains one content key
+  can prove to a third party where the author said they were. Deniable authentication is a
+  non-goal; this is a disclosure item.
+- **A copied identity key is a durable takeover.** The restart path (§4.6) trusts prekeys
+  signed by the follower's identity key, which sits on the same disk as the ratchet state. An
+  adversary who cloned the device can publish prekeys of their own and be restarted into.
+  Binding prekey signatures to a hardware-held key is repair item R7.
 
 Non-goals this phase: multi-device identity, mesh-path forward secrecy (see §8), and
 protection of the user's _own_ trail beyond a retention cap (§5.3).
@@ -144,6 +180,14 @@ There are exactly two ways to obtain the ephemeral contribution:
   receiver deletes the private after opening. Requires no liveness.
 
 This design takes the first path and _manufactures_ the bidirectionality (§4.1).
+
+**Revision 5 correction.** Those are the two ways to obtain a _fresh_ ephemeral contribution.
+A third construction needs none: a symmetric chain rooted in a secret that was itself
+ephemeral × ephemeral — which `derive_boot_root` has been since revision 3 — and stepped by the
+clock, with each side deleting the epochs it has passed. It is forward-secret with no return
+path and no messages. What it lacks is healing after a copied state (§1). The docs path keeps
+the DH ratchet for that reason; the mesh path, which has no return path to ratchet on, is the
+natural home for the clock chain (§8).
 
 ## 4. Design
 
@@ -341,6 +385,14 @@ Product consequence, stated plainly: a friend whose device has not run the app i
 stops receiving until it does, and should be visibly "hasn't checked in" — distinct from
 revoked, distinct from merely stale.
 
+**Field reality (revision 5).** `peer_advanced_ms` moves only on a DH step (`ratchet.rs`), a DH
+step needs the peer to _open_ one of our envelopes, and on iOS only a mounted app opens
+anything. So a friend who simply does not open the app for a day lapses while their phone is
+publishing normally, and comes back through a §4.6 restart — the prekey-rooted path, whose
+forward secrecy is weaker until its first DH step. The recovery path is carrying routine
+traffic. Repair item R2 (advance on receipt) removes the cause; do not lengthen T_lapse to
+hide it.
+
 ### 4.6 Desync detection and recovery
 
 Any ratchet deployment's real risk is the recovery path becoming the bypass. The second-order
@@ -482,8 +534,12 @@ Changes from v2 (`crypto.rs`):
   `blake3(recvPub)[..8]`. The receiver knows which author an envelope is from (signed),
   holds exactly one session per author, and finds its wrap by computing candidate kids
   while fast-forwarding its receiving chain — bounded by the acceptance window, one hash
-  per position. Outsiders can no longer link a recipient across envelopes or across
-  authors, closing the §1.1 shared-friend-graph leak.
+  per position. This stops clustering by kid _across authors_, which closes the §1.1
+  shared-friend-graph leak. **It does not make wraps unlinkable (revision 5):** the plaintext
+  ratchet header beside each kid links one recipient's wraps within and across DH epochs
+  (§1.1). Closing that needs header encryption — the Double Ratchet specification's
+  header-encryption variant, which exists because a header the receiver needs _before_ it can
+  derive the message key cannot be encrypted under that key (repair item R4).
 - **The acceptance window is sized by reader absence, not cadence** (`2^17` positions).
   A sender's chain resets only when the reader answers, the reader answers only by
   _opening_ something (on iOS, only while the app is mounted), and every tick spends two
@@ -491,7 +547,8 @@ Changes from v2 (`crypto.rs`):
   interval; it ran out after ~21 h of a friend not opening the app, and on 2026-10-09 left
   an iPhone unable to open anything from its friend until a §4.6 restart. The window bounds
   work only — no skipped key is stored, and anyone holding a chain key can walk it as far
-  as they like regardless — so it is set wide: ~7 months at the 5-minute cadence.
+  as they like regardless — so it is set wide: ~7 months at the 5-minute cadence. The price
+  is paid by claim 1, not in work: see "What bounded, small window is today" in §1.
 - **KDF domain separation.** All derivations use `blake3::derive_key` with distinct
   contexts (`sc-dr/v1/rk`, `/ck`, `/mk`, `/kid`, `/boot`), matching the existing
   `mesh.rs` convention.
@@ -525,6 +582,9 @@ built to converge, not forget, and deletion is tombstone-shaped. If confirmed, f
 bypass docs entirely (gossip plus a purpose-built LWW stash endpoint) and §7 step 2
 changes shape.
 
+**Status 2026-11-10: open.** `docs.rs` still documents superseded versions as present and
+reclaiming them as future work, and nothing in the crate purges them. Repair item R3.
+
 ### 5.2 Blob store [verified: no GC configured]
 
 Doc entries reference content hashes; envelope ciphertext lives in `FsStore` on disk
@@ -534,6 +594,9 @@ in the crate.
 **[MUST VERIFY]** iroh-blobs 0.103 default retention and the semantics of the second
 argument to `BlobsProtocol::new` (`lib.rs:1009`). Prior expectation: GC exists but is
 config-gated and tag-protected; assume defaults do not help.
+
+**Status 2026-11-10: open.** The store is opened with `FsStore::load` and no GC configuration
+(`lib.rs`). Repair item R3.
 
 ### 5.3 Local plaintext [verified]
 
@@ -707,6 +770,11 @@ libraries do.
 | `double-ratchet` 0.1.0 (sebastianv89)                                                                               | Best architecture — a `CryptoProvider` trait would genuinely satisfy the external-wrap and chain-key-derivation constraints. But **no serialization at all** (fails §4.2's persist-before-publish outright), capacity is a precondition rather than a cap (zero would make every fast-forward `Err(StorageFull)`), and it has been dead since 2021 on `rand_core 0.4` / `hashbrown 0.1`.                                                                                                                            |
 | `nostr-double-ratchet`, `enigma-double-ratchet`, `light-double-ratchet`, `olm-rs`, `libsignal-protocol` (crates.io) | Unvetted, dormant, transport-coupled, or C bindings requiring clang (which our wasm target already cannot satisfy).                                                                                                                                                                                                                                                                                                                                                                                                 |
 
+**Revision 5 note on the libsignal row.** This repository is itself AGPL-3.0 now, so the
+licence is no longer disqualifying; the row's second reason (crate-private, welded to Signal's
+session storage) still is. The same goes for Signal's SPQR crate, which is AGPLv3 and usable
+here if a post-quantum ratchet is ever wanted (`POST-QUANTUM.md` §3).
+
 Forcing vodozemac would take roughly 100 lines across three files — but they are ~100
 lines **inside precisely the code the Least Authority audit covered** (the receiver
 chain, the key store, key-lifetime logic), which forks away the one property that made
@@ -737,6 +805,18 @@ by having surveyed — it moves onto our code.
    the mesh's archive surface is structurally far smaller than the stash's was, which may
    make "weaker FS, short TTL" a defensible _deliberate_ answer. Decide deliberately; do
    not let it be settled by omission.
+
+   **Proposed answer (revision 5): a clock-stepped chain exported from the paired session.**
+   At pairing, and again at each restart, both sides derive
+   `mesh_root = KDF(RK₀, "sc-mesh/v2/root")`. For mesh epoch `e` each side computes
+   `M_e = KDF(M_{e-1})`, derives that epoch's tag and capsule key from `M_e`, and deletes
+   `M_{e-1}` once epoch `e-1` can no longer arrive. Both phones step by the clock, so no
+   return path is needed; no key material rides the radio; forward secrecy is per epoch; and
+   the chain inherits whatever the session root is made of, including the hybrid secret of
+   `POST-QUANTUM.md` P1. It replaces the static-static `ss_AB` in `mesh.rs`. Costs: no healing
+   on the mesh path, and two devices whose clocks disagree by more than the ±1 epoch window
+   cannot talk. Repair item R6.
+
 2. **iroh-docs purge semantics** (§5.1) — gates the shape of step 2.
 3. **iroh-blobs default retention** (§5.2).
 4. **Tuning:** T_lapse default (24 h?), the padding size class, R (desync threshold), and
@@ -757,3 +837,72 @@ by having surveyed — it moves onto our code.
 | Skipped-message key **storage** (full DR as deployed by messengers) | Unnecessary under LWW — there is no history to catch up on — and against an archive-holding adversary it is actively harmful, being a stored key index into the archive. The DR _schedule_ is adopted (§4.2); only the table is rejected: skipped keys are deleted, not stored.                                                                                                               |
 | MLS-style group epochs                                              | Membership here is per-author and asymmetric, and offline members reintroduce retained epoch secrets. Large lift, little gain over the above.                                                                                                                                                                                                                                                 |
 | **Adopting a third-party Double Ratchet crate**                     | Surveyed under §7.1 and rejected on evidence, not preference: every candidate hardcodes a private skipped-key store capacity, and the strongest (vodozemac) exposes a message key on the sending side only — so a receiver could never unwrap `K` itself. Forcing it means forking the exact code its audit covered. Kept as the standing answer to "why not just use a library?".            |
+
+**Revision 5 note on "Symmetric chain from the pairing DH".** That row rejects a chain rooted
+in static-static DH, which is right. Rooted in the ephemeral × ephemeral boot root it _is_
+forward-secret (§3); what it lacks is healing after a copied state (§1). It stays rejected for
+the docs path on that ground alone, and is proposed for the mesh path, clock-stepped (§8).
+
+## 10. Repair items (review of 2026-11-10)
+
+What the tree needs before the claims in this document and in `POST-QUANTUM.md` are true. None
+of them changes the ratchet schedule. Each was checked against `modules/iroh-location/rust` at
+`ab4cb86` (v3.0.0); the trail-stash repository was not reviewed.
+
+| #   | Repair                                                         | What it makes true                                                                                          | Where                                                                                  | Wire change                    |
+| --- | -------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------- | ------------------------------ |
+| R1  | Set `usesNonExemptEncryption` to `true`                        | The export declaration (`POST-QUANTUM.md` §0, action E1). It is still `false` at v3.0.0                     | `app.json:21`                                                                          | None                           |
+| R2  | Advance the receiving chain on receipt, not on read            | Claim 1's window shrinks from "since the app was last opened" to one delivery; healthy iPhones stop lapsing | `sessions.rs`, both native background runtimes, the replica-listener rule in AGENTS.md | None                           |
+| R3  | Reclaim superseded doc versions and unreferenced blobs         | Claim 3 (§5.1, §5.2, §7 step 2)                                                                             | `docs.rs`, the `FsStore` setup in `lib.rs`, the trail-stash repository                 | None                           |
+| R4  | Encrypt the ratchet header                                     | Wraps stop being linkable (§1.1, §4.7)                                                                      | `crypto.rs` (`WrapV3`, `WrapV4`), `ratchet.rs`                                         | New envelope version           |
+| R5  | Hybrid restart prekeys                                         | A restart no longer discards the post-quantum root (`POST-QUANTUM.md` P1b)                                  | `restart.rs`, the control record, `BootHeader`                                         | New envelope version, suite id |
+| R6  | Mesh keys from a clock-stepped chain exported from the session | Mesh forward secrecy (§8); no static-static root anywhere                                                   | `mesh.rs`, `mesh_vectors.json`                                                         | Capsule v2                     |
+| R7  | Bind prekey signatures to a hardware-held key                  | A cloned disk cannot publish prekeys and be restarted into (§1.1)                                           | `pairing.rs`, the control record, platform keystores                                   | `PAIR_ALPN` bump               |
+| R8  | Keep the other documents in step                               | `ARCHITECTURE.md`, AGENTS.md and `docs/mesh/DESIGN.md` §3.2 say what the code does                          | docs                                                                                   | None                           |
+
+**R1.** One line. The **[LEGAL]** items in `POST-QUANTUM.md` §0 still decide how the App Store
+Connect follow-up is answered.
+
+**R2.** Today only the app's read may advance the ratchet, because consuming a position with no
+reader loses the fix. Change what is kept, not who may advance: on receipt in any process,
+verify, perform the DH step if the envelope carries a new ratchet key, fast-forward to the
+envelope's position, and keep **exactly one** message key per author — the one that opens the
+newest envelope — until a reader uses it. Every earlier key is deleted at once. This is a
+key store of size one for the single last-write-wins slot the receiver is entitled to; it is
+not §9's skipped-key table, which indexed into an archive. Because the DH step now happens in
+the background, `peer_advanced_ms` moves for a phone that is merely pocketed, and §4.5's lapse
+goes back to meaning "this device has stopped".
+_Test:_ after a background receipt, no key on disk opens any envelope older than the newest;
+the retained key opens the newest fix exactly once; a model of a reader absent for seven days
+with a publishing peer never lapses and never restarts; a crash between the DH step and the
+persist burns a position and nothing else.
+
+**R3.** §7 step 2 as written, with both **[MUST VERIFY]** items resolved first. If iroh-docs
+cannot purge rather than tombstone, the fallback in §5.1 applies. The stash needs the same
+change (§8 item 5). R2 without R3 shortens what a seized key can open; R3 without R2 shortens
+what exists to be opened. Claims 1 and 3 need both.
+
+**R4.** Follow the Double Ratchet specification's header-encryption variant: derive a header
+key and a next-header key at each DH step, encrypt `{sender_ratchet_pub, epoch, counter}`
+under the header key, and have the receiver trial-decrypt each wrap's header with the two
+header keys it holds. The kid can then be dropped. Cost: two small AEAD attempts per wrap per
+envelope on the reader.
+_Test:_ across any two envelopes from one author, no plaintext field of a wrap repeats or
+increments predictably; a wrap for another recipient fails both header keys and is skipped
+without touching state.
+
+**R5.** Specified in `POST-QUANTUM.md` P1b. It ships with P1, or P1's protection ends at each
+friendship's first restart.
+
+**R6.** Specified in §8. `no_session_root_derives_from_static_static_dh` is extended to cover
+`mesh.rs`, and `mesh_vectors.json` gains a v2 set so firmware and TypeScript reproduce it.
+_Test:_ after `M_{e-1}` is deleted, a recorded capsule from epoch `e-1` cannot be opened from
+the device's state; two devices with clocks one epoch apart still exchange.
+
+**R7.** Needs design before code. The shape: each device holds a non-exportable P-256 key in the
+Secure Enclave or StrongBox, its public half goes into the pairing transcript the SAS covers,
+and control records are accepted only when co-signed by it. Lowest priority; it shares P1's
+`PAIR_ALPN` bump if it is ready in time.
+
+**Order.** R1 now. R2 and R3 next and together. R5 with `POST-QUANTUM.md` P1. R4 and R6 each
+need a wire version and can share a release. R7 when designed. R8 rides each of the others.
